@@ -398,3 +398,99 @@ def test_vm_clone_from_template_vi_json_paths_exist_in_the_pinned_spec() -> None
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "clone-from-template vi-json sub-op targets a path the spec does not serve"
         )
+
+
+# ---------------------------------------------------------------------------
+# #2895 vim cluster / inventory writes — the drs_rule + folder vi-json paths
+# reconcile against the same pinned spec as the disk-grow substrate.
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_drs_rule_create_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the drs_rule vi-json manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE) == {
+        "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+
+
+def test_folder_create_vi_json_sub_op_manifest_is_the_expected_single() -> None:
+    """Pin the folder.create vi-json manifest — one synchronous CreateFolder, no poll."""
+    assert set(_write._VIM_SUB_OPS_FOLDER_CREATE) == {
+        "POST:/Folder/{moId}/CreateFolder",
+    }
+
+
+def test_cluster_drs_rule_create_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The drs_rule vi-json op_ids are byte-for-byte what ``parse_openapi`` emits."""
+    required = set(_write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_folder_create_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The folder.create vi-json op_id is byte-for-byte what ``parse_openapi`` emits."""
+    required = set(_write._VIM_SUB_OPS_FOLDER_CREATE)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_cluster_drs_rule_create_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each drs_rule vi-json sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #2895 grounding for the DRS-rule write: the
+    ``ReconfigureComputeResource_Task`` + collision-read ``RetrievePropertiesEx``
+    paths must exist in the pinned spec. Skips when the spec-shelf is not
+    configured (the canary's convention), so CI is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "drs_rule vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+def test_folder_create_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """The folder.create vi-json sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #2895 grounding for the folder write: ``Folder.CreateFolder``
+    must exist as a POST path in the pinned spec (``/vcenter/folder`` is GET-only,
+    so vim is the sole write path). Skips when the spec-shelf is unconfigured.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_FOLDER_CREATE:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "folder.create vi-json sub-op targets a path the spec does not serve"
+        )

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 16 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 18 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,10 +26,11 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 11 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 13 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
-VI-JSON ``vm.disk.grow`` / #2893, and the folder-template
-``vm.clone_from_template`` / #2894) inherit the T4
+VI-JSON ``vm.disk.grow`` / #2893, the folder-template
+``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
+``cluster.drs_rule.create`` + ``folder.create`` / #2895) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -51,7 +52,9 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     performance_summary_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
+    cluster_drs_rule_create_composite,
     cluster_patch_composite,
+    folder_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
@@ -66,12 +69,16 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
+    CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
     CLUSTER_PATCH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
     EVENT_TAIL_RESPONSE_SCHEMA,
+    FOLDER_CREATE_PARAMETER_SCHEMA,
+    FOLDER_CREATE_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
@@ -597,6 +604,54 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # vim cluster / inventory writes (#2895) -- dangerous / requires approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_rule.create",
+        handler=cluster_drs_rule_create_composite,
+        summary="Add a DRS affinity / anti-affinity rule to a cluster by explicit VM list.",
+        description=(
+            "Adds a classic DRS affinity ('keep these VMs together') or "
+            "anti-affinity ('keep these VMs apart') rule by explicit VM "
+            "list. No cluster-rules REST path exists and the tag-based "
+            "compute-policies surface is semantically wrong (tag-scoped, not "
+            "an explicit VM list), so the add goes through vim "
+            "ClusterComputeResource.ReconfigureComputeResource_Task with a "
+            "single-rule ClusterConfigSpecEx.rulesSpec delta (modify=true) "
+            "and polls the returned task to a terminal state. Resolves the VM "
+            "names to MoRefs scoped to the cluster; rule names are the "
+            "idempotence key, so a duplicate returns status='rule_exists' "
+            "before any write. Equivalent of 'govc cluster.rule.create'."
+        ),
+        parameter_schema=CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.folder.create",
+        handler=folder_create_composite,
+        summary="Create a VM folder under a named parent (synchronous vim CreateFolder).",
+        description=(
+            "Creates a VM folder under a named parent. /vcenter/folder is "
+            "GET-only, so the create goes through vim Folder.CreateFolder — "
+            "which is synchronous: it returns the new folder's "
+            "ManagedObjectReference directly (no task poll). Resolves the "
+            "parent by display name among the VIRTUAL_MACHINE folders; an "
+            "unknown name returns status='parent_not_found' and an ambiguous "
+            "one status='ambiguous_parent', both before any write. Equivalent "
+            "of 'govc folder.create' for the VM-folder inventory tree."
+        ),
+        parameter_schema=FOLDER_CREATE_PARAMETER_SCHEMA,
+        response_schema=FOLDER_CREATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "inventory", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
 )
 
 
@@ -613,10 +668,11 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 16 composites total -- 5 read (T5 / #508) + 11 write (T6 /
+    Scope: 18 composites total -- 5 read (T5 / #508) + 13 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
-    ``vm.disk.grow`` / #2893, and the folder-template
-    ``vm.clone_from_template`` / #2894). (The former
+    ``vm.disk.grow`` / #2893, the folder-template
+    ``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
+    ``cluster.drs_rule.create`` + ``folder.create`` / #2895). (The former
     ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
     as typed ops in #2258.)
     Each composite's ``safety_level`` +

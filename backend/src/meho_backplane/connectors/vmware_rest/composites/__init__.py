@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 16 composites land before
+``endpoint_descriptor`` upserts for the 18 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -29,9 +29,11 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 11 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
-  #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, and the
-  folder-template ``vm.clone_from_template`` / #2894) -- inherit
+* 13 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
+  #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
+  folder-template ``vm.clone_from_template`` / #2894, and the vim
+  cluster / inventory writes ``cluster.drs_rule.create`` +
+  ``folder.create`` / #2895) -- inherit
   T4's ``safety_level="dangerous"`` +
   ``requires_approval=True`` defaults.
   They cover every state-mutating workflow Goal #214 names as
@@ -42,7 +44,9 @@ Scope:
   incl. Tools soft shutdown), ``vm.power.bulk``, ``vm.disk.grow`` (the
   first mutating VI-JSON composite — disk capacity has no REST path),
   ``host.evacuate`` (first recursive composite),
-  ``host.detach_from_vds``, ``cluster.patch``.
+  ``host.detach_from_vds``, ``cluster.patch``,
+  ``cluster.drs_rule.create`` (DRS rule by explicit VM list, no REST
+  path) and ``folder.create`` (synchronous vim ``CreateFolder``).
 """
 
 from meho_backplane.connectors.vmware_rest.composites._read import (
@@ -56,7 +60,9 @@ from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
+    cluster_drs_rule_create_composite,
     cluster_patch_composite,
+    folder_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
@@ -76,7 +82,7 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
-# Side-effect import: registers the 11 write composites' park-time
+# Side-effect import: registers the 13 write composites' park-time
 # ``proposed_effect`` preview builders (#1608) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
@@ -84,9 +90,11 @@ from meho_backplane.connectors.vmware_rest.composites import _write_preview  # n
 
 __all__ = [
     "cluster_drs_recommendations_composite",
+    "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
     "datastore_usage_composite",
     "event_tail_composite",
+    "folder_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "network_portgroup_audit_composite",

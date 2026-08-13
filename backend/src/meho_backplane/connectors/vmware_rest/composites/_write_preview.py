@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 11 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 13 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 11 write composites onto the per-op preview hook shipped
+This wires all 13 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -34,6 +34,9 @@ helpers, never the mutating sub-ops.
 ``vm.disk.grow``          live-read: vm, name, disk, disk_label,
                           current_capacity_bytes, requested_capacity_bytes,
                           delta_bytes
+``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
+                          rule_name, enabled, resolved, total_resolved
+``folder.create``         echo: parent_folder, new_folder_name
 ========================  ====================================================
 
 Two preview depths, chosen per composite
@@ -112,6 +115,7 @@ from typing import Any
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _resolve_cluster_hosts,
+    _resolve_cluster_name,
     _resolve_disk_info,
     _resolve_vm_list,
     _resolve_vm_name,
@@ -452,7 +456,69 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 10 write composites. Module-level so the
+async def _cluster_drs_rule_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``cluster.drs_rule.create`` — resolve the VM set the rule would govern.
+
+    The fan-out blast-radius pattern (like ``vm.power.bulk``): resolves the
+    rule's VM names to the same ``[{vm, name}]`` set the approved write
+    references — scoped to the cluster — via the shared
+    :func:`._write._resolve_vm_list` (one read-only GET), capped at
+    :data:`_PREVIEW_RESOLVED_CAP` with ``total_resolved`` carrying the
+    uncapped count. Best-effort reads the cluster display name
+    (:func:`._write._resolve_cluster_name`) so the reviewer sees which
+    cluster + which VMs the affinity / anti-affinity rule pins. The
+    ReconfigureComputeResource_Task write never fires here. Declines
+    (``None``) without a resolved connector or on malformed params.
+    """
+    cluster = ctx.params.get("cluster")
+    rule_name = ctx.params.get("rule_name")
+    rule_type = ctx.params.get("rule_type")
+    if (
+        not isinstance(cluster, str)
+        or not isinstance(rule_name, str)
+        or not isinstance(rule_type, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    vm_names = [n for n in (ctx.params.get("vms") or []) if isinstance(n, str)]
+    rows = await _resolve_vm_list(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        filter_dict={"names": vm_names, "clusters": [cluster]},
+    )
+    cluster_name = await _resolve_cluster_name(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        cluster=cluster,
+    )
+    return {
+        "cluster": cluster,
+        "cluster_name": cluster_name,
+        "rule_type": rule_type,
+        "rule_name": rule_name,
+        "enabled": bool(ctx.params.get("enabled", True)),
+        **_capped_resolution(rows, _vm_identity),
+    }
+
+
+async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``folder.create`` — echo the parent + new folder name (no I/O).
+
+    Param echo (the ``secret.move`` precedent, #1580): the params fully name
+    the blast radius — one new folder under one named parent. Parent-name
+    resolution and the synchronous ``CreateFolder`` write stay the handler's
+    job at dispatch time.
+    """
+    parent_folder = ctx.params.get("parent_folder")
+    folder_name = ctx.params.get("folder_name")
+    if not isinstance(parent_folder, str) or not isinstance(folder_name, str):
+        return None
+    return {"parent_folder": parent_folder, "new_folder_name": folder_name}
+
+
+#: op_id → builder for the 13 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
@@ -466,11 +532,13 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.host.evacuate": _host_evacuate_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
+    "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
+    "vmware.composite.folder.create": _folder_create_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 11 write-composite park-time preview builders. Import-time.
+    """Wire the 13 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

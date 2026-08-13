@@ -155,6 +155,28 @@ connector-related release-notes line.
   and is polled via `poll_vim_task`. See
   `docs/codebase/connectors-vmware-rest.md` for the two-clone-ops contrast.
 
+### Added — vmware `cluster.drs_rule.create` + `folder.create` (vim cluster/inventory writes, #2895)
+
+- `vmware.composite.cluster.drs_rule.create` adds a DRS affinity /
+  anti-affinity rule to a cluster **by explicit VM list** — the last write
+  the #2859 provisioning flow had to drop to `govc` for. No cluster-rules
+  REST path exists (and the tag-based compute-policies surface is
+  semantically wrong — tag-scoped, not an explicit VM list), so the add goes
+  through vim `ClusterComputeResource.ReconfigureComputeResource_Task` with a
+  single-rule `ClusterConfigSpecEx.rulesSpec` delta (`modify=true`), polled
+  to a terminal state. Rule names are the idempotence key: a duplicate
+  returns a structured `status='rule_exists'` (not a raw vim `DuplicateName`
+  fault) before any write.
+- `vmware.composite.folder.create` creates a VM folder under a named parent
+  through vim `Folder.CreateFolder` — which is **synchronous**: it returns
+  the new folder's MoRef directly (no task poll), unlike every other vim
+  write. `/vcenter/folder` is GET-only, so vim is the sole write path.
+- Both are `dangerous` + approval-required and ride the #2893 substrate
+  (`_write_vmomi_sub_op` governed gate; `poll_vim_task` drives the DRS-rule
+  task, while the synchronous folder create is never polled). Park-time
+  previews: a capped VM fan-out (cluster + cluster name + resolved VM set)
+  for the rule op, a parent + new-folder-name echo for the folder op.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

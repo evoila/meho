@@ -259,7 +259,7 @@ def _seed_connector(recorder: _RecordingVmwareConnector) -> None:
 async def _bootstrap(
     recorder: _RecordingVmwareConnector, stub_embedding_service: AsyncMock
 ) -> None:
-    """Register the connector + all 15 composites and seed the recorder."""
+    """Register the connector + all 17 composites and seed the recorder."""
     _seed_connector(recorder)
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
 
@@ -1319,3 +1319,367 @@ async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
     assert result.status == "ok", result.error
     assert result.result["status"] == "cloned"
     assert recorder.clone_writes == ["/VirtualMachine/vm-42/CloneVM_Task"]
+
+
+# ===========================================================================
+# cluster.drs_rule.create — park→approve→resume + fresh-boot (#2895)
+# ===========================================================================
+
+
+class _DrsRuleVmwareConnector:
+    """Recording double for the drs_rule.create park→approve→resume E2E.
+
+    Serves the VM-resolution + cluster-name REST reads (``_get_json``) and the
+    dispatch-time VI-JSON sub-ops (``_post_vmomi_json``: the existing-rules
+    collision read, the ``ReconfigureComputeResource_Task`` write, and the
+    ``Task.info`` poll — the two ``RetrievePropertiesEx`` reads keyed apart by
+    the request body's ``specSet`` object type). Records both surfaces so the
+    test can prove the mutating vmomi write fires only on the approved resume.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(self, *, existing_rules: list[dict[str, Any]] | None = None) -> None:
+        self.existing_rules = existing_rules or []
+        self.rest_calls: list[tuple[str, str]] = []
+        self.vmomi_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        spec = self._spec(path)
+        self.rest_calls.append(("GET", spec))
+        if spec == "/vcenter/vm":
+            return {
+                "value": [
+                    {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+                    {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_ON"},
+                ]
+            }
+        if spec == "/vcenter/cluster/domain-c1":
+            return {"name": "prod-cluster"}
+        return {"value": {}}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append(path)
+        if path.endswith("/ReconfigureComputeResource_Task"):
+            return {"type": "Task", "value": "task-rule-e2e"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "ClusterComputeResource":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                        "propSet": [{"name": "configurationEx.rule", "val": self.existing_rules}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-rule-e2e"},
+                    "propSet": [{"name": "info", "val": {"state": "success"}}],
+                }
+            ]
+        }
+
+    @property
+    def reconfig_writes(self) -> list[str]:
+        return [p for p in self.vmomi_calls if p.endswith("/ReconfigureComputeResource_Task")]
+
+
+@pytest.mark.asyncio
+async def test_drs_rule_create_queue_approve_resume_with_2681_envelope(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """drs_rule.create: park (#2681 envelope + fan-out preview) → approve → resume → created.
+
+    1. A USER dispatch parks at ``awaiting_approval``; the durable row carries
+       the uniform #2681 op-identity envelope plus the capped VM fan-out
+       preview (cluster + cluster_name + resolved VMs). No
+       ReconfigureComputeResource_Task fires — only the read-only preview GETs.
+    2. A distinct human reviewer approves.
+    3. The ``_approved=True`` resume executes: VM resolution + collision read +
+       the (now auto-executed) governed reconfigure + the Task poll run, and
+       the result is ``status='created'``.
+    """
+    recorder = _DrsRuleVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = {
+        "cluster": "domain-c1",
+        "rule_name": "keep-apart",
+        "rule_type": "anti_affinity",
+        "vms": ["web-01", "web-02"],
+    }
+
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.cluster.drs_rule.create",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.reconfig_writes == [], "no reconfigure before approval"
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    assert pending.target_id == target_id
+    effect = pending.proposed_effect
+    assert effect["op_id"] == "vmware.composite.cluster.drs_rule.create"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target_id)
+    assert effect["op_class"] == "write"
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_populated"] is True
+    assert effect["preview"] == {
+        "cluster": "domain-c1",
+        "cluster_name": "prod-cluster",
+        "rule_type": "anti_affinity",
+        "rule_name": "keep-apart",
+        "enabled": True,
+        "resolved": [
+            {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+            {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_ON"},
+        ],
+        "total_resolved": 2,
+    }
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.cluster.drs_rule.create",
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "created"
+    assert result2.result["rule_name"] == "keep-apart"
+    # The mutating reconfigure fired exactly once, on the approved resume.
+    assert recorder.reconfig_writes == [
+        "/ClusterComputeResource/domain-c1/ReconfigureComputeResource_Task"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_drs_rule_create_fresh_boot_dispatchable_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """drs_rule.create runs to ``created`` on the direct session with ZERO ingested rows."""
+    recorder = _DrsRuleVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.cluster.drs_rule.create"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.cluster.drs_rule.create",
+        target=_FakeVmwareTarget(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+    )
+    assert "composite_l2_missing" not in (result.error or ""), result.error
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "created"
+    assert recorder.reconfig_writes == [
+        "/ClusterComputeResource/domain-c1/ReconfigureComputeResource_Task"
+    ]
+
+
+# ===========================================================================
+# folder.create — park→approve→resume + fresh-boot (synchronous, #2895)
+# ===========================================================================
+
+
+class _FolderCreateVmwareConnector:
+    """Recording double for the folder.create park→approve→resume E2E.
+
+    Serves the parent-folder resolution REST read (``_get_json``) and the
+    synchronous ``Folder.CreateFolder`` vim POST (``_post_vmomi_json``) — which
+    returns the new Folder MoRef directly, so **no** ``RetrievePropertiesEx``
+    poll ever fires. Records both surfaces so the test can prove the mutating
+    CreateFolder fires only on the approved resume and is never polled.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(self, *, new_folder_moid: str = "group-v99") -> None:
+        self.new_folder_moid = new_folder_moid
+        self.rest_calls: list[tuple[str, str]] = []
+        self.vmomi_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append(("GET", self._spec(path)))
+        return {"value": [{"folder": "group-v1", "name": "prod"}]}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append(path)
+        return {"type": "Folder", "value": self.new_folder_moid}
+
+    @property
+    def create_writes(self) -> list[str]:
+        return [p for p in self.vmomi_calls if p.endswith("/CreateFolder")]
+
+
+@pytest.mark.asyncio
+async def test_folder_create_queue_approve_resume_with_2681_envelope(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """folder.create: park (#2681 + param-echo preview) → approve → resume → created.
+
+    The synchronous-write proof end-to-end: on the approved resume the
+    ``CreateFolder`` fires exactly once and its returned Folder MoRef is the
+    result, with **no** ``RetrievePropertiesEx`` task poll (the whole vmomi
+    call log is the single CreateFolder).
+    """
+    recorder = _FolderCreateVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = {"parent_folder": "prod", "folder_name": "cluster-nodes"}
+
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.folder.create",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.create_writes == [], "no CreateFolder before approval"
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    effect = pending.proposed_effect
+    assert effect["op_id"] == "vmware.composite.folder.create"
+    assert effect["op_class"] == "write"
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_populated"] is True
+    assert effect["preview"] == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.folder.create",
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "created"
+    assert result2.result["folder"] == "group-v99"
+    # CreateFolder is synchronous: exactly one vmomi call, never polled.
+    assert recorder.vmomi_calls == ["/Folder/group-v1/CreateFolder"]
+
+
+@pytest.mark.asyncio
+async def test_folder_create_fresh_boot_dispatchable_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """folder.create runs to ``created`` on the direct session with ZERO ingested rows."""
+    recorder = _FolderCreateVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.folder.create"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.folder.create",
+        target=_FakeVmwareTarget(),
+        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+    )
+    assert "composite_l2_missing" not in (result.error or ""), result.error
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "created"
+    assert recorder.create_writes == ["/Folder/group-v1/CreateFolder"]

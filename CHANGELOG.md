@@ -196,6 +196,20 @@ connector-related release-notes line.
   `/vcenter/network/distributed-portgroup` path to the generic
   `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP` the read
   composites already use.
+### Added — `nsx.segment.list` typed read for overlay-segment + subnet/CIDR occupancy pre-flight (#2835)
+
+- A new `source_kind="typed"` op `nsx.segment.list` dispatches
+  `GET /policy/api/v1/infra/segments` on a fresh boot with zero catalog
+  ingest, mirroring `nsx.tier1.list` / `nsx.transport_zone.list` in the
+  `nsx-inventory` group. It passes the vendor `{results, result_count}`
+  envelope through unmodified — each segment carries `id`,
+  `display_name`, `resource_type`, `transport_zone_path`, and
+  `subnets[].gateway_address`, the CIDR-occupancy datum an operator reads
+  before carving a new segment (or attaching a workload) to avoid a
+  collision, instead of falling back to the NSX Policy Manager UI or a
+  raw `curl` that bypasses policy/audit/broadcast/JSONFlux.
+  `safety_level="safe"`, no approval; segment create/update/delete stays
+  out of scope (a future approval-gated write-surface initiative).
 
 ## [0.28.0] - 2026-08-07
 

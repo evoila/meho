@@ -40,6 +40,9 @@ The audited set:
   default enforcement point.
 * ``nsx.tier1.list`` -- ``GET /policy/api/v1/infra/tier-1s`` (the
   per-tenant east-west routing surface).
+* ``nsx.segment.list`` -- ``GET /policy/api/v1/infra/segments`` (the
+  overlay/VLAN segments and their subnet/CIDR occupancy -- the
+  pre-flight read before carving a new segment).
 * ``nsx.alarm.list`` -- ``GET /api/v1/alarms`` with optional
   ``status`` / ``feature_name`` / ``severity`` filters.
 
@@ -69,6 +72,7 @@ __all__ = [
     "nsx_backup_status_impl",
     "nsx_cluster_status_impl",
     "nsx_node_status_impl",
+    "nsx_segment_list_impl",
     "nsx_tier1_list_impl",
     "nsx_transport_zone_list_impl",
 ]
@@ -87,6 +91,7 @@ _TRANSPORT_ZONES_PATH = (
     "/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones"
 )
 _TIER1S_PATH = "/policy/api/v1/infra/tier-1s"
+_SEGMENTS_PATH = "/policy/api/v1/infra/segments"
 _ALARMS_PATH = "/api/v1/alarms"
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
@@ -260,6 +265,28 @@ async def nsx_tier1_list_impl(
     """
     del params  # schema declares the param object empty
     return await connector._get_json(target, _TIER1S_PATH, operator=operator)
+
+
+async def nsx_segment_list_impl(
+    connector: NsxConnector,
+    operator: Operator,
+    target: NsxTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``nsx.segment.list`` -- ``GET /policy/api/v1/infra/segments``.
+
+    Returns the overlay/VLAN segment inventory -- the read an operator
+    runs before carving a new segment or attaching a workload, to see
+    which subnet/gateway CIDRs are already in use and avoid a collision.
+    The vendor's ``{"results": [...], "result_count": N}`` envelope is
+    passed through unmodified (same shape as :func:`nsx_tier1_list_impl`);
+    each segment carries ``id``, ``display_name``, ``resource_type``,
+    ``transport_zone_path`` (the transport zone it backs onto), and
+    ``subnets`` -- each subnet's ``gateway_address`` is the subnet/CIDR
+    occupancy datum the pre-flight question needs.
+    """
+    del params  # schema declares the param object empty
+    return await connector._get_json(target, _SEGMENTS_PATH, operator=operator)
 
 
 async def nsx_alarm_list_impl(

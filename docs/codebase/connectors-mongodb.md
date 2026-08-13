@@ -84,7 +84,7 @@ Ops:
 | `mongodb.indexes` | `listIndexes` | indexes incl. TTL `expireAfterSeconds` (`database`, `collection`) |
 | `mongodb.count` | `estimatedDocumentCount` | fast metadata count, O(1) (`database`, `collection`) |
 | `mongodb.server_status` | `serverStatus` | slim projection (heavy sections suppressed) |
-| `mongodb.replica_status` | `hello` + `replSetGetStatus` | replica-set health + member roles |
+| `mongodb.replica_status` | `hello` + `replSetGetStatus` | replica-set health + member roles + per-member `lag_seconds` (secs behind primary) |
 
 ### Read-only enforcement (fixed command set)
 
@@ -128,8 +128,9 @@ a credentialled target on the operator-less probe path resolves here),
 Member roles are derived from `hello` (`hosts`/`passives`/`arbiters` + `primary`)
 so the fingerprint does not need the elevated `clusterMonitor` privilege
 `replSetGetStatus` requires; `mongodb.replica_status` additionally calls
-`replSetGetStatus` for each member's live `stateStr`/health, and treats the
-standalone code-76 (`NoReplicationEnabled`) as `is_replica_set=False`.
+`replSetGetStatus` for each member's live `stateStr`/health and per-member
+replication lag, and treats the standalone code-76 (`NoReplicationEnabled`) as
+`is_replica_set=False`.
 
 ## Dependencies
 
@@ -155,6 +156,13 @@ standalone code-76 (`NoReplicationEnabled`) as `is_replica_set=False`.
   the wire, not just dropped in code.
 - Member roles in `fingerprint` come from `hello`; a live replica set's detailed
   per-member state is on `mongodb.replica_status`.
+- `mongodb.replica_status` computes each member's `lag_seconds` from the primary's
+  and the member's `optimeDate` in the same `replSetGetStatus` response — no extra
+  round trip. It is `null` on the primary's own row, when no member is currently
+  `PRIMARY`, and for a member with no `optimeDate` (e.g. an arbiter). Like
+  `rs.printSecondaryReplicationInfo()`, it is an `optimeDate` delta, so on a quiet
+  replica set with no recent writes it can read high because the secondary has had
+  nothing new to apply — not because it is unhealthy.
 
 ## References
 

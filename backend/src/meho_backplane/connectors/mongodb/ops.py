@@ -338,10 +338,12 @@ _REPLICA_STATUS = MongoOp(
     description=(
         "Returns replica-set health from the hello handshake plus "
         "replSetGetStatus: set name, current primary, each member's role, and "
-        "(when available) each member's live state / health / uptime. On a "
-        "standalone it reports is_replica_set=false rather than erroring. The op "
-        "for 'is the replica set healthy and who is primary?'. safety_level=safe, "
-        "read-only."
+        "(when available) each member's live state / health / uptime, plus each "
+        "member's optime_date and a computed lag_seconds (seconds behind the "
+        "primary's oplog; null on the primary). On a standalone it reports "
+        "is_replica_set=false rather than erroring. The op for 'is the replica "
+        "set healthy, who is primary, and how far behind is each secondary?'. "
+        "safety_level=safe, read-only."
     ),
     parameter_schema=_EMPTY_PARAMS,
     response_schema=_OBJECT_RESPONSE_SCHEMA,
@@ -354,7 +356,8 @@ _REPLICA_STATUS = MongoOp(
         "parameter_hints": {},
         "output_shape": (
             "{is_replica_set, set_name, primary, me, members:[{host, role}], "
-            "repl_set_status:{set, members:[{name, state, health, uptime}]}}."
+            "repl_set_status:{set, members:[{name, state, health, uptime, "
+            "optime_date, sync_source_host, last_heartbeat, lag_seconds}]}}."
         ),
     },
 )

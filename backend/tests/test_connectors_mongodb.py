@@ -29,6 +29,7 @@ exercises the real credential loader. Mirrors
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -473,7 +474,9 @@ async def test_replica_status_standalone_reports_not_replica_set(
 async def test_replica_status_replica_set_returns_member_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A replica set surfaces member roles from hello + replSetGetStatus."""
+    """A replica set surfaces member roles + per-member lag from replSetGetStatus."""
+    primary_optime = dt.datetime(2026, 8, 12, 12, 0, 0, tzinfo=dt.UTC)
+    secondary_optime = primary_optime - dt.timedelta(seconds=12)
     admin = _FakeDb(
         command_responses={
             "hello": {
@@ -486,8 +489,23 @@ async def test_replica_status_replica_set_returns_member_roles(
             "replSetGetStatus": {
                 "set": "rs0",
                 "members": [
-                    {"name": "m1:27017", "stateStr": "PRIMARY", "health": 1, "uptime": 500},
-                    {"name": "m2:27017", "stateStr": "SECONDARY", "health": 1, "uptime": 490},
+                    {
+                        "name": "m1:27017",
+                        "stateStr": "PRIMARY",
+                        "health": 1,
+                        "uptime": 500,
+                        "optimeDate": primary_optime,
+                        "syncSourceHost": "",
+                    },
+                    {
+                        "name": "m2:27017",
+                        "stateStr": "SECONDARY",
+                        "health": 1,
+                        "uptime": 490,
+                        "optimeDate": secondary_optime,
+                        "syncSourceHost": "m1:27017",
+                        "lastHeartbeat": primary_optime,
+                    },
                 ],
             },
         }
@@ -501,7 +519,58 @@ async def test_replica_status_replica_set_returns_member_roles(
     assert result["primary"] == "m1:27017"
     roles = {m["host"]: m["role"] for m in result["members"]}
     assert roles == {"m1:27017": "primary", "m2:27017": "secondary"}
-    assert result["repl_set_status"]["members"][0]["state"] == "PRIMARY"
+
+    members = {m["name"]: m for m in result["repl_set_status"]["members"]}
+    assert members["m1:27017"]["state"] == "PRIMARY"
+    # Primary carries no lag by definition; the secondary trails by the fixture delta.
+    assert members["m1:27017"]["lag_seconds"] is None
+    assert members["m2:27017"]["lag_seconds"] == 12.0
+    # optimeDate / lastHeartbeat round-trip through _jsonable as ISO-8601; sync source projected.
+    assert members["m2:27017"]["optime_date"] == secondary_optime.isoformat()
+    assert members["m2:27017"]["last_heartbeat"] == primary_optime.isoformat()
+    assert members["m2:27017"]["sync_source_host"] == "m1:27017"
+
+
+@pytest.mark.asyncio
+async def test_replica_status_lag_is_null_without_primary_or_optime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lag_seconds is null when no member is PRIMARY and for a member with no optimeDate."""
+    admin = _FakeDb(
+        command_responses={
+            "hello": {
+                "isWritablePrimary": False,
+                "setName": "rs0",
+                "primary": None,
+                "me": "m1:27017",
+                "hosts": ["m1:27017"],
+                "arbiters": ["arb:27017"],
+            },
+            "replSetGetStatus": {
+                "set": "rs0",
+                "members": [
+                    {
+                        "name": "m1:27017",
+                        "stateStr": "SECONDARY",
+                        "health": 1,
+                        "uptime": 500,
+                        "optimeDate": dt.datetime(2026, 8, 12, 12, 0, 0, tzinfo=dt.UTC),
+                    },
+                    {"name": "arb:27017", "stateStr": "ARBITER", "health": 1, "uptime": 480},
+                ],
+            },
+        }
+    )
+    client = _FakeClient(default=admin)
+    _patch_client(monkeypatch, client)
+
+    result = await MongoDbConnector().replica_status(_make_operator(), _MongoTarget(), {})
+    members = {m["name"]: m for m in result["repl_set_status"]["members"]}
+    # No elected primary -> lag undefined for every member; the arbiter also has no optimeDate.
+    assert members["m1:27017"]["lag_seconds"] is None
+    assert members["arb:27017"]["lag_seconds"] is None
+    assert members["arb:27017"]["optime_date"] is None
+    assert members["arb:27017"]["last_heartbeat"] is None
 
 
 @pytest.mark.asyncio

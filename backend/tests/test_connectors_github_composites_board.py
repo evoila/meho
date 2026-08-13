@@ -122,6 +122,33 @@ def _project_view_payload() -> dict[str, Any]:
                         "nodes": [
                             {
                                 "id": "PVTI_1",
+                                "fieldValues": {
+                                    "nodes": [
+                                        {
+                                            "__typename": "ProjectV2ItemFieldTextValue",
+                                            "text": "Fix X",
+                                            "field": {"name": "Title"},
+                                        },
+                                        {
+                                            "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                                            "name": "In Progress",
+                                            "field": {"name": "Status"},
+                                        },
+                                        {
+                                            "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                                            "name": "high",
+                                            "field": {"name": "Priority"},
+                                        },
+                                        # Unrecognised value type -> dropped (matches the wire:
+                                        # no inline fragment is taken, so only __typename returns).
+                                        {"__typename": "ProjectV2ItemFieldRepositoryValue"},
+                                        # Recognised type but no resolvable field -> skipped.
+                                        {
+                                            "__typename": "ProjectV2ItemFieldSingleSelectValue",
+                                            "name": "orphan",
+                                        },
+                                    ]
+                                },
                                 "content": {
                                     "__typename": "Issue",
                                     "number": 42,
@@ -203,6 +230,35 @@ async def test_project_view_parses_items_including_draft() -> None:
     draft_item = next(i for i in envelope["items"] if i["content_type"] == "DraftIssue")
     assert draft_item["number"] is None
     assert draft_item["url"] is None
+
+
+@pytest.mark.asyncio
+async def test_project_view_projects_item_field_values() -> None:
+    """Item rows carry ``field_values`` from single-select + text nodes; other types drop."""
+    connector = _RecordingConnector([_project_view_payload()])
+    envelope = await project_view_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"owner": "evoila", "project_number": 19},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    # ----- The query asks for each item's field values with the union fragments -----
+    query = connector.post_calls[0]["json"]["query"]
+    assert "fieldValues(first: 20)" in query
+    assert "... on ProjectV2ItemFieldSingleSelectValue" in query
+    assert "... on ProjectV2ItemFieldTextValue" in query
+    assert "... on ProjectV2FieldCommon { name }" in query
+    # ----- Status/Priority single-selects + the Title text value surface by field name;
+    # the ProjectV2ItemFieldRepositoryValue node and the field-less single-select drop -----
+    issue_item = next(i for i in envelope["items"] if i["content_type"] == "Issue")
+    assert issue_item["field_values"] == {
+        "Title": "Fix X",
+        "Status": "In Progress",
+        "Priority": "high",
+    }
+    # An item with no fieldValues selection collapses to an empty map, not an error.
+    draft_item = next(i for i in envelope["items"] if i["content_type"] == "DraftIssue")
+    assert draft_item["field_values"] == {}
 
 
 @pytest.mark.asyncio

@@ -884,7 +884,7 @@ def test_read_ops_handler_attrs_resolve_to_bound_methods() -> None:
     """
     from meho_backplane.connectors.keycloak.ops_read import READ_OPS, WHEN_TO_USE_BY_GROUP
 
-    assert len(READ_OPS) == 6
+    assert len(READ_OPS) == 8
     for op in READ_OPS:
         handler = getattr(KeycloakConnector, op.handler_attr, None)
         assert callable(handler), (

@@ -14,8 +14,8 @@ live Vault read.
 Acceptance criteria verified (Issue #1394)
 ==========================================
 
-(a) All 6 read ops dispatch through ``call_operation`` via the admin-auth
-    path and return ``status="ok"``; all 6 are visible to
+(a) All 8 read ops dispatch through ``call_operation`` via the admin-auth
+    path and return ``status="ok"``; all 8 are visible to
     ``search_operations``.
 (b) ``keycloak.client.get`` returns the client's flows
     (``authenticationFlowBindingOverrides``), redirect URIs
@@ -65,6 +65,8 @@ _CLIENT_UUID = "11111111-1111-1111-1111-111111111111"
 _USER_UUID = "22222222-2222-2222-2222-222222222222"
 _CLIENT_SECRET_SENTINEL = "super-secret-client-secret-DO-NOT-LEAK"
 _USER_CRED_SENTINEL = "hashed-password-DO-NOT-LEAK"
+_ROLE_NAME = "operator"
+_ROLE_USER_CRED_SENTINEL = "role-member-hash-DO-NOT-LEAK"
 
 _OPERATOR_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000ad")
 _OPERATOR = Operator(
@@ -83,6 +85,8 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "keycloak.client_scope.list",
     "keycloak.user.list",
     "keycloak.role_mapping.get",
+    "keycloak.role.list",
+    "keycloak.role.users",
 )
 
 
@@ -146,6 +150,36 @@ _FIXTURE_ROLE_MAPPINGS: dict[str, Any] = {
     },
 }
 
+_FIXTURE_ROLES: list[dict[str, Any]] = [
+    {
+        "id": "role-uuid-operator",
+        "name": "operator",
+        "description": "Operator role",
+        "composite": False,
+        "clientRole": False,
+        "containerId": "evba",
+    },
+    {
+        "id": "role-uuid-admin",
+        "name": "admin",
+        "description": "Realm administrator",
+        "composite": True,
+        "clientRole": False,
+        "containerId": "evba",
+    },
+]
+
+_FIXTURE_ROLE_USERS: list[dict[str, Any]] = [
+    {
+        "id": _USER_UUID,
+        "username": "operator-a",
+        "enabled": True,
+        # Planted credential material — role.users must scrub it exactly as
+        # keycloak.user.list does for any UserRepresentation row.
+        "credentials": [{"type": "password", "secretData": _ROLE_USER_CRED_SENTINEL}],
+    }
+]
+
 
 def _mount_admin_routes(mock: respx.MockRouter) -> None:
     """Register the token endpoint + 6 admin REST fixture routes on *mock*."""
@@ -160,6 +194,8 @@ def _mount_admin_routes(mock: respx.MockRouter) -> None:
     mock.get(f"/admin/realms/evba/users/{_USER_UUID}/role-mappings").respond(
         200, json=_FIXTURE_ROLE_MAPPINGS
     )
+    mock.get("/admin/realms/evba/roles").respond(200, json=_FIXTURE_ROLES)
+    mock.get(f"/admin/realms/evba/roles/{_ROLE_NAME}/users").respond(200, json=_FIXTURE_ROLE_USERS)
 
 
 # ---------------------------------------------------------------------------
@@ -251,10 +287,10 @@ async def keycloak_e2e() -> AsyncIterator[KeycloakConnector]:
 
 
 def test_keycloak_read_ops_registration_set() -> None:
-    """READ_OPS carries exactly the 6 curated read ops and no write op."""
+    """READ_OPS carries exactly the 8 curated read ops and no write op."""
     op_ids = {op.op_id for op in READ_OPS}
     assert op_ids == set(EXPECTED_OP_IDS)
-    assert len(READ_OPS) == 6
+    assert len(READ_OPS) == 8
 
 
 def test_keycloak_read_ops_all_safe_no_approval_read_only_tag() -> None:
@@ -411,6 +447,55 @@ async def test_keycloak_e2e_role_mapping_get(keycloak_e2e: KeycloakConnector) ->
     mappings = result["result"]["role_mappings"]
     assert mappings["realmMappings"][0]["name"] == "tenant_admin"
     assert "meho-backplane" in mappings["clientMappings"]
+
+
+@pytest.mark.asyncio
+async def test_keycloak_e2e_role_list(keycloak_e2e: KeycloakConnector) -> None:
+    """keycloak.role.list returns the realm role catalogue as {rows, total}."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_routes(mock)
+        result = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.role.list",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+    assert result["status"] == "ok", f"role.list failed: {result.get('error')}"
+    assert result["result"]["total"] == 2
+    rows = result["result"]["rows"]
+    assert {row["name"] for row in rows} == {"operator", "admin"}
+    # RoleRepresentation fields the access-review caller reads.
+    assert rows[0]["containerId"] == "evba"
+    assert rows[0]["clientRole"] is False
+
+
+@pytest.mark.asyncio
+async def test_keycloak_e2e_role_users_redacts_credentials(
+    keycloak_e2e: KeycloakConnector,
+) -> None:
+    """keycloak.role.users returns {rows, total} with member credentials redacted."""
+    with respx.mock(base_url=_KC_BASE_URL, assert_all_called=False) as mock:
+        _mount_admin_routes(mock)
+        result = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "keycloak.role.users",
+                "target": {"name": _TARGET_NAME},
+                "params": {"name": _ROLE_NAME},
+            },
+        )
+    assert result["status"] == "ok", f"role.users failed: {result.get('error')}"
+    assert result["result"]["total"] == 1
+    rows = result["result"]["rows"]
+    assert rows[0]["username"] == "operator-a"
+    # Acceptance: a planted credentials field is redacted identically to
+    # keycloak.user.list's UserRepresentation scrub.
+    assert rows[0]["credentials"] == REDACTED
+    assert _ROLE_USER_CRED_SENTINEL not in str(result)
 
 
 @pytest.mark.asyncio

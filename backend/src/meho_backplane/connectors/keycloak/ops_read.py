@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing module size (>600 lines before
+# this change); #2843 appends two role read ops to the established READ_OPS
+# pattern this file owns, so splitting the read-op module is out of scope here.
 
 """Curated read ops for :class:`KeycloakConnector` (G3.13-T2 #1394).
 
-Six ``safety_level="safe"`` / ``requires_approval=False`` read ops that
-surface the realm / client / client-scope / user / role-mapping config an
-operator would otherwise read with ``kcadm.sh get`` or the admin console:
+Eight ``safety_level="safe"`` / ``requires_approval=False`` read ops that
+surface the realm / client / client-scope / user / role-mapping / role
+config an operator would otherwise read with ``kcadm.sh get`` or the admin
+console:
 
 ================================  =================================================
 op_id                             Admin REST API
@@ -16,6 +20,8 @@ op_id                             Admin REST API
 ``keycloak.client_scope.list``    ``GET /admin/realms/{realm}/client-scopes``
 ``keycloak.user.list``            ``GET /admin/realms/{realm}/users`` (``?username=``/``?max=``)
 ``keycloak.role_mapping.get``     ``GET /admin/realms/{realm}/users/{id}/role-mappings``
+``keycloak.role.list``            ``GET /admin/realms/{realm}/roles``
+``keycloak.role.users``           ``GET /admin/realms/{realm}/roles/{role-name}/users``
 ================================  =================================================
 
 All ops dispatch via the **admin-auth** path the T1 substrate built
@@ -88,7 +94,9 @@ __all__ = [
     "keycloak_client_list",
     "keycloak_client_scope_list",
     "keycloak_realm_get",
+    "keycloak_role_list",
     "keycloak_role_mapping_get",
+    "keycloak_role_users",
     "keycloak_user_list",
 ]
 
@@ -285,6 +293,64 @@ async def keycloak_role_mapping_get(
     return {"role_mappings": redact_secret_fields(mappings)}
 
 
+async def keycloak_role_list(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """List the managed realm's roles (``GET /admin/realms/{realm}/roles``).
+
+    Op-id: ``keycloak.role.list``. No params. Returns ``{rows, total}``;
+    each row is a :class:`RoleRepresentation` (``id``, ``name``,
+    ``description``, ``composite``, ``clientRole``, ``containerId``) — the
+    realm's role catalogue an operator would list with
+    ``kcadm.sh get roles``. This is the entry point for an access review:
+    discover a role's ``name`` here, then read its members with
+    ``keycloak.role.users``. No credential material is present, but the
+    response is run through the scrubber for defence-in-depth consistency
+    with the sibling ops.
+    """
+    del params  # declared empty; intentionally ignored
+    realms = resolve_realm_config(target)
+    rows = await self._get_admin_list(
+        target,
+        f"/admin/realms/{realms.managed_realm}/roles",
+        operator=operator,
+    )
+    scrubbed = [redact_secret_fields(row) for row in rows]
+    return {"rows": scrubbed, "total": len(scrubbed)}
+
+
+async def keycloak_role_users(
+    self: KeycloakConnector,
+    operator: Operator,
+    target: KeycloakTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """List the users holding a realm role (``GET .../roles/{role-name}/users``).
+
+    Op-id: ``keycloak.role.users``. ``name`` is the realm role's **name**
+    (from ``keycloak.role.list``), not a UUID — Keycloak keys this endpoint
+    on the role name, so the segment is only ``quote_segment``-encoded (no
+    UUID-pattern gate). Returns ``{rows, total}``; each row is a
+    :class:`UserRepresentation` with its ``credentials`` scrubbed — the
+    same discipline ``keycloak.user.list`` applies, non-optional for any op
+    returning ``UserRepresentation`` rows. Keycloak sorts the members by
+    username and returns its default first page (100 users); a very large
+    role is capped at that page.
+    """
+    realms = resolve_realm_config(target)
+    role_name = quote_segment(params["name"])
+    rows = await self._get_admin_list(
+        target,
+        f"/admin/realms/{realms.managed_realm}/roles/{role_name}/users",
+        operator=operator,
+    )
+    scrubbed = [redact_secret_fields(row) for row in rows]
+    return {"rows": scrubbed, "total": len(scrubbed)}
+
+
 # ---------------------------------------------------------------------------
 # Curated when_to_use blurbs (one per op group)
 # ---------------------------------------------------------------------------
@@ -324,6 +390,19 @@ _WHEN_TO_USE_USER = (
     "``keycloak.role_mapping.get`` for that user's role assignments."
 )
 
+_WHEN_TO_USE_ROLE = (
+    "Use for realm-role access review: list the realm's role catalogue "
+    "(``keycloak.role.list`` — the roles ``kcadm.sh get roles`` shows) or "
+    "read which users currently hold a given realm role "
+    "(``keycloak.role.users`` by role **name**, not UUID). Call "
+    "``keycloak.role.list`` to discover role names, then "
+    "``keycloak.role.users`` with a role ``name`` to audit its members. "
+    'This answers "which realm roles exist?" and "who holds '
+    'operator/admin?" directly — the reverse of '
+    "``keycloak.role_mapping.get``, which needs a user UUID and only "
+    "reports that one user's roles."
+)
+
 #: Curated ``when_to_use`` blurb per op group, consumed by
 #: :meth:`KeycloakConnector.register_operations` (a group_key without an
 #: entry is a hard registration error). Co-located with the ops so the
@@ -333,6 +412,7 @@ WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "client": _WHEN_TO_USE_CLIENT,
     "client_scope": _WHEN_TO_USE_CLIENT_SCOPE,
     "user": _WHEN_TO_USE_USER,
+    "role": _WHEN_TO_USE_ROLE,
 }
 
 #: UUID pattern used as a defence-in-depth constraint on every ``id``/``uuid``
@@ -599,6 +679,75 @@ READ_OPS: tuple[KeycloakOp, ...] = (
             "when_to_use": _WHEN_TO_USE_USER,
             "parameter_hints": {"id": "The user's internal UUID, from keycloak.user.list."},
             "output_shape": ("``{role_mappings: {realmMappings: [...], clientMappings: {...}}}``."),
+        },
+    ),
+    KeycloakOp(
+        op_id="keycloak.role.list",
+        handler_attr="role_list",
+        summary="List the managed Keycloak realm's roles (the realm role catalogue).",
+        description=(
+            "GETs ``/admin/realms/{realm}/roles`` and returns the realm's "
+            "role catalogue as ``{rows, total}``. Each row is a "
+            "RoleRepresentation (``id``, ``name``, ``description``, "
+            "``composite``, ``clientRole``, ``containerId``) — the realm "
+            "roles ``kcadm.sh get roles`` lists. No params. Use "
+            "``keycloak.role.users`` to read a role's members by name. "
+            "Dispatches via the admin-auth path."
+        ),
+        parameter_schema=_EMPTY_PARAMS,
+        response_schema=_ROWS_SCHEMA,
+        group_key="role",
+        tags=("read-only", "role", "keycloak"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_ROLE,
+            "parameter_hints": {},
+            "output_shape": (
+                "``{rows: [{<RoleRepresentation>}], total: N}``. Each row's "
+                "``name`` is the role name for ``keycloak.role.users``."
+            ),
+        },
+    ),
+    KeycloakOp(
+        op_id="keycloak.role.users",
+        handler_attr="role_users",
+        summary="List the Keycloak users holding a realm role by role name (no credentials).",
+        description=(
+            "GETs ``/admin/realms/{realm}/roles/{role-name}/users`` where "
+            "``name`` is the realm role's **name** (from "
+            "``keycloak.role.list`` — NOT a UUID) and returns the users "
+            "holding that role as ``{rows, total}``. Each row is a "
+            "UserRepresentation with its ``credentials`` redacted — the op "
+            "never surfaces credential material. Keycloak sorts by username "
+            "and returns its default first page (100 users); a very large "
+            "role is capped at that page. Dispatches via the admin-auth path."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The realm role's name (NOT a UUID; from keycloak.role.list).",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        response_schema=_ROWS_SCHEMA,
+        group_key="role",
+        tags=("read-only", "role", "keycloak"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_ROLE,
+            "parameter_hints": {
+                "name": "The realm role's name (not a UUID), from keycloak.role.list."
+            },
+            "output_shape": (
+                "``{rows: [{<UserRepresentation, credentials redacted>}], "
+                "total: N}`` — the realm-role members."
+            ),
         },
     ),
 )

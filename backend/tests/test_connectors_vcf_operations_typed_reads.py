@@ -13,6 +13,9 @@ Covers the audited read set converted from ingested-row curation to
 * ``vrops.alert.list`` — ``GET /suite-api/api/alerts`` (alert triage).
 * ``vrops.resource.query`` — ``POST /suite-api/api/resources/query`` (a
   body-shaped POST carrying a typed ``ResourceQuerySpec``).
+* ``vrops.resource.stats`` — ``GET /suite-api/api/resources/stats/latest``
+  (the wave-2 sizing read, #2838; latest metric *values* for named
+  resources, gated by a required ``resourceId`` list).
 
 Coverage matrix (per #2303 acceptance criteria):
 
@@ -32,7 +35,7 @@ Coverage matrix (per #2303 acceptance criteria):
   omitted otherwise.
 * **OpsToken on every read** — each read carries
   ``Authorization: OpsToken <token>``, never Basic or Bearer.
-* **Metadata shape** — all three are ``safety_level="safe"``,
+* **Metadata shape** — all four are ``safety_level="safe"``,
   ``requires_approval=False``, tagged ``read-only``, with
   ``additionalProperties=False`` parameter schemas and non-empty
   ``llm_instructions``; no write op is registered.
@@ -85,6 +88,7 @@ _VROPS_BASE_URL = f"https://{_VROPS_HOST}"
 _LIVENESS_PATH = "/suite-api/api/versions/current"
 _ALERTS_PATH = "/suite-api/api/alerts"
 _RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
+_STATS_LATEST_PATH = "/suite-api/api/resources/stats/latest"
 
 #: OpsToken session-establish path + canned acquire response (#2395).
 _ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
@@ -111,6 +115,22 @@ _RESOURCES_QUERY_RESPONSE: dict[str, Any] = {
         },
     ],
     "pageInfo": {"page": 0, "pageSize": 1000, "totalCount": 1},
+}
+_STATS_RESPONSE: dict[str, Any] = {
+    "values": [
+        {
+            "resourceId": "r-1",
+            "stats": {
+                "stat": [
+                    {
+                        "statKey": {"key": "cpu|demandmhz"},
+                        "data": [1234.5],
+                        "timestamps": [1470421325035],
+                    },
+                ],
+            },
+        },
+    ],
 }
 
 
@@ -220,6 +240,13 @@ async def _register_typed_ops(stub: AsyncMock) -> None:
             _RESOURCES_QUERY_PATH,
             _RESOURCES_QUERY_RESPONSE,
         ),
+        (
+            "vrops.resource.stats",
+            {"resourceId": ["r-1"]},
+            "GET",
+            _STATS_LATEST_PATH,
+            _STATS_RESPONSE,
+        ),
     ],
     ids=lambda v: v if isinstance(v, str) else "",
 )
@@ -273,7 +300,12 @@ async def test_typed_ops_registered_with_source_kind_typed(
     """
     await _register_typed_ops(_stub_embedding)
 
-    expected = {"vrops.liveness", "vrops.alert.list", "vrops.resource.query"}
+    expected = {
+        "vrops.liveness",
+        "vrops.alert.list",
+        "vrops.resource.query",
+        "vrops.resource.stats",
+    }
     rows = (
         (
             await session.execute(
@@ -339,6 +371,81 @@ async def test_resource_query_sends_body_and_paginates(
     # Pagination rides as query params.
     assert request.url.params["page"] == "0"
     assert request.url.params["pageSize"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_resource_stats_sends_repeated_ids_and_keys_and_returns_values(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """vrops.resource.stats GETs stats/latest with repeated ids/keys and returns values."""
+    await _register_typed_ops(_stub_embedding)
+    install_fake_client(
+        monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    )
+
+    params = {
+        "resourceId": ["r-1", "r-2"],
+        "statKey": ["cpu|demandmhz", "mem|workload"],
+        "currentOnly": True,
+    }
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
+        route = mock.get(_STATS_LATEST_PATH).respond(200, json=_STATS_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vrops.resource.stats",
+            target=_TypedReadTarget(),
+            params=params,
+        )
+
+    # The op returns the metric *values* (not just resource identity).
+    assert result.status == "ok", result.error
+    assert result.result == _STATS_RESPONSE
+
+    sent = route.calls[0].request.url.params
+    resource_ids = [value for key, value in sent.multi_items() if key == "resourceId"]
+    stat_keys = [value for key, value in sent.multi_items() if key == "statKey"]
+    assert resource_ids == ["r-1", "r-2"]
+    assert stat_keys == ["cpu|demandmhz", "mem|workload"]
+    assert sent["currentOnly"] == "true"
+    # Scheme-regression pin: the read carries OpsToken, never Basic/Bearer.
+    assert route.calls[0].request.headers.get("authorization") == f"OpsToken {_OPS_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_resource_stats_refuses_unbounded_all_resource_read(
+    _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """resourceId is required (minItems=1): an unbounded all-resource read never hits the wire."""
+    await _register_typed_ops(_stub_embedding)
+    install_fake_client(
+        monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    )
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
+        stats_route = mock.get(_STATS_LATEST_PATH).respond(200, json=_STATS_RESPONSE)
+        empty = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vrops.resource.stats",
+            target=_TypedReadTarget(),
+            params={"resourceId": []},
+        )
+        missing = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vrops.resource.stats",
+            target=_TypedReadTarget(),
+            params={"statKey": ["cpu|demandmhz"]},
+        )
+
+    for result in (empty, missing):
+        assert result.status == "error"
+        assert result.extras.get("error_code") == "invalid_params"
+    # The schema gate refuses before any wire call — the stats endpoint is never hit.
+    assert not stats_route.called
 
 
 @pytest.mark.asyncio
@@ -442,6 +549,7 @@ def test_typed_ops_are_read_only_and_well_formed() -> None:
         "vrops.liveness",
         "vrops.alert.list",
         "vrops.resource.query",
+        "vrops.resource.stats",
     }
     for op in VROPS_TYPED_OPS:
         assert op.safety_level == "safe", f"{op.op_id} must be safe (read-only surface)"

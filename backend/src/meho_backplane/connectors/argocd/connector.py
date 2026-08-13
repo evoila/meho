@@ -406,7 +406,7 @@ class ArgoCdConnector(HttpConnector):
     # (see :func:`~meho_backplane.operations._branches.dispatch_typed`); the
     # ``operator`` is forwarded to :meth:`_get_json` so the credential loader
     # reads the per-target bearer token under the operator's identity. All
-    # six are read-only — no write/mutating op ships in this Task.
+    # seven are read-only — no write/mutating op ships in this section.
     # ------------------------------------------------------------------
 
     async def app_list(
@@ -535,6 +535,36 @@ class ArgoCdConnector(HttpConnector):
         """
         del params  # schema declares the param object empty
         return await self._get_json(target, "/api/v1/repositories", operator=operator)
+
+    async def cluster_list(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.cluster.list`` — ``GET /api/v1/clusters``.
+
+        Returns the ``ClusterList`` (``{"items": [...], "metadata": {...}}``);
+        each item carries the destination cluster's ``server`` URL, ``name``,
+        ``connectionState`` (whether ArgoCD can currently reach and
+        authenticate to the cluster), ``serverVersion``, and ``info``
+        (``applicationsCount`` + the cached connection state).
+
+        Defense in depth: ArgoCD's ``Cluster.config`` carries the destination
+        cluster's own credentials (bearer token, TLS client cert/key,
+        basic-auth username/password, AWS/exec provider config). The handler
+        strips the whole ``config`` object from every item before returning so
+        no destination credential ever rides back in the envelope — even if a
+        broad-RBAC token makes ``argocd-server`` include it.
+        """
+        del params  # schema declares the param object empty
+        payload = await self._get_json(target, "/api/v1/clusters", operator=operator)
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    item.pop("config", None)
+        return payload
 
     # ------------------------------------------------------------------
     # Write primitive + approval-gated write handlers (G3.12-T4 #1405)

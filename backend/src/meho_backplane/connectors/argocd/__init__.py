@@ -23,11 +23,11 @@ The asynchronous (lifespan startup) typed-op registrar — queued via
 the way Harbor (#621) and bind9 (#367) do — lands in this module as of
 G3.12-T2 (#1391). :func:`register_argocd_typed_operations` delegates to
 :meth:`ArgoCdConnector.register_operations`, which walks
-:data:`~meho_backplane.connectors.argocd.ops.ARGOCD_OPS` and upserts the six
+:data:`~meho_backplane.connectors.argocd.ops.ARGOCD_OPS` and upserts the seven
 curated read-core descriptors (``argocd.app.list`` / ``argocd.app.get`` /
 ``argocd.app.diff`` / ``argocd.app.resource_tree`` /
-``argocd.appproject.list`` / ``argocd.repo.list``) — all ``safety_level="safe"``,
-``requires_approval=False``, read-only. The approval-gated write ops
+``argocd.appproject.list`` / ``argocd.repo.list`` / ``argocd.cluster.list``) —
+all ``safety_level="safe"``, ``requires_approval=False``, read-only. The approval-gated write ops
 (``app.sync`` / ``rollback`` / ``set`` / ``refresh`` / ``delete`` +
 ``appproject.create`` / ``update``, every one ``requires_approval=True``)
 land on the same registrar walk in G3.12-T4 (#1405) — see

@@ -40,6 +40,8 @@ from uuid import UUID
 
 import pytest
 import structlog
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -205,19 +207,35 @@ class _FakeConn:
         fetchrow_result: dict[str, Any] | None = None,
         fetchval_result: Any = 1,
         cursor_records: list[dict[str, Any]] | None = None,
+        fetch_by_sql: dict[str, list[dict[str, Any]]] | None = None,
+        fetchrow_by_sql: dict[str, dict[str, Any] | None] | None = None,
     ) -> None:
         self._fetch_result = fetch_result or []
         self._fetchrow_result = fetchrow_result
         self._fetchval_result = fetchval_result
         self._cursor_records = cursor_records or []
+        # Optional per-query routing for ops that issue several reads over one
+        # connection (postgres.replication): the first marker that is a
+        # substring of the executed SQL selects the canned result. Unset =>
+        # the single-result fields above (every other op's shape).
+        self._fetch_by_sql = fetch_by_sql
+        self._fetchrow_by_sql = fetchrow_by_sql
         self.closed = False
         self.readonly_txn: bool | None = None
         self.cursor_sql: str | None = None
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        if self._fetch_by_sql is not None:
+            for marker, records in self._fetch_by_sql.items():
+                if marker in sql:
+                    return records
         return self._fetch_result
 
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        if self._fetchrow_by_sql is not None:
+            for marker, record in self._fetchrow_by_sql.items():
+                if marker in sql:
+                    return record
         return self._fetchrow_result
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
@@ -260,6 +278,25 @@ def test_postgres_resolves_versioned_and_wildcard_and_appears_in_registry() -> N
     assert resolve_connector(fresh) is PostgresConnector
 
 
+def test_supported_version_range_excludes_eol_postgres_12() -> None:
+    """AC: the advertised range starts at 13, not the EOL 12.
+
+    ``postgres.replication`` reads ``pg_stat_wal_receiver.written_lsn`` /
+    ``flushed_lsn`` -- the columns that replaced 12's single ``received_lsn`` in
+    PostgreSQL 13 (https://www.postgresql.org/docs/13/monitoring-stats.html) --
+    so advertising the (EOL) 12 would parse-error that op on a 12 standby.
+    Matched with the same ``SpecifierSet`` the resolver applies, 12 must fall
+    outside the range while the written_lsn/flushed_lsn-bearing releases stay in.
+    """
+    version_range = PostgresConnector.supported_version_range
+    assert version_range is not None
+    spec = SpecifierSet(version_range)
+    assert Version("12") not in spec
+    assert Version("13") in spec
+    assert Version("17") in spec
+    assert Version("18") not in spec
+
+
 def test_every_op_is_safe_read_only_with_closed_schema() -> None:
     """AC: no write op -- every registered op is safe/read-only/no-approval."""
     assert {op.op_id for op in PG_OPS} == {
@@ -269,6 +306,7 @@ def test_every_op_is_safe_read_only_with_closed_schema() -> None:
         "postgres.indexes",
         "postgres.activity",
         "postgres.settings",
+        "postgres.replication",
         "postgres.query",
     }
     for op in PG_OPS:
@@ -459,6 +497,136 @@ async def test_activity_omits_query_text(monkeypatch: pytest.MonkeyPatch) -> Non
     result = await PostgresConnector().activity(_make_operator(), _PgTarget(), {})
     assert result["sessions"][0]["pid"] == 42
     assert "query" not in result["sessions"][0]
+
+
+@pytest.mark.asyncio
+async def test_replication_primary_reports_standbys_with_lag_seconds_and_lsn_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: a primary reports per-standby rows; interval lag -> float seconds.
+
+    ``pg_stat_replication`` is populated, ``pg_stat_wal_receiver`` is empty
+    (a primary has no receiver), ``pg_is_in_recovery()`` is false. The lag
+    columns are ``interval`` -> ``timedelta`` -> float seconds, LSNs keep their
+    canonical ``X/Y`` text form, and ``reply_time`` becomes ISO-8601.
+    """
+    reply_time = dt.datetime(2026, 8, 12, 10, 30, tzinfo=dt.UTC)
+    conn = _FakeConn(
+        fetch_by_sql={
+            "pg_stat_replication": [
+                {
+                    "pid": 5140,
+                    "usename": "replicator",
+                    "application_name": "standby1",
+                    "client_addr": "10.0.0.7",
+                    "state": "streaming",
+                    "sent_lsn": "0/16CC63C",
+                    "write_lsn": "0/16CC63C",
+                    "flush_lsn": "0/16CC63C",
+                    "replay_lsn": "0/16CC600",
+                    "write_lag": dt.timedelta(milliseconds=5),
+                    "flush_lag": dt.timedelta(milliseconds=12),
+                    "replay_lag": dt.timedelta(seconds=2, microseconds=250000),
+                    "sync_state": "sync",
+                    "sync_priority": 1,
+                    "reply_time": reply_time,
+                }
+            ]
+        },
+        fetchrow_by_sql={
+            "pg_is_in_recovery": {"in_recovery": False, "last_xact_replay_timestamp": None},
+            "pg_stat_wal_receiver": None,
+        },
+    )
+    _patch_connection(monkeypatch, conn)
+
+    result = await PostgresConnector().replication(_make_operator(), _PgTarget(), {})
+
+    assert result["in_recovery"] is False
+    assert result["last_xact_replay_timestamp"] is None
+    assert result["wal_receiver"] is None
+    standby = result["standbys"][0]
+    assert standby["state"] == "streaming"
+    assert standby["sync_state"] == "sync"
+    assert standby["replay_lsn"] == "0/16CC600"  # canonical LSN text preserved
+    assert standby["replay_lag"] == 2.25  # interval -> float seconds
+    assert standby["write_lag"] == 0.005
+    assert standby["reply_time"] == reply_time.isoformat()
+    assert standby["client_addr"] == "10.0.0.7"
+    assert conn.closed is True
+
+
+@pytest.mark.asyncio
+async def test_replication_standby_reports_wal_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A standby reports its WAL receiver + replay staleness, empty standbys.
+
+    ``pg_is_in_recovery()`` is true, ``pg_stat_wal_receiver`` has its one row,
+    ``pg_stat_replication`` is empty. ``conninfo`` is omitted at the SQL level
+    (it carries the primary DSN), so it never appears in the response shape.
+    """
+    last_replay = dt.datetime(2026, 8, 12, 10, 29, 58, tzinfo=dt.UTC)
+    send_time = dt.datetime(2026, 8, 12, 10, 30, tzinfo=dt.UTC)
+    conn = _FakeConn(
+        fetch_by_sql={"pg_stat_replication": []},
+        fetchrow_by_sql={
+            "pg_is_in_recovery": {
+                "in_recovery": True,
+                "last_xact_replay_timestamp": last_replay,
+            },
+            "pg_stat_wal_receiver": {
+                "status": "streaming",
+                "receive_start_lsn": "0/16000000",
+                "written_lsn": "0/16CC63C",
+                "flushed_lsn": "0/16CC63C",
+                "latest_end_lsn": "0/16CC63C",
+                "last_msg_send_time": send_time,
+                "last_msg_receipt_time": send_time,
+                "slot_name": "standby1_slot",
+                "sender_host": "primary.internal",
+                "sender_port": 5432,
+            },
+        },
+    )
+    _patch_connection(monkeypatch, conn)
+
+    result = await PostgresConnector().replication(_make_operator(), _PgTarget(), {})
+
+    assert result["in_recovery"] is True
+    assert result["last_xact_replay_timestamp"] == last_replay.isoformat()
+    assert result["standbys"] == []
+    receiver = result["wal_receiver"]
+    assert receiver["status"] == "streaming"
+    assert receiver["sender_host"] == "primary.internal"
+    assert receiver["last_msg_send_time"] == send_time.isoformat()
+    assert "conninfo" not in receiver
+    assert conn.closed is True
+
+
+@pytest.mark.asyncio
+async def test_replication_standalone_reports_both_views_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: a standalone instance -> standbys == [] and wal_receiver is None."""
+    conn = _FakeConn(
+        fetch_by_sql={"pg_stat_replication": []},
+        fetchrow_by_sql={
+            "pg_is_in_recovery": {"in_recovery": False, "last_xact_replay_timestamp": None},
+            "pg_stat_wal_receiver": None,
+        },
+    )
+    _patch_connection(monkeypatch, conn)
+
+    result = await PostgresConnector().replication(_make_operator(), _PgTarget(), {})
+
+    assert result == {
+        "in_recovery": False,
+        "last_xact_replay_timestamp": None,
+        "standbys": [],
+        "wal_receiver": None,
+    }
+    assert conn.closed is True
 
 
 @pytest.mark.asyncio

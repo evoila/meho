@@ -25,6 +25,9 @@ This module ships:
   :meth:`fingerprint`, registered as the ``rke2.about`` typed op.
 * :meth:`Rke2SshConnector.posture_show` -- the read-only posture tier
   (``rke2.posture.show``): config-file modes + redacted token presence.
+* :meth:`Rke2SshConnector.service_status` -- the read-only service-state
+  probe (``rke2.node.service.status``, #2833 / #2852): live systemd state
+  of the ``rke2-server`` / ``rke2-agent`` units via ``systemctl show``.
 * :meth:`Rke2SshConnector.etcd_snapshot_save` -- the safe, non-gated
   ``rke2.etcd-snapshot.save`` op (T4 #2431): an on-demand managed-etcd
   snapshot on a server node, returning a snapshot name + path.
@@ -326,6 +329,28 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def service_status(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.service.status`` (#2833 / #2852).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_read.rke2_service_status`,
+        which runs one read-only ``systemctl show`` probe over the shared SSH
+        adapter across the fixed ``rke2-server`` / ``rke2-agent`` pair and
+        returns their live systemd state (load/active/sub state, start time,
+        restart count) without mutating anything. Safe / non-gated like the
+        sibling ``posture_show``.
+        """
+        from meho_backplane.connectors.rke2.ops_read import (
+            rke2_service_status as _rke2_service_status,
+        )
+
+        return await _rke2_service_status(self, target, params, operator)
+
     async def token_rotate(
         self,
         target: Target,
@@ -574,6 +599,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "exists (presence + mode only -- the token VALUE is never read). "
         "Pair with a rotation runbook to confirm the token is present "
         "before rotating. Transport: plain SSH (``stat``, read-only)."
+    ),
+    "rke2-service-read": (
+        "Use to check whether an RKE2 node's systemd service is up WITHOUT "
+        "changing it: ``rke2.node.service.status`` runs a read-only "
+        "``systemctl show`` over the fixed ``rke2-server`` / ``rke2-agent`` "
+        "pair and reports each unit's load / active / sub state, start time, "
+        "and restart count. The unit reporting ``not-found`` is not installed "
+        "on the node, so the result also reveals the node's role. Reach for "
+        "it when the Kubernetes API is unreachable and ``kubernetes.*`` ops "
+        "cannot answer 'is rke2-server actually up, and is it crash-looping?'. "
+        "Read-only -- the restart itself is the approval-gated "
+        "``rke2.node.service.restart``. Transport: plain SSH."
     ),
     "rke2-etcd-snapshot": (
         "Use to capture an on-demand managed-etcd snapshot on an RKE2 "

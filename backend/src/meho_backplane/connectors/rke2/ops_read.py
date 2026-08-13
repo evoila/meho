@@ -1,7 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Read-only posture tier for :class:`Rke2SshConnector` (G-Node/RKE2-T1 #2221).
+"""Read-only tier for :class:`Rke2SshConnector` (G-Node/RKE2-T1 #2221).
+
+Hosts the connector's safe, non-mutating read ops:
+
+* ``rke2.posture.show`` -- the config-surface security posture (below).
+* ``rke2.node.service.status`` -- the systemd service-state probe added by
+  Initiative #2833 (#2852): one read-only ``systemctl show`` round-trip
+  over the fixed ``(rke2-server, rke2-agent)`` unit pair, reporting each
+  unit's load/active/sub state, start time, and restart count so an
+  operator can answer "is ``rke2-server`` up, since when, and is it
+  crash-looping?" when the Kubernetes API itself is down. See
+  :func:`rke2_service_status`.
 
 ``rke2.posture.show`` reports the security posture of an RKE2 node's
 config surface without ever reading secret material:
@@ -71,14 +82,20 @@ __all__ = [
     "POSTURE_CONFIG_PATHS",
     "READ_OPS",
     "RKE2_TOKEN_PATH",
+    "SERVICE_STATUS_PROPERTIES",
+    "SERVICE_UNITS",
     "STATUS_ABSENT",
     "STATUS_PRESENT",
     "STATUS_UNKNOWN",
     "Rke2PostureProbeError",
+    "Rke2ServiceStatusProbeError",
     "build_posture_probe_command",
+    "build_service_status_command",
     "parse_posture",
     "parse_posture_probe_output",
+    "parse_service_status",
     "rke2_posture_show",
+    "rke2_service_status",
 ]
 
 
@@ -433,7 +450,289 @@ _RKE2_POSTURE_OP = Rke2Op(
 )
 
 
-#: The read-only posture tier ops. ``rke2.about`` (the identity canary)
-#: is composed alongside these in
-#: :func:`meho_backplane.connectors.rke2.ops._rke2_ops`.
-READ_OPS: tuple[Rke2Op, ...] = (_RKE2_POSTURE_OP,)
+# ---------------------------------------------------------------------------
+# Service-state read (``rke2.node.service.status``, Initiative #2833 / #2852)
+# ---------------------------------------------------------------------------
+
+#: The RKE2 systemd units a node may run. A control-plane node runs
+#: ``rke2-server``; a worker runs ``rke2-agent``. A node runs exactly one,
+#: so probing both is how the op reports which role the node has -- the same
+#: closed pair the approval-gated restart op allow-lists, here read-only.
+#: Fixed constants: no operator-supplied unit, so no arbitrary-unit or
+#: shell-injection surface.
+SERVICE_UNITS: tuple[str, ...] = ("rke2-server", "rke2-agent")
+
+#: The systemd unit properties the status probe reads per unit. All are
+#: read-only introspection (``systemctl show`` never mutates). ``LoadState``
+#: separates an installed unit from ``not-found``; ``ActiveState`` /
+#: ``SubState`` are the running signal; ``ExecMainStartTimestamp`` answers
+#: "active since when"; ``NRestarts`` is the crash-loop counter.
+SERVICE_STATUS_PROPERTIES: tuple[str, ...] = (
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "ExecMainStartTimestamp",
+    "NRestarts",
+)
+
+#: systemd's "this unit is not installed on this node" ``LoadState`` value.
+#: ``systemctl show`` prints it on stdout and still exits 0
+#: (systemd/systemd#1105), so it -- not the exit code -- is how the op tells
+#: a node's role apart and reports both units honestly.
+_LOAD_STATE_NOT_FOUND: str = "not-found"
+
+#: Marker line the probe prints before each unit's ``systemctl show`` block
+#: so the parser can attribute the ``KEY=VALUE`` lines that follow to a unit.
+#: ``systemctl show`` never emits a ``UNIT`` property, so the marker cannot
+#: collide with real output.
+_UNIT_MARKER: str = "UNIT"
+
+#: Exit code the probe uses when the node has no ``systemctl``. Any non-zero
+#: exit is an infrastructure failure, not a service-state verdict.
+_PROBE_NO_SYSTEMCTL_EXIT: int = 127
+
+
+class Rke2ServiceStatusProbeError(RuntimeError):
+    """The service-status probe itself failed to run (no ``systemctl``, broken shell).
+
+    Distinct from any service-state verdict: the dispatcher maps it to a
+    ``connector_error`` result (the #986 discipline) so an infrastructure
+    failure is never served as a service-state answer.
+    """
+
+
+def build_service_status_command(units: tuple[str, ...]) -> str:
+    """Build the single-round-trip ``systemctl show`` service-status probe.
+
+    Emits a ``UNIT=<name>`` marker then that unit's ``KEY=VALUE`` property
+    block for each unit, in one SSH round-trip. Every unit name is a fixed
+    module constant (no operator input) and is ``shlex.quote``d defensively.
+    ``--all`` un-suppresses the zero/empty properties within the ``-p``
+    selection (``systemctl show`` drops ``NRestarts=0`` and an empty
+    ``ExecMainStartTimestamp`` otherwise), so a healthy unit reports
+    ``restart_count: 0`` rather than a missing field. ``systemctl show`` is
+    read-only and exits 0 even for a ``not-found`` unit, so the ``|| true``
+    per unit means the only non-zero exit is the ``systemctl``-absent guard
+    -- which lets the handler tell an infrastructure failure apart from a
+    real verdict.
+    """
+    props = ",".join(SERVICE_STATUS_PROPERTIES)
+    quoted = " ".join(shlex.quote(unit) for unit in units)
+    return (
+        f"command -v systemctl >/dev/null 2>&1 || exit {_PROBE_NO_SYSTEMCTL_EXIT}; "
+        f"for u in {quoted}; do "
+        f"printf '{_UNIT_MARKER}=%s\\n' \"$u\"; "
+        f'systemctl show --all -p {props} "$u" 2>/dev/null || true; '
+        "done"
+    )
+
+
+def _parse_restart_count(raw: str | None) -> int | None:
+    """Parse a ``systemctl`` ``NRestarts`` value into an int, else ``None``.
+
+    A missing or non-integer value resolves to ``None`` rather than raising --
+    a suppressed or unparseable counter must not fail the whole probe.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
+def _service_unit_entry(unit: str, fields: dict[str, str]) -> dict[str, Any]:
+    """Compose one unit's status entry from its parsed ``KEY=VALUE`` fields.
+
+    A ``LoadState=not-found`` unit is not installed on this node, so every
+    live-state field is ``null``: systemd still prints ``inactive`` /
+    ``dead`` defaults for an absent unit, and surfacing those would misreport
+    "not present here" as "present but stopped". A missing ``LoadState``
+    (unusual) resolves to ``null`` rather than ``not-found`` -- undetermined,
+    not a confident absence.
+    """
+    load_state = fields.get("LoadState") or None
+    if load_state == _LOAD_STATE_NOT_FOUND:
+        return {
+            "unit": unit,
+            "load_state": _LOAD_STATE_NOT_FOUND,
+            "active_state": None,
+            "sub_state": None,
+            "since": None,
+            "restart_count": None,
+        }
+    return {
+        "unit": unit,
+        "load_state": load_state,
+        "active_state": fields.get("ActiveState") or None,
+        "sub_state": fields.get("SubState") or None,
+        "since": fields.get("ExecMainStartTimestamp", "").strip() or None,
+        "restart_count": _parse_restart_count(fields.get("NRestarts")),
+    }
+
+
+def parse_service_status(stdout: str) -> list[dict[str, Any]]:
+    """Parse the probe's ``UNIT=`` / ``KEY=VALUE`` stream into per-unit entries.
+
+    Each ``UNIT=<name>`` marker opens a block; the ``systemctl show``
+    ``KEY=VALUE`` lines that follow belong to it until the next marker. The
+    ``partition("=")`` split reuses the ``ops_write._parse_preflight`` idiom,
+    generalised from one flat map to one map per unit. Entries preserve the
+    order the units were probed in. Lines before the first marker, and lines
+    with no ``=``, are ignored -- defensive against a login-shell banner.
+    """
+    entries: list[dict[str, Any]] = []
+    current_unit: str | None = None
+    current_fields: dict[str, str] = {}
+    for line in stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key == _UNIT_MARKER:
+            if current_unit is not None:
+                entries.append(_service_unit_entry(current_unit, current_fields))
+            current_unit = value.strip()
+            current_fields = {}
+        elif current_unit is not None:
+            current_fields[key] = value.strip()
+    if current_unit is not None:
+        entries.append(_service_unit_entry(current_unit, current_fields))
+    return entries
+
+
+async def rke2_service_status(
+    connector: Rke2SshConnector,
+    target: Target,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``rke2.node.service.status``.
+
+    Runs one read-only ``systemctl show`` probe over SSH across the fixed
+    ``(rke2-server, rke2-agent)`` unit pair and returns their live systemd
+    state -- ``load_state`` / ``active_state`` / ``sub_state``, the start
+    timestamp, and the restart count -- without mutating anything. No param
+    is consumed; the probed units are code constants, never operator input.
+
+    Answers "is ``rke2-server`` up when the Kubernetes API is down?": a node
+    runs exactly one of the two units and the other reports
+    ``load_state: not-found``. ``restart_count`` (systemd ``NRestarts``)
+    paired with a non-``active`` ``active_state`` is the crash-loop signal.
+
+    Raises :class:`Rke2ServiceStatusProbeError` when the probe exits non-zero
+    (no ``systemctl`` on the node, broken shell). ``systemctl show`` exits 0
+    for every real verdict including a ``not-found`` unit
+    (systemd/systemd#1105), so a non-zero exit is an infrastructure failure,
+    not service state -- the same discipline ``rke2.posture.show`` applies.
+    ``exit_status`` is ``None`` when the peer sent no exit status at all
+    (asyncssh's documented third case); that is tolerated when at least one
+    unit block came back, because the probe emits a marker per unit and a
+    parsed entry is independent evidence it ran. Transport / auth failures
+    propagate to the dispatcher's ``connector_error`` branch (#986).
+    """
+    del params  # declared empty in schema; the probed units are fixed
+    cmd = build_service_status_command(SERVICE_UNITS)
+    proc = await connector._run_command(target, cmd, operator=operator)
+    exit_status = getattr(proc, "exit_status", None)
+    stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""
+    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
+    units = parse_service_status(stdout)
+    if exit_status not in (0, None) or not units:
+        stderr_raw = getattr(proc, "stderr", "")
+        stderr_txt = stderr_raw.strip()[:400] if isinstance(stderr_raw, str) else ""
+        hint = " (no `systemctl` on the node)" if exit_status == _PROBE_NO_SYSTEMCTL_EXIT else ""
+        raise Rke2ServiceStatusProbeError(
+            f"the RKE2 service-status probe failed to run over SSH "
+            f"(exit {exit_status}){hint}: {stderr_txt or 'no stderr'}"
+        )
+    return {"units": units}
+
+
+_RKE2_SERVICE_STATUS_OP = Rke2Op(
+    op_id="rke2.node.service.status",
+    handler_attr="service_status",
+    summary="Report RKE2 systemd unit state (rke2-server/rke2-agent) without mutating.",
+    description=(
+        "Runs a single read-only ``systemctl show`` probe over SSH across "
+        "the fixed ``rke2-server`` / ``rke2-agent`` unit pair and returns "
+        "each unit's live systemd state: ``load_state`` (``loaded`` vs "
+        "``not-found``), ``active_state`` / ``sub_state`` (the running "
+        "signal), ``since`` (the systemd ``ExecMainStartTimestamp`` -- active "
+        "since when), and ``restart_count`` (systemd ``NRestarts`` -- the "
+        "crash-loop counter). A node runs exactly one of the two units; the "
+        "other reports ``load_state: not-found`` (every other field null), so "
+        "the result also tells the caller the node's role. Answers 'is "
+        "rke2-server actually up?' when the Kubernetes API server itself is "
+        "down and ``kubernetes.*`` ops cannot help. ``systemctl show`` never "
+        "mutates -- there is NO restart/start/stop here (that is the "
+        "approval-gated ``rke2.node.service.restart``). No params; safe and "
+        "read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "units": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "unit": {"type": "string"},
+                        "load_state": {"type": ["string", "null"]},
+                        "active_state": {"type": ["string", "null"]},
+                        "sub_state": {"type": ["string", "null"]},
+                        "since": {"type": ["string", "null"]},
+                        "restart_count": {"type": ["integer", "null"]},
+                    },
+                    "required": ["unit", "load_state"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["units"],
+        "additionalProperties": False,
+    },
+    group_key="rke2-service-read",
+    tags=("read-only", "service", "systemd", "rke2"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to check whether an RKE2 node's systemd service is up "
+            "WITHOUT changing anything -- especially 'is rke2-server active, "
+            "since when, and is it crash-looping?' when the Kubernetes API is "
+            "unreachable and node-level ops like ``kubernetes.node.list`` "
+            "cannot answer (the API server is what is down). Probes the fixed "
+            "``rke2-server`` / ``rke2-agent`` pair; the unit reporting "
+            "``load_state: not-found`` is simply not installed on this node, "
+            "which is how the op reveals the node's role. This is READ-ONLY: "
+            "to actually restart a unit use the approval-gated "
+            "``rke2.node.service.restart``. " + SSH_TRANSPORT_NOTE
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "``{units: [{unit, load_state, active_state, sub_state, since, "
+            "restart_count}]}`` -- one entry per probed unit. ``load_state`` "
+            "is ``loaded`` for an installed unit or ``not-found`` when the "
+            "unit is not present on this node (then every other field is "
+            "null). ``active_state`` (e.g. ``active`` / ``inactive`` / "
+            "``failed`` / ``activating``) with ``sub_state`` (e.g. "
+            "``running`` / ``dead`` / ``auto-restart``) is the running "
+            "signal; ``since`` is the systemd ``ExecMainStartTimestamp`` "
+            "string (e.g. ``Fri 2026-08-01 09:12:03 UTC``), null when the "
+            "unit has no recorded start; ``restart_count`` is systemd "
+            "``NRestarts`` (0 or more) -- a non-zero value paired with a "
+            "non-``active`` state signals a crash loop."
+        ),
+    },
+)
+
+
+#: The read-only tier ops. ``rke2.about`` (the identity canary) is composed
+#: alongside these in :func:`meho_backplane.connectors.rke2.ops._rke2_ops`.
+READ_OPS: tuple[Rke2Op, ...] = (_RKE2_POSTURE_OP, _RKE2_SERVICE_STATUS_OP)

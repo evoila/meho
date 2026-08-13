@@ -117,12 +117,12 @@ _PFSENSE_ABOUT_OP = PfSenseOp(
 def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     """Return the merged registration tuple.
 
-    Composition: ``pfsense.about`` (T1 canary) + ``READ_OPS`` (T2 read
+    Composition: ``pfsense.about`` (T1 canary) + ``READ_OPS`` (the read
     ops: ``pfsense.version``, ``pfsense.firewall.rules``,
     ``pfsense.firewall.state``, ``pfsense.nat.rules``,
     ``pfsense.interface.list``, ``pfsense.gateway.list``,
-    ``pfsense.config.show``). Eight ops total -- the full G3.7-T2
-    read surface.
+    ``pfsense.config.show``, and ``pfsense.dhcp.leases`` (#2849)).
+    Nine ops total -- the T2 read surface plus the DHCP-lease read op.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -142,7 +142,8 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: (``pfsense.version``, ``pfsense.firewall.rules``,
 #: ``pfsense.firewall.state``, ``pfsense.nat.rules``,
 #: ``pfsense.interface.list``, ``pfsense.gateway.list``,
-#: ``pfsense.config.show``) -- 8 ops total. The shape of each
+#: ``pfsense.config.show``); #2849 adds ``pfsense.dhcp.leases`` --
+#: 9 ops total. The shape of each
 #: follow-on PR is "import a new module-level tuple and splat it
 #: into :data:`PFSENSE_OPS` via :func:`_pfsense_ops`" -- the
 #: registration walk in

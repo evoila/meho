@@ -23,24 +23,29 @@ Coverage matrix (per Task #847 acceptance criteria):
   config.xml or snippet; ``defaultgw`` bool; empty/malformed XML returns [].
 * Bound-method shims on :class:`PfSenseConnector` -- ``version``,
   ``firewall_rules``, ``firewall_state``, ``nat_rules``,
-  ``interface_list``, ``gateway_list``, ``config_show`` -- each runs
-  the correct SSH command, passes stdout through the parser, and returns
-  the expected envelope shape.
+  ``interface_list``, ``gateway_list``, ``config_show``,
+  ``dhcp_leases`` -- each runs the correct SSH command, passes stdout
+  through the parser, and returns the expected envelope shape.
+* ``parse_dhcp_leases`` -- parses an ISC ``dhcpd.leases`` DB; active /
+  expired-by-time / free / ``ends never`` states; ``client-hostname``
+  nullable; log-structured de-dup to the last block per IP.
 * Malformed command output → structured result (no crash); error field
   set on non-zero exit with empty stdout.
-* ``PFSENSE_OPS`` registration shape -- all 8 ops carry
+* ``PFSENSE_OPS`` registration shape -- all 9 ops carry
   ``safety_level='safe'``, ``additionalProperties=False`` on the
   parameter schema, non-empty ``llm_instructions``, and pfsense-
-  namespace op_ids; ``firewall``, ``nat``, ``network``, ``config``
-  groups are present.
-* Idempotency contract -- the ``PFSENSE_OPS`` tuple length matches 8
-  after T2 lands; the ``pfsense.about`` canary remains at index 0.
+  namespace op_ids; ``firewall``, ``nat``, ``network``, ``config``,
+  ``dhcp`` groups are present.
+* Idempotency contract -- the ``PFSENSE_OPS`` tuple length matches 9
+  (T2 read ops + ``pfsense.dhcp.leases``, #2849); the ``pfsense.about``
+  canary remains at index 0.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -50,6 +55,7 @@ import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry si
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.ops_read import (
     _netmask_to_cidr,
+    parse_dhcp_leases,
     parse_gateways_xml,
     parse_ifconfig,
     parse_pfctl_nat,
@@ -622,13 +628,228 @@ async def test_pfsense_config_show_returns_error_on_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_dhcp_leases
+# ---------------------------------------------------------------------------
+
+# A captured-shape ISC dhcpd.leases fixture: an active lease (ends in the
+# far future), an active lease whose ends is in the past (→ expired), a
+# free lease, an active lease with no client-hostname, an ``ends never``
+# lease, and a duplicate IP whose second (last) block must win. Bracketed
+# by a comment and a non-lease block that must both be ignored.
+_DHCP_LEASES_SAMPLE = """\
+# The format of this file is documented in the dhcpd.leases(5) manual page.
+server-duid "\\000\\001\\000\\001-abc";
+
+lease 192.168.1.100 {
+  starts 3 2026/08/12 10:00:00;
+  ends 5 2099/01/01 00:00:00;
+  cltt 3 2026/08/12 10:00:00;
+  binding state active;
+  next binding state free;
+  hardware ethernet 08:00:27:aa:bb:cc;
+  client-hostname "laptop";
+}
+lease 192.168.1.101 {
+  starts 3 2000/01/01 08:00:00;
+  ends 3 2000/01/01 09:00:00;
+  binding state active;
+  hardware ethernet 08:00:27:11:22:33;
+  client-hostname "old-host";
+}
+lease 192.168.1.102 {
+  starts 3 2026/08/12 07:00:00;
+  ends 3 2026/08/12 08:00:00;
+  binding state free;
+  hardware ethernet 08:00:27:44:55:66;
+}
+lease 192.168.1.103 {
+  starts 3 2026/08/12 07:00:00;
+  ends never;
+  binding state active;
+  hardware ethernet 08:00:27:77:88:99;
+  client-hostname "gateway";
+}
+lease 192.168.1.100 {
+  starts 4 2026/08/13 10:00:00;
+  ends 6 2099/06/01 22:00:00;
+  binding state active;
+  hardware ethernet 08:00:27:aa:bb:cc;
+  client-hostname "laptop-renewed";
+}
+"""
+
+# A now between the 2000 (expired) and 2099 (active) fixture timestamps,
+# so the active/expired split is deterministic regardless of wall-clock.
+_DHCP_NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=UTC)
+
+
+def _lease_by_ip(rows: list[dict[str, Any]], ip: str) -> dict[str, Any]:
+    return next(r for r in rows if r["ip"] == ip)
+
+
+def test_parse_dhcp_leases_extracts_all_fields() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    lease = _lease_by_ip(rows, "192.168.1.101")
+    assert lease["mac"] == "08:00:27:11:22:33"
+    assert lease["hostname"] == "old-host"
+    assert lease["starts"] == "2000/01/01 08:00:00"
+    assert lease["ends"] == "2000/01/01 09:00:00"
+
+
+def test_parse_dhcp_leases_active_lease_stays_active() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    assert _lease_by_ip(rows, "192.168.1.100")["binding_state"] == "active"
+
+
+def test_parse_dhcp_leases_past_ends_active_is_expired() -> None:
+    """An ``active`` lease whose ``ends`` is in the past reads as expired."""
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    assert _lease_by_ip(rows, "192.168.1.101")["binding_state"] == "expired"
+
+
+def test_parse_dhcp_leases_free_state_passes_through() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    assert _lease_by_ip(rows, "192.168.1.102")["binding_state"] == "free"
+
+
+def test_parse_dhcp_leases_missing_client_hostname_is_none() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    assert _lease_by_ip(rows, "192.168.1.102")["hostname"] is None
+
+
+def test_parse_dhcp_leases_ends_never_stays_active() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    lease = _lease_by_ip(rows, "192.168.1.103")
+    assert lease["ends"] == "never"
+    assert lease["binding_state"] == "active"
+
+
+def test_parse_dhcp_leases_dedupes_to_last_block_per_ip() -> None:
+    """The lease DB is log-structured; the last block for an IP wins."""
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    matches = [r for r in rows if r["ip"] == "192.168.1.100"]
+    assert len(matches) == 1
+    assert matches[0]["hostname"] == "laptop-renewed"
+    assert matches[0]["starts"] == "2026/08/13 10:00:00"
+
+
+def test_parse_dhcp_leases_strips_weekday_index_from_timestamps() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    # .103's winning line is ``starts 3 2026/08/12 07:00:00;`` — the leading
+    # weekday ``3`` is dropped, leaving the bare UTC timestamp.
+    assert _lease_by_ip(rows, "192.168.1.103")["starts"] == "2026/08/12 07:00:00"
+
+
+def test_parse_dhcp_leases_ignores_non_lease_blocks() -> None:
+    rows = parse_dhcp_leases(_DHCP_LEASES_SAMPLE, now=_DHCP_NOW)
+    # server-duid + the comment line contribute no rows; 4 distinct IPs.
+    assert {r["ip"] for r in rows} == {
+        "192.168.1.100",
+        "192.168.1.101",
+        "192.168.1.102",
+        "192.168.1.103",
+    }
+
+
+def test_parse_dhcp_leases_empty_input_returns_empty_list() -> None:
+    assert parse_dhcp_leases("") == []
+    assert parse_dhcp_leases("\n\n# just a comment\n") == []
+
+
+def test_parse_dhcp_leases_drops_unterminated_trailing_block() -> None:
+    """A block dhcpd was mid-write on (no closing brace) is not emitted."""
+    text = "lease 10.0.0.1 {\n  binding state active;\n  hardware ethernet 00:11:22:33:44:55;\n"
+    assert parse_dhcp_leases(text, now=_DHCP_NOW) == []
+
+
+def test_parse_dhcp_leases_now_defaults_to_current_utc() -> None:
+    """Without an injected ``now`` a far-past active lease reads expired."""
+    text = (
+        "lease 10.0.0.9 {\n"
+        "  starts 3 2000/01/01 00:00:00;\n"
+        "  ends 3 2000/01/01 01:00:00;\n"
+        "  binding state active;\n"
+        "  hardware ethernet 00:11:22:33:44:55;\n"
+        "}\n"
+    )
+    rows = parse_dhcp_leases(text)
+    assert rows[0]["binding_state"] == "expired"
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shim -- pfsense_dhcp_leases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pfsense_dhcp_leases_reads_lease_db() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(_DHCP_LEASES_SAMPLE)
+        result = await connector.dhcp_leases(_TARGET, {})
+    mock_cmd.assert_awaited_once_with(_TARGET, "cat /var/dhcpd/var/db/dhcpd.leases", operator=None)
+    assert result["total"] == 4
+    ips = {row["ip"] for row in result["rows"]}
+    assert "192.168.1.103" in ips
+
+
+@pytest.mark.asyncio
+async def test_pfsense_dhcp_leases_returns_error_on_failure() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc("", exit_status=1)
+        result = await connector.dhcp_leases(_TARGET, {})
+    assert result["rows"] == []
+    assert result["total"] == 0
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_pfsense_dhcp_leases_empty_file_returns_empty_rows() -> None:
+    """An empty (exit 0) lease DB — DHCP enabled, no leases yet — is not an error."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc("")
+        result = await connector.dhcp_leases(_TARGET, {})
+    assert result["rows"] == []
+    assert result["total"] == 0
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> None:
+    """The registered op's response_schema row keys match the handler output."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(_DHCP_LEASES_SAMPLE)
+        result = await connector.dhcp_leases(_TARGET, {})
+    handler_row_keys = set(result["rows"][0].keys())
+
+    op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.dhcp.leases")
+    assert op.response_schema is not None
+    schema_row_keys = set(op.response_schema["properties"]["rows"]["items"]["properties"].keys())
+    assert (
+        schema_row_keys
+        == handler_row_keys
+        == {
+            "ip",
+            "mac",
+            "hostname",
+            "starts",
+            "ends",
+            "binding_state",
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # PFSENSE_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_eight_entries() -> None:
-    """T1 canary + 7 T2 read ops = 8 total."""
-    assert len(PFSENSE_OPS) == 8
+def test_pfsense_ops_has_nine_entries() -> None:
+    """T1 canary + 7 T2 read ops + pfsense.dhcp.leases (#2849) = 9 total."""
+    assert len(PFSENSE_OPS) == 9
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -671,6 +892,7 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.interface.list",
         "pfsense.gateway.list",
         "pfsense.config.show",
+        "pfsense.dhcp.leases",
     }
     assert op_ids == expected
 
@@ -682,6 +904,7 @@ def test_pfsense_ops_group_keys_include_new_groups() -> None:
     assert "nat" in group_keys
     assert "network" in group_keys
     assert "config" in group_keys
+    assert "dhcp" in group_keys
 
 
 def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:

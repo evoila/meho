@@ -197,6 +197,19 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "warning on the 74 GB root fs (VCF-9.x backup fill). "
         "Transport: plain SSH (``df`` / ``du``)."
     ),
+    "backups": (
+        "Use to inventory backup artefacts under ``/var/backups`` on the "
+        "HoloRouter: ``holodeck.backups.list [path=<sub-dir>]`` returns one "
+        "row per file ({path, mtime, size_bytes}) newest-first. Call it "
+        "before approving a ``holodeck.backups.prune`` -- the rows past "
+        "index ``keep_newest`` are exactly what that prune would delete, so "
+        "a destructive prune is never approved blind -- and as a routine "
+        "backup-landing health check (is the hourly backup still landing? "
+        "how old is the newest file?). This is the safe read half of the "
+        "``backups`` surface; ``holodeck.backups.prune`` (group "
+        "``backups-write``) is the approval-gated delete. Transport: plain "
+        "SSH (``find``)."
+    ),
     # G3.18-T2 (#2154) approval-gated remediation write groups. The keys
     # carry a ``-write`` suffix so they never collide with the read-op
     # group keys above; the blurbs are the single source of truth in
@@ -651,6 +664,25 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_disk_usage(self, target, params, operator)
+
+    async def backups_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.backups.list`` (#2847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_backups_list`.
+        Safe read; lists ``/var/backups`` newest-first reusing
+        ``holodeck.backups.prune``'s own ``find`` listing + path bound.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_backups_list as _holodeck_backups_list,
+        )
+
+        return await _holodeck_backups_list(self, target, params, operator)
 
     async def k8s_pods_gc(
         self,

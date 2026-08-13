@@ -281,6 +281,35 @@ func TestPrintFailoverList(t *testing.T) {
 	}
 }
 
+func TestPrintFirewallGet(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(`{"firewall":{"server_ip":"1.2.3.1","status":"active","whitelist_hos":true,"filter_ipv6":false,"port":"main","rules":{"input":[{"name":"operator-https","ip_version":"ipv4","src_ip":"198.51.100.7/32","dst_port":"443","protocol":"tcp","action":"accept"},{"name":"default-discard","action":"discard"}],"output":[]}}}`),
+	}
+	var buf bytes.Buffer
+	printFirewallGet(&buf, r)
+	out := buf.String()
+	for _, want := range []string{
+		"status=ok", "active", "whitelist_hos", "input rules (2)",
+		"operator-https", "198.51.100.7/32", "443", "default-discard",
+		"discard", "output rules (0)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printFirewallGet missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintFirewallGetEmptySandbox(t *testing.T) {
+	// The sandbox returns 200 + {} for a single-object GET; render must not crash.
+	r := &CallResult{Status: "ok", Result: json.RawMessage(`{}`)}
+	var buf bytes.Buffer
+	printFirewallGet(&buf, r)
+	if !strings.Contains(buf.String(), "status=ok") {
+		t.Errorf("empty firewall should still print the status header; got:\n%s", buf.String())
+	}
+}
+
 func TestPrintSearchTable(t *testing.T) {
 	summary := "List dedicated servers"
 	r := &searchResponse{
@@ -478,6 +507,35 @@ func TestDispatchVswitchInfoSendsID(t *testing.T) {
 	}
 }
 
+// TestDispatchFirewallGetSendsParams — firewall get passes server-ip in params.
+func TestDispatchFirewallGetSendsParams(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			var body callRequestBody
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			serverIP, _ := body.Params["server-ip"].(string)
+			if serverIP != "1.2.3.1" {
+				t.Errorf("server-ip: got %q want %q", serverIP, "1.2.3.1")
+			}
+			if body.OpID != "GET:/firewall/{server-ip}" {
+				t.Errorf("op_id: got %q", body.OpID)
+			}
+			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	params := map[string]any{"server-ip": "1.2.3.1"}
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/firewall/{server-ip}", "rdc-robot", params); err != nil {
+		t.Fatalf("dispatchOp: %v", err)
+	}
+}
+
 // TestErrOpErrorIsSentinel — pins the exported sentinel.
 func TestErrOpErrorIsSentinel(t *testing.T) {
 	if errOpError == nil {
@@ -492,7 +550,7 @@ func TestNewRootCmdHasExpectedSubcommands(t *testing.T) {
 	for _, c := range root.Commands() {
 		names[c.Name()] = true
 	}
-	for _, expected := range []string{"about", "server", "ip", "subnet", "vswitch", "failover", "rdns", "ssh-key", "operation"} {
+	for _, expected := range []string{"about", "server", "ip", "subnet", "vswitch", "failover", "rdns", "firewall", "ssh-key", "operation"} {
 		if !names[expected] {
 			t.Errorf("expected subcommand %q under hetzner-robot; commands: %v", expected, names)
 		}

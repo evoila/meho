@@ -7,14 +7,19 @@ for the [Hetzner Robot Webservice API](https://robot.hetzner.com/doc/webservice/
 G3.7-T7 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
 `_post_form` helper, and the G0.6 dispatch shim. G3.7-T8 (#849) ships the
 read-only v0.2 core: the Robot Webservice OpenAPI spec is ingested via G0.7
-into the `endpoint_descriptor` table, and the curated 10-op core is staged
+into the `endpoint_descriptor` table, and the curated read core is staged
 for operator review in `core_ops.py`. G3.7-T9 (#852) ships the read-only CLI
 verbs (`hetzner-robot about`, `server list`/`server info`, `ip list`,
 `subnet list`, `vswitch list`/`vswitch info`, `failover list`, `rdns list`,
 `ssh-key list`, and the generic `operation search`/`operation call`), the
-dispatch smoke test suite (AC1–AC5 covering all 10 read ops, JSONFlux handle
-path, audit-row assertions, and sandbox empty-array tolerance), and the
-operator onboarding doc.
+dispatch smoke test suite (AC1–AC5 covering all curated read ops, JSONFlux
+handle path, audit-row assertions, and sandbox empty-array tolerance), and the
+operator onboarding doc. Task #2848 (Initiative #2833) curates the per-server
+firewall read (`GET:/firewall/{server-ip}`) into the `robot-networking`
+group — the **11th** core op — and adds the `hetzner-robot firewall get
+<server-ip>` CLI verb, so the consumer onboarding runbook's firewall-verify
+step no longer shells `scripts/hetzner-robot.sh GET /firewall/<server-number>`
+outside MEHO's policy / audit / broadcast / JSONFlux path.
 
 Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 
@@ -41,12 +46,15 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 - **`ROBOT_CORE_GROUPS`** (`core_ops.py`) — 4 curated `RobotCoreGroup`
   entries with operator-reviewed `when_to_use` hints spanning the read-only
   core: `robot-about`, `robot-servers`, `robot-networking`, `robot-ssh-keys`.
-- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 10 curated `RobotCoreOp` entries
+- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 11 curated `RobotCoreOp` entries
   (the read-only v0.2 core), each with `op_id` (`GET:/path` form), `group_key`,
   and `llm_instructions` blob (`when_to_call` / `output_shape` / `next_step`).
+  The 11th, `GET:/firewall/{server-ip}` (#2848), reads one dedicated server's
+  packet-filter firewall (status, allowlist flag, ordered input/output rules)
+  for the onboarding firewall-verify step and classifies into `robot-networking`.
 - **`apply_robot_core_curation`** (`core_ops.py`) — async function that
   drives `ReviewService.edit_group` + `enable_group` + `edit_op` to flip the
-  10 curated ops to `is_enabled=True` and land `llm_instructions`.
+  11 curated ops to `is_enabled=True` and land `llm_instructions`.
 - **`classify_robot_op`** (`core_ops.py`) — path-prefix classifier mapping
   a `GET:/path` op_id to its curated `group_key` via `ROBOT_PATH_RULES`.
 
@@ -137,11 +145,16 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
 
 - **`operations/ingest/specs/hetzner_robot_minimal.yaml`** — OpenAPI 3.0
   covering list/get servers, vSwitch get + membership, per-server firewall
-  get/set, reverse DNS, and the `server_addon` order. The GET op_ids
-  (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
-  `GET:/vswitch/{id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) match the
-  `ROBOT_CORE_OPS` strings so the ingested rows and the curated read core
-  agree.
+  get/set, reverse DNS, and the `server_addon` order. Each of these spec GET
+  op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
+  `GET:/vswitch/{id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) is curated in
+  `ROBOT_CORE_OPS`, so the ingested rows and the curated read core agree on the
+  same strings. `GET:/firewall/{server-ip}` was ingested from this spec from the
+  start but only joined the curated core in #2848; before that it was
+  ingested-but-uncurated (`is_enabled=False`, no `llm_instructions`) and
+  unreachable through `search_operations` / `call_operation`. (`GET:/rdns/{ip}`
+  is the one spec GET the core deliberately leaves uncurated — the account-wide
+  `GET:/rdns` list covers the read need.)
 - Ingest via `meho connector ingest --product hetzner --version 2026.04
   --impl hetzner-rest --spec <this-file>`. The ingest guard defers to the
   registered `HetznerRobotConnector` for the triple rather than scaffolding a

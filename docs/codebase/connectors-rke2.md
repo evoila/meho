@@ -28,7 +28,29 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
   `present` / `absent` / `unknown` (#2698, see
   [Posture tri-state](#posture-tri-state-2698)).
 
-Both `safety_level="safe"` / `requires_approval=false`.
+A later read op (#2854) reads config **content** rather than modes:
+
+- `rke2.node.config.get` — the redacted **config-content** read. `cat`s the
+  RKE2 server `config.yaml` (or a `config.yaml.d/*.yaml` drop-in) over SSH —
+  the same read + `yaml.safe_load` step `rke2.node.config.update` runs — and
+  returns the parsed top-level mapping so an operator can verify `tls-san` /
+  `datastore-endpoint` / `node-taint` before or after a patch (the
+  `claude-rdc-hetzner-dc#615` re-confirm-config step). Secret-bearing keys are
+  **redacted, not withheld**: `token` / `agent-token` and the etcd S3
+  credentials (`etcd-s3-access-key` / `etcd-s3-secret-key` /
+  `etcd-s3-session-token`) become `***redacted***`, and `datastore-endpoint`
+  keeps its host/port/db while masking only the `user:pass@` DSN userinfo. The
+  masked key **names** are surfaced in `redacted_keys`. The `path` is confined
+  by `bound_read_config_path` to the server config's flat schema — `config.yaml`
+  and its `config.yaml.d/*.yaml` drop-ins — so sibling files whose secrets live
+  in nested keys the flat redaction set cannot mask (the admin kubeconfig
+  `rke2.yaml`, `registries.yaml`) and traversal are both rejected before any SSH
+  round-trip; non-mapping / invalid YAML returns a
+  structured `error`. See [Redaction guarantee](#redaction-guarantee).
+
+All three `safety_level="safe"` / `requires_approval=false`. `rke2.about` and
+`rke2.posture.show` take no params; `rke2.node.config.get` takes one optional
+path-bounded `path`.
 
 T2 (#2429) adds the **first approval-gated write op** (in the
 `rke2-token-write` group):
@@ -117,13 +139,14 @@ argv) — like the sibling T3 node-write ops, the connector already
 authenticates as root, so no sudo construction is needed and the repo-wide
 sudo-guard stays satisfied.
 
-Eight ops total: three safe read-only (T1 `about` / `posture.show` + the
-#2852 `node.service.status`), three `dangerous` / `requires_approval=true`
-write ops (T2 + T3), and two safe non-gated snapshot ops (`.save` T4 #2431,
-`.list` #2853). `.save` is safe / no-approval but active, so it is neither
-`read-only`-tagged nor in the dangerous write tier — it belongs to neither
-sweep set; `.list` is safe / no-approval and genuinely read-only, so it
-carries the `read-only` tag alongside the T1 read tier.
+Nine ops total: four safe read-only (T1 `about` / `posture.show`, the #2852
+`node.service.status`, and the #2854 redacted `node.config.get` read), three
+`dangerous` / `requires_approval=true` write ops (T2 + T3), and two safe
+non-gated snapshot ops (`.save` T4 #2431, `.list` #2853). `.save` is safe /
+no-approval but active, so it is neither `read-only`-tagged nor in the
+dangerous write tier — it belongs to neither sweep set; `.list` is safe /
+no-approval and genuinely read-only, so it carries the `read-only` tag
+alongside the T1 read tier.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -134,7 +157,8 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   Inherits the per-target asyncssh connection pool, `_auth_config`,
   `_run_command`, `_assert_reachable`, and `aclose()` from the adapter.
   Ships `fingerprint`, `probe`, `execute`, `about`, `posture_show`,
-  `service_status`, `register_operations`. Two module-level pure parsers live here:
+  `service_status`, `config_get`, `register_operations`. Two module-level pure
+  parsers live here:
   `parse_rke2_version` (release string from `rke2 --version`) and
   `parse_os_pretty_name` (`PRETTY_NAME` from `/etc/os-release`).
 
@@ -159,11 +183,24 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   unit, so no arbitrary-unit surface. `Rke2ServiceStatusProbeError` fires when
   the probe cannot run (no `systemctl` on the node).
 
+- **Config-content read + redaction** (`ops_read.py`, #2854) —
+  `rke2_config_get` (the async handler: `bound_read_config_path` confinement →
+  `cat` + `yaml.safe_load` → redact), and `redact_config_content` (the pure
+  redaction step). `SECRET_CONFIG_KEYS` is the frozenset of fully-masked
+  secret keys (`token` / `agent-token` / the three `etcd-s3-*` credentials);
+  `REDACTED_SENTINEL` (`***redacted***`) is the replacement value; the
+  `datastore-endpoint` DSN userinfo is masked via a scheme-anchored regex that
+  leaves host/port/db intact. `bound_read_config_path` layers the read op's
+  tighter allow-set (`config.yaml` + `config.yaml.d/*.yaml` only, sibling files
+  like `rke2.yaml` / `registries.yaml` rejected) on top of the write op's
+  `bound_config_path` traversal/root/`.yaml` checks.
+
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
-  (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple +
-  the `SNAPSHOT_OPS` tuple — the latter now `.save` + `.list`).
+  (`about` + the `READ_OPS` read tuple — posture + `.service.status` +
+  `.config.get` — + the `WRITE_OPS` write tuple + the `SNAPSHOT_OPS` tuple,
+  the latter now `.save` + `.list`).
 
 - **Write ops** (`ops_write.py`, #2429 + #2430) — the three approval-gated
   write ops share one module:
@@ -318,6 +355,28 @@ make the guarantee explicit to agents reading the schema. This is the T1
 foundation for the load-bearing Initiative #2172 rule: a secret-returning
 handler must never return the secret (the audit `raw_payload` stores the raw
 result).
+
+`rke2.node.config.get` (#2854) is the same rule applied to a handler that
+*does* read the config body. Because `raw_payload` persists the raw handler
+result, the redaction must happen **inside the handler, before it returns** —
+which it does: `redact_config_content` masks every secret-bearing key
+(`token` / `agent-token` / `etcd-s3-access-key` / `etcd-s3-secret-key` /
+`etcd-s3-session-token`) to `***redacted***` and masks the
+`datastore-endpoint` DSN userinfo, so no secret value ever reaches the result
+envelope, the `raw_payload`, or the logs. Redaction is names-not-values: the
+masked key names are disclosed in `redacted_keys` (the `changed_config_keys`
+precedent) while the values are gone. The secret-key set is grounded in the
+RKE2 server-config reference, not just the two join tokens — the etcd S3
+credentials are equally secret-bearing and equally masked. The guarantee holds
+because the read is confined to the server config's flat schema — `config.yaml`
+and its `config.yaml.d/*.yaml` drop-ins (same top-level keys) — by
+`bound_read_config_path`: sibling files whose secrets live in nested keys the
+flat redaction set cannot reach (the admin kubeconfig `rke2.yaml`'s
+`client-key-data`, `registries.yaml`'s `configs.<reg>.auth.password`) are
+rejected before any SSH round-trip, not read-and-partially-redacted. Custom,
+non-standard keys an operator hand-added to `config.yaml` are out of scope
+(this is not a general secret scanner); the bounded single-file read never
+enumerates drop-ins.
 
 `rke2.token.rotate` (T2) is the write-side application of the same rule. The
 dispatcher persists the **raw** handler result on the audit row and

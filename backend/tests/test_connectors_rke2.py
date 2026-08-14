@@ -30,19 +30,27 @@ Coverage matrix (per Task #2221 acceptance criteria):
   ``LoadState=not-found`` nulls the live-state fields; a non-zero
   ``NRestarts`` surfaces as the crash-loop signal; the probe raises
   :class:`Rke2ServiceStatusProbeError` when ``systemctl`` is absent.
-* ``RKE2_OPS`` registration shape -- 8 ops: three read (``rke2.about`` /
-  ``rke2.posture.show``, T1 #2221; ``rke2.node.service.status``, #2852),
-  three approval-gated write (``rke2.token.rotate`` T2 #2429,
+* ``RKE2_OPS`` registration shape -- 9 ops: four read (``rke2.about`` /
+  ``rke2.posture.show``, T1 #2221; ``rke2.node.service.status``, #2852;
+  ``rke2.node.config.get``, the redacted config-content read #2854), three
+  approval-gated write (``rke2.token.rotate`` T2 #2429,
   ``rke2.node.service.restart`` / ``rke2.node.config.update`` T3 #2430), and
   two safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431,
   ``rke2.etcd-snapshot.list`` #2853). Read ops are safe / read-only /
-  no-approval and take no params; write ops are dangerous / approval-gated;
-  ``.save`` is safe / no-approval but active (neither read-only nor write)
-  and takes an optional charset-bounded ``name``; ``.list`` is safe /
-  no-approval / read-only and takes no params. Every op has
-  ``additionalProperties=False`` on its parameter schema, a non-empty
+  no-approval; ``rke2.about`` / ``rke2.posture.show`` /
+  ``rke2.node.service.status`` take no params while ``rke2.node.config.get``
+  takes an optional path-bounded ``path``; write ops are dangerous /
+  approval-gated; ``.save`` is safe / no-approval but active (neither
+  read-only nor write) and takes an optional charset-bounded ``name``;
+  ``.list`` is safe / no-approval / read-only and takes no params. Every op
+  has ``additionalProperties=False`` on its parameter schema, a non-empty
   SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
   on the class.
+* ``rke2.node.config.get`` handler (#2854) -- reuses the write op's
+  ``bound_config_path`` confinement (traversal rejected before any SSH), the
+  ``cat`` + ``yaml.safe_load`` read step, and redacts the join tokens + etcd
+  S3 credentials (``redact_config_content``) so no secret VALUE reaches the
+  result envelope.
 * ``rke2.etcd-snapshot.save`` handler -- name charset re-check
   (fail-closed), the shared embedded-etcd-server precondition guard, and a
   bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
@@ -69,7 +77,9 @@ from meho_backplane.connectors.rke2.connector import (
 )
 from meho_backplane.connectors.rke2.ops_read import (
     POSTURE_CONFIG_PATHS,
+    REDACTED_SENTINEL,
     RKE2_TOKEN_PATH,
+    SECRET_CONFIG_KEYS,
     SERVICE_STATUS_PROPERTIES,
     SERVICE_UNITS,
     STATUS_ABSENT,
@@ -77,11 +87,13 @@ from meho_backplane.connectors.rke2.ops_read import (
     STATUS_UNKNOWN,
     Rke2PostureProbeError,
     Rke2ServiceStatusProbeError,
+    bound_read_config_path,
     build_posture_probe_command,
     build_service_status_command,
     parse_posture,
     parse_posture_probe_output,
     parse_service_status,
+    redact_config_content,
 )
 from meho_backplane.connectors.rke2.ops_snapshot import (
     SNAPSHOT_DEFAULT_DIR,
@@ -89,6 +101,10 @@ from meho_backplane.connectors.rke2.ops_snapshot import (
     Rke2SnapshotPreconditionError,
     parse_saved_snapshot_name,
     parse_snapshot_list,
+)
+from meho_backplane.connectors.rke2.ops_write import (
+    ConfigPathRejectedError,
+    bound_config_path,
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -120,6 +136,56 @@ _CANARY_SSH_KEY = "RKE2-CANARY-KEY-MARKER-QWER5678ZX"  # gitleaks:allow -- synth
 # A token *value* canary. The posture tier must NEVER read the token
 # content, so this string must never surface anywhere.
 _CANARY_TOKEN_VALUE = "K10rke2canarytokenvalueDONOTLEAK::server:abc123"  # gitleaks:allow NOSONAR
+# Secret-value canaries planted in the rke2.node.config.get fixture (#2854).
+# The op reads the config body but must REDACT every secret key, so none of
+# these may surface anywhere in the result.
+_CONFIG_TOKEN_CANARY = "K10rke2configREADcanaryDONOTLEAK::server:ccc333"  # gitleaks:allow NOSONAR
+_CONFIG_AGENT_TOKEN_CANARY = "rke2configAGENTcanaryDONOTLEAKddd444"  # gitleaks:allow NOSONAR
+_CONFIG_S3_SECRET_CANARY = "rke2configS3secretDONOTLEAKeee555"  # gitleaks:allow NOSONAR
+_CONFIG_DSN_PASS_CANARY = "dsnPassDONOTLEAKfff666"  # gitleaks:allow NOSONAR
+# A config.yaml body carrying secret + non-secret keys the operator wants to
+# read back (tls-san / node-taint) alongside the redacted ones.
+_CONFIG_YAML_FIXTURE = (
+    f"token: {_CONFIG_TOKEN_CANARY}\n"
+    f"agent-token: {_CONFIG_AGENT_TOKEN_CANARY}\n"
+    f"etcd-s3-secret-key: {_CONFIG_S3_SECRET_CANARY}\n"
+    "tls-san:\n"
+    "  - 10.0.0.5\n"
+    "  - rke2.lab.example\n"
+    "node-taint:\n"
+    "  - dedicated=infra:NoSchedule\n"
+    f"datastore-endpoint: postgres://dbuser:{_CONFIG_DSN_PASS_CANARY}@db.lab.example:5432/kine\n"
+)
+
+# Nested-secret canaries for the sibling files config.get must REJECT (#2854 B1).
+# The flat top-level redaction set only covers config.yaml's schema, so these
+# secrets -- the admin kubeconfig's cluster-admin private key and a registry
+# password, both nested -- would leak verbatim if the op ever read the file.
+# The op must therefore refuse rke2.yaml / registries.yaml before any SSH read.
+_KUBECONFIG_KEY_CANARY = "RKE2-ADMIN-KEY-MARKER-DONOTLEAK-8842"  # gitleaks:allow NOSONAR
+_REGISTRIES_PASSWORD_CANARY = "registryPassDONOTLEAKggg777"  # gitleaks:allow NOSONAR
+# /etc/rancher/rke2/rke2.yaml -- the admin kubeconfig; client-key-data is nested
+# under users[].user, not a top-level config.yaml key.
+_RKE2_KUBECONFIG_FIXTURE = (
+    "apiVersion: v1\n"
+    "clusters:\n"
+    "  - name: default\n"
+    "    cluster:\n"
+    "      server: https://127.0.0.1:6443\n"
+    "users:\n"
+    "  - name: default\n"
+    "    user:\n"
+    f"      client-key-data: {_KUBECONFIG_KEY_CANARY}\n"
+)
+# /etc/rancher/rke2/registries.yaml -- the private-registry config; the password
+# is nested under configs.<registry>.auth, not a top-level config.yaml key.
+_REGISTRIES_YAML_FIXTURE = (
+    "configs:\n"
+    "  registry.lab.example:\n"
+    "    auth:\n"
+    "      username: admin\n"
+    f"      password: {_REGISTRIES_PASSWORD_CANARY}\n"
+)
 
 
 @dataclass
@@ -720,14 +786,276 @@ async def test_service_status_propagates_ssh_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# rke2.node.config.get -- redacted config-content read (#2854)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_config_content_masks_all_secret_keys() -> None:
+    """Every documented secret-bearing key is fully redacted; names sorted."""
+    raw: dict[str, Any] = {key: f"secret-value-of-{key}" for key in SECRET_CONFIG_KEYS}
+    raw["tls-san"] = ["10.0.0.5", "rke2.lab.example"]
+    redacted, names = redact_config_content(raw)
+    for key in SECRET_CONFIG_KEYS:
+        assert redacted[key] == REDACTED_SENTINEL, f"{key!r} not redacted"
+    # Non-secret operator-facing keys pass through untouched.
+    assert redacted["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert names == sorted(SECRET_CONFIG_KEYS)
+    # The input mapping is not mutated in place.
+    assert raw["token"] == "secret-value-of-token"
+
+
+def test_redact_config_content_masks_only_datastore_userinfo() -> None:
+    """datastore-endpoint keeps host/port/db; only the user:pass@ is masked."""
+    raw = {"datastore-endpoint": "mysql://kine:s3cr3t@tcp(10.0.0.9:3306)/kine"}
+    redacted, names = redact_config_content(raw)
+    assert redacted["datastore-endpoint"] == (
+        f"mysql://{REDACTED_SENTINEL}@tcp(10.0.0.9:3306)/kine"
+    )
+    assert names == ["datastore-endpoint"]
+
+
+def test_redact_config_content_leaves_credential_less_datastore() -> None:
+    """An embedded-etcd datastore endpoint (no userinfo) is left untouched."""
+    raw = {"datastore-endpoint": "https://etcd.lab.example:2379"}
+    redacted, names = redact_config_content(raw)
+    assert redacted["datastore-endpoint"] == "https://etcd.lab.example:2379"
+    assert names == []
+
+
+def test_redact_config_content_no_secrets_is_noop() -> None:
+    """A config with no secret keys returns unchanged content + empty names.
+
+    ``token-file`` is a filesystem PATH, not a secret value, so it is never
+    redacted -- verifying it is exactly what an operator asked to read.
+    """
+    raw = {
+        "tls-san": ["a", "b"],
+        "write-kubeconfig-mode": "0644",
+        "token-file": "/var/lib/rancher/rke2/server/token",
+    }
+    redacted, names = redact_config_content(raw)
+    assert redacted == raw
+    assert names == []
+
+
+@pytest.mark.asyncio
+async def test_config_get_returns_redacted_content() -> None:
+    """AC: config.get returns parsed content with every secret redacted, not withheld."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        result = await connector.config_get(_TARGET, {})
+    # One bounded SSH round-trip; the same cat+parse the update op runs.
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert "cat -- /etc/rancher/rke2/config.yaml" in cmd
+    assert result["path"] == "/etc/rancher/rke2/config.yaml"
+    content = result["content"]
+    # Non-secret operator-facing keys are returned verbatim.
+    assert content["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert content["node-taint"] == ["dedicated=infra:NoSchedule"]
+    # Secret keys are redacted to the sentinel...
+    assert content["token"] == REDACTED_SENTINEL
+    assert content["agent-token"] == REDACTED_SENTINEL
+    assert content["etcd-s3-secret-key"] == REDACTED_SENTINEL
+    # ...datastore-endpoint keeps host/port/db but masks the userinfo.
+    assert content["datastore-endpoint"] == (
+        f"postgres://{REDACTED_SENTINEL}@db.lab.example:5432/kine"
+    )
+    # redacted_keys lists exactly the masked names, sorted (write-side discipline).
+    assert set(result["redacted_keys"]) == {
+        "agent-token",
+        "datastore-endpoint",
+        "etcd-s3-secret-key",
+        "token",
+    }
+    assert result["redacted_keys"] == sorted(result["redacted_keys"])
+    # THE guarantee: no planted secret VALUE surfaces anywhere in the result.
+    rendered = repr(result)
+    for canary in (
+        _CONFIG_TOKEN_CANARY,
+        _CONFIG_AGENT_TOKEN_CANARY,
+        _CONFIG_S3_SECRET_CANARY,
+        _CONFIG_DSN_PASS_CANARY,
+    ):
+        assert canary not in rendered, f"{canary!r} leaked into the result"
+
+
+@pytest.mark.asyncio
+async def test_config_get_rejects_path_traversal_before_ssh() -> None:
+    """AC: a traversal path is rejected via bound_config_path -- no SSH round trip."""
+    # The op relies on the write side's confinement; a traversal escapes the
+    # /etc/rancher/rke2 root and raises before any transport is touched.
+    with pytest.raises(ConfigPathRejectedError):
+        bound_config_path("../../etc/passwd")
+
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.config_get(_TARGET, {"path": "../../etc/passwd"})
+    mock_cmd.assert_not_awaited()
+    assert "content" not in result
+    assert "path check" in result["error"]
+
+
+def test_bound_read_config_path_confines_to_server_config() -> None:
+    """B1: only config.yaml + config.yaml.d/*.yaml pass; sibling files are rejected."""
+    # The server config and a single-level drop-in are accepted.
+    assert bound_read_config_path(None) == "/etc/rancher/rke2/config.yaml"
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml") == "/etc/rancher/rke2/config.yaml"
+    )
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml.d/10-tls.yaml")
+        == "/etc/rancher/rke2/config.yaml.d/10-tls.yaml"
+    )
+    # Sibling files (nested secrets the flat redaction set cannot mask) and a
+    # nested drop-in subdir are rejected outright.
+    for rejected in (
+        "/etc/rancher/rke2/rke2.yaml",
+        "/etc/rancher/rke2/registries.yaml",
+        "/etc/rancher/rke2/config.yaml.d/nested/dir.yaml",
+        "/etc/rancher/rke2/config.yaml.d/../rke2.yaml",
+    ):
+        with pytest.raises(ConfigPathRejectedError):
+            bound_read_config_path(rejected)
+
+
+@pytest.mark.asyncio
+async def test_config_get_rejects_sibling_files_before_ssh() -> None:
+    """B1: rke2.yaml / registries.yaml -- whose nested secrets the flat redaction
+    set cannot mask -- are rejected before any SSH read, so a safe/no-approval call
+    never returns the cluster-admin private key or the registry password.
+    """
+    connector = Rke2SshConnector()
+    cases = (
+        (
+            "/etc/rancher/rke2/rke2.yaml",
+            _RKE2_KUBECONFIG_FIXTURE,
+            _KUBECONFIG_KEY_CANARY,
+        ),
+        (
+            "/etc/rancher/rke2/registries.yaml",
+            _REGISTRIES_YAML_FIXTURE,
+            _REGISTRIES_PASSWORD_CANARY,
+        ),
+    )
+    for path, fixture, canary in cases:
+        with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+            # Even if the file WOULD read back with a nested secret, the op must
+            # refuse it before the `cat` ever runs.
+            mock_cmd.return_value = _proc(stdout=fixture)
+            result = await connector.config_get(_TARGET, {"path": path})
+        mock_cmd.assert_not_awaited()
+        assert "content" not in result
+        assert "path check" in result["error"]
+        assert "server config" in result["error"]
+        assert canary not in repr(result), f"{canary!r} leaked for {path}"
+
+
+@pytest.mark.asyncio
+async def test_config_get_accepts_config_yaml_d_dropin() -> None:
+    """A config.yaml.d/*.yaml drop-in stays in scope (same flat schema, redacted)."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        result = await connector.config_get(
+            _TARGET, {"path": "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"}
+        )
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert "cat -- /etc/rancher/rke2/config.yaml.d/99-custom.yaml" in cmd
+    assert result["path"] == "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"
+    assert result["content"]["token"] == REDACTED_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_config_get_non_mapping_yaml_returns_structured_error() -> None:
+    """AC: a YAML sequence/scalar (not a mapping) surfaces an error, not a crash."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="- just\n- a\n- list\n")
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert result["error"] == "config file is not a YAML mapping"
+    assert result["path"] == "/etc/rancher/rke2/config.yaml"
+
+
+@pytest.mark.asyncio
+async def test_config_get_invalid_yaml_returns_structured_error() -> None:
+    """AC: unparseable YAML surfaces a structured error rather than crashing."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="key: [unterminated\n")
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert "not valid YAML" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_get_missing_or_empty_file_returns_empty_content() -> None:
+    """A missing/empty config.yaml (the ``[ -e ]`` guard) yields content: {}."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="")
+        result = await connector.config_get(_TARGET, {})
+    assert result["content"] == {}
+    assert result["redacted_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_config_get_read_failure_returns_structured_error() -> None:
+    """A non-zero read exit surfaces a structured error, not a partial parse."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="cat: permission denied", exit_status=1)
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert result["error"] == "failed to read the config file"
+
+
+@pytest.mark.asyncio
+async def test_config_get_never_leaks_secret_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The config-get envelope + logs carry no credential material."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        with caplog.at_level("DEBUG"):
+            result = await connector.config_get(_TARGET, {})
+    rendered = repr(result)
+    for canary in (
+        _CONFIG_TOKEN_CANARY,
+        _CONFIG_AGENT_TOKEN_CANARY,
+        _CONFIG_S3_SECRET_CANARY,
+        _CONFIG_DSN_PASS_CANARY,
+    ):
+        assert canary not in rendered
+        assert canary not in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # RKE2_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-#: The read-only tier: ``rke2.about`` + ``rke2.posture.show`` (T1 #2221) and
-#: ``rke2.node.service.status`` (Initiative #2833 / #2852). Every entry is
-#: safe-tier / no-approval and takes no operator parameters.
+#: The read-only tier: ``rke2.about`` + ``rke2.posture.show`` (T1 #2221),
+#: ``rke2.node.service.status`` (Initiative #2833 / #2852), and the redacted
+#: config-content read ``rke2.node.config.get`` (#2854). Every entry is
+#: safe-tier / no-approval.
 _READ_OP_IDS: frozenset[str] = frozenset(
+    {
+        "rke2.about",
+        "rke2.posture.show",
+        "rke2.node.service.status",
+        "rke2.node.config.get",
+    }
+)
+
+#: The read ops that take no operator parameters at all (fixed paths/units).
+#: The sibling ``rke2.node.config.get`` takes an optional path-bounded
+#: ``path``, so it is excluded from the no-params invariant.
+_PARAMETERLESS_READ_OP_IDS: frozenset[str] = frozenset(
     {"rke2.about", "rke2.posture.show", "rke2.node.service.status"}
 )
 
@@ -756,9 +1084,9 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_I
 
 
 def test_rke2_ops_count_matches_expected() -> None:
-    # Three read ops (#2221 posture/about + #2852 service.status) + three
-    # approval-gated write ops (#2429 / #2430) + two safe non-gated snapshot
-    # ops (.save #2431, .list #2853) = eight.
+    # Four read ops (#2221 posture/about + #2852 service.status + #2854
+    # config.get) + three approval-gated write ops (#2429 / #2430) + two safe
+    # non-gated snapshot ops (.save #2431, .list #2853) = nine.
     assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -850,9 +1178,22 @@ def test_rke2_read_ops_parameter_schemas_closed() -> None:
         if op.op_id not in _READ_OP_IDS:
             continue
         assert op.parameter_schema.get("additionalProperties") is False
-    # The read tier takes no operator parameters -- fixed paths only.
-    for op_id in _READ_OP_IDS:
+    # rke2.about / rke2.posture.show / rke2.node.service.status take no
+    # operator parameters -- fixed paths/units.
+    for op_id in _PARAMETERLESS_READ_OP_IDS:
         assert by_id[op_id].parameter_schema.get("properties") == {}
+    # rke2.node.config.get (#2854) exposes exactly one optional param -- a path
+    # bounded to the server config.yaml + its config.yaml.d/*.yaml drop-ins
+    # (sibling files like rke2.yaml / registries.yaml are rejected; the
+    # handler-side bound_read_config_path check is authoritative).
+    get_schema = by_id["rke2.node.config.get"].parameter_schema
+    get_props = get_schema.get("properties", {})
+    assert set(get_props) == {"path"}
+    assert (
+        get_props["path"].get("pattern")
+        == r"^/etc/rancher/rke2/config\.yaml(\.d/[^/\x00\n\r]+\.yaml)?$"
+    )
+    assert get_schema.get("required", []) == []  # path is optional
     # The snapshot op exposes exactly one optional, charset-bounded param.
     save_schema = by_id["rke2.etcd-snapshot.save"].parameter_schema
     props = save_schema.get("properties", {})

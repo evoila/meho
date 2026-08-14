@@ -1037,18 +1037,24 @@ they never park.
   A build-time guard
   (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
   the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
-  by the ingest, so a future drift goes red in CI.
-- **`host.detach_from_vds` write composite carries the same singular
-  `distributed-portgroup` defect (out of scope for #1602)** —
-  `_write.py`'s `_OP_LIST_PORTGROUPS =
-  "GET:/vcenter/network/distributed-portgroup"` has the identical
-  unresolvable spelling. #1602 is scoped to the read
-  `network.portgroup.audit` composite only; the write-side fix plus a
-  reconcile guard over the 14 write composites' `_SUB_OPS_*` against the
-  real pinned spec (the existing
-  `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
-  synthesises its fixture *from* the constants, so it cannot catch a
-  wrong key) is a follow-up under the #1529 cleanup.
+  by the ingest. The vendor-licensed spec-shelf is not provisioned in
+  public-repo CI, so that guard **skips** there (the #1602 convention);
+  it runs wherever the spec-shelf is wired — an operator deploy or a
+  spec-shelf-backed run — which is where a future drift surfaces.
+- **`host.detach_from_vds` write-side portgroup fix: done (#2891);
+  real-spec reconcile guard: done (#2944)** — `_write.py` once carried
+  `_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"`
+  (singular, absent from the pinned spec — the same class of defect
+  #1602 fixed on the read side). #2891 corrected it to `_OP_LIST_NETWORK
+  = "GET:/vcenter/network"`, so `_SUB_OPS_HOST_DETACH_FROM_VDS` now
+  dispatches the resolvable path (see "Portgroup resolution — the #1602
+  lesson" above). #2944 then closed the guard gap: the always-on
+  reconcile in `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
+  synthesises its fixture *from* the constants (proves op_id **shape**,
+  cannot catch a wrong key), so #2944 added an env-gated assertion that
+  parses the real pinned `vcenter.yaml` and asserts every `_SUB_OPS_*`
+  REST path actually **exists** — skipping in CI where the spec-shelf is
+  unprovisioned (the #1602 convention), running wherever it is wired.
 
 ## References
 

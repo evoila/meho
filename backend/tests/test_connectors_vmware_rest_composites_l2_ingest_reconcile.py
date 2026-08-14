@@ -48,6 +48,25 @@ once the operator ingests the vSphere specs and enables the carrying
 groups (acceptance criterion 2 on #1414, verified in code rather than
 against a deploy). If anyone edits a ``_SUB_OPS_*`` op_id into a shape
 the ingest pipeline cannot emit, this test goes red.
+
+**Two tiers of proof -- shape vs. real-path existence.** The hand-built
+fixture assertion
+(:func:`test_every_write_composite_sub_op_resolves_to_an_ingested_op_id`)
+proves op_id *shape*: that every ``_SUB_OPS_*`` string is a well-formed
+``METHOD:/path`` the parser emits, keyed vCenter's action-verb-in-path
+way. It synthesises the fixture *from* those same constants, so it
+**cannot** prove a path actually exists in vCenter 9.0 -- a typo, a
+renamed endpoint, or a wrong API-version path passes it. The env-gated
+:func:`test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec`
+closes that gap: it parses the canonical pinned ``vcenter.yaml`` and
+asserts real *path existence*. It skips when the vendor-licensed
+spec-shelf is unconfigured (the #1602 / G0.7-canary convention -- the
+specs live in the operator's separate spec-shelf repo, not this chassis
+repo), so the default local run and CI stay green on the shape assertion
+with zero external dependency; wherever ``MEHO_VCENTER_OPENAPI_VCENTER``
+/ ``MEHO_CONSUMER_DOCS_ROOT`` is wired it runs for real. The vi-json
+write composites get the same real-path treatment in the
+``*_paths_exist_in_the_pinned_spec`` checks lower down.
 """
 
 from __future__ import annotations
@@ -63,7 +82,11 @@ import respx
 
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.operations.ingest import parse_openapi
-from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vi_json_yaml
+from tests.acceptance._vcenter_spec import (
+    VCENTER_SPEC_REASON,
+    resolve_vcenter_yaml,
+    resolve_vi_json_yaml,
+)
 
 # Public IP returned by the mock getaddrinfo for specs.example.test.
 _PUBLIC_TEST_IP = "93.184.216.34"
@@ -248,6 +271,60 @@ def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest() -> None
     assert action_op_ids <= ingested_op_ids
     # And no op_id lost its query suffix (proves no stripping).
     assert all("?action=" in op_id for op_id in ingested_op_ids)
+
+
+def test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec() -> None:
+    """Every REST ``_SUB_OPS_*`` op_id is emitted by parsing the real vcenter.yaml.
+
+    The env-gated real-spec analogue of
+    :func:`test_every_write_composite_sub_op_resolves_to_an_ingested_op_id`.
+    That test synthesises its OpenAPI fixture *from* the ``_SUB_OPS_*``
+    constants, so it proves op_id **shape** (a well-formed ``METHOD:/path``
+    that survives the parser, keyed vCenter's action-verb-in-path way) but
+    cannot prove a path actually **exists** in vCenter 9.0 -- a typo, a
+    renamed endpoint, or a wrong API-version path passes it. This parses the
+    canonical pinned ``vcenter.yaml`` through the real :func:`parse_openapi`
+    and asserts every REST ``_SUB_OPS_*`` op_id is in the emitted descriptor
+    set, i.e. real path existence -- the vcenter.yaml/REST analogue of the
+    vi-json ``*_paths_exist_in_the_pinned_spec`` checks below, mirroring
+    #1602's ``test_portgroup_audit_op_id_reconcile.py``.
+
+    Skips when the spec-shelf is unconfigured (the canary's convention), so
+    the default local run and CI stay green on the hand-built-fixture
+    assertion above with zero external dependency; wherever
+    ``MEHO_VCENTER_OPENAPI_VCENTER`` / ``MEHO_CONSUMER_DOCS_ROOT`` is wired
+    it runs for real. A shelf-backed red is the guard surfacing a real
+    finding (a ``_SUB_OPS_*`` path the pinned spec does not serve), not a
+    reason to withhold the guard.
+    """
+    spec_path = resolve_vcenter_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+
+    required = _required_raw_sub_op_ids()
+    assert required, "introspection found no raw sub-op_ids -- wiring broke"
+
+    spec_text = spec_path.read_text(encoding="utf-8")
+    # ``content=`` feeds the bytes verbatim (the https-only SSRF guard
+    # applies only to the URL-fetch path); the URI arg is just the audit
+    # label. Mirrors #1602's portgroup-audit real-spec reconcile.
+    rows = parse_openapi(
+        f"file://{spec_path}",
+        spec_source="spec:vcenter.yaml",
+        content=spec_text,
+    )
+    ingested_op_ids = {row.op_id for row in rows}
+
+    missing = required - ingested_op_ids
+    assert not missing, (
+        "vmware write composites declare _SUB_OPS_* REST op_ids the real "
+        f"vcenter.yaml ingest does not emit: {sorted(missing)}. Either a "
+        "_SUB_OPS_* constant references a path vCenter 9.0 does not serve "
+        "(a typo, a renamed endpoint, or a wrong API-version path -- the "
+        "class of defect the hand-built fixture cannot catch), or the pinned "
+        "spec revision moved the resource (re-check against the vSphere "
+        "Automation REST API)."
+    )
 
 
 # ---------------------------------------------------------------------------

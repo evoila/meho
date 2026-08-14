@@ -365,6 +365,16 @@ def test_list_full_page_renders_with_empty_inventory() -> None:
         assert label in body
     # CSRF cookie set by the route.
     assert CSRF_COOKIE_NAME in response.cookies
+    # #220: the tag-filter control is migrated off dead daisyUI-v4 classes
+    # (removed in v5 — zero compiled rules — which collapsed the
+    # label-over-input column). Scoped to the tag-filter markup: the
+    # `_cards.html` partial included below still carries one stray
+    # `form-control` (sibling task #220's follow-up), so a page-wide
+    # assertion would be too broad.
+    assert 'class="flex flex-col gap-1 max-w-xs"' in body
+    assert '<span class="text-sm font-medium">Filter by tag</span>' in body
+    assert "form-control md:col-span-2" not in body
+    assert '<span class="label-text">Filter by tag</span>' not in body
 
 
 def test_list_renders_cards_with_preview_and_scope_badge() -> None:

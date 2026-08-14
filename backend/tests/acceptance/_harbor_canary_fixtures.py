@@ -156,6 +156,12 @@ HARBOR_CANARY_HEALTH: dict[str, object] = {
 }
 
 #: Synthetic project list — one public project ("library").
+#:
+#: No ``quota`` key: the vendor ``Project`` schema (what ``GET /projects``
+#: and ``GET /projects/{name}`` return) carries no quota field. Storage
+#: quota lives only on the summary endpoint — ``harbor.project.summary``
+#: (#2858). Keeping the fixture quota-less stops the suite from masking the
+#: real (quota-less) shape.
 HARBOR_CANARY_PROJECTS: list[dict[str, object]] = [
     {
         "id": 1,
@@ -166,14 +172,15 @@ HARBOR_CANARY_PROJECTS: list[dict[str, object]] = [
         "repo_count": 3,
         "registry_id": None,
         "metadata": {"public": "true", "auto_scan": "true"},
-        "quota": {
-            "used": {"storage": 1073741824},
-            "hard": {"storage": -1},
-        },
     }
 ]
 
 #: Synthetic project detail for "library".
+#:
+#: No ``quota`` and no ``chart_count`` keys — neither is a field on the
+#: Harbor 2.11 ``Project`` schema (#2858). Storage quota is read via
+#: ``harbor.project.summary``; Harbor 2.x has no standalone chart count
+#: (Helm charts fold into the OCI artifact model).
 HARBOR_CANARY_PROJECT_DETAIL: dict[str, object] = {
     "id": 1,
     "name": "library",
@@ -181,7 +188,6 @@ HARBOR_CANARY_PROJECT_DETAIL: dict[str, object] = {
     "creation_time": "2026-01-01T00:00:00.000Z",
     "update_time": "2026-01-01T00:00:00.000Z",
     "repo_count": 3,
-    "chart_count": 0,
     "metadata": {
         "public": "true",
         "enable_content_trust": "false",
@@ -190,10 +196,6 @@ HARBOR_CANARY_PROJECT_DETAIL: dict[str, object] = {
         "reuse_sys_cve_allowlist": "true",
         "prevent_vul": "false",
         "retention_id": None,
-    },
-    "quota": {
-        "used": {"storage": 1073741824},
-        "hard": {"storage": -1},
     },
 }
 

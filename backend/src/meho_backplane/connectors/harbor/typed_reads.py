@@ -183,9 +183,11 @@ async def harbor_project_info_impl(
 ) -> dict[str, Any]:
     """``harbor.project.info`` -- ``GET /api/v2.0/projects/{project_name}``.
 
-    Reads the full detail of one Harbor project by name: quota usage, repo
-    count, and the metadata dict (public flag, content trust, auto-scan).
-    Requires ``project_name`` from ``harbor.project.list``.
+    Reads the full detail of one Harbor project by name: repo count and the
+    metadata dict (public flag, content trust, auto-scan). The vendor
+    ``Project`` object carries no quota field -- storage-quota usage lives on
+    the summary endpoint (``harbor.project.summary``, #2858). Requires
+    ``project_name`` from ``harbor.project.list``.
     """
     path = f"{_PROJECTS_PATH}/{_seg(params['project_name'])}"
     return await connector._get_json(target, path, operator=operator)
@@ -383,8 +385,9 @@ _PROJECT_LIST_INSTRUCTIONS: dict[str, object] = {
         "the 'public' flag as a string 'true'/'false')."
     ),
     "next_step": (
-        "Pick a project name for harbor.project.info to get quota and "
-        "full metadata, or pass it as project_name to "
+        "Pick a project name for harbor.project.info to get its full "
+        "metadata, or harbor.project.summary for storage quota usage "
+        "and member counts; or pass it as project_name to "
         "harbor.repository.list to enumerate its images."
     ),
 }
@@ -392,20 +395,23 @@ _PROJECT_LIST_INSTRUCTIONS: dict[str, object] = {
 _PROJECT_INFO_INSTRUCTIONS: dict[str, object] = {
     "when_to_call": (
         "Call to read the full detail of one Harbor project by name. "
-        "Returns quota usage, repository count, chart count, and the "
-        "full metadata dict including public flag and content trust, "
-        "vulnerability scanning, and auto-scan settings. Requires "
-        "a project_name path parameter obtained from harbor.project.list."
+        "Returns the repository count and the full metadata dict "
+        "including public flag and content trust, vulnerability "
+        "scanning, and auto-scan settings. For storage quota usage "
+        "(used vs. hard limit) and per-role member counts, call "
+        "harbor.project.summary instead. Requires a project_name path "
+        "parameter obtained from harbor.project.list."
     ),
     "output_shape": (
         "Project object with id, name, owner_name, repo_count, "
-        "chart_count, metadata (public, enable_content_trust, "
-        "auto_scan, severity), quota (used/hard storage in bytes), "
-        "creation_time, and update_time."
+        "metadata (public, enable_content_trust, auto_scan, severity), "
+        "creation_time, and update_time. The Project object carries no "
+        "quota field — call harbor.project.summary for storage quota "
+        "usage in bytes."
     ),
     "next_step": (
-        "If quota.used is close to quota.hard, surface the storage "
-        "pressure to the operator. Proceed to harbor.repository.list "
+        "For storage quota usage against the hard limit, call "
+        "harbor.project.summary. Proceed to harbor.repository.list "
         "to enumerate the project's images."
     ),
 }

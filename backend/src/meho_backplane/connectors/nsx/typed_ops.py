@@ -18,7 +18,7 @@ The dataclass + tuple + module-level registrar shape mirrors
 :mod:`meho_backplane.connectors.argocd.ops` and
 :mod:`meho_backplane.connectors.vmware_rest.typed_ops`.
 
-Ops NOT in the audited set (transport-node listing, tier-0 gateways,
+Ops NOT in the audited set (tier-0 gateways,
 distributed-firewall policies + rules) stay as ingested browse breadth
 -- enable-able through the generic review flow
 (``ReviewService.enable_reads``); only the audited operational reads are
@@ -108,9 +108,12 @@ NSX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use to list the NSX routing/overlay inventory the operator asks "
         "about most: transport zones under the default enforcement point "
         "(nsx.transport_zone.list), per-tenant tier-1 gateways "
-        "(nsx.tier1.list), and overlay/VLAN segments with their "
+        "(nsx.tier1.list), overlay/VLAN segments with their "
         "subnet/CIDR occupancy (nsx.segment.list) -- the pre-flight read "
-        "before carving a new segment. Read-only."
+        "before carving a new segment -- and edge/host transport nodes "
+        "(nsx.transport_node.list), with per-node fabric health via "
+        "nsx.transport_node.state, the edge-health pre-flight before a "
+        "maintenance-mode or failover action. Read-only."
     ),
     _GROUP_ALARMS: (
         "Use to read NSX system alarms (nsx.alarm.list) -- open faults and "
@@ -407,6 +410,103 @@ _SEGMENT_LIST = NsxTypedOp(
 
 
 # ---------------------------------------------------------------------------
+# nsx.transport_node.list
+# ---------------------------------------------------------------------------
+
+_TRANSPORT_NODE_LIST = NsxTypedOp(
+    op_id="nsx.transport_node.list",
+    handler_attr="transport_node_list",
+    summary="NSX edge/host transport-node fabric inventory (state via nsx.transport_node.state).",
+    description=(
+        "Lists NSX transport nodes via GET /api/v1/transport-nodes -- the "
+        "edge and host nodes that carry the overlay. Returns "
+        "{results: [...], result_count} where each node carries id, "
+        "display_name, and node_deployment_info.resource_type "
+        "(EdgeNode / EsxiNode -- what tells an edge node from a host node). "
+        "The list row does NOT carry live health: NSX exposes per-node "
+        "fabric/tunnel/realization state on the separate .../state "
+        "sub-resource, so pair this with nsx.transport_node.state to answer "
+        "'are the edges healthy' before a maintenance-mode or failover "
+        "action. The vendor envelope passes through unmodified. Works with "
+        "zero catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema=_NO_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_INVENTORY,
+    tags=("read-only", "nsx", "manager", "transport-node"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to list edge/host transport nodes and get their ids -- the "
+            "entry point for the per-node health read nsx.transport_node.state. "
+            "Tell edge from host nodes on node_deployment_info.resource_type."
+        ),
+        "output_shape": (
+            "{results: [{id, display_name, node_deployment_info: "
+            "{resource_type}}, ...], result_count}. The list carries no live "
+            "state -- feed each id to nsx.transport_node.state for health."
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
+# nsx.transport_node.state
+# ---------------------------------------------------------------------------
+
+_TRANSPORT_NODE_STATE = NsxTypedOp(
+    op_id="nsx.transport_node.state",
+    handler_attr="transport_node_state",
+    summary="Realization + maintenance-mode + tunnel state of one NSX transport node.",
+    description=(
+        "Reads one transport node's realization + fabric health via "
+        "GET /api/v1/transport-nodes/{id}/state -- requires a node id from "
+        "nsx.transport_node.list. NSX's TransportNodeState carries state "
+        "(overall realization result), maintenance_mode_state (whether the "
+        "node is already draining -- the datum that says whether the "
+        "surviving edge can still take over), node_deployment_state, "
+        "deployment_progress_state, and host_switch_states (per-host-switch "
+        "tunnel/connectivity realization). The read an operator runs before "
+        "putting an edge into maintenance mode or relying on a tier-1 HA "
+        "failover, so a degraded surviving node does not cost the tier-1 its "
+        "HA. The vendor payload passes through unmodified. Works with zero "
+        "catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The transport-node id (from nsx.transport_node.list).",
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_INVENTORY,
+    tags=("read-only", "nsx", "manager", "transport-node", "health"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call with a transport-node id before a maintenance-mode or "
+            "failover action, to confirm the node (and its HA peer) is "
+            "realized, not already in maintenance, and tunnel-healthy."
+        ),
+        "parameter_hints": {"id": "The transport-node id from nsx.transport_node.list."},
+        "output_shape": (
+            "{state, maintenance_mode_state, node_deployment_state, "
+            "deployment_progress_state, host_switch_states: [...]}. Read "
+            "maintenance_mode_state + state before draining the peer edge."
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # nsx.alarm.list
 # ---------------------------------------------------------------------------
 
@@ -482,6 +582,8 @@ NSX_TYPED_OPS: tuple[NsxTypedOp, ...] = (
     _TRANSPORT_ZONE_LIST,
     _TIER1_LIST,
     _SEGMENT_LIST,
+    _TRANSPORT_NODE_LIST,
+    _TRANSPORT_NODE_STATE,
     _ALARM_LIST,
 )
 

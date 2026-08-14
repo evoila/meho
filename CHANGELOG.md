@@ -234,6 +234,24 @@ connector-related release-notes line.
   domain-join credentials), and the durable audit row stores only a params
   hash. A dedicated end-to-end test proves no secret material reaches the
   approval, broadcast, or audit surface.
+### Added — `nsx.transport_node.list` + `nsx.transport_node.state` typed reads for edge health before maintenance/failover (#2836)
+
+- Two new `source_kind="typed"` ops dispatch on a fresh boot with zero
+  catalog ingest, in the `nsx-inventory` group. `nsx.transport_node.list`
+  (`GET /api/v1/transport-nodes`) lists the edge/host transport-node
+  fabric, but the list row carries no live health — NSX keeps per-node
+  state on a separate sub-resource — so `nsx.transport_node.state`
+  (`GET /api/v1/transport-nodes/{id}/state`, required `id`) reads one
+  node's realization result, `maintenance_mode_state`,
+  `node_deployment_state`, `deployment_progress_state`, and per-host-switch
+  tunnel/connectivity state. Together they answer "are both edges up, in
+  sync, and tunnel-healthy" before an operator drains an edge into
+  maintenance mode or relies on a tier-1 HA failover — instead of falling
+  back to the NSX Manager UI or `nsx.sh`, which bypass
+  policy/audit/broadcast/JSONFlux. The vendor payloads pass through
+  unmodified; `safety_level="safe"`, no approval. Transport-node
+  create/delete/maintenance-mode toggle (writes) stay out of scope
+  (a future approval-gated write-surface initiative).
 
 ## [0.28.0] - 2026-08-07
 

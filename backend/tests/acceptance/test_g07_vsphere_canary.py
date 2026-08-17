@@ -440,7 +440,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "vm-managed-objects",
+                "group_key": "vm_managed_objects",
                 "name": "Virtual Machine (Managed Object)",
                 "when_to_use": (
                     "Use for per-VM Managed-Object method calls -- "
@@ -450,7 +450,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "host-managed-objects",
+                "group_key": "host_managed_objects",
                 "name": "Host System (Managed Object)",
                 "when_to_use": (
                     "Use for per-host Managed-Object method calls -- "
@@ -460,7 +460,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "cluster-managed-objects",
+                "group_key": "cluster_managed_objects",
                 "name": "Cluster Compute Resource (Managed Object)",
                 "when_to_use": (
                     "Use for per-cluster Managed-Object method calls -- "
@@ -469,7 +469,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "datastore-managed-objects",
+                "group_key": "datastore_managed_objects",
                 "name": "Datastore (Managed Object)",
                 "when_to_use": (
                     "Use for per-datastore Managed-Object method calls -- "
@@ -503,10 +503,10 @@ class _PathPrefixStubLlmClient:
         ("/appliance/", "appliance"),
         ("/PerformanceManager", "performance"),
         ("/EventManager", "events"),
-        ("/VirtualMachine", "vm-managed-objects"),
-        ("/HostSystem", "host-managed-objects"),
-        ("/ClusterComputeResource", "cluster-managed-objects"),
-        ("/Datastore", "datastore-managed-objects"),
+        ("/VirtualMachine", "vm_managed_objects"),
+        ("/HostSystem", "host_managed_objects"),
+        ("/ClusterComputeResource", "cluster_managed_objects"),
+        ("/Datastore", "datastore_managed_objects"),
     )
 
     # Regex to recover op_ids from the rendered Pass-2 prompt. The

@@ -231,7 +231,7 @@ meho vcf-automation about --plane provider --target rdc-vcfa \
   --fqdn vcfa.maintenance.evoila.io
 
 # Escape hatch — run any vcfa-rest-9.0 op_id by name
-meho vcf-automation operation call GET:/cloudapi/1.0.0/site --target rdc-vcfa
+meho vcf-automation operation call GET:/cloudapi/1.0.0/users --target rdc-vcfa
 meho vcf-automation operation search "deployment status" --group tenant-deployments
 ```
 
@@ -318,7 +318,7 @@ op_id). The persistent `--fqdn` flag still threads into the body.
 
 ```bash
 meho vcf-automation operation search "deployments" --group tenant-deployments
-meho vcf-automation operation call GET:/iaas/api/about --target rdc-vcfa
+meho vcf-automation operation call GET:/iaas/api/blueprints --target rdc-vcfa
 ```
 
 ## Audit and broadcast classification

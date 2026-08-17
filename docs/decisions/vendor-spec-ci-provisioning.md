@@ -1,10 +1,10 @@
 # Vendor vCenter spec-shelf in CI — licensing record + provisioning runbook (decision)
 
-**Status:** facts recorded; rationale stated; **decision routed for human
-legal/maintainer signoff** (see "Signoff of record" below — deliberately not
-filled by this ADR). The CI wiring ships **disarmed**: nothing is fetched until
-a repository admin provisions the `SPEC_SHELF_TOKEN` secret, and provisioning
-is gated on the signoff below.
+**Status:** **signed off** (see "Signoff of record" below, completed
+2026-08-17). The CI wiring shipped **disarmed**: nothing is fetched until a
+repository admin provisions the `SPEC_SHELF_TOKEN` secret. With this signoff
+and the "Known findings" fix merged on `main` (#2970 / PR #2974,
+`6938222c`), provisioning is unblocked per the runbook below.
 **Date:** 2026-08-17
 **Task:** [#2949](https://github.com/evoila/meho/issues/2949) (split out of
 [#2944](https://github.com/evoila/meho/issues/2944) precisely because this is a
@@ -192,12 +192,17 @@ operator's private spec-shelf into ephemeral CI jobs, never committed, never
 in artifacts or logs* — for the signoff of record. It does **not** assert a
 legal conclusion.
 
-- **Reviewer:** _(name / GitHub handle — to be completed)_
-- **Date:** _(to be completed)_
-- **Determination:** _(to be completed — e.g. an attestation that the
-  ephemeral CI use recorded above is acceptable under the operator's vendor
-  license; or a request for changes)_
-- **Attestation link:** _(comment / issue URL — to be completed)_
+- **Reviewer:** Damir Topic (@damir-topic), maintainer/operator
+- **Date:** 2026-08-17
+- **Determination:** Attestation that the ephemeral CI use recorded above is
+  acceptable under the operator's vendor license — fetching the pinned
+  vSphere OpenAPI specs from the private spec-shelf into ephemeral same-repo
+  CI jobs, under the conditions in "What CI does with the specs" (sparse
+  read-only checkout, workspace destroyed at job end, never committed, never
+  in artifacts or logs, secret withheld from fork PRs and the Dependabot
+  store).
+- **Attestation link:**
+  <https://github.com/evoila/meho/issues/2949#issuecomment-5316438336>
 
 Until this section is completed, the question stands as **recorded and
 routed**, not resolved — and the `SPEC_SHELF_TOKEN` secret must not be

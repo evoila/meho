@@ -16,8 +16,9 @@ This module converts the **audited read set** (evoila/meho#2294 row 22:
 "org/region list + provider health"; the VCFA follow-up: "org/region
 list, /iaas/api/projects + about") to ``source_kind="typed"`` operations
 that dispatch through the connector's own dual-plane session — no
-``endpoint_descriptor`` catalog state required. Six ops — the five
-#2294 audited reads plus the #2839 tenant deployment list:
+``endpoint_descriptor`` catalog state required. Seven ops — the five
+#2294 audited reads plus the #2839 tenant deployment list and the
+#2960 tenant deployment detail read:
 
 Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT session):
@@ -34,6 +35,7 @@ session):
 
 * ``vcfa.tenant.project.list`` — ``GET /iaas/api/projects``
 * ``vcfa.tenant.deployment.list`` — ``GET /iaas/api/deployments``
+* ``vcfa.tenant.deployment.get`` — ``GET /iaas/api/deployments/{id}``
 * ``vcfa.tenant.about`` — ``GET /iaas/api/about``
 
 Every op declares the **plane it rides** (``provider`` / ``tenant``).
@@ -77,6 +79,7 @@ __all__ = [
     "PROVIDER_SITE_PATH",
     "TENANT_ABOUT_PATH",
     "TENANT_DEPLOYMENTS_PATH",
+    "TENANT_DEPLOYMENT_DETAIL_PATH",
     "TENANT_PROJECTS_PATH",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
@@ -92,6 +95,11 @@ PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/1.0.0/regions"
 PROVIDER_SITE_PATH: Final[str] = "/cloudapi/1.0.0/site"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
 TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
+#: Path template for the per-id deployment detail read. The ``{id}``
+#: placeholder is substituted (percent-encoded, empty safe set) by the
+#: connector handler; ``plane_for_path`` classifies the template itself,
+#: so the declared plane is validated before any substitution happens.
+TENANT_DEPLOYMENT_DETAIL_PATH: Final[str] = "/iaas/api/deployments/{id}"
 TENANT_ABOUT_PATH: Final[str] = "/iaas/api/about"
 
 
@@ -160,7 +168,8 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
         "every deployment belongs to (vcfa.tenant.project.list), list "
         "deployments — which exist, which failed, which are stuck "
         "in-progress, narrowable with a status $filter "
-        "(vcfa.tenant.deployment.list), or read "
+        "(vcfa.tenant.deployment.list), read one deployment's detail by "
+        "id (vcfa.tenant.deployment.get), or read "
         "the IaaS API self-describe surface — supported API versions + "
         "latest version — as a tenant-plane reachability/version probe "
         "(vcfa.tenant.about). Tenant-plane ops authenticate with the "
@@ -495,9 +504,74 @@ _TENANT_DEPLOYMENT_LIST = VcfaTypedOp(
             "ownedBy, createdAt, lastUpdatedAt, resources[]."
         ),
         "next_step": (
-            "Cross-reference projectId against vcfa.tenant.project.list, or "
-            "inspect a failed deployment's status to triage the failure."
+            "Drill into one deployment's full detail with "
+            "vcfa.tenant.deployment.get, or cross-reference projectId "
+            "against vcfa.tenant.project.list."
         ),
+    },
+)
+
+_TENANT_DEPLOYMENT_GET = VcfaTypedOp(
+    op_id="vcfa.tenant.deployment.get",
+    handler_attr="tenant_deployment_get",
+    plane="tenant",
+    path=TENANT_DEPLOYMENT_DETAIL_PATH,
+    summary="Read one deployment by id within the tenant organization (tenant plane).",
+    description=(
+        "Reads one deployment's detail via GET /iaas/api/deployments/{id} "
+        "on the tenant plane — the drill-down after "
+        "vcfa.tenant.deployment.list surfaced a deployment worth "
+        "inspecting (a failure to triage, a stuck in-progress create). "
+        "Requires the deployment id (from vcfa.tenant.deployment.list). "
+        "Returns the single deployment object: id, name, description, "
+        "status, projectId, blueprintId, ownedBy, createdAt, "
+        "lastUpdatedAt, and resources[] — the same shape as one "
+        "'content' entry of the list op. safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The deployment id (from vcfa.tenant.deployment.list).",
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "id": {"type": ["string", "null"]},
+            "name": {"type": ["string", "null"]},
+            "status": {"type": ["string", "null"]},
+            "projectId": {"type": ["string", "null"]},
+            "resources": {"type": ["array", "null"]},
+        },
+        "additionalProperties": True,
+    },
+    group_key="vcfa-tenant-reads",
+    tags=("read-only", "vcfa", "tenant"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_call": (
+            "Call on the tenant plane with a deployment id to read one "
+            "deployment's full detail — the drill-down after "
+            "vcfa.tenant.deployment.list surfaced a failed or stuck "
+            "deployment worth inspecting."
+        ),
+        "output_shape": (
+            "{id, name, status, projectId, blueprintId, ownedBy, "
+            "createdAt, lastUpdatedAt, resources: [...]}. One deployment "
+            "object — the same shape as one 'content' entry of the list op."
+        ),
+        "next_step": (
+            "Inspect status and resources[] to triage the deployment, or "
+            "cross-reference projectId against vcfa.tenant.project.list."
+        ),
+        "parameter_hints": {"id": "The deployment id from vcfa.tenant.deployment.list."},
     },
 )
 
@@ -547,17 +621,18 @@ _TENANT_ABOUT = VcfaTypedOp(
 )
 
 
-#: The six typed VCFA read ops the connector registers at lifespan
+#: The seven typed VCFA read ops the connector registers at lifespan
 #: startup — the #2294 audited read set plus the #2839 tenant deployment
-#: list. Ordered provider → tenant, probe last within each plane, to
-#: match the operator's typical drill path (inventory first, health as
-#: needed).
+#: list and the #2960 tenant deployment detail read. Ordered provider →
+#: tenant, probe last within each plane, to match the operator's typical
+#: drill path (inventory first, detail next, health as needed).
 VCFA_TYPED_OPS: Final[tuple[VcfaTypedOp, ...]] = (
     _PROVIDER_ORG_LIST,
     _PROVIDER_REGION_LIST,
     _PROVIDER_HEALTH,
     _TENANT_PROJECT_LIST,
     _TENANT_DEPLOYMENT_LIST,
+    _TENANT_DEPLOYMENT_GET,
     _TENANT_ABOUT,
 )
 

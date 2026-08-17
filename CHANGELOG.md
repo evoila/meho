@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — vcfa tenant deployment detail read + `deployment get` repoint (#2960)
+
+- `vcfa.tenant.deployment.get` (`GET /iaas/api/deployments/{id}`,
+  tenant plane) joins the typed VCFA read surface — the per-id
+  drill-down after `vcfa.tenant.deployment.list` surfaced a failed or
+  stuck deployment. `meho vcf-automation deployment get <id>` now
+  dispatches the typed op_id instead of the ingested
+  `GET:/iaas/api/deployments/{id}`, which does not resolve on a
+  zero-catalog boot (the same stranding class #2942 closed for
+  `deployment list`); the verb moved from the pinned-ingested table to
+  the typed table in the `typed_opid_dispatch_test.go` guard.
+
 ### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
 
 - `meho vcf-automation deployment list` now dispatches the typed
@@ -99,8 +111,8 @@ connector-related release-notes line.
   agent/backend path worked. The wave-2 cross-check found the same
   stranding on `meho nsx segment list` (→ `nsx.segment.list`, #2835)
   and `meho nsx node list` (→ `nsx.transport_node.list`, #2836); both
-  repointed. `deployment get` stays on `GET:/iaas/api/deployments/{id}`
-  until a typed detail op ships.
+  repointed. `deployment get` stayed on `GET:/iaas/api/deployments/{id}`
+  until #2960 shipped the typed detail op (see Added above).
 - The five per-connector `typed_opid_dispatch_test.go` guards (nsx,
   sddc-manager, vcf-automation, vcf-fleet, vcf-operations) are now
   exhaustive: every verb is pinned to the exact op_id it dispatches

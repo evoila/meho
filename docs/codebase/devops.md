@@ -796,6 +796,43 @@ smaller `-n`. Target: request 4000m / limit 7000m (pending
 do not raise `-n` above the current value to chase wall-clock gains — the
 heartbeat failures will return.
 
+### Vendor vCenter spec-shelf in CI (#2949)
+
+The five real-spec vCenter lanes (`test_g07_vsphere_canary.py`, the two
+`tests/integration/test_operations_ingest_*` lanes,
+`test_portgroup_audit_op_id_reconcile.py`,
+`test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`) validate
+ingest + op_id reconciliation against the **real** Broadcom/VMware-licensed
+`vcenter.yaml` / `vi-json.yaml`, which are deliberately not in this public
+repo. `ci.yml` provisions them at runtime, gated on a secret:
+
+- Both Python test jobs (`python-lint-test`, `python-integration`) carry a
+  secret-gated "Checkout vendor vCenter spec-shelf" step: a cone-mode sparse
+  checkout of `docs/vcenter-9.0/` from the private
+  `evoila-bosnia/claude-rdc-hetzner-dc` shelf repo into
+  `$GITHUB_WORKSPACE/spec-shelf`, authenticated by the **`SPEC_SHELF_TOKEN`**
+  repo secret (fine-grained PAT, Contents read-only, that single repo).
+- `MEHO_CONSUMER_DOCS_ROOT` is set **unconditionally** to
+  `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
+  (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
+  skips, the directory doesn't exist, and the resolvers
+  (`backend/tests/acceptance/_vcenter_spec.py`) return `None` → the lanes
+  `pytest.skip()` exactly as before the wiring. When the secret exists, all
+  five lanes run for real, and a fail-loud verify step turns any shelf-layout
+  drift into a job failure instead of a silent regression to lane-skip.
+- The `secrets` context is unavailable in step-level `if:`, so the gate is
+  the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
+  token value.
+
+Licensing record, signoff gate, and the full provisioning/rotation runbook:
+[`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).
+**Do not provision `SPEC_SHELF_TOKEN` before that ADR's signoff-of-record
+section is completed AND its "Known findings" prerequisite is fixed on
+`main`** — the two reconcile lanes are known-red against the real shelf
+(real op_id findings, the guard working), and both live inside required
+merge-gate jobs, so premature provisioning turns CI red for every PR. The
+wiring is deliberately inert until then.
+
 ### Fail-loud posture
 
 No step in `ci.yml` carries `continue-on-error: true` except the Python

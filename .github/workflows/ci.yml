@@ -229,6 +229,29 @@ jobs:
       # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
       # never breaks an unrelated PR.
       MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      # #2949 — vendor vCenter spec-shelf wiring (see the checkout step
+      # below + docs/decisions/vendor-spec-ci-provisioning.md).
+      # SPEC_SHELF_TOKEN_PRESENT surfaces *presence* of the
+      # SPEC_SHELF_TOKEN secret as a job-level boolean so the shelf
+      # checkout step can gate on it — the `secrets` context is NOT
+      # available in a step-level `if:` (same constraint the
+      # DOCKERHUB_USERNAME row above works around). Unlike that row,
+      # only the presence flag is surfaced, never the token value, so
+      # the secret is not exported into every step's environment.
+      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      # Points the vCenter spec resolvers (tests/acceptance/
+      # _vcenter_spec.py + tests/integration/test_operations_ingest_
+      # vcenter.py) at the spec-shelf checkout. Set UNCONDITIONALLY:
+      # when the shelf checkout was skipped (secret absent — fork PRs,
+      # Dependabot runs, not-yet-provisioned repos) the directory does
+      # not exist, the resolvers return None, and the spec-backed lanes
+      # pytest.skip exactly as they did before #2949. When the checkout
+      # ran, the lanes run for real. The docs-root form (not
+      # MEHO_VCENTER_OPENAPI_VCENTER / _VI_JSON) is deliberate: it is
+      # the only single setting that lights every spec lane, because
+      # test_operations_ingest_vcenter.py predates the explicit
+      # per-file env vars and reads only the legacy var or this root.
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
         # backend/ is the only Python project today; pyproject.toml
@@ -237,6 +260,68 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Checkout vendor vCenter spec-shelf (secret-gated, #2949)
+        # The vSphere OpenAPI specs (vcenter.yaml ~961 paths,
+        # vi-json.yaml ~2,195 paths) are Broadcom/VMware
+        # vendor-licensed and deliberately NOT committed to this public
+        # repo — they live in the operator's private spec-shelf repo.
+        # This step fetches ONLY the pinned vcenter-9.0 shelf directory
+        # into the ephemeral runner workspace so the real-spec
+        # ingest/reconcile lanes stop skipping. Licensing record +
+        # provisioning runbook (secret scope, signoff gate):
+        # docs/decisions/vendor-spec-ci-provisioning.md. The specs are
+        # never committed, never uploaded as artifacts (the
+        # upload-artifact steps in this workflow enumerate exact
+        # coverage files only), and never printed to logs.
+        #
+        # SPEC_SHELF_TOKEN is a fine-grained PAT: Contents read-only on
+        # the single private shelf repo, nothing else. Secret absent →
+        # this step skips → the spec lanes pytest.skip exactly as
+        # before this step existed. Fork PRs never reach this step (the
+        # job-level fork guard skips the whole job) and would not see
+        # the secret anyway (GitHub withholds secrets from fork-PR
+        # runs). Dependabot runs read the Dependabot secret store,
+        # where this secret is deliberately not mirrored, so they skip
+        # too.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          token: ${{ secrets.SPEC_SHELF_TOKEN }}
+          path: spec-shelf
+          # Cone-mode sparse checkout of the shelf directory only +
+          # lazy blob filter: the runner materialises just the
+          # vcenter-9.0 spec files (~18 MB), not the whole consumer
+          # repo. No `ref:` pin — the shelf's default branch IS the
+          # operator-curated pin (the directory is version-named
+          # vcenter-9.0/), matching the local-dev contract documented
+          # in tests/acceptance/_vcenter_spec.py.
+          sparse-checkout: docs/vcenter-9.0
+          filter: blob:none
+          # Read-only consumer; never pushes. Don't leave the token in
+          # the shelf clone's local git config after checkout.
+          persist-credentials: false
+
+      - name: Verify spec-shelf provisioned the pinned vCenter specs
+        # Fail-loud layout guard: once the secret exists, a shelf
+        # layout move (or a sparse-checkout typo here) must fail THIS
+        # job — otherwise the resolvers would return None and the spec
+        # lanes would silently go back to skipping, undetected (the
+        # exact regression #2949 closes). Without the secret this step
+        # skips and lane-skip stays the documented degraded mode.
+        # Prints file *presence* only — never spec content.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          for f in spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the vCenter real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
+              exit 1
+            fi
+          done
+          echo "spec-shelf OK: vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -797,12 +882,52 @@ jobs:
       # any future fork PR job that doesn't see this env) the test
       # skips cleanly with a clear remediation message.
       MEHO_TEST_KEYCLOAK_IMAGE: harbor.evba.lab/dockerhub-proxy/keycloak/keycloak:26.0
+      # #2949 — vendor vCenter spec-shelf wiring; this job runs the
+      # tests/integration real-spec ingest lanes
+      # (test_operations_ingest_vcenter.py / _vi_json.py). See the
+      # comment on the python-lint-test job's occurrence of these two
+      # rows for the full rationale (presence-flag gating; the
+      # unconditional docs-root that degrades to lane-skip when the
+      # shelf checkout was skipped).
+      SPEC_SHELF_TOKEN_PRESENT: ${{ secrets.SPEC_SHELF_TOKEN != '' }}
+      MEHO_CONSUMER_DOCS_ROOT: ${{ github.workspace }}/spec-shelf/docs
     defaults:
       run:
         working-directory: backend
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Checkout vendor vCenter spec-shelf (secret-gated, #2949)
+        # Same secret-gated sparse checkout as the python-lint-test
+        # job's spec-shelf step — see that step's comment for the
+        # licensing pointer (docs/decisions/vendor-spec-ci-
+        # provisioning.md), the secret scope, and the fork/Dependabot
+        # degrade-to-skip analysis.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: evoila-bosnia/claude-rdc-hetzner-dc
+          token: ${{ secrets.SPEC_SHELF_TOKEN }}
+          path: spec-shelf
+          sparse-checkout: docs/vcenter-9.0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Verify spec-shelf provisioned the pinned vCenter specs
+        # Fail-loud layout guard — same rationale as the
+        # python-lint-test job's occurrence.
+        if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          for f in spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the vCenter real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
+              exit 1
+            fi
+          done
+          echo "spec-shelf OK: vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

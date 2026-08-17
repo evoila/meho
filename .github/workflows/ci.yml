@@ -246,7 +246,10 @@ jobs:
       # Dependabot runs, not-yet-provisioned repos) the directory does
       # not exist, the resolvers return None, and the spec-backed lanes
       # pytest.skip exactly as they did before #2949. When the checkout
-      # ran, the lanes run for real. The docs-root form (not
+      # ran, the seconds-cheap reconcile lanes run for real in this job;
+      # the G0.7 canary's full-ingest tests are opted out here and run
+      # armed in python-integration instead (#2980 — see this job's
+      # MEHO_SKIP_SPEC_INGEST_TESTS env row). The docs-root form (not
       # MEHO_VCENTER_OPENAPI_VCENTER / _VI_JSON) is deliberate: it is
       # the only single setting that lights every spec lane, because
       # test_operations_ingest_vcenter.py predates the explicit
@@ -478,6 +481,26 @@ jobs:
           # (en_core_web_lg) once that lane provisions the heavier
           # model.
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
+          # Lane placement (#2980): opt this sweep out of the G0.7
+          # canary's full-ingest spec tests. With the spec shelf armed
+          # (#2949/#2966) each of those tests re-runs the full two-spec
+          # ingest (~3,470 ops through parse + register + embedding +
+          # grouping — the fixture is function-scoped by design), which
+          # took the whole sweep from 478 s (2026-08-17 16:57Z, canary
+          # still erroring fast) past this job's 25-min cap (four
+          # consecutive timeout kills on head eaccb895, the last on a
+          # quiet cluster with pytest at 81% and progressing). Per this
+          # workflow's perf-budget discipline (#898/#793/#827): the slow
+          # path is relocated, not the cap raised. The canary's
+          # full-ingest tests run armed in the python-integration job
+          # (which selects the file explicitly, see its Pytest step);
+          # its fixture-less self-checks and every seconds-cheap
+          # reconcile lane stay in this sweep. Honored by a
+          # collection-time skipif marker in tests/acceptance/
+          # test_g07_vsphere_canary.py (fixture-level backstop in
+          # vcenter_spec_path); rule of record in
+          # docs/decisions/spec-reconcile-guards-standard.md.
+          MEHO_SKIP_SPEC_INGEST_TESTS: "1"
         # PARALLELIZED via pytest-xdist (#585 unblocked this). The
         # serial sweep was the job's dominant cost (~49 min in CI vs
         # ~5 min local). #585 added process-wide global-registry
@@ -758,6 +781,15 @@ jobs:
         timeout-minutes: 45
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
+          # Same lane-placement opt-out as the required unit lane's
+          # Pytest step (#2980) — this job re-runs that sweep, serially
+          # and under a 45-min step cap, so the canary's full-ingest
+          # tests are opted out here for the same budget reason. Today
+          # this is belt-and-suspenders (this job has no spec-shelf
+          # checkout, so those tests skip on shelf absence anyway);
+          # it keeps a future shelf-arming of this job from silently
+          # re-importing the multi-minute ingest wall.
+          MEHO_SKIP_SPEC_INGEST_TESTS: "1"
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
           # calls coverage.process_startup() when COVERAGE_PROCESS_START points
           # at a config, so every worker writes its OWN parallel data file
@@ -954,14 +986,28 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: Pytest (integration testcontainers)
-        # Only the tests/integration/ subtree. No --cov here: coverage
-        # is emitted by the unit job (see its NOTE); combined coverage
-        # is a #564 follow-up. -x for fast-fail on the first broken
-        # integration case. Deliberately NOT parallelized: the unit
-        # job is the ~49min bottleneck (now split-parallelized); this
-        # job is ~6min and its container-heavy fixtures under xdist
-        # are unverified — out of scope for the perf change.
-        run: uv run pytest -x tests/integration/
+        # The tests/integration/ subtree plus the G0.7 vSphere canary
+        # module. No --cov here: coverage is emitted by the unit job
+        # (see its NOTE); combined coverage is a #564 follow-up. -x for
+        # fast-fail on the first broken integration case. Deliberately
+        # NOT parallelized: the unit job is the ~49min bottleneck (now
+        # split-parallelized); this job is ~6min and its
+        # container-heavy fixtures under xdist are unverified — out of
+        # scope for the perf change.
+        #
+        # The canary module is selected here (#2980) because its
+        # armed-shelf full-ingest tests cost minutes per test (full
+        # two-spec ingest per test by design) — they blew the unit
+        # lane's 25-min cap the first day the shelf was armed, so this
+        # job (60-min cap, containers first-class) is their single
+        # armed lane; the unit sweep opts out via
+        # MEHO_SKIP_SPEC_INGEST_TESTS (see its Pytest step's env
+        # comment). Shelf absent (fork/Dependabot/unprovisioned) → the
+        # canary skips exactly as it always did; its fixture-less
+        # self-checks also run (again) here — seconds, harmless. Lane
+        # placement rule: docs/decisions/spec-reconcile-guards-
+        # standard.md.
+        run: uv run pytest -x tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
 
   python-migration-tests:
     name: Python (database migrations)

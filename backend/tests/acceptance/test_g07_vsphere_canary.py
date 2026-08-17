@@ -197,6 +197,59 @@ _CANARY_VERSION: str = "9.0"
 _CANARY_IMPL_ID: str = "vmware-rest"
 _CANARY_CONNECTOR_ID: str = f"{_CANARY_IMPL_ID}-{_CANARY_VERSION}"
 
+#: Lane-placement opt-out (#2980). With the CI spec shelf armed
+#: (#2949/#2966), every test behind :func:`vcenter_spec_path` re-runs
+#: the full two-spec ingest (~3,470 ops through parse + register +
+#: real-embedding + grouping, per test — the ``ingested_canary``
+#: fixture is deliberately function-scoped, see its docstring), which
+#: costs minutes per test. That blew the unit lane's 25-min cap the
+#: first day the shelf was armed (four consecutive timeout kills on
+#: 2026-08-17 vs a 478 s sweep while the canary still errored fast).
+#: The unit job (``python-lint-test``) sets this env var so the
+#: full-ingest canary runs in exactly one armed lane — ``python-
+#: integration``, which selects this file explicitly and has the
+#: container-heavy budget. Everywhere else (local dev, the
+#: integration lane) the var is unset and the armed-shelf contract
+#: is unchanged: shelf resolvable → tests run. Strict truthy parsing
+#: mirrors ``MEHO_RUN_SLOW_TESTS`` in ``tests/test_retrieval_embedding.py``.
+#: Lane-placement rule of record:
+#: ``docs/decisions/spec-reconcile-guards-standard.md``.
+_SPEC_INGEST_OPT_OUT_ENV: str = "MEHO_SKIP_SPEC_INGEST_TESTS"
+
+_SPEC_INGEST_OPT_OUT_REASON: str = (
+    f"{_SPEC_INGEST_OPT_OUT_ENV} is set: this lane opts out of the canary's "
+    "full-ingest spec tests (minutes per test when the spec shelf is armed). "
+    "They run in the integration lane (ci.yml python-integration selects this "
+    "file explicitly). See docs/decisions/spec-reconcile-guards-standard.md "
+    "§Lane placement."
+)
+
+
+def _spec_ingest_opted_out() -> bool:
+    """True when the invoking lane opted out of the full-ingest canary tests."""
+    return os.environ.get(_SPEC_INGEST_OPT_OUT_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+#: Collection-time marker for every test whose fixtures run the full
+#: ingest. skipif (not a fixture-side skip) so an opted-out lane never
+#: instantiates the module-scoped Postgres container / migration chain
+#: the ``pg_engine`` chain would otherwise spin up before the
+#: function-scoped spec fixture gets a chance to skip — pytest
+#: resolves higher-scoped fixtures first. The env var is read at
+#: import time, matching how CI sets it (job env, before the pytest
+#: process starts). :func:`vcenter_spec_path` re-checks the env as a
+#: backstop for any future full-ingest test that forgets the marker.
+_skip_when_spec_ingest_opted_out = pytest.mark.skipif(
+    _spec_ingest_opted_out(),
+    reason=_SPEC_INGEST_OPT_OUT_REASON,
+)
+
+
 #: Minimum number of operations the parser must emit from ``vcenter.yaml``.
 #: The full-spec count is ~1,275 on the consumer's current shelf;
 #: tightened from the original 950 (set conservatively for the single-spec
@@ -722,7 +775,20 @@ def canary_operator() -> Operator:
 
 @pytest.fixture
 def vcenter_spec_path() -> Path:
-    """Return the local path to vcenter.yaml, or skip the suite if unconfigured."""
+    """Return the local path to vcenter.yaml, or skip the suite if unconfigured.
+
+    Also the lane-placement backstop: the primary opt-out is the
+    collection-time :data:`_skip_when_spec_ingest_opted_out` marker on
+    every full-ingest test (skipping before any fixture — including
+    the module-scoped Postgres container — is instantiated). Every
+    full-ingest path (the ``ingested_canary`` chain plus the opt-in
+    variants) also resolves this fixture, so a future heavy test that
+    forgets the marker still skips in an opted-out lane instead of
+    re-importing the multi-minute ingest wall. The fixture-less
+    taxonomy self-check above is deliberately unaffected by either.
+    """
+    if _spec_ingest_opted_out():
+        pytest.skip(_SPEC_INGEST_OPT_OUT_REASON)
     path = resolve_vcenter_yaml()
     if path is None:
         pytest.skip(VCENTER_SPEC_REASON)
@@ -896,6 +962,7 @@ async def ingested_canary(
 # ---------------------------------------------------------------------------
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_ingest_meets_operation_count(
     ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
@@ -942,6 +1009,7 @@ async def test_canary_ingest_meets_operation_count(
         )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_every_row_tagged_with_spec_source(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1013,6 +1081,7 @@ async def test_canary_every_row_tagged_with_spec_source(
         )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_grouping_produces_expected_group_count(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1051,6 +1120,7 @@ async def test_canary_grouping_produces_expected_group_count(
         )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_connector_is_enabled_after_review(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1070,6 +1140,7 @@ async def test_canary_connector_is_enabled_after_review(
     )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_edit_group_writes_audit_row(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1095,6 +1166,7 @@ async def test_canary_edit_group_writes_audit_row(
     assert "when_to_use" in payload.get("fields_updated", []), payload
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_list_operation_groups_returns_enabled_groups(
     ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
@@ -1139,6 +1211,7 @@ async def test_canary_list_operation_groups_returns_enabled_groups(
         )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_list_ingested_connectors_surfaces_vmware_rest(
     ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
@@ -1236,6 +1309,7 @@ def _benchmark_params() -> list[Any]:
     return params
 
 
+@_skip_when_spec_ingest_opted_out
 @pytest.mark.parametrize(
     ("query", "expected_op_id"),
     _benchmark_params(),
@@ -1282,6 +1356,7 @@ async def test_canary_govc_parity_benchmark(
     )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_search_operations_respects_connector_scope(
     ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
@@ -1307,6 +1382,7 @@ async def test_canary_search_operations_respects_connector_scope(
 # ---------------------------------------------------------------------------
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_two_spec_connector_registered_flag(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1335,6 +1411,7 @@ async def test_canary_two_spec_connector_registered_flag(
     )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_two_spec_grouping_unassigned_ratio(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1374,6 +1451,7 @@ async def test_canary_two_spec_grouping_unassigned_ratio(
     )
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_vi_json_op_dispatch_path_substitution(
     ingested_canary: _CanaryIngestState,
 ) -> None:
@@ -1452,6 +1530,7 @@ async def test_canary_vi_json_op_dispatch_path_substitution(
 # ---------------------------------------------------------------------------
 
 
+@_skip_when_spec_ingest_opted_out
 async def test_canary_llm_call_count_matches_documented_contract(
     ingested_canary: _CanaryIngestState,
 ) -> None:

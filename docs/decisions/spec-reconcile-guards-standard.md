@@ -77,6 +77,39 @@ webservice markdown) still use `require_shelf_spec` for resolution and
 skip semantics; the lane supplies its own served-set extraction and
 feeds `assert_op_ids_served` as usual.
 
+## Lane placement (CI budget)
+
+Two cost classes of shelf-backed test, two CI homes:
+
+- **Reconcile lanes** (this standard's subject, every #2981-#2993
+  lane): parse the pinned spec, set-compare op_ids. No DB, no
+  embeddings, no containers — **seconds** when armed. They live in the
+  required unit sweep (`python-lint-test`) like any unit test, and
+  need **no gating of any kind**.
+- **Full-ingest canaries** (today: the G0.7 vSphere canary,
+  `tests/acceptance/test_g07_vsphere_canary.py`): drive the whole
+  ingest pipeline — Postgres testcontainers, real embeddings, the
+  grouping pass — over the full pinned corpus, per test. **Minutes per
+  test** when armed. They run in exactly one armed lane:
+  `python-integration` (its pytest step selects the canary module
+  alongside `tests/integration/`), and the unit sweep opts out via
+  `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored by a collection-time
+  `skipif` marker on every full-ingest test (so an opted-out lane
+  never even spins the module-scoped Postgres container), with a
+  backstop re-check in the canary's `vcenter_spec_path` fixture.
+  Everywhere the var is unset (local dev, the integration lane) the
+  armed-shelf contract is unchanged.
+
+Why this split is load-bearing: the day the shelf was first armed
+(2026-08-17, #2949/#2966), the canary's full ingest ran inside the
+unit sweep for the first time and took the job from a 478 s pytest
+wall past its 25-min cap — four consecutive timeout kills, the last on
+a quiet cluster with pytest progressing. `ci.yml`'s perf-budget
+discipline (#898/#793/#827) applies: measure and relocate the slow
+path; never just raise `timeout-minutes` or `budget_s`. A future lane
+that performs a full ingest (rather than a parse-only reconcile)
+inherits the canary's placement; a reconcile lane never needs it.
+
 ## Extension mechanics (per new vendor lane)
 
 Each lane task (#2981-#2993) ships all of:

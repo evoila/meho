@@ -131,35 +131,46 @@ actually serve — likely their vi-json / vim analogues) must merge first.
 1. **Complete the Signoff of record below** (or link the attestation
    comment from #2949). Provisioning the secret is the act that arms the
    fetch; it must not precede the signoff.
-1a. **Confirm the "Known findings" above are fixed on `main`** (the
+2. **Confirm the "Known findings" above are fixed on `main`** (the
    follow-up task re-pointing the affected `_SUB_OPS_*` / `_OP_LIST_DVS`
-   op_ids). Verify locally:
-   `MEHO_CONSUMER_DOCS_ROOT=<shelf>/docs uv run pytest
-   tests/acceptance/test_portgroup_audit_op_id_reconcile.py
-   tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
-   must be green before the secret exists, or every PR's required checks
-   go red the moment it does.
-2. **Mint the credential** — recommended shape: a **fine-grained PAT**
+   op_ids), then pre-verify the **full** five-lane set locally against
+   the shelf, on a machine with Docker available (the g07 canary's
+   dispatch tests need containers — a sandbox without Docker
+   under-verifies exactly the subset CI will run):
+
+   ```bash
+   cd backend && MEHO_CONSUMER_DOCS_ROOT=<shelf>/docs uv run pytest \
+     tests/acceptance/test_g07_vsphere_canary.py \
+     tests/integration/test_operations_ingest_vcenter.py \
+     tests/integration/test_operations_ingest_vi_json.py \
+     tests/acceptance/test_portgroup_audit_op_id_reconcile.py \
+     tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py
+   ```
+
+   This must be green before the secret exists — both reconcile lanes
+   sit inside required merge-gate jobs, so every PR's checks go red the
+   moment the secret lands otherwise.
+3. **Mint the credential** — recommended shape: a **fine-grained PAT**
    - Resource owner: `evoila-bosnia`
    - Repository access: *Only select repositories* →
      `evoila-bosnia/claude-rdc-hetzner-dc`
    - Permissions: **Contents: Read-only** (Metadata: Read is implied)
    - Expiration: per org policy; record the rotation date. On rotation,
-     repeat step 3 with the new token — no workflow change needed.
+     repeat step 4 with the new token — no workflow change needed.
 
    Alternative shape: a read-only **deploy key** on the shelf repo. That
    requires a one-line workflow change (swap `token:` for `ssh-key:` in the
    two "Checkout vendor vCenter spec-shelf" steps of `ci.yml`) and SSH
    egress from the runner pool; the PAT/HTTPS shape is the shipped default
    because the runners' 443 egress is already proven.
-3. **Set the secret** on the public repo (interactive paste — keep the token
+4. **Set the secret** on the public repo (interactive paste — keep the token
    out of shell history):
 
    ```bash
    gh secret set SPEC_SHELF_TOKEN --repo evoila/meho
    ```
 
-4. **Verify activation.** Re-run CI on any open same-repo PR (or push a
+5. **Verify activation.** Re-run CI on any open same-repo PR (or push a
    no-op branch). Expect:
    - the "Checkout vendor vCenter spec-shelf" and "Verify spec-shelf
      provisioned the pinned vCenter specs" steps run (not skipped) and pass
@@ -169,7 +180,7 @@ actually serve — likely their vi-json / vim analogues) must merge first.
      `"vCenter OpenAPI spec not configured"` (and the
      `test_operations_ingest_vcenter.py` variant `"vcenter.yaml
      unavailable"`) no longer appears in the pytest output.
-5. **Do not mirror the secret into the Dependabot secret store.** Dependabot
+6. **Do not mirror the secret into the Dependabot secret store.** Dependabot
    PRs gain nothing from the spec lanes; least exposure wins.
 
 ## Signoff of record

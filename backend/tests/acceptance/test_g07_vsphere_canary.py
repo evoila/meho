@@ -713,6 +713,30 @@ def vi_json_spec_path() -> Path | None:
     return resolve_vi_json_yaml()
 
 
+def _inline_spec_source(spec_path: Path) -> SpecSource:
+    """Wrap a resolved local spec file as an inline-content :class:`SpecSource`.
+
+    The backend ingest path is https-only by design (G0.16-T8 #95 SSRF
+    guard): a content-less ``SpecSource`` is *fetched*, and bare local
+    paths are rejected at the scheme check before any read. Real
+    operators go through the CLI, which reads ``docs:`` / ``file://``
+    sources client-side and uploads the bytes via ``content`` (#1572).
+    The canary drives :class:`IngestionPipelineService` directly -- no
+    CLI in the loop -- so it performs the same client-side read here,
+    exactly like the integration lane
+    (``tests/integration/test_operations_ingest_vcenter.py``) has since
+    the guard landed. The bare path stays the ``uri`` audit label: rows
+    are tagged ``spec:<absolute path>`` and
+    :func:`test_canary_every_row_tagged_with_spec_source` keys off the
+    basename.
+
+    This was latent until #2949/#2966 armed the CI spec shelf
+    (2026-08-17): with no shelf provisioned the spec fixtures always
+    skipped, so a content-less source never reached the scheme guard.
+    """
+    return SpecSource(uri=str(spec_path), content=spec_path.read_text(encoding="utf-8"))
+
+
 class _CanaryIngestState:
     """Bundle of per-spec :class:`IngestionPipelineResult`s + the stub LLM client.
 
@@ -787,7 +811,7 @@ async def ingested_canary(
         product=_CANARY_PRODUCT,
         version=_CANARY_VERSION,
         impl_id=_CANARY_IMPL_ID,
-        specs=[SpecSource(uri=str(vcenter_spec_path))],
+        specs=[_inline_spec_source(vcenter_spec_path)],
         tenant_id=_CANARY_TENANT_ID,
     )
 
@@ -804,7 +828,7 @@ async def ingested_canary(
             product=_CANARY_PRODUCT,
             version=_CANARY_VERSION,
             impl_id=_CANARY_IMPL_ID,
-            specs=[SpecSource(uri=str(vi_json_spec_path))],
+            specs=[_inline_spec_source(vi_json_spec_path)],
             tenant_id=_CANARY_TENANT_ID,
         )
 
@@ -1742,7 +1766,7 @@ async def real_llm_ingested_canary(
         product=_CANARY_PRODUCT,
         version=_CANARY_VERSION,
         impl_id=_CANARY_IMPL_ID,
-        specs=[SpecSource(uri=str(vcenter_spec_path))],
+        specs=[_inline_spec_source(vcenter_spec_path)],
         tenant_id=_CANARY_TENANT_ID,
     )
 
@@ -1903,7 +1927,7 @@ async def vcsim_ingested_canary(
         product=_CANARY_PRODUCT,
         version=_CANARY_VERSION,
         impl_id=_CANARY_IMPL_ID,
-        specs=[SpecSource(uri=str(vcenter_spec_path))],
+        specs=[_inline_spec_source(vcenter_spec_path)],
         base_url=base_url,
         tenant_id=_CANARY_TENANT_ID,
     )

@@ -2447,23 +2447,60 @@ def test_create_target_honours_explicit_secret_ref(client: TestClient) -> None:
     assert response.json()["secret_ref"] != f"tenants/{DEFAULT_TENANT_ID}/custom"
 
 
-@pytest.mark.asyncio
-async def test_update_target_homes_unconfigured_secret_ref(client: TestClient) -> None:
-    """A PATCH not touching ``secret_ref`` on a null-ref row derives the per-tenant path."""
+def test_create_target_persists_explicit_null_secret_ref(client: TestClient) -> None:
+    """#2872: POST with an explicit ``{"secret_ref": null}`` persists NULL, not the default.
+
+    The #2234 auth-optional dispatch branch — an unauthenticated,
+    network-scoped target such as a port-forwarded Prometheus — must be
+    registrable in a single request. ``model_fields_set`` distinguishes an
+    *omitted* ``secret_ref`` (derive ``tenants/<T>/<name>``, pinned by
+    ``test_create_target_derives_per_tenant_secret_ref``) from an explicit
+    null (persist NULL). A null-ref row then dispatches with no credential
+    load — pinned at the connector layer by ``test_connectors_prometheus``
+    — instead of failing with ``connector_vault_forbidden``.
+    """
     key = make_rsa_keypair("kid-A")
-    # Row created out-of-band with no secret_ref (e.g. pre-#1723).
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "prom-noauth",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": None,
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    # Explicit null persisted verbatim — NOT re-derived to the per-tenant default.
+    assert response.json()["secret_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_target_leaves_unconfigured_secret_ref_null(client: TestClient) -> None:
+    """#2872: a PATCH not touching ``secret_ref`` on a null-ref row leaves it NULL.
+
+    Inverts the pre-#2872 ``_homes_unconfigured_`` contract. The #1723
+    PATCH auto-home branch was removed, so a deliberately-cleared
+    ``secret_ref`` (the #2234 auth-optional branch) survives an unrelated
+    PATCH — here one touching only ``verify_tls``, the reporter's exact
+    repro — instead of being silently re-derived to ``tenants/<T>/<name>``.
+    """
+    key = make_rsa_keypair("kid-A")
+    # Null-ref row: an operator's auth-optional target (or a pre-#1723 legacy row).
     await _insert_target(name="legacy-target", product="ssh", host="10.0.0.9", secret_ref=None)
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.patch(
             "/api/v1/targets/legacy-target",
-            json={"host": "moved.host"},
+            json={"verify_tls": False},
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 200
     data = response.json()
-    assert data["host"] == "moved.host"
-    assert data["secret_ref"] == f"tenants/{DEFAULT_TENANT_ID}/legacy-target"
+    assert data["verify_tls"] is False
+    assert data["secret_ref"] is None
 
 
 @pytest.mark.asyncio

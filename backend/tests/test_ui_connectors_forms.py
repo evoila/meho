@@ -434,6 +434,42 @@ def test_create_submit_persists_target_and_redirects_to_list() -> None:
     assert row.notes == "created via UI"
 
 
+def test_create_submit_blank_secret_ref_derives_default() -> None:
+    """#2872: a blank ``secret_ref`` field derives the #1723 per-tenant default.
+
+    The create form field is ``Form(default=None)``; ``submit_create`` must
+    *omit* ``secret_ref`` from the ``TargetCreate`` (not pass an explicit
+    ``None``) so ``create_target`` derives ``tenants/<tenant_id>/<name>``.
+    Were it passed explicitly, ``model_fields_set`` would flag it and the
+    row would persist ``NULL`` (the #2234 auth-optional shape) — the wrong
+    result for a blank create form.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.post(
+            "/ui/connectors/create",
+            headers=_form_headers(csrf),
+            data={
+                "name": "blank-secret",
+                "product": _PRODUCT,
+                "host": "blank.example.test",
+                "auth_model": "shared_service_account",
+            },
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+
+    row = _load_target(_TENANT_A, "blank-secret")
+    assert row is not None
+    assert row.secret_ref == f"tenants/{_TENANT_A}/blank-secret"
+
+
 def test_create_submit_rejects_port_out_of_range_with_field_error() -> None:
     """A port outside 1-65535 re-renders the form with a 422 + field error."""
     _seed_tenant(_TENANT_A, "tenant-a")

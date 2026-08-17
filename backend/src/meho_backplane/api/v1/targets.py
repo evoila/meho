@@ -1211,6 +1211,28 @@ async def probe_target(
     return fp
 
 
+def _resolve_create_secret_ref(body: TargetCreate, operator: Operator) -> str | None:
+    """Resolve the ``secret_ref`` to persist for a new target (#1723 / #2872).
+
+    Distinguishes an *omitted* ``secret_ref`` (derive the #1723 per-tenant
+    default ``tenants/<tenant_id>/<name>``) from an explicit
+    ``{"secret_ref": null}`` (persist ``NULL`` so the #2234 auth-optional
+    dispatch branch — an unauthenticated, network-scoped target such as a
+    port-forwarded Prometheus — is reachable in one request). The two
+    collapse to ``None`` under ``model_dump``; ``model_fields_set`` is the
+    only signal that separates them (the established in-repo pattern:
+    ``conventions/_internal.py``, ``memory/ttl.py``, ``mcp/tools/memory.py``).
+    A non-null explicit ref is honoured only inside the operator's tenant
+    subtree (#2091, see :func:`_enforce_secret_ref_tenant_scope`). Post-fix,
+    ``secret_ref IS NULL`` unambiguously means "operator chose no credential".
+    """
+    if "secret_ref" not in body.model_fields_set:
+        return tenant_secret_ref(operator.tenant_id, body.name)
+    if body.secret_ref is not None:
+        _enforce_secret_ref_tenant_scope(body.secret_ref, operator, body.name)
+    return body.secret_ref
+
+
 @router.post("", response_model=Target, status_code=201)
 async def create_target(
     body: TargetCreate,
@@ -1247,6 +1269,11 @@ async def create_target(
     ``permission denied``. Omitting ``secret_ref`` derives the
     per-tenant default (#1723) and always passes; no-op when the guard
     is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
+
+    #2872. ``secret_ref`` resolution (omitted → derive the #1723 default;
+    explicit ``{"secret_ref": null}`` → persist ``NULL`` for the #2234
+    auth-optional branch) is delegated to
+    :func:`_resolve_create_secret_ref`.
     """
     # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
     # token against the registered set so a value copied straight out of
@@ -1264,14 +1291,10 @@ async def create_target(
     # Persist the validated product token so the stored row matches the
     # registry / resolver spelling (G0.18-T2 #1355).
     create_fields["product"] = product
-    # #1723: default a fresh target's secret onto the per-tenant shared
-    # path ``tenants/<tenant_id>/<name>``. An explicit ``secret_ref`` is
-    # honoured verbatim — but only inside the operator's tenant subtree
-    # (#2091, see :func:`_enforce_secret_ref_tenant_scope`).
-    if create_fields.get("secret_ref") is None:
-        create_fields["secret_ref"] = tenant_secret_ref(operator.tenant_id, body.name)
-    else:
-        _enforce_secret_ref_tenant_scope(create_fields["secret_ref"], operator, body.name)
+    # #1723 / #2872: an omitted ``secret_ref`` derives the per-tenant
+    # default; an explicit ``{"secret_ref": null}`` persists verbatim. See
+    # :func:`_resolve_create_secret_ref`.
+    create_fields["secret_ref"] = _resolve_create_secret_ref(body, operator)
     t = TargetORM(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -1401,18 +1424,16 @@ async def update_target(
     _validate_update_body_fields(updates, t, operator)
     for k, v in updates.items():
         setattr(t, k, v)
-    # #1723: home an as-yet-unconfigured target onto the per-tenant shared
-    # path. A PATCH that does not touch ``secret_ref`` (the field is absent
-    # from the request body, so it is not in ``updates``) on a row whose
-    # ``secret_ref`` is still unset derives ``tenants/<tenant_id>/<name>``
-    # so the canonical layout is filled in without the operator typing it.
-    # A PATCH that *sends* ``secret_ref`` — including an explicit
-    # ``{"secret_ref": null}`` to clear it — is honoured verbatim and is
-    # never overwritten here (it is in ``updates`` and the branch is
-    # skipped); silent re-homing of an already-configured ref is the
-    # operator-driven migration runbook's job, not the route's.
-    if "secret_ref" not in updates and t.secret_ref is None:
-        t.secret_ref = tenant_secret_ref(operator.tenant_id, t.name)
+    # #2872: PATCH no longer re-homes an unset ``secret_ref``. The #1723
+    # auto-home branch that used to derive ``tenants/<tenant_id>/<name>``
+    # here — on any PATCH omitting ``secret_ref`` over a NULL row — was
+    # removed: post-fix a DB NULL is unambiguous, meaning the operator
+    # deliberately chose no credential (created with an explicit null, or
+    # cleared it later) to reach the #2234 auth-optional dispatch branch. An
+    # unrelated PATCH (e.g. one touching only ``verify_tls``) must not
+    # resurrect a credential path. The per-tenant default is derived once,
+    # at create time, and only when ``secret_ref`` is omitted (see
+    # :func:`create_target`).
     t.updated_at = datetime.now(UTC)
     _log.info(
         "target_updated",

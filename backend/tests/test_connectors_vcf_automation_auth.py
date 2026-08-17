@@ -1343,3 +1343,109 @@ async def test_fingerprint_probes_present_fqdn_host_and_sni_while_dialing_ip() -
         assert host_header == _NAT_FQDN
         assert sni == _NAT_FQDN
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Same vhost FQDN, two NAT-alias IPs -- disambiguation (#2863)
+#
+# The bug's headline scenario: several lab appliances publish the *same*
+# vhost FQDN yet are reachable only through distinct per-site NAT-alias
+# IPs. Each target must dial its own ``host`` while presenting the shared
+# vhost, and the two must not share a pooled client or a cached token --
+# the client pool and both token caches key on ``target_cache_key``
+# (``(tenant_id, id)``), which the shared FQDN never enters.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_fqdn_two_alias_ips_dial_own_host_and_stay_isolated() -> None:
+    """Two targets sharing one vhost FQDN but on distinct IPs never cross-contaminate.
+
+    Seeds two same-tenant targets with an identical ``fqdn`` (the shared
+    vhost) but different reachable ``host`` IPs, drives a provider-plane
+    data GET against each, and asserts: (a) each request dials its OWN IP
+    while presenting the shared vhost as ``Host:`` + TLS SNI, (b) the two
+    targets get distinct pooled ``AsyncClient`` identities each bound to
+    its own dialled IP, and (c) the provider token cache holds one
+    independent entry per target. The mechanism (pool + token caches keyed
+    on ``target_cache_key``, not on the FQDN) is already in place, so this
+    passes with no production change -- it pins the bug's headline
+    scenario against regression.
+    """
+    connector = _make_connector()
+    target_a = _StubTarget(
+        name="vcfa-site-a",
+        host="10.0.0.5",
+        port=443,
+        secret_ref="vcfa/site-a",
+        fqdn=_NAT_FQDN,
+    )
+    target_b = _StubTarget(
+        name="vcfa-site-b",
+        host="10.0.0.6",
+        port=443,
+        secret_ref="vcfa/site-b",
+        fqdn=_NAT_FQDN,
+    )
+    dialed: dict[str, dict[str, Any]] = {}
+
+    def _responder_a(request: httpx.Request) -> httpx.Response:
+        dialed["a"] = {
+            "url_host": request.url.host,
+            "host_header": request.headers.get("host"),
+            "sni": request.extensions.get("sni_hostname"),
+        }
+        return httpx.Response(200, json={"values": ["a"]})
+
+    def _responder_b(request: httpx.Request) -> httpx.Response:
+        dialed["b"] = {
+            "url_host": request.url.host,
+            "host_header": request.headers.get("host"),
+            "sni": request.extensions.get("sni_hostname"),
+        }
+        return httpx.Response(200, json={"values": ["b"]})
+
+    # Separate respx routers, one per dialled IP: a request that dialled the
+    # wrong host would miss its router and fail, so a green run proves each
+    # target reached its own ``host``.
+    async with respx.mock(base_url="https://10.0.0.5") as mock_a:
+        mock_a.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt-a"}
+        )
+        mock_a.get("/cloudapi/1.0.0/orgs").mock(side_effect=_responder_a)
+        result_a = await connector._request_json(
+            target_a, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
+
+    async with respx.mock(base_url="https://10.0.0.6") as mock_b:
+        mock_b.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt-b"}
+        )
+        mock_b.get("/cloudapi/1.0.0/orgs").mock(side_effect=_responder_b)
+        result_b = await connector._request_json(
+            target_b, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
+
+    # (a) Each request dialled its OWN IP while presenting the shared vhost.
+    assert result_a == {"values": ["a"]}
+    assert result_b == {"values": ["b"]}
+    assert dialed["a"] == {"url_host": "10.0.0.5", "host_header": _NAT_FQDN, "sni": _NAT_FQDN}
+    assert dialed["b"] == {"url_host": "10.0.0.6", "host_header": _NAT_FQDN, "sni": _NAT_FQDN}
+
+    # (b) Distinct pooled AsyncClient identities -- the shared FQDN does not
+    # enter the pool key, so the two targets get two clients, each bound to
+    # its own dialled IP.
+    pooled = list(connector._clients.values())
+    assert len(pooled) == 2
+    assert pooled[0] is not pooled[1]
+    assert {client.base_url.host for client in pooled} == {"10.0.0.5", "10.0.0.6"}
+
+    # (c) Independent per-plane token caches -- one entry per target keyed on
+    # ``target_cache_key``, no cross-contamination; the tenant plane, never
+    # exercised by these ``/cloudapi`` calls, stays empty.
+    assert connector._provider_tokens == {
+        target_cache_key(target_a): "p-jwt-a",
+        target_cache_key(target_b): "p-jwt-b",
+    }
+    assert connector._tenant_tokens == {}
+    await connector.aclose()

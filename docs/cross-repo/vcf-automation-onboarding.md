@@ -94,14 +94,14 @@ working set as 11 curated ops, distributed across both planes:
 
 | Plane | Group | CLI verb | `op_id` |
 | --- | --- | --- | --- |
-| provider | `provider-site` | `meho vcf-automation about --plane provider` | `GET:/cloudapi/1.0.0/site` |
-| provider | `provider-orgs` | `meho vcf-automation org list` | `GET:/cloudapi/1.0.0/orgs` |
+| provider | `provider-site` | `meho vcf-automation about --plane provider` | `vcfa.provider.health` |
+| provider | `provider-orgs` | `meho vcf-automation org list` | `vcfa.provider.org.list` |
 | provider | `provider-orgs` | `meho vcf-automation org get <id>` | `GET:/cloudapi/1.0.0/orgs/{id}` |
-| provider | `provider-regions` | `meho vcf-automation region list` | `GET:/cloudapi/1.0.0/regions` |
+| provider | `provider-regions` | `meho vcf-automation region list` | `vcfa.provider.region.list` |
 | provider | `provider-regions` | `meho vcf-automation region get <id>` | `GET:/cloudapi/1.0.0/regions/{id}` |
 | provider | `provider-users` | `meho vcf-automation user list` | `GET:/cloudapi/1.0.0/users` |
-| tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `GET:/iaas/api/about` |
-| tenant | `tenant-projects` | `meho vcf-automation project list` | `GET:/iaas/api/projects` |
+| tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `vcfa.tenant.about` |
+| tenant | `tenant-projects` | `meho vcf-automation project list` | `vcfa.tenant.project.list` |
 | tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `vcfa.tenant.deployment.list` |
 | tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `GET:/iaas/api/deployments/{id}` |
 | tenant | `tenant-blueprints` | `meho vcf-automation blueprint list` | `GET:/iaas/api/blueprints` |
@@ -242,10 +242,14 @@ meho vcf-automation operation search "deployment status" --group tenant-deployme
 Dual-plane verb. `--plane` is **required** because the resource name
 "about" exists on both planes with different shapes:
 
-- **`--plane provider`** dispatches `GET:/cloudapi/1.0.0/site` and
-  renders site identity (`id`, `name`, `restName`, `productVersion`).
-- **`--plane tenant`** dispatches `GET:/iaas/api/about` and renders
-  IaaS API self-describe (`latestApiVersion`, `supportedApis[]`).
+- **`--plane provider`** dispatches `vcfa.provider.health` (the typed
+  read; repointed off the ingested `GET:/cloudapi/1.0.0/site` op_id by
+  #2355) and renders site identity (`id`, `name`, `restName`,
+  `productVersion`).
+- **`--plane tenant`** dispatches `vcfa.tenant.about` (the typed read;
+  repointed off the ingested `GET:/iaas/api/about` op_id by #2355) and
+  renders IaaS API self-describe (`latestApiVersion`,
+  `supportedApis[]`).
 
 Omitting `--plane` fails fast with an explicit message — no silent
 default.

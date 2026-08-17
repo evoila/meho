@@ -3,8 +3,15 @@
 
 // Package targets hosts the cobra commands under `meho targets ...`
 // for Initiative #224's targets registry (G0.3-T5 / Task #256 +
-// G0.3-T6 / Task #257). v0.2 ships three operator-facing read verbs
-// plus a bulk-import migration tool:
+// G0.3-T6 / Task #257). v0.2 ships a single-target `add` write verb,
+// three operator-facing read verbs, and a bulk-import migration tool:
+//
+//   - `meho targets add <name> --product P --host H [optional flags]`
+//     (alias `create`; Task #2862) — POST /api/v1/targets for one
+//     target. The single-target counterpart to `import`: reuses the
+//     same authed POST plumbing, sends only the flags the operator
+//     set (so server defaults apply), renders the created row like
+//     `describe`, and keeps all validation server-side.
 //
 //   - `meho targets list [--product P] [--json]` —
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
@@ -53,9 +60,11 @@
 // token meho login wrote — same pattern as `meho operation` and
 // `meho retrieval eval`.
 //
-// Write verbs (`create` / `update` / `delete`) are out of scope for
-// v0.2 per the issue body — operators use `import --update` for
-// bulk reconciliation.
+// Single-target create ships as `meho targets add <name>` (alias
+// `create`; Task #2862) — see add.go, which reuses import.go's
+// `doAuthedRequest` POST plumbing. The remaining write verbs
+// (`update` / `delete`) stay out of scope; operators use
+// `import --update` for bulk reconciliation.
 package targets
 
 import (
@@ -82,10 +91,11 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (list / describe / probe / import / discover)",
-		Long:         "List, describe, probe, bulk-import, and discover candidate targets in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (add / list / describe / probe / import / discover)",
+		Long:         "Add, list, describe, probe, bulk-import, and discover targets in the operator's tenant.",
 		SilenceUsage: true,
 	}
+	cmd.AddCommand(newAddCmd())
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())

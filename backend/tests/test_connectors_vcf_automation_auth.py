@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -51,6 +52,7 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationConnector,
     VcfAutomationTargetLike,
 )
+from meho_backplane.connectors.vcf_automation._routing import vhost_header
 from meho_backplane.settings import get_settings
 
 
@@ -224,8 +226,15 @@ def test_default_loader_fails_closed_for_system_initiated_call() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_base_url_uses_fqdn_when_set() -> None:
-    """``target.fqdn`` overrides ``target.host`` in the base URL."""
+def test_base_url_dials_host_even_when_fqdn_set() -> None:
+    """The base URL is always the dialled ``host``; ``fqdn`` is per-request (#2863).
+
+    Pre-#2863 the FQDN was baked into ``base_url`` so the pooled transport
+    dialled it -- unreachable for an appliance addressable only by a
+    NAT-alias IP, and unable to disambiguate several appliances sharing one
+    vhost FQDN. Now the base URL is the reachable host and the FQDN rides
+    the ``Host:`` header + TLS SNI per request.
+    """
     target = _StubTarget(
         name="vcfa-vhost",
         host="10.0.0.5",
@@ -234,7 +243,20 @@ def test_base_url_uses_fqdn_when_set() -> None:
         fqdn="vcfa.canonical.invalid",
     )
     connector = _make_connector()
-    assert connector._base_url(target) == "https://vcfa.canonical.invalid"
+    assert connector._base_url(target) == "https://10.0.0.5"
+
+
+def test_base_url_dials_host_with_non_default_port_when_fqdn_set() -> None:
+    """A non-443 port stays on the dialled host authority even with ``fqdn`` set."""
+    target = _StubTarget(
+        name="vcfa-vhost-port",
+        host="10.0.0.5",
+        port=8443,
+        secret_ref="vcfa/vhost-port",
+        fqdn="vcfa.canonical.invalid",
+    )
+    connector = _make_connector()
+    assert connector._base_url(target) == "https://10.0.0.5:8443"
 
 
 def test_base_url_uses_host_when_host_is_fqdn() -> None:
@@ -1128,4 +1150,196 @@ async def test_tenant_login_threads_sni_extension() -> None:
 
     assert login.called
     assert login.calls[0].request.extensions["sni_hostname"] == "vcfa-tenant.corp.example"
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Connect-by-IP / route-by-vhost (#2863)
+#
+# The connector dials ``target.host`` (a reachable NAT-alias IP) and presents
+# ``target.fqdn`` per-request as the ``Host:`` header + TLS SNI. Nothing
+# fqdn-derived is baked into the pooled client. These pin the four request
+# paths: the data path, both plane logins, and both fingerprint probes.
+# ---------------------------------------------------------------------------
+
+_NAT_FQDN = "auto-a.site-a.vcf.lab"
+
+
+def _nat_target(name: str, secret_ref: str, **overrides: Any) -> _StubTarget:
+    """A target reached only by a private NAT-alias IP with a vhost FQDN set."""
+    return _StubTarget(
+        name=name,
+        host="10.0.0.5",
+        port=443,
+        secret_ref=secret_ref,
+        fqdn=_NAT_FQDN,
+        **overrides,
+    )
+
+
+def test_vhost_header_renders_host_for_fqdn() -> None:
+    """``vhost_header`` returns the ``Host:`` mapping (port appended only when non-default)."""
+    assert vhost_header(_NAT_FQDN) == {"Host": _NAT_FQDN}
+    assert vhost_header(_NAT_FQDN, 443) == {"Host": _NAT_FQDN}
+    assert vhost_header(_NAT_FQDN, 8443) == {"Host": f"{_NAT_FQDN}:8443"}
+    assert vhost_header(None) == {}
+    assert vhost_header("") == {}
+
+
+def test_request_extensions_prefers_tls_server_name_over_fqdn() -> None:
+    """SNI precedence: an explicit ``tls_server_name`` wins over ``fqdn``."""
+    connector = _make_connector()
+    target = _nat_target("vcfa-sni-prec", "vcfa/sni-prec", tls_server_name="sni.corp.example")
+    assert connector._request_extensions(target) == {"sni_hostname": "sni.corp.example"}
+
+
+def test_request_extensions_falls_back_to_fqdn_for_sni() -> None:
+    """SNI precedence: ``fqdn`` drives SNI when no ``tls_server_name`` is set."""
+    connector = _make_connector()
+    target = _nat_target("vcfa-sni-fqdn", "vcfa/sni-fqdn")
+    assert connector._request_extensions(target) == {"sni_hostname": _NAT_FQDN}
+
+
+def test_request_extensions_empty_when_neither_set() -> None:
+    """No override → empty extensions; httpcore derives SNI from the dialled host."""
+    connector = _make_connector()
+    assert connector._request_extensions(_TARGET_A) == {}
+
+
+@pytest.mark.asyncio
+async def test_data_path_presents_fqdn_as_host_and_sni_while_dialing_ip() -> None:
+    """A data-path GET dials the host IP but carries ``Host: fqdn`` + ``sni_hostname=fqdn``.
+
+    This is the load-bearing #2863 fix: pre-fix there was no target shape
+    in which the connector dialled the stored host while presenting the
+    vhost. The respx router is rooted at the IP, proving the transport now
+    dials ``target.host`` and not the FQDN.
+    """
+    connector = _make_connector()
+    target = _nat_target("vcfa-nat-data", "vcfa/nat-data")
+    captured: dict[str, Any] = {}
+
+    def _orgs_responder(request: httpx.Request) -> httpx.Response:
+        captured["url_host"] = request.url.host
+        captured["host_header"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, json={"values": []})
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
+        )
+        mock.get("/cloudapi/1.0.0/orgs").mock(side_effect=_orgs_responder)
+        result = await connector._request_json(
+            target, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
+
+    assert result == {"values": []}
+    assert captured["url_host"] == "10.0.0.5"
+    assert captured["host_header"] == _NAT_FQDN
+    assert captured["sni"] == _NAT_FQDN
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_data_path_derives_host_and_omits_sni_when_fqdn_unset() -> None:
+    """No fqdn + FQDN host: ``Host`` derives from the host, no SNI extension is set.
+
+    Byte-identical request shape to the pre-#2863 no-fqdn path — a
+    regression guard that the fix does not perturb the FQDN-host targets.
+    """
+    connector = _make_connector()
+    captured: dict[str, Any] = {}
+
+    def _orgs_responder(request: httpx.Request) -> httpx.Response:
+        captured["url_host"] = request.url.host
+        captured["host_header"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, json={"values": []})
+
+    async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
+        mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
+        )
+        mock.get("/cloudapi/1.0.0/orgs").mock(side_effect=_orgs_responder)
+        await connector._request_json(
+            _TARGET_A, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
+
+    assert captured["url_host"] == "vcfa-a.test.invalid"
+    assert captured["host_header"] == "vcfa-a.test.invalid"
+    assert captured["sni"] is None
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_login_presents_fqdn_host_and_sni_while_dialing_ip() -> None:
+    """#2863: the provider login POST dials the IP but presents ``Host: fqdn`` + SNI."""
+    connector = _make_connector()
+    target = _nat_target("vcfa-nat-plogin", "vcfa/nat-plogin")
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        login = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
+        )
+        await connector.auth_headers(target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs")
+
+    req = login.calls[0].request
+    assert req.url.host == "10.0.0.5"
+    assert req.headers.get("host") == _NAT_FQDN
+    assert req.extensions["sni_hostname"] == _NAT_FQDN
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tenant_login_presents_fqdn_host_and_sni_while_dialing_ip() -> None:
+    """#2863: the tenant login POST dials the IP but presents ``Host: fqdn`` + SNI."""
+    connector = _make_connector()
+    target = _nat_target("vcfa-nat-tlogin", "vcfa/nat-tlogin")
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        login = mock.post("/iaas/api/login").respond(200, json={"token": "t-tok"})
+        await connector.auth_headers(target, operator=_make_operator(), path="/iaas/api/projects")
+
+    req = login.calls[0].request
+    assert req.url.host == "10.0.0.5"
+    assert req.headers.get("host") == _NAT_FQDN
+    assert req.extensions["sni_hostname"] == _NAT_FQDN
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_probes_present_fqdn_host_and_sni_while_dialing_ip() -> None:
+    """#2863: both unauthenticated probes dial the IP but present ``Host: fqdn`` + SNI.
+
+    Closes the #2398 gap — the SNI seam previously reached only the two
+    login POSTs, so the probes verified against the dialled IP.
+    """
+    connector = _make_connector()
+    target = _nat_target("vcfa-nat-fp", "vcfa/nat-fp")
+    seen: list[tuple[str | None, str | None, Any]] = []
+
+    def _probe_responder(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.url.host,
+                request.headers.get("host"),
+                request.extensions.get("sni_hostname"),
+            )
+        )
+        if request.url.path == "/iaas/api/about":
+            return httpx.Response(200, json={"latestApiVersion": "9.0"})
+        return httpx.Response(200, content=b"<x/>")
+
+    async with respx.mock(base_url="https://10.0.0.5") as mock:
+        mock.get("/api/versions").mock(side_effect=_probe_responder)
+        mock.get("/iaas/api/about").mock(side_effect=_probe_responder)
+        fp = await connector.fingerprint(target)
+
+    assert fp.reachable is True
+    assert len(seen) == 2
+    for url_host, host_header, sni in seen:
+        assert url_host == "10.0.0.5"
+        assert host_header == _NAT_FQDN
+        assert sni == _NAT_FQDN
     await connector.aclose()

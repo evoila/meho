@@ -53,14 +53,17 @@ natively. The per-target TLS trust has three states, in precedence order:
 **Client pool key:** the pool is keyed on
 :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
 (``(tenant_id, id)``) **plus** :meth:`HttpConnector.extra_cache_dimensions`
-(``(verify_tls, ca_pin_digest)``), i.e.
-``(tenant_id, id, verify_tls, ca_pin_digest)``. Appending the two
-TLS-trust dimensions keeps the ``(tenant_id, id)`` tenant-isolation prefix
-intact (evoila/meho#1682/#1642) while ensuring a PATCH that flips
-``verify_tls`` **or** rotates ``tls_ca_pin`` is not served the stale
-pooled client built under the previous trust material. The pin digest is
-the empty string when unpinned, so an unpinned target's key is unchanged
-in its pin slot from the #1781 shape.
+(``(verify_tls, ca_pin_digest, base_url)``), i.e.
+``(tenant_id, id, verify_tls, ca_pin_digest, base_url)``. Appending the
+three construction-time dimensions keeps the ``(tenant_id, id)``
+tenant-isolation prefix intact (evoila/meho#1682/#1642) while ensuring a
+PATCH that flips ``verify_tls``, rotates ``tls_ca_pin``, **or** changes
+what :meth:`_base_url` resolves (``extras.scheme`` / host / port,
+evoila/meho#2873) is not served the stale pooled client built under the
+previous material. Both a client's ``verify`` context and its ``base_url``
+are baked into the ``httpx.AsyncClient`` at construction, so both must be
+in the key. The pin digest is the empty string when unpinned, so an
+unpinned target's key is unchanged in its pin slot from the #1781 shape.
 """
 
 from __future__ import annotations

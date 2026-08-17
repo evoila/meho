@@ -174,6 +174,19 @@ connector-related release-notes line.
   message naming the host and the `--fqdn` knob — there is no vhost to
   present.
 
+### Fixed — pooled HTTP client keyed on the resolved base URL so a scheme/host/port PATCH rotates the pool (#2873)
+
+- The per-target `httpx.AsyncClient` pool is now keyed on the resolved
+  `base_url` alongside the existing tenant / `verify_tls` /
+  `ca_pin_digest` slots. Previously a PATCH changing `extras.scheme`,
+  host, port, or fqdn left the pool key unchanged, so a warm pool kept
+  serving a client bound to the old URL — a target flipped to plain
+  `http` stayed wedged behind the warm `https` client
+  (`SSL: WRONG_VERSION_NUMBER`) until a process restart. The pooled
+  client now rotates on the first post-deploy dispatch instead, and an
+  invalid `extras.scheme` fails loud at key derivation rather than
+  silently serving the stale client.
+
 ### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
 
 - `meho vcf-automation deployment list` now dispatches the typed

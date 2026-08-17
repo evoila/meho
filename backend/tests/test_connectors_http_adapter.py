@@ -36,6 +36,18 @@ Per-target TLS trust (evoila/meho#1774, #1781):
   client — the stale client is never reused.
 * The ``(tenant_id, id)`` prefix is intact after the append, so same-named
   targets in different tenants still get distinct clients.
+
+Per-target base URL (evoila/meho#2873):
+
+* The resolved ``_base_url`` is a third ``extra_cache_dimensions`` slot, so a
+  PATCH changing ``extras.scheme`` — or ``host`` / ``port`` — rotates the
+  pool entry the same way a TLS-trust change does (``base_url`` is fixed at
+  client construction).
+* The lookup is polymorphic through the subclass ``_base_url`` seam: the
+  Prometheus and Loki plain-HTTP overrides rotate the key on a scheme change
+  that keying on the base ``_effective_scheme`` alone would miss.
+* An invalid ``extras.scheme`` fails loud at key derivation (``ValueError``)
+  rather than serving the stale client.
 """
 
 from __future__ import annotations
@@ -67,6 +79,8 @@ from meho_backplane.connectors.adapters.http import (
     _same_origin,
     _SameOriginRedirectClient,
 )
+from meho_backplane.connectors.loki import LokiConnector
+from meho_backplane.connectors.prometheus import PrometheusConnector
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -857,20 +871,167 @@ async def test_same_id_different_tenant_distinct_clients_with_verify_tls() -> No
 
 
 def test_extra_cache_dimensions_defaults_to_verify_tls_true_unpinned() -> None:
-    """A target missing verify_tls/tls_ca_pin defaults to ``(True, "")``.
+    """A target missing verify_tls/tls_ca_pin defaults to ``(True, "", base_url)``.
 
     Guards the ``getattr`` fallbacks so a duck-typed double or a
     pre-migration row defaults to verification on and no pin — never
     silently insecure, never a spurious pin. The pin slot is the empty
-    string when unpinned, so the key matches the pre-#1784 shape in its
-    first two extra slots plus a trailing ``""``.
+    string when unpinned; the trailing slot is the resolved ``_base_url``
+    (evoila/meho#2873) — ``https://h`` here: no ``extras``, so the default
+    ``https`` scheme, and port 443 is the scheme default so it is omitted.
     """
     conn = _ConcreteHttpConnector()
     without_attr = types.SimpleNamespace(
         name="legacy", host="h", port=443, id="i", tenant_id="t", auth_model="impersonation"
     )
-    assert conn.extra_cache_dimensions(without_attr) == (True, "")
-    assert conn._client_cache_key(without_attr) == ("t", "i", "True", "")
+    assert conn.extra_cache_dimensions(without_attr) == (True, "", "https://h")
+    assert conn._client_cache_key(without_attr) == ("t", "i", "True", "", "https://h")
+
+
+@pytest.mark.asyncio
+async def test_scheme_change_yields_distinct_client_not_served_stale() -> None:
+    """A PATCH to ``extras.scheme`` rotates the pool entry (evoila/meho#2873).
+
+    ``base_url`` is baked into the client at construction, so a warm pool
+    built for the ``https`` default must not keep serving that client after
+    a PATCH sets ``extras.scheme=http`` — the reported failure was a
+    plain-HTTP target wedged behind a stale ``https`` client
+    (``SSL: WRONG_VERSION_NUMBER``) forever. Same identity (tenant_id, id,
+    host), different resolved scheme → distinct keys, distinct clients,
+    distinct base_urls.
+    """
+    conn = _ConcreteHttpConnector()
+    # Same host and port on both — only the resolved scheme differs, so the
+    # key rotation is attributable to the scheme alone.
+    https = _make_target(
+        name="t", host="h.example.com", port=8080, target_id="same-id", tenant_id="same-tenant"
+    )
+    http = _make_target(
+        name="t",
+        host="h.example.com",
+        port=8080,
+        target_id="same-id",
+        tenant_id="same-tenant",
+        extras={"scheme": "http"},
+    )
+
+    client_https = await conn._http_client(https)
+    client_http = await conn._http_client(http)
+
+    assert client_https is not client_http
+    assert str(client_https.base_url) == "https://h.example.com:8080"
+    assert str(client_http.base_url) == "http://h.example.com:8080"
+    key_https = conn._client_cache_key(https)
+    key_http = conn._client_cache_key(http)
+    assert key_https != key_http
+    # The (tenant_id, id) tenant-isolation prefix is untouched by the append.
+    assert key_https[:2] == key_http[:2] == ("same-tenant", "same-id")
+    # Re-fetching the https target returns the original https client, never
+    # the http one minted after the scheme PATCH.
+    assert await conn._http_client(https) is client_https
+    await conn.aclose()
+
+
+def test_host_or_port_change_rotates_pool_key() -> None:
+    """Host/port changes rotate the pool key too — the wider #2873 staleness.
+
+    ``base_url`` folds in ``host`` and ``port`` as well as scheme, so a PATCH
+    moving a target to a new host (or a non-default port) is not served the
+    client bound to the old origin. Same identity (tenant_id, id), different
+    host — and same identity + host, different port — both yield distinct
+    keys.
+    """
+    conn = _ConcreteHttpConnector()
+    host_a = _make_target(host="a.example.com", target_id="id", tenant_id="ten")
+    host_b = _make_target(host="b.example.com", target_id="id", tenant_id="ten")
+    assert conn._client_cache_key(host_a) != conn._client_cache_key(host_b)
+
+    port_default = _make_target(host="h.example.com", port=443, target_id="id", tenant_id="ten")
+    port_moved = _make_target(host="h.example.com", port=8443, target_id="id", tenant_id="ten")
+    assert conn._client_cache_key(port_default) != conn._client_cache_key(port_moved)
+
+
+@pytest.mark.asyncio
+async def test_invalid_scheme_fails_loud_not_served_stale() -> None:
+    """An invalid ``extras.scheme`` on a warm pool fails loud (evoila/meho#2873).
+
+    Before #2873 the pool key ignored the scheme, so a PATCH to a garbage
+    ``extras.scheme`` left the key unchanged and the stale ``https`` client
+    kept serving silently. Now the key derivation resolves ``_base_url``,
+    whose ``_effective_scheme`` raises on an unrecognised scheme — the same
+    fail-loud contract the fresh-client path already had (#2599), extended
+    to the warm-pool case.
+    """
+    conn = _ConcreteHttpConnector()
+    valid = _make_target(host="h.example.com", target_id="id", tenant_id="ten")
+    client_valid = await conn._http_client(valid)
+
+    bad = _make_target(
+        host="h.example.com", target_id="id", tenant_id="ten", extras={"scheme": "htp"}
+    )
+    with pytest.raises(ValueError, match=r"invalid.*extras\.scheme"):
+        conn._client_cache_key(bad)
+    with pytest.raises(ValueError, match=r"invalid.*extras\.scheme"):
+        await conn._http_client(bad)
+
+    # The stale client was never poisoned or evicted; only the valid entry
+    # remains, and the valid target still resolves to it.
+    assert list(conn._clients.values()) == [client_valid]
+    assert await conn._http_client(valid) is client_valid
+    await conn.aclose()
+
+
+def test_prometheus_base_url_override_rotates_pool_key() -> None:
+    """Prometheus's ``_base_url`` override participates in the pool key (#2873).
+
+    The reported repro: a Prometheus target registered plain-HTTP, then
+    PATCHed ``extras.scheme=http``. Keying on the polymorphically resolved
+    :meth:`PrometheusConnector._base_url` (which honours the override's
+    ``http``/``https`` selection) rotates the entry so the ``http`` client is
+    built instead of the stale ``https`` one being served.
+    """
+    conn = PrometheusConnector()
+    https = _make_target(host="prom.example.com", port=9090, target_id="id", tenant_id="ten")
+    http = _make_target(
+        host="prom.example.com",
+        port=9090,
+        target_id="id",
+        tenant_id="ten",
+        extras={"scheme": "http"},
+    )
+    assert conn._base_url(https) == "https://prom.example.com:9090"
+    assert conn._base_url(http) == "http://prom.example.com:9090"
+    assert conn._client_cache_key(https) != conn._client_cache_key(http)
+
+
+def test_loki_base_url_override_rotates_pool_key() -> None:
+    """Loki's default-``http`` ``_base_url`` override drives the key (#2873).
+
+    Loki defaults to plaintext ``http`` and opts into ``https`` via
+    ``extras.scheme=https``. This is exactly the case a naive
+    ``_effective_scheme``-only key would miss: the base helper maps both
+    ``scheme``-absent and ``scheme=https`` to ``https``, yet Loki's override
+    resolves them to different URLs (``http`` vs ``https``). Keying on the
+    polymorphic ``_base_url`` captures the flip; asserting the base
+    ``_effective_scheme`` collision documents why the seam is load-bearing.
+    """
+    conn = LokiConnector()
+    default_http = _make_target(host="loki.example.com", port=3100, target_id="id", tenant_id="ten")
+    opt_https = _make_target(
+        host="loki.example.com",
+        port=3100,
+        target_id="id",
+        tenant_id="ten",
+        extras={"scheme": "https"},
+    )
+    # The subclass override flips the URL scheme...
+    assert conn._base_url(default_http) == "http://loki.example.com:3100"
+    assert conn._base_url(opt_https) == "https://loki.example.com:3100"
+    # ...while the base helper would have collapsed both to ``https`` —
+    # which is precisely why the key must read the resolved URL, not the
+    # base scheme.
+    assert _effective_scheme(default_http) == _effective_scheme(opt_https) == "https"
+    assert conn._client_cache_key(default_http) != conn._client_cache_key(opt_https)
 
 
 # ---------------------------------------------------------------------------

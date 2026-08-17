@@ -102,7 +102,7 @@ working set as 11 curated ops, distributed across both planes:
 | provider | `provider-users` | `meho vcf-automation user list` | `GET:/cloudapi/1.0.0/users` |
 | tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `GET:/iaas/api/about` |
 | tenant | `tenant-projects` | `meho vcf-automation project list` | `GET:/iaas/api/projects` |
-| tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `GET:/iaas/api/deployments` |
+| tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `vcfa.tenant.deployment.list` |
 | tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `GET:/iaas/api/deployments/{id}` |
 | tenant | `tenant-blueprints` | `meho vcf-automation blueprint list` | `GET:/iaas/api/blueprints` |
 
@@ -283,7 +283,11 @@ controls reference project membership.
 
 ### `meho vcf-automation deployment list` / `deployment get <id>`
 
-Tenant-plane only. The largest payload on the tenant surface; large
+Tenant-plane only. `deployment list` dispatches the typed
+`vcfa.tenant.deployment.list` (repointed off the ingested
+`GET:/iaas/api/deployments` op_id by #2942); `deployment get` stays
+on `GET:/iaas/api/deployments/{id}` until a typed detail op ships.
+The largest payload on the tenant surface; large
 tenants return hundreds of deployments. The dispatcher's JSONFlux
 seam wraps oversized responses in a `ResultHandle`; use the
 `result_describe` / `result_query` meta-tools to navigate. The
@@ -325,7 +329,7 @@ the read-only surface never mutates state. The audit row carries:
 Broadcast events publish per-tenant on every successful dispatch.
 `meho audit query --connector vcfa-rest-9.0` retrieves the full
 dispatch history; filter by op_id to focus on one plane (`--op-id
-GET:/iaas/api/deployments`).
+vcfa.tenant.deployment.list`).
 
 ## Migrating off `scripts/vcf-automation.sh`
 

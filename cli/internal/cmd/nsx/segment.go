@@ -24,7 +24,10 @@ func newSegmentCmd() *cobra.Command {
 	return cmd
 }
 
-// newSegmentListCmd returns `meho nsx segment list` → GET:/policy/api/v1/infra/segments.
+// newSegmentListCmd returns `meho nsx segment list` → nsx.segment.list
+// (repointed from the ingested GET:/policy/api/v1/infra/segments op_id
+// once #2835 shipped the typed read — the legacy op_id no longer
+// resolves on a zero-catalog boot; #2942).
 func newSegmentListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -34,7 +37,7 @@ func newSegmentListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List NSX policy-API segments (logical + DVS-backed portgroups)",
-		Long: "list dispatches GET:/policy/api/v1/infra/segments against\n" +
+		Long: "list dispatches nsx.segment.list against\n" +
 			"connector_id=\"nsx-rest-4.2\". Renders id / display_name /\n" +
 			"transport_zone_path for human eyes; --json emits the full envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
@@ -59,7 +62,7 @@ func runSegmentList(cmd *cobra.Command, targetName string, jsonOut bool, backpla
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	const opID = "GET:/policy/api/v1/infra/segments"
+	const opID = "nsx.segment.list"
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -68,7 +71,7 @@ func runSegmentList(cmd *cobra.Command, targetName string, jsonOut bool, backpla
 }
 
 func printSegmentList(w io.Writer, r *CallResult) {
-	const opID = "GET:/policy/api/v1/infra/segments"
+	const opID = "nsx.segment.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

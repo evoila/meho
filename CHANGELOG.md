@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
+
+- `meho vcf-automation deployment list` now dispatches the typed
+  `vcfa.tenant.deployment.list` (#2839) instead of the ingested
+  `GET:/iaas/api/deployments`, which no longer resolves on a
+  zero-catalog boot — the operator verb was a dead end even though the
+  agent/backend path worked. The wave-2 cross-check found the same
+  stranding on `meho nsx segment list` (→ `nsx.segment.list`, #2835)
+  and `meho nsx node list` (→ `nsx.transport_node.list`, #2836); both
+  repointed. `deployment get` stays on `GET:/iaas/api/deployments/{id}`
+  until a typed detail op ships.
+- The five per-connector `typed_opid_dispatch_test.go` guards (nsx,
+  sddc-manager, vcf-automation, vcf-fleet, vcf-operations) are now
+  exhaustive: every verb is pinned to the exact op_id it dispatches
+  (typed or deliberately ingested, with the reason in a comment), and a
+  new `TestBackendTypedOpsAreClassified` reconciles each guard against
+  the backend's typed-op registry — a typed read op shipped without a
+  CLI-repoint decision fails CI instead of silently stranding the verb.
+  Contract recorded in `docs/codebase/cli.md`.
+
 ### Added — vmware `vm.disk.grow` + the governed mutating VI-JSON write substrate (#2893)
 
 - `vmware.composite.vm.disk.grow` grows a virtual disk's capacity — the

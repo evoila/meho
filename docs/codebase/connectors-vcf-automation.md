@@ -13,7 +13,8 @@ G3.6-T11 (#836) added the dual-plane spec ingestion + operator-review
 curation. G3.6-T12 (#840) shipped the recorded-fixture E2E. The operator
 runbook lives at `docs/cross-repo/g36-vcfa-canary.md`.
 
-**Typed reads (T5 #2305; deployment list #2839).** VCFA ships **no
+**Typed reads (T5 #2305; deployment list #2839; deployment get
+#2960).** VCFA ships **no
 vendor OpenAPI spec** (the provider plane publishes none; the tenant
 plane ships only Swagger 2.0 fragments the ingest parser rejects by
 decision #2090), so there is nothing to ingest — the hand-curated
@@ -21,9 +22,10 @@ decision #2090), so there is nothing to ingest — the hand-curated
 dispatch-inert on a real deploy and was **retired in #2362**. The
 **audited read set** (evoila/meho#2294: org/region list, provider
 health, `/iaas/api/projects` + tenant `about`), plus the tenant
-**deployment list** (#2839), is served by `source_kind="typed"` ops
+**deployment list** (#2839) and per-id **deployment detail** (#2960),
+is served by `source_kind="typed"` ops
 (`typed_ops.py`) that dispatch through the connector's own dual-plane
-session with **zero catalog state**. Six ops:
+session with **zero catalog state**. Seven ops:
 
 | op_id | plane | path |
 |---|---|---|
@@ -32,17 +34,21 @@ session with **zero catalog state**. Six ops:
 | `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/site` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
 | `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
+| `vcfa.tenant.deployment.get` | tenant | `GET /iaas/api/deployments/{id}` |
 | `vcfa.tenant.about` | tenant | `GET /iaas/api/about` |
 
 Each op **declares the plane it rides**; `typed_ops._validate_typed_op_planes`
 asserts at import time that the declared `plane` matches
 `plane_for_path(op.path)`, so a drift fails the import rather than
-surfacing as a misrouted HTTP 401. The `org create` write
+surfacing as a misrouted HTTP 401. The detail read's `{id}` path
+template is percent-encoded (empty safe set) by the handler at
+substitution time — OpenAPI `style: simple` semantics, matching the
+ingested dispatch path's `{var}` expansion. The `org create` write
 (`POST /cloudapi/1.0.0/orgs`) is deliberately out of scope — a first
 write on a read-only connector belongs in a G3.x-mold approval-gated
-write-surface initiative. Per-id deployment detail
-(`vcfa.tenant.deployment.get`), blueprint listing, and the provider
-users list remain unconverted — a natural fast-follow, not part of the
+write-surface initiative. Blueprint listing and the provider
+users list remain unconverted (initiative #2833 ranks them low tier) —
+not part of the
 "which deployments exist / which failed" answer this surface delivers.
 The hand-curated ingested-enable apparatus (`core_ops.py` / `_core_data`)
 those once lived under was retired in #2362; the wider ingested catalog
@@ -52,7 +58,7 @@ it does not.
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the six descriptors on startup — the same
+`__init__.py`) upserts the seven descriptors on startup — the same
 argocd / bind9 / Kubernetes typed-registrar shape.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
@@ -101,8 +107,9 @@ domains.
   and `load_session_credentials_from_vault` in `connectors/nsx/` /
   `connectors/vmware_rest/`.
 - **`VCFA_TYPED_OPS` / `VcfaTypedOp` / `VCFA_TYPED_WHEN_TO_USE_BY_GROUP`**
-  (`typed_ops.py`) — the six typed read ops (T5 #2305; tenant deployment
-  list #2839) and their two per-plane groups (`vcfa-provider-reads`,
+  (`typed_ops.py`) — the seven typed read ops (T5 #2305; tenant
+  deployment list #2839; tenant deployment get #2960) and their two
+  per-plane groups (`vcfa-provider-reads`,
   `vcfa-tenant-reads`). Each `VcfaTypedOp` carries a `plane` + `path`;
   the module's `_validate_typed_op_planes()` cross-checks them at import
   so a declared-plane / path drift fails the import rather than
@@ -132,7 +139,7 @@ domains.
    idempotency check (in `ensure_connector_class_registered`) no-ops on
    subsequent ingests against the same triple.
 4. `run_typed_op_registrars()` (lifespan) invokes the registrar, which
-   upserts the five `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
+   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
    needed, so the audited read surface works on a fresh boot.
 
 ### Vhost routing (load-bearing)

@@ -90,6 +90,7 @@ import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -130,6 +131,7 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     PROVIDER_REGIONS_PATH,
     PROVIDER_SITE_PATH,
     TENANT_ABOUT_PATH,
+    TENANT_DEPLOYMENT_DETAIL_PATH,
     TENANT_DEPLOYMENTS_PATH,
     TENANT_PROJECTS_PATH,
 )
@@ -744,6 +746,24 @@ class VcfAutomationConnector(HttpConnector):
             operator=operator,
             params=_tenant_odata_query(params),
         )
+
+    async def tenant_deployment_get(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.get`` — ``GET /iaas/api/deployments/{id}`` (tenant plane).
+
+        ``params["id"]`` is guaranteed present by the dispatcher's
+        JSON Schema validation (``required: ["id"]``). The value is
+        percent-encoded with an empty safe set — OpenAPI ``style:
+        simple`` semantics, same as the ingested-dispatch path's
+        ``{var}`` expansion — so an id carrying a reserved char can
+        never traverse out of the ``/iaas/api/deployments/`` segment.
+        """
+        path = TENANT_DEPLOYMENT_DETAIL_PATH.format(id=quote(str(params["id"]), safe=""))
+        return await self._request_json(target, "GET", path, operator=operator)
 
     async def tenant_about(
         self,

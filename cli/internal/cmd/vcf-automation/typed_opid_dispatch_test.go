@@ -15,7 +15,8 @@ import (
 // typedDispatchCases pins every VCFA verb whose backend read is typed
 // to the dotted typed op_id it must dispatch (#2266 repoint sweep
 // #2355; deployment list repointed by #2942 once #2839 shipped the
-// typed op). The dual-plane `about` verb is pinned separately by
+// typed op; deployment get repointed by #2960 once the typed detail
+// op shipped). The dual-plane `about` verb is pinned separately by
 // TestAboutVerbDispatchesPerPlane / TestAboutOpForPlane.
 var typedDispatchCases = []struct {
 	name   string
@@ -26,6 +27,7 @@ var typedDispatchCases = []struct {
 	{"region list", []string{"region", "list"}, "vcfa.provider.region.list"},
 	{"project list", []string{"project", "list"}, "vcfa.tenant.project.list"},
 	{"deployment list", []string{"deployment", "list"}, "vcfa.tenant.deployment.list"},
+	{"deployment get", []string{"deployment", "get", "dep-1"}, "vcfa.tenant.deployment.get"},
 }
 
 // ingestedDispatchCases pins the VCFA verbs that legitimately dispatch
@@ -39,13 +41,10 @@ var ingestedDispatchCases = []struct {
 	args   []string
 	wantOp string
 }{
-	// Detail reads with no typed counterpart (the typed surface ships
-	// list ops only).
+	// Provider-plane detail reads with no typed counterpart (the typed
+	// provider surface ships list ops only).
 	{"org get", []string{"org", "get", "org-1"}, "GET:/cloudapi/1.0.0/orgs/{id}"},
 	{"region get", []string{"region", "get", "reg-1"}, "GET:/cloudapi/1.0.0/regions/{id}"},
-	// Blocked on a future vcfa.tenant.deployment.get typed op — #2839
-	// shipped list only (#2942 out-of-scope note).
-	{"deployment get", []string{"deployment", "get", "dep-1"}, "GET:/iaas/api/deployments/{id}"},
 	// No typed blueprint/user reads (initiative #2833 ranks them low
 	// tier, not planned).
 	{"blueprint list", []string{"blueprint", "list"}, "GET:/iaas/api/blueprints"},
@@ -64,13 +63,13 @@ var typedOpCLICoverage = map[string]string{
 	"vcfa.provider.health":        "about --plane provider", // pinned by TestAboutVerbDispatchesPerPlane
 	"vcfa.tenant.project.list":    "project list",
 	"vcfa.tenant.deployment.list": "deployment list",
+	"vcfa.tenant.deployment.get":  "deployment get",
 	"vcfa.tenant.about":           "about --plane tenant", // pinned by TestAboutVerbDispatchesPerPlane
 }
 
-// TestRepointedListVerbsDispatchTypedOpIDs pins that the repointed
-// VCFA list verbs dispatch their typed op_ids at the
-// command-constructor site.
-func TestRepointedListVerbsDispatchTypedOpIDs(t *testing.T) {
+// TestRepointedVerbsDispatchTypedOpIDs pins that the repointed VCFA
+// verbs dispatch their typed op_ids at the command-constructor site.
+func TestRepointedVerbsDispatchTypedOpIDs(t *testing.T) {
 	for _, tc := range typedDispatchCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

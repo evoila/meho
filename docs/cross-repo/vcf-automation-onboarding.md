@@ -103,7 +103,7 @@ working set as 11 curated ops, distributed across both planes:
 | tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `GET:/iaas/api/about` |
 | tenant | `tenant-projects` | `meho vcf-automation project list` | `GET:/iaas/api/projects` |
 | tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `vcfa.tenant.deployment.list` |
-| tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `GET:/iaas/api/deployments/{id}` |
+| tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `vcfa.tenant.deployment.get` |
 | tenant | `tenant-blueprints` | `meho vcf-automation blueprint list` | `GET:/iaas/api/blueprints` |
 
 Every op dispatches through the same `POST /api/v1/operations/call`
@@ -285,8 +285,8 @@ controls reference project membership.
 
 Tenant-plane only. `deployment list` dispatches the typed
 `vcfa.tenant.deployment.list` (repointed off the ingested
-`GET:/iaas/api/deployments` op_id by #2942); `deployment get` stays
-on `GET:/iaas/api/deployments/{id}` until a typed detail op ships.
+`GET:/iaas/api/deployments` op_id by #2942); `deployment get`
+dispatches the typed `vcfa.tenant.deployment.get` (#2960).
 The largest payload on the tenant surface; large
 tenants return hundreds of deployments. The dispatcher's JSONFlux
 seam wraps oversized responses in a `ResultHandle`; use the

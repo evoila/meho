@@ -156,6 +156,10 @@ from meho_backplane.operations.ingest import (
     SpecSource,
     list_ingested_connectors,
 )
+from meho_backplane.operations.ingest._llm_grouping_internals import (
+    NONE_GROUP_KEY,
+    parse_proposal_response,
+)
 from meho_backplane.operations.meta_tools import (
     UnknownConnectorError,
     call_operation,
@@ -321,7 +325,7 @@ class _PathPrefixStubLlmClient:
     This stub generates per-batch responses by parsing the op_ids out
     of the Pass-2 user prompt and assigning each one to the group
     whose key matches its path's top-level family. The Pass-1
-    response is a static 8-group taxonomy that covers every vSphere
+    response is a static 14-group taxonomy that covers every vSphere
     family the corpus contains.
 
     Records every call's ``(system_prompt_marker, user_prompt_length,
@@ -440,7 +444,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "vm-managed-objects",
+                "group_key": "vm_managed_objects",
                 "name": "Virtual Machine (Managed Object)",
                 "when_to_use": (
                     "Use for per-VM Managed-Object method calls -- "
@@ -450,7 +454,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "host-managed-objects",
+                "group_key": "host_managed_objects",
                 "name": "Host System (Managed Object)",
                 "when_to_use": (
                     "Use for per-host Managed-Object method calls -- "
@@ -460,7 +464,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "cluster-managed-objects",
+                "group_key": "cluster_managed_objects",
                 "name": "Cluster Compute Resource (Managed Object)",
                 "when_to_use": (
                     "Use for per-cluster Managed-Object method calls -- "
@@ -469,7 +473,7 @@ class _PathPrefixStubLlmClient:
                 ),
             },
             {
-                "group_key": "datastore-managed-objects",
+                "group_key": "datastore_managed_objects",
                 "name": "Datastore (Managed Object)",
                 "when_to_use": (
                     "Use for per-datastore Managed-Object method calls -- "
@@ -503,10 +507,10 @@ class _PathPrefixStubLlmClient:
         ("/appliance/", "appliance"),
         ("/PerformanceManager", "performance"),
         ("/EventManager", "events"),
-        ("/VirtualMachine", "vm-managed-objects"),
-        ("/HostSystem", "host-managed-objects"),
-        ("/ClusterComputeResource", "cluster-managed-objects"),
-        ("/Datastore", "datastore-managed-objects"),
+        ("/VirtualMachine", "vm_managed_objects"),
+        ("/HostSystem", "host_managed_objects"),
+        ("/ClusterComputeResource", "cluster_managed_objects"),
+        ("/Datastore", "datastore_managed_objects"),
     )
 
     # Regex to recover op_ids from the rendered Pass-2 prompt. The
@@ -579,6 +583,30 @@ class _PathPrefixStubLlmClient:
         # the stub realistic without claiming the synthetic
         # taxonomy covers every appliance / esx / hvc subpath.
         return "none"
+
+
+def test_stub_taxonomy_passes_production_proposal_validation() -> None:
+    """The stub's static Pass-1 response parses through the real validator.
+
+    Deliberately fixture-less (no DB, no spec shelf) so it runs in
+    every local and CI unit invocation. The full canary ingest only
+    executes where Postgres testcontainers AND the spec shelf are both
+    provisioned, which let an invalid hand-authored stub taxonomy (four
+    kebab-case ``group_key`` values, #520) lie latent until the CI
+    shelf was armed (#2949/#2966) — the grouping pass then failed with
+    ``LlmOutputInvalid`` on the snake_case ``group_key`` check. This
+    round-trip catches that class of stub drift at unit speed.
+    """
+    proposals = parse_proposal_response(_PathPrefixStubLlmClient._PROPOSE_RESPONSE)
+    assert len(proposals) == 14
+
+    # Pass-2 consistency: every path-rule target must be a proposed
+    # group_key (or the "none" sentinel), else assignments silently
+    # fall out as unassigned and weaken the canary's coverage bars.
+    proposed_keys = {p.group_key for p in proposals}
+    rule_keys = {group_key for _, group_key in _PathPrefixStubLlmClient._PATH_RULES}
+    unknown = rule_keys - proposed_keys - {NONE_GROUP_KEY}
+    assert not unknown, f"_PATH_RULES targets not in _PROPOSE_RESPONSE: {sorted(unknown)}"
 
 
 # ---------------------------------------------------------------------------

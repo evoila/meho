@@ -32,6 +32,7 @@ __all__ = [
     "is_acceptable_auth_model",
     "plane_for_path",
     "provider_accept_for_path",
+    "vhost_header",
 ]
 
 # Per-plane login endpoints. Verified against scripts/vcf-automation.sh
@@ -137,26 +138,64 @@ def provider_accept_for_path(path: str) -> str:
     return PROVIDER_CLOUDAPI_ACCEPT
 
 
-def compose_base_url(target_name: str, host: str, port: int | None, fqdn: str | None) -> str:
-    """Build the per-target base URL honouring vhost routing.
+def _port_suffix(port: int | None) -> str:
+    """Return ``":{port}"`` for a non-default HTTPS port, else ``""``.
 
-    When *fqdn* is set, the URL host is the FQDN (httpx's request will
-    carry it as the ``Host:`` header, satisfying VCFA's strict vhost
-    match). When *fqdn* is unset and *host* is an IP literal, raise
-    :exc:`VcfAutomationConfigurationError` -- the consumer wrapper
-    documents this as the silent-404 failure mode and we surface it
-    at base-URL construction time. When *host* is itself an FQDN, the
-    URL already carries the right vhost.
+    Shared by :func:`compose_base_url` (the dialled authority) and
+    :func:`vhost_header` (the ``Host:`` authority) so both render the
+    port identically -- matching httpx's own ``Host:``-header derivation,
+    which appends the port only when it is not the scheme default (443).
     """
-    scheme = "https"
-    port_suffix = f":{port}" if port and port != 443 else ""
-    if fqdn:
-        return f"{scheme}://{fqdn}{port_suffix}"
-    if _is_ip_literal(host):
+    return f":{port}" if port and port != 443 else ""
+
+
+def compose_base_url(target_name: str, host: str, port: int | None, fqdn: str | None) -> str:
+    """Build the per-target base URL -- always the dialled ``host``.
+
+    VCFA enforces strict vhost routing, but the vhost belongs in the
+    per-request ``Host:`` header and TLS SNI (see :func:`vhost_header`
+    and :meth:`.connector.VcfAutomationConnector._request_extensions`),
+    **not** in the pooled client's ``base_url``. So the base URL is
+    always ``https://{host}[:port]`` -- the reachable address the
+    transport dials (an IP behind a NAT alias, or an FQDN) -- and
+    ``fqdn`` is presented per-request. Baking ``fqdn`` into ``base_url``
+    is what made "connect by IP, route by vhost" structurally
+    unreachable and let the connector dial an address the SSRF guard
+    never screened (evoila/meho#2863); it also could not disambiguate
+    several appliances that share one vhost FQDN behind distinct NAT
+    aliases.
+
+    The one shape still refused at construction time is an IP-literal
+    *host* with no *fqdn*: there is no vhost to present, so every path
+    would 404 with an empty body before the application sees it. Raising
+    :exc:`VcfAutomationConfigurationError` here surfaces a clear
+    configuration message rather than a post-login 404 storm.
+    """
+    if not fqdn and _is_ip_literal(host):
         raise VcfAutomationConfigurationError(
             f"vcf-automation target {target_name!r} is reached by IP ({host!r}) "
-            "but has no fqdn set. VCFA enforces strict vhost routing and "
-            "returns 404 on every path otherwise. Set target.fqdn (CLI: "
-            "--fqdn; targets.yaml: fqdn:) to the appliance's canonical FQDN."
+            "but has no fqdn set. VCFA enforces strict vhost routing, so the "
+            "connector needs a vhost to present as the Host: header -- an IP "
+            "alone matches no vhost and returns 404 on every path. Set "
+            "target.fqdn (CLI: --fqdn; targets.yaml: fqdn:) to the appliance's "
+            "canonical FQDN; the connector still dials this host address."
         )
-    return f"{scheme}://{host}{port_suffix}"
+    return f"https://{host}{_port_suffix(port)}"
+
+
+def vhost_header(fqdn: str | None, port: int | None = None) -> dict[str, str]:
+    """Return the per-request ``Host:`` header presenting the vhost, or ``{}``.
+
+    When *fqdn* is set, VCFA's strict vhost routing needs it as the
+    ``Host:`` header even though the transport dials ``target.host``
+    (:func:`compose_base_url`). The port is appended on the same
+    non-default-port rule httpx uses when it derives ``Host:`` from a
+    ``base_url``, so a target on a non-443 port renders
+    ``Host: {fqdn}:{port}`` -- byte-identical to the pre-#2863 shape that
+    put the FQDN in ``base_url``. When *fqdn* is unset, returns an empty
+    mapping so httpx derives ``Host:`` from ``base_url`` (the host, which
+    in that shape already carries the right vhost).
+    """
+    if not fqdn:
+        return {}
+    return {"Host": f"{fqdn}{_port_suffix(port)}"}

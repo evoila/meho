@@ -142,6 +142,38 @@ connector-related release-notes line.
   `deployment list`); the verb moved from the pinned-ingested table to
   the typed table in the `typed_opid_dispatch_test.go` guard.
 
+### Fixed — vcf-automation connector dials `target.host` and presents `target.fqdn` per-request as the vhost `Host:` + TLS SNI (#2863)
+
+- The vcf-automation connector baked `target.fqdn` into the pooled
+  client's `base_url`, so httpx derived the TCP connect address, the
+  `Host:` header, and the TLS SNI / cert-verify name all from the FQDN.
+  That made "connect by IP, route by vhost" — the shape a VCFA appliance
+  behind a NAT alias (reachable only by IP) needs — structurally
+  unreachable, could not disambiguate several appliances that share one
+  vhost FQDN behind distinct NAT aliases, and let the transport dial an
+  address the SSRF guard (which screens `target.host`) never screened.
+  The connector now always dials `target.host` (`https://{host}[:port]`,
+  the reachable address the guard screens) and applies `target.fqdn`
+  per-request as the `Host:` header and as TLS SNI (precedence
+  `tls_server_name` > `fqdn` > derive-from-host), threaded through the
+  data path, both plane logins, and both fingerprint probes. Under
+  `verify_tls=true` the certificate is still verified against the FQDN
+  (httpcore uses `sni_hostname` for both SNI and cert CN/SAN
+  verification, confirmed against pinned httpx 0.28.1 / httpcore 1.0.9).
+- **Operator migration:** a vcf-automation `target.host` must now be the
+  *dialable* address (an IP, or a name that resolves where the backplane
+  runs), with the vhost in `target.fqdn`. Previously the FQDN was baked
+  into `base_url`, so a target that carried a **stale** `host` still
+  worked as long as split-DNS resolved the FQDN — the stale `host` was
+  screened by the SSRF guard but never actually dialled. Now that `host`
+  is the dial address, such a target fails loud at its first dispatch
+  against that host instead of silently reaching whatever the baked-in
+  FQDN resolved to. Move the vhost into `fqdn` (CLI `--fqdn`;
+  `targets.yaml: fqdn:`) and set `host` to the reachable address. An
+  IP-literal `host` with no `fqdn` is refused at construction with a
+  message naming the host and the `--fqdn` knob — there is no vhost to
+  present.
+
 ### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
 
 - `meho vcf-automation deployment list` now dispatches the typed

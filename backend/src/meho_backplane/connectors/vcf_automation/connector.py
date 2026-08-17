@@ -54,15 +54,23 @@ re-login once on session-expiry, not a retry loop.
 Vhost routing
 -------------
 
-VCFA 9.x enforces strict ``Host:`` header matching. When ``target.fqdn``
-is set, the per-target httpx ``AsyncClient`` is built with
-``base_url=https://<fqdn>``; standard DNS resolution targets the FQDN.
-When ``target.fqdn`` is unset and ``target.host`` is an IP literal,
-:func:`._routing.compose_base_url` raises
-:exc:`VcfAutomationConfigurationError` at first session-establish --
-the consumer wrapper documents this as the silent-404 failure mode.
-When ``target.host`` is itself an FQDN, ``fqdn`` is optional -- the
-URL host already carries the right vhost.
+VCFA 9.x enforces strict ``Host:`` header matching. The per-target
+httpx ``AsyncClient`` always dials ``target.host`` (``base_url=
+https://<host>`` -- the reachable NAT-alias IP or FQDN); ``target.fqdn``
+is presented **per-request** as the ``Host:`` header
+(:func:`._routing.vhost_header`) and as TLS SNI + cert-verify name (the
+#2002 ``sni_hostname`` extension, precedence ``tls_server_name`` >
+``fqdn`` > derive-from-host -- see :meth:`._request_extensions`). This
+is the standard "connect by IP, route by vhost" posture: it reaches an
+appliance addressable only by IP behind a NAT alias, and disambiguates
+several appliances that share one vhost FQDN. Nothing ``fqdn``-derived
+is baked into the pooled client, so a per-request ``fqdn`` override
+never serves a stale client. When ``target.fqdn`` is unset and
+``target.host`` is an IP literal, :func:`._routing.compose_base_url`
+raises :exc:`VcfAutomationConfigurationError` -- there is no vhost to
+present, the consumer wrapper's documented silent-404 failure mode.
+When ``target.host`` is itself an FQDN, ``fqdn`` is optional -- httpx
+derives ``Host:`` from the host, which already carries the right vhost.
 
 Auth model gating
 -----------------
@@ -120,6 +128,7 @@ from meho_backplane.connectors.vcf_automation._routing import (
     is_acceptable_auth_model,
     plane_for_path,
     provider_accept_for_path,
+    vhost_header,
 )
 from meho_backplane.connectors.vcf_automation.session import (
     VcfAutomationCredentialsLoader,
@@ -193,13 +202,43 @@ class VcfAutomationConnector(HttpConnector):
     # ------------------------------------------------------------------
 
     def _base_url(self, target: VcfAutomationTargetLike) -> str:
-        """Delegate to :func:`._routing.compose_base_url` for vhost handling."""
+        """Delegate to :func:`._routing.compose_base_url` (always the dialled host)."""
         return compose_base_url(
             target_name=target.name,
             host=target.host,
             port=getattr(target, "port", None),
             fqdn=getattr(target, "fqdn", None),
         )
+
+    def _request_extensions(self, target: VcfAutomationTargetLike) -> dict[str, Any]:
+        """Per-request httpx ``extensions`` -- SNI precedence for vhost routing.
+
+        Extends the base seam (evoila/meho#2002, which honours a target's
+        ``tls_server_name``) with the ``fqdn`` fallback this connector's
+        connect-by-IP/route-by-vhost posture needs. The transport dials
+        ``target.host`` (which may be an IP), so the TLS SNI + cert-verify
+        name must be set explicitly or httpcore would derive it from the
+        dialled IP and fail hostname verification under ``verify_tls=true``.
+        Precedence, highest first:
+
+        1. ``target.tls_server_name`` -- explicit operator override (the
+           base seam), unchanged.
+        2. ``target.fqdn`` -- the vhost; presented as SNI so the appliance
+           routes the handshake and the presented cert is verified against
+           the same FQDN the pre-#2863 ``base_url=https://<fqdn>`` shape
+           verified against (httpcore uses ``sni_hostname`` for both SNI and
+           cert CN/SAN verification).
+        3. Neither set -- empty dict; httpcore derives the name from the
+           dialled ``base_url`` host (which, in that shape, is itself the
+           FQDN).
+        """
+        base = super()._request_extensions(target)
+        if base:
+            return base
+        fqdn = getattr(target, "fqdn", None)
+        if fqdn:
+            return {"sni_hostname": fqdn}
+        return {}
 
     # ------------------------------------------------------------------
     # auth_headers -- ABC + plane-aware path argument
@@ -483,6 +522,12 @@ class VcfAutomationConnector(HttpConnector):
         form-encoded body.
         """
 
+        # vhost routing is applied per-request (never baked into the pooled
+        # client): the FQDN as the ``Host:`` header and as TLS SNI. Computed
+        # once so both the initial fire and the post-401 retry carry them.
+        vhost = vhost_header(getattr(target, "fqdn", None), getattr(target, "port", None))
+        extensions = self._request_extensions(target)
+
         async def _fire(headers: Mapping[str, str]) -> httpx.Response:
             client = await self._http_client(target)
             params_dict = dict(params) if params is not None else None
@@ -493,7 +538,8 @@ class VcfAutomationConnector(HttpConnector):
                 params=params_dict,
                 json=json_dict,
                 data=data,
-                headers=dict(headers),
+                headers={**dict(headers), **vhost},
+                extensions=extensions,
             )
 
         plane = plane_for_path(path)
@@ -553,12 +599,21 @@ class VcfAutomationConnector(HttpConnector):
             client = await self._http_client(target)
         except VcfAutomationConfigurationError as exc:
             return self._unreachable_fingerprint(probed_at, probe_method, exc, failed_plane=None)
-        provider_resp = await _try_probe(client, PROVIDER_VERSION_PATH)
+        # Both unauthenticated probes dial ``target.host`` but must present
+        # the vhost as ``Host:`` + SNI, same as the data path -- the #2398
+        # SNI seam previously reached only the two login POSTs, not the probes.
+        vhost = vhost_header(getattr(target, "fqdn", None), getattr(target, "port", None))
+        extensions = self._request_extensions(target)
+        provider_resp = await _try_probe(
+            client, PROVIDER_VERSION_PATH, headers=vhost, extensions=extensions
+        )
         if isinstance(provider_resp, Exception):
             return self._unreachable_fingerprint(
                 probed_at, probe_method, provider_resp, failed_plane="provider"
             )
-        tenant_resp = await _try_probe(client, TENANT_VERSION_PATH, accept=TENANT_ACCEPT)
+        tenant_resp = await _try_probe(
+            client, TENANT_VERSION_PATH, accept=TENANT_ACCEPT, headers=vhost, extensions=extensions
+        )
         if isinstance(tenant_resp, Exception):
             return self._unreachable_fingerprint(
                 probed_at, probe_method, tenant_resp, failed_plane="tenant"
@@ -863,16 +918,24 @@ async def _try_probe(
     client: httpx.AsyncClient,
     path: str,
     accept: str | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    extensions: dict[str, Any] | None = None,
 ) -> httpx.Response | Exception:
     """GET *path* on *client*, returning the response or the captured exception.
 
     Used by :meth:`VcfAutomationConnector.fingerprint` to probe each
     plane and produce a structured ``reachable=False`` result on
-    failure rather than letting the exception bubble.
+    failure rather than letting the exception bubble. *headers* carries
+    the per-request vhost ``Host:`` header and *extensions* the TLS SNI
+    override, so the probe dials ``target.host`` while presenting the
+    vhost -- the same routing the data path applies.
     """
     try:
-        headers = {"Accept": accept} if accept else None
-        resp = await client.get(path, headers=headers)
+        hdrs: dict[str, str] = dict(headers) if headers else {}
+        if accept:
+            hdrs["Accept"] = accept
+        resp = await client.get(path, headers=hdrs or None, extensions=extensions or {})
         resp.raise_for_status()
     except (httpx.HTTPError, OSError) as exc:
         return exc

@@ -142,25 +142,41 @@ domains.
    upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
    needed, so the audited read surface works on a fresh boot.
 
-### Vhost routing (load-bearing)
+### Vhost routing (load-bearing, #2863)
 
 VCFA 9.x enforces strict `Host:` header matching — the consumer wrapper
-(`scripts/vcf-automation.sh`) uses `curl --resolve fqdn:443:<ip>` to override
-DNS while keeping the FQDN in the request line. In httpx terms, the
-connector's per-target `AsyncClient` is built with
-`base_url=https://<fqdn-or-host>`; the cleanest equivalent of `--resolve` is
-to use the FQDN as the URL host and rely on operator-side DNS resolution.
+(`scripts/vcf-automation.sh`) uses `curl --resolve fqdn:443:<ip>` to keep
+the FQDN in the request line while dialling a specific IP. The connector
+implements the same "connect by IP, route by vhost" posture in httpx
+terms: the per-target `AsyncClient` **always** dials `target.host`
+(`base_url=https://<host>[:port]` — the reachable NAT-alias IP, or an
+FQDN), and `target.fqdn` is applied **per-request** as:
 
-The decision tree in `VcfAutomationConnector._base_url`:
+- the `Host:` header — via `_routing.vhost_header(fqdn, port)`, merged
+  onto the auth headers on the data path, both plane logins, and both
+  fingerprint probes; and
+- the TLS SNI + certificate-verify name — via the `sni_hostname`
+  request extension (the #2002 seam), so under `verify_tls=true` the
+  presented cert is still verified against the FQDN, not the dialled IP.
+  `VcfAutomationConnector._request_extensions` sets it with precedence
+  `tls_server_name` > `fqdn` > derive-from-host.
 
-1. `target.fqdn` is set → base URL host is the FQDN.
-2. `target.fqdn` is unset and `target.host` is an IP literal (IPv4 or IPv6,
-   bracket-wrapped accepted) → raise `VcfAutomationConfigurationError` with
-   a clear message naming the target and pointing operators at the `--fqdn`
-   / `fqdn:` configuration knob. Without this guard every path returns 404
-   with empty body post-login.
-3. `target.fqdn` is unset and `target.host` is itself an FQDN → use
-   `target.host` as the URL host (the right vhost is already on the wire).
+Nothing FQDN-derived is baked into the pooled `AsyncClient`, so this is
+compatible with the client-pool key (a per-request `fqdn` override never
+serves a stale client), and the SSRF guard — which screens `target.host`
+— now screens the address actually dialled. Before #2863 the FQDN was
+put into `base_url`, which (a) made an appliance reachable only by a
+NAT-alias IP structurally undialable, (b) could not disambiguate several
+appliances sharing one vhost FQDN behind distinct aliases, and (c) let
+the transport dial a host the SSRF guard never screened.
+
+`compose_base_url` returns `https://{host}[:port]` for every valid shape
+and refuses exactly one: an IP-literal `host` (IPv4 / IPv6, bracket-wrapped
+accepted) with no `fqdn` — there is no vhost to present, so it raises
+`VcfAutomationConfigurationError` naming the target + IP and pointing at
+the `--fqdn` / `fqdn:` knob rather than emitting a post-login 404 storm.
+An FQDN `host` with no `fqdn` is fine — httpx derives `Host:` from the
+host, which already carries the right vhost.
 
 `fingerprint()` catches the configuration error and reports a structured
 `reachable=False` with `extras["error"]` rather than bubbling the exception
@@ -243,7 +259,9 @@ the consumer repo, validated 2026-05-17):
 ### Fingerprint + probe
 
 - `fingerprint(target)` issues both unauthenticated version probes in series
-  through the per-target httpx client:
+  through the per-target httpx client. Each probe carries the vhost `Host:`
+  header and TLS SNI the same way the data path does (#2863 closed the
+  #2398 gap where the SNI seam reached only the two login POSTs):
   - Provider: `GET /api/versions` — returns vCD-API version XML. The
     connector reads the status only; XML parsing for the "latest
     non-deprecated" string lives in the consumer wrapper, which the
@@ -302,7 +320,12 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   headers without rerouting through `_request_json`'s tenacity decorator.
   The connection-error / 5xx retry layer lives on the base method and
   applies to callers that use the base `_get_json` / `_post_json` paths
-  (the dispatcher always uses the overridden ones here).
+  (the dispatcher always uses the overridden ones here). Verified against
+  the pinned httpx 0.28.1 / httpcore 1.0.9: an explicit `Host` header
+  survives onto the built request (httpx does not overwrite it from
+  `base_url`) and the `sni_hostname` request extension drives httpcore's
+  `server_hostname` for both TLS SNI and cert CN/SAN verification — the two
+  facts the per-request vhost routing (#2863) relies on.
 - **tenacity 9.x** — installed dependency; not in direct use on this
   connector's overrides (the per-plane 401 retry-once is the only retry
   layer). Inherited use of tenacity persists on the base `_request_json`.
@@ -345,13 +368,17 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   `typed_ops.py` dispatch with zero catalog state, so they never touch
   the vra-sdk-go 2.0 fragments — converting those would only *widen* the
   ingested browse breadth, not change the typed reads.
-- `--resolve`-style DNS override (consumer-wrapper-only) has no direct
-  httpx equivalent in the connector — operators are expected to make the
-  appliance's FQDN resolvable on the meho-backplane host (typical: split-DNS
-  for the management network) when the target uses the IP-host-plus-FQDN
-  shape. A future enhancement could use httpx's transport-level resolver
-  hook, but the v0.2 posture matches MEHO's standard "operator-owned DNS"
-  assumption.
+- `--resolve`-style DNS override no longer needs split-DNS (#2863). The
+  connector dials `target.host` directly and presents `target.fqdn` as the
+  `Host:` header + TLS SNI per request, so the IP-host-plus-FQDN shape works
+  without making the appliance's FQDN resolvable on the meho-backplane host.
+  This is the `curl --resolve fqdn:443:<ip>` behaviour the consumer wrapper
+  uses, done at the request layer rather than the transport resolver — and
+  it is **required** (not merely convenient) when several appliances share
+  one vhost FQDN behind distinct NAT aliases, since a single DNS name cannot
+  map to N alias IPs. Operator note: a vcfa target must set `host` to the
+  dialable address; a target whose `host` held a stale value while split-DNS
+  carried the FQDN fails loud at first dispatch with the host named.
 
 ## References
 
@@ -359,6 +386,13 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   (skeleton — this Task); [G3.6-T11 #836](https://github.com/evoila/meho/issues/836)
   (dual-plane spec ingestion + read ops); [G3.6-T12 #840](https://github.com/evoila/meho/issues/840)
   (CLI verbs + E2E + onboarding doc).
+- Connect-by-IP / route-by-vhost: [#2863](https://github.com/evoila/meho/issues/2863)
+  (dial `target.host`, present `target.fqdn` per-request as `Host:` + TLS
+  SNI; closes the #2398 probe/data-path SNI-seam gap) — builds on the
+  `tls_server_name` SNI seam [#2002](https://github.com/evoila/meho/issues/2002)
+  / [#2398](https://github.com/evoila/meho/issues/2398). The generic
+  `net.http_probe` counterpart is split out as
+  [#2896](https://github.com/evoila/meho/issues/2896).
 - Swagger-2.0 on-ramp decision: [#2090](https://github.com/evoila/meho/issues/2090)
   (parser stays OpenAPI-3.x-only; convert vra-sdk-go fragments
   out-of-band — see Known issues above).

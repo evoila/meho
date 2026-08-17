@@ -86,7 +86,11 @@ from meho_backplane.operations.meta_tools import call_operation
 
 _OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fb")
 _FQDN = "vcfa-typed.test.invalid"
-_BASE_URL = f"https://{_FQDN}"
+# The reachable dial address (a NAT-alias IP). Since #2863 the connector
+# dials ``target.host`` and presents ``_FQDN`` per-request as the ``Host:``
+# header + SNI, so the respx router is rooted at the host, not the FQDN.
+_HOST = "10.20.30.5"
+_BASE_URL = f"https://{_HOST}"
 _TARGET_NAME = "vcfa-typed-target"
 
 _PROVIDER_JWT = "vcfa-typed-provider-jwt"
@@ -342,7 +346,7 @@ class _Bundle:
 async def typed_bundle(captured_events: list[Any]) -> AsyncIterator[_Bundle]:
     """Register the seven typed ops (zero ingested state) + respx-mock the appliance."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     async with respx.mock(
         base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
@@ -450,7 +454,7 @@ async def test_typed_ops_dispatch_ok(op_id: str, typed_bundle: _Bundle) -> None:
 async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]) -> None:
     """Provider typed op establishes the provider session + Accept; tenant cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     cache_key = target_cache_key(seeded)
     accept_by_path: dict[str, str] = {}
@@ -489,7 +493,7 @@ async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]
 async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) -> None:
     """Tenant typed op establishes the tenant session + Accept; provider cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     cache_key = target_cache_key(seeded)
     accept_by_path: dict[str, str] = {}
@@ -528,7 +532,7 @@ async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) ->
 async def test_provider_op_query_params_forward_pagination(captured_events: list[Any]) -> None:
     """``vcfa.provider.org.list`` forwards ``page`` / ``pageSize`` as query params."""
     await VcfAutomationConnector.register_typed_operations()
-    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     captured: dict[str, str] = {}
 
@@ -572,7 +576,7 @@ async def test_tenant_deployment_list_forwards_odata_and_returns_content(
     sibling test module might leave set (the E2E force-handle test).
     """
     await VcfAutomationConnector.register_typed_operations()
-    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     captured: dict[str, str] = {}
 

@@ -246,7 +246,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
 | `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
-| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
 
 **Secret redaction reuses the shipped `credential_write` op-class
@@ -258,6 +258,43 @@ material in `params`). `classify_op` returns `credential_write`, so
 `{op_class, result_status}` -- the secret never reaches the SSE stream or
 a Slack mirror. The handlers also return value-free summaries, so the
 `OperationResult` itself carries no secret.
+
+**`k8s.secret.create` ref-valued params (#2860).** Redaction keeps a
+secret off audit/broadcast once it is *in* `params`, but an agent driving
+the op still had to put the value there -- and an inline value transits
+the caller's context (the model API) before MEHO ever sees it. To close
+that leak vector, `k8s.secret.create` accepts ref-valued siblings that are
+resolved **server-side, mid-dispatch**, so a Vault/GSM-resident value
+materialises into the Secret without the value ever entering the caller's
+context (the same pattern as keycloak's `password_secret_ref`, #2401):
+
+- `string_data_secret_ref` / `data_secret_ref` -- a
+  `{secret-key: "<scheme>:<vault-or-gsm-path>#<field>"}` map. Each ref is
+  read under the operator's identity via
+  [`load_vault_secret_data`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
+  (the same credential-backend seam the kubeconfig loader rides -- no new
+  connector dependency), and the resolved key/value is merged into
+  `string_data` (plaintext) / `data` (base64) respectively.
+- `string_data_secret_mount` / `data_secret_mount` -- the Vault KV-v2
+  mount for the corresponding ref map (default `secret`; backends without
+  a mount concept, e.g. GSM, ignore it).
+- The `anyOf` widens so a call may supply inline maps, ref maps, or both
+  (merged into one Secret; refs win a key collision). Multi-key Secrets
+  (the ArgoCD spoke token + CA case) work natively -- one ref per key.
+- The optional `#<field>` fragment on a ref names which field of the
+  resolved payload to use (default: the Secret key). It is split off in
+  the connector *before* the seam read -- a Vault KV-v2 path cannot carry
+  a `#` (hvac would 404), so the caller owns fragment->field selection
+  uniformly across the `vault:` and `gsm:` schemes. Backend-agnostic for
+  free: the seam dispatches on scheme, so a `gsm:` ref resolves on a GSM
+  deployment with no extra connector code.
+
+The redaction above is unchanged and still applies: the op stays pinned in
+`_CREDENTIAL_WRITE_OPS`, and only the *ref* (never a value) is ever in
+`params`, so the audit row hashes a path and the broadcast stays
+aggregate-only. A resolved payload missing the requested field raises
+`KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
+value).
 
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without

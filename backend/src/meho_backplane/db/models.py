@@ -137,7 +137,9 @@ Schema decisions for :class:`Target`:
   adds the FK.
 * ``name`` — Text NOT NULL. Human-readable handle within the tenant.
   Uniqueness enforced by the named ``targets_tenant_name_idx``
-  (unique b-tree on ``(tenant_id, name)``).
+  (partial unique b-tree on ``(tenant_id, name)``
+  ``WHERE deleted_at IS NULL`` — live rows only, so a soft-deleted
+  tombstone frees the name for re-use; migration ``0072`` / #2874).
 * ``aliases`` — JSON/TEXT[], nullable. Secondary names for the target
   (DNS aliases, legacy hostnames). Stored as native ``TEXT[]`` on
   PostgreSQL (GIN-indexed for containment queries) and as a JSON
@@ -216,8 +218,11 @@ Schema decisions for :class:`Target`:
 
 Indexes on :class:`Target`:
 
-* ``targets_tenant_name_idx`` — unique b-tree on ``(tenant_id, name)``
-  — enforces the one-name-per-tenant invariant.
+* ``targets_tenant_name_idx`` — partial unique b-tree on
+  ``(tenant_id, name)`` ``WHERE deleted_at IS NULL`` — enforces the
+  one-*live*-name-per-tenant invariant. Soft-deleted tombstones are
+  excluded so a deleted name can be re-registered (migration ``0072``,
+  #2874); a live duplicate still collides.
 * ``targets_tenant_product_idx`` — b-tree on ``(tenant_id, product)``
   — drives the "list targets by product in tenant" query.
 * ``targets_aliases_gin_idx`` — GIN on ``aliases`` (PostgreSQL only).
@@ -887,10 +892,11 @@ class Target(Base):
     enforces referential integrity at insert time until a tightening
     migration adds the FK.
 
-    ``name`` is unique within a tenant (enforced by the named
-    ``targets_tenant_name_idx`` unique b-tree). Operators reference
-    targets by name in CLI commands and policy rules; the UUID is
-    the stable cross-system identifier.
+    ``name`` is unique among *live* rows within a tenant (enforced by
+    the named ``targets_tenant_name_idx`` partial unique b-tree,
+    ``WHERE deleted_at IS NULL``). Operators reference targets by name
+    in CLI commands and policy rules; the UUID is the stable
+    cross-system identifier.
 
     ``aliases`` stores secondary names (DNS aliases, legacy hostnames)
     as a native ``TEXT[]`` on PostgreSQL (GIN-indexed for containment
@@ -1048,15 +1054,24 @@ class Target(Base):
     )
 
     __table_args__ = (
-        # Unique index matches migration op.create_index(..., unique=True).
-        # Using Index rather than UniqueConstraint avoids Alembic autogenerate
-        # drift (autogenerate sees constraint vs index as different objects).
+        # Partial unique index: matches migration 0072's
+        # op.create_index(..., unique=True, postgresql_where/sqlite_where).
+        # The ``WHERE deleted_at IS NULL`` predicate scopes uniqueness to
+        # live rows so a soft-deleted tombstone (migration 0029) no longer
+        # occupies the name slot -- DELETE + POST of the same name now
+        # succeeds while a live duplicate still collides (#2874). Using
+        # Index rather than UniqueConstraint avoids Alembic autogenerate
+        # drift (autogenerate sees constraint vs index as different objects);
+        # the postgresql_where / sqlite_where pair keeps the predicate
+        # matched on both dialects so autogenerate stays clean.
         Index(
             "targets_tenant_name_idx",
             "tenant_id",
             "name",
             unique=True,
             postgresql_using="btree",
+            postgresql_where=sa.text("deleted_at IS NULL"),
+            sqlite_where=sa.text("deleted_at IS NULL"),
         ),
         Index(
             "targets_tenant_product_idx",

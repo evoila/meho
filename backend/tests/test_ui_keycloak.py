@@ -37,7 +37,7 @@ import asyncio
 import uuid
 import warnings
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -153,8 +153,12 @@ def _seed_keycloak_target(
     tenant_id: uuid.UUID,
     name: str = _TARGET_NAME,
     product: str = "keycloak",
+    deleted_at: datetime | None = None,
 ) -> None:
-    """Seed one keycloak ``Target`` row scoped to *tenant_id*."""
+    """Seed one keycloak ``Target`` row scoped to *tenant_id*.
+
+    Pass ``deleted_at`` to seed a soft-deleted tombstone.
+    """
 
     async def _do() -> None:
         sessionmaker = get_sessionmaker()
@@ -166,6 +170,7 @@ def _seed_keycloak_target(
                     name=name,
                     product=product,
                     host="keycloak.test",
+                    deleted_at=deleted_at,
                 ),
             )
 
@@ -445,6 +450,29 @@ def test_keycloak_ui_index_ignores_cross_tenant_target(
     with mock:
         response = client.get("/ui/keycloak?target=other-keycloak")
     assert response.status_code == 200, response.text
+    assert received == []
+
+
+def test_keycloak_ui_index_excludes_soft_deleted_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A soft-deleted keycloak target is absent from the picker (#2874).
+
+    ``_list_keycloak_targets`` filters ``deleted_at IS NULL``, so a
+    tombstone never becomes a pickable option the resolver would then
+    404 on. With the sole target soft-deleted the index prompts for
+    selection and dispatches nothing.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_keycloak_target(tenant_id=_TENANT_A, deleted_at=datetime.now(UTC))
+    received = _patch_call_operation(monkeypatch, {})
+    client, mock = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    with mock:
+        response = client.get("/ui/keycloak")
+    assert response.status_code == 200, response.text
+    assert "No Keycloak targets registered" in response.text
     assert received == []
 
 

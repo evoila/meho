@@ -239,7 +239,9 @@ async def _list_keycloak_targets(operator: Operator) -> list[dict[str, Any]]:
     Tenant-scoped to ``operator.tenant_id`` only -- no query/header/path
     tenant override, so a cross-tenant keycloak target never enters the
     rendered set. Filtered to ``product == "keycloak"`` so the picker lists
-    only deployments the keycloak read ops can dispatch against.
+    only deployments the keycloak read ops can dispatch against, and to
+    ``deleted_at IS NULL`` so a soft-deleted target never surfaces as a
+    pickable option the resolver would then 404 on (#2874).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
@@ -248,6 +250,7 @@ async def _list_keycloak_targets(operator: Operator) -> list[dict[str, Any]]:
             .where(
                 TargetORM.tenant_id == operator.tenant_id,
                 TargetORM.product == KEYCLOAK_PRODUCT,
+                TargetORM.deleted_at.is_(None),
             )
             .order_by(TargetORM.name)
         )

@@ -2810,3 +2810,116 @@ def test_create_target_gsm_scheme_ref_bypasses_gate_on_vault_backend(
         )
     assert response.status_code == 201
     assert response.json()["secret_ref"] == gsm_ref
+
+
+# ---------------------------------------------------------------------------
+# DELETE + re-create: soft-delete tombstones free the name (0072 / #2874)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_then_recreate_same_name_returns_201_with_fresh_uuid(
+    client: TestClient,
+) -> None:
+    """Reporter repro (#2874): DELETE frees the name for a fresh re-create.
+
+    POST → 201, DELETE → 204, GET → 404, POST same name → 201 with a
+    **new** id. Before the fix the tombstone kept the full unique-index
+    slot and the final POST returned 409 forever, stranding the name.
+    """
+    key = make_rsa_keypair("kid-A")
+    admin = {"Authorization": f"Bearer {_admin_token(key)}"}
+    operator = {"Authorization": f"Bearer {_operator_token(key)}"}
+    name = "rke2-mgmt-prometheus"
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+
+        created = client.post(
+            "/api/v1/targets",
+            json={"name": name, "product": "ssh", "host": "10.0.0.1"},
+            headers=admin,
+        )
+        assert created.status_code == 201
+        first_id = created.json()["id"]
+
+        deleted = client.delete(f"/api/v1/targets/{name}", headers=admin)
+        assert deleted.status_code == 204
+
+        gone = client.get(f"/api/v1/targets/{name}", headers=operator)
+        assert gone.status_code == 404
+
+        recreated = client.post(
+            "/api/v1/targets",
+            json={"name": name, "product": "kubernetes", "host": "10.0.0.2"},
+            headers=admin,
+        )
+        assert recreated.status_code == 201
+        second_id = recreated.json()["id"]
+
+    assert second_id != first_id
+
+
+@pytest.mark.asyncio
+async def test_repeated_delete_recreate_accumulates_coexisting_tombstones(
+    client: TestClient,
+) -> None:
+    """Repeated delete/recreate cycles pile up tombstones; live dup still 409s.
+
+    Three POST→DELETE cycles leave three tombstones; a fourth POST lands
+    a live row alongside them; a fifth POST of the *same live* name still
+    returns 409 (the partial index keeps enforcing one-live-name-per-
+    tenant). The DB ends with three tombstones + one live row.
+    """
+    from sqlalchemy import select as _select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import Target as TargetORM
+
+    key = make_rsa_keypair("kid-A")
+    admin = {"Authorization": f"Bearer {_admin_token(key)}"}
+    name = "cycle-host"
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+
+        for _ in range(3):
+            created = client.post(
+                "/api/v1/targets",
+                json={"name": name, "product": "ssh", "host": "10.0.0.1"},
+                headers=admin,
+            )
+            assert created.status_code == 201
+            deleted = client.delete(f"/api/v1/targets/{name}", headers=admin)
+            assert deleted.status_code == 204
+
+        # Fourth create lands a live row over the three tombstones.
+        live = client.post(
+            "/api/v1/targets",
+            json={"name": name, "product": "ssh", "host": "10.0.0.9"},
+            headers=admin,
+        )
+        assert live.status_code == 201
+
+        # A live duplicate still collides — the 409 path is unchanged.
+        dup = client.post(
+            "/api/v1/targets",
+            json={"name": name, "product": "ssh", "host": "10.0.0.9"},
+            headers=admin,
+        )
+        assert dup.status_code == 409
+
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            (
+                await session.execute(
+                    _select(TargetORM).where(
+                        TargetORM.tenant_id == uuid.UUID(DEFAULT_TENANT_ID),
+                        TargetORM.name == name,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 4
+    assert sum(1 for r in rows if r.deleted_at is not None) == 3
+    assert sum(1 for r in rows if r.deleted_at is None) == 1

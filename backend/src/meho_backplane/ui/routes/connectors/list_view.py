@@ -257,8 +257,16 @@ async def _list_targets(
     exact-match (matching the ``/api/v1/targets`` list route's
     ``?product=`` shape from #254) so the dropdown's
     selected-or-cleared state maps 1:1 to the active query.
+
+    Soft-deleted rows are excluded (``deleted_at IS NULL``) -- the same
+    filter the resolver and the ``/api/v1/targets`` list route apply, so
+    the console never renders a tombstone the API surfaces have already
+    hidden (#2874).
     """
-    stmt = select(TargetORM).where(TargetORM.tenant_id == tenant_id)
+    stmt = select(TargetORM).where(
+        TargetORM.tenant_id == tenant_id,
+        TargetORM.deleted_at.is_(None),
+    )
     if product_filter:
         stmt = stmt.where(TargetORM.product == product_filter)
     stmt = _apply_sort(stmt, sort=sort, direction=direction)
@@ -281,10 +289,17 @@ async def _distinct_products(
     the same tenant. A ``SELECT DISTINCT`` round trip on the
     targets table costs one extra query per page render; the table
     is already paged so the cost is bounded.
+
+    Soft-deleted rows are excluded (``deleted_at IS NULL``) so the
+    dropdown never offers a product whose only carrier is a tombstone
+    filtered out of the list itself (#2874).
     """
     stmt = (
         select(TargetORM.product)
-        .where(TargetORM.tenant_id == tenant_id)
+        .where(
+            TargetORM.tenant_id == tenant_id,
+            TargetORM.deleted_at.is_(None),
+        )
         .distinct()
         .order_by(TargetORM.product)
     )

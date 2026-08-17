@@ -420,9 +420,47 @@ _SECRET_CREATE_SCHEMA: dict[str, Any] = {
             "additionalProperties": {"type": "string"},
             "description": "Already-base64-encoded key→value map.",
         },
+        "string_data_secret_ref": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Map {secret-key: '<scheme>:<path>#<field>'} resolved server-side under "
+                "your identity via the credential-backend seam and merged into string_data "
+                "(plaintext). The value NEVER transits op params — only the ref does. The "
+                "optional '#field' fragment names the payload field (defaults to the "
+                "secret-key). Schemeless/'vault:' → Vault KV-v2 (logical path, no mount "
+                "prefix); 'gsm:' → GCP Secret Manager."
+            ),
+        },
+        "string_data_secret_mount": {
+            "type": "string",
+            "description": (
+                "Vault KV-v2 mount for string_data_secret_ref reads (default 'secret'; "
+                "backends without a mount concept, e.g. GSM, ignore it)."
+            ),
+        },
+        "data_secret_ref": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Like string_data_secret_ref, but the resolved values are already base64 "
+                "and merged into data. Resolved server-side; never transits op params."
+            ),
+        },
+        "data_secret_mount": {
+            "type": "string",
+            "description": (
+                "Vault KV-v2 mount for data_secret_ref reads (default 'secret'; GSM ignores)."
+            ),
+        },
     },
     "required": ["name", "namespace"],
-    "anyOf": [{"required": ["string_data"]}, {"required": ["data"]}],
+    "anyOf": [
+        {"required": ["string_data"]},
+        {"required": ["data"]},
+        {"required": ["string_data_secret_ref"]},
+        {"required": ["data_secret_ref"]},
+    ],
     "additionalProperties": False,
 }
 
@@ -480,8 +518,11 @@ _DELETE_LLM: dict[str, Any] = {
 _SECRET_CREATE_LLM: dict[str, Any] = {
     "when_to_use": (
         "Create a Secret. Pass plaintext under string_data (API encodes) or "
-        "pre-encoded under data. Values are NEVER echoed back or broadcast "
-        "(credential_write redaction). Requires approval."
+        "pre-encoded under data. For a Vault/GSM-resident value, pass "
+        "string_data_secret_ref / data_secret_ref (a "
+        "{key: '<scheme>:<path>#<field>'} map) so the value is read "
+        "server-side and NEVER transits op params. Values are NEVER echoed "
+        "back or broadcast (credential_write redaction). Requires approval."
     ),
     "parameter_hints": {
         "name": "Secret name.",
@@ -489,6 +530,12 @@ _SECRET_CREATE_LLM: dict[str, Any] = {
         "type": "Opaque by default.",
         "string_data": "Plaintext key→value.",
         "data": "Base64-encoded key→value.",
+        "string_data_secret_ref": (
+            "{key: '<scheme>:<path>#<field>'} → resolved server-side into string_data."
+        ),
+        "data_secret_ref": (
+            "{key: '<scheme>:<path>#<field>'} → resolved server-side into data (base64)."
+        ),
     },
     "output_shape": "{name, namespace, type, data_keys, created} -- key names only, no values.",
 }
@@ -553,10 +600,14 @@ WRITE_DANGEROUS_OPS: tuple[KubernetesOp, ...] = (
         summary="Create a Secret; values are redacted from audit + broadcast.",
         description=(
             "Creates a Secret from string_data (plaintext) and/or data "
-            "(base64). The values are written to the cluster but never "
-            "echoed back -- the response is key-names-only -- and the op "
-            "classifies credential_write so the broadcast collapses to "
-            "aggregate-only. Requires approval."
+            "(base64), inline and/or by reference. string_data_secret_ref / "
+            "data_secret_ref ({key: '<scheme>:<path>#<field>'} maps) are "
+            "resolved server-side through the credential-backend seam and "
+            "merged in, so a Vault/GSM-resident value never transits op "
+            "params. The values are written to the cluster but never echoed "
+            "back -- the response is key-names-only -- and the op classifies "
+            "credential_write so the broadcast collapses to aggregate-only. "
+            "Requires approval."
         ),
         parameter_schema=_SECRET_CREATE_SCHEMA,
         response_schema=None,

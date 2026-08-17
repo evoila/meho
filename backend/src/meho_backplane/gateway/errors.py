@@ -10,7 +10,7 @@ descriptor the runner can actually execute. A failing item raises one of
 these — each carrying a class-level ``error_code`` the route surfaces as a
 structured 422 via :mod:`meho_backplane.api.v1._errors`, the same
 machine-readable-code discipline as
-:class:`~meho_backplane.scheduler.service.EventTriggersNotImplementedError`.
+:class:`~meho_backplane.checks.service.SensorOperationNotFoundError`.
 
 Fail at the *first* offending item and write nothing: an assignment PUT is
 a full-document replace, so a partial store would leave the runner with a

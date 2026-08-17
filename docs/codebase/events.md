@@ -39,7 +39,8 @@ disk; `NOTIFY` is a tail-latency optimisation.
 backend/src/meho_backplane/events/
 ├── __init__.py        # re-exports publish, start_event_drain, stop_event_drain
 ├── outbox.py          # producer-side publish() + post-commit NOTIFY hint
-└── drain.py           # background drain loop + advisory-lock + claim + dispatch
+├── drain.py           # background drain loop + advisory-lock + claim + dispatch
+└── matcher.py         # subscription matcher: payload @> event_filter -> fire triggers
 ```
 
 Plus the persistence shape in
@@ -169,11 +170,14 @@ On each tick (default 10s, settable via
    the same open session as the SELECT; the FOR UPDATE row-lock
    carries through to the UPDATE.
 
-4. **Dispatch each row.** In v0.2 the subscription-matcher is not
-   yet built (see [Deferred work](#deferred-work) below). The drain
-   therefore stamps `processed_at` directly and emits a structlog
-   event — events are visible in the log stream, and the drain's
-   stamp-and-skip behaviour proves the substrate works end-to-end.
+4. **Dispatch each row** through the subscription matcher
+   ([The subscription matcher](#the-subscription-matcher) below): fire
+   every active `kind='event'` trigger whose `event_filter` the payload
+   contains, then stamp `processed_at`. An event that matches no
+   subscriber is still durably consumed (stamped, no fire, no log
+   noise). The claim stamps are committed *before* this fire step so
+   the drain holds no open write across a subscriber's independently-
+   committed run row (mirrors the scheduler-fire ordering).
 
 5. **Mark each row processed** via a conditional UPDATE
    (`processed_at IS NULL` predicate). The conditional UPDATE is the
@@ -208,27 +212,114 @@ each other — the scheduler's lock holder does not block the drain's
 claim, and vice versa. The ASCII spellings make the keys easy to
 recognise in `pg_locks` during operator triage.
 
+## The subscription matcher
+
+`backend/src/meho_backplane/events/matcher.py` is the junction between a
+drained event and the agent runs it fires. The drain calls
+`fire_matching_triggers(event, invoker)` for each claimed row (#2878).
+
+### Match semantics — `payload @> event_filter` (direction is load-bearing)
+
+An event matches a trigger when the event **`payload` contains** every
+key/value the trigger's **`event_filter`** names — the Postgres jsonb
+`@>` direction, the same one the retrieval metadata-filter path uses
+(`doc_metadata @> :filters`). Concretely:
+
+- A filter `{"status": "succeeded"}` matches a payload
+  `{"run_id": "…", "status": "succeeded", …}` — the filter is a subset
+  of the payload.
+- The **reverse never matches**: a payload that is a subset of the
+  filter is not a match (unless they are equal). Inverting the
+  operands would match nothing useful, so the direction is pinned by a
+  test.
+- An **empty filter `{}` matches every event** of the tenant (it names
+  no constraints). `event_filter` is matched, `event_kind` is not — a
+  subscriber filters on payload fields (for `agent_run.completed`:
+  `run_id` / `tenant_id` / `status` / `agent_definition_id` /
+  `work_ref`).
+
+### Why one pure-Python predicate on both dialects (not native `@>` on PG)
+
+`_payload_contains` is a single pure-Python containment predicate
+(recursive: object ⊇ object, array ⊇ array subset, scalar equality)
+used on **both** PG and SQLite, rather than the native jsonb `@>` on PG
+with a portable fallback on SQLite. One code path is deliberate:
+
+- The drain's tests run on SQLite, so a single predicate means those
+  tests exercise the **exact** code that also runs on Postgres. Two
+  implementations (native `@>` + a fallback) could silently diverge on
+  nested/array shapes — precisely the "works on PG **and** SQLite"
+  contract this Task must hold.
+- There is **no GIN index** on `scheduled_trigger.event_filter`, so a
+  native `@>` gives no index-backed speed-up over loading the tenant's
+  (dozens of) event triggers and filtering them in Python — which the
+  drain already does row-by-row.
+
+### The fire recipe — reuse of the scheduler seam
+
+The matcher reuses the cron/one-off fire recipe verbatim
+(`scheduler/loop.py`): `_prepare_invocation` resolves the definition +
+credentials (the agent's `client_credentials` secret stays a
+`SecretStr` end-to-end, CWE-532), and `_dispatch_invocation` calls
+`AgentInvoker.run_scheduled` and treats `BudgetExceededError` as a
+do-not-retry single-log refusal (`scheduler_invoke_refused` with the
+`budget_reason` tag). An event storm therefore never blasts through a
+budget kill switch — the refusal is logged once per matched trigger and
+the drain tick completes. Only two values are overridden on the
+prepared invocation:
+
+- **`work_ref` = `event:{event_id}:{trigger_id}`** — the fire-dedupe
+  key (below). The dispatched run inherits it through the trigger→run
+  `work_ref_var` seam `run_scheduled` already plumbs.
+- **`inputs`** — a `kind=event` trigger is exempt from the create-time
+  non-empty-inputs rule (`scheduler/schemas.py`), so an input-less
+  trigger reaches the matcher with no operator prompt. Rather than let
+  the fire fail typed at the no-input guard, the matcher **synthesises
+  a prompt from the matched event**. The event kind + payload are
+  untrusted, so the composed body is wrapped with
+  `wrap_untrusted_text` (`untrusted_text.py`). A trigger that *does*
+  carry a usable `inputs` prompt uses that instead.
+
+### Redelivery dedupe — the `work_ref`
+
+Delivery is **at-least-once**: a fired subscriber's `agent_run` commits
+in its own transaction, and the drain stamps `processed_at` in a
+separate one. A crash between the two leaves the event unprocessed and
+the next tick re-matches it. `_run_exists_for_work_ref` makes that
+idempotent: before firing, the matcher checks
+`agent_run_tenant_work_ref_idx` for **any** run (terminal or not)
+carrying `event:{event_id}:{trigger_id}` — a hit means the first
+delivery already fired, so the redelivery is skipped. A single drain
+replica runs at a time (the drain advisory lock), so this check-then-
+fire never races itself in production. (This overloads `work_ref` — a
+change-ticket field for scheduled triggers — as the dedupe key; a
+sibling Task, #2879, adds a first-class `dedupe_key` column, out of
+scope here.)
+
+### Storm controls
+
+- **Budget gate**: `BudgetExceededError` refusals do not retry and log
+  once — an event storm cannot repeatedly blast a kill switch.
+- **Zero-match quiet**: an event matching no subscriber is stamped with
+  no per-event log line.
+- **Per-trigger isolation**: one subscription raising never stalls the
+  others or the drain tick.
+
+### Avoiding self-triggering loops
+
+A fired agent run reaches a terminal state, which the producer emits as
+its own `agent_run.completed` event. A subscription with a filter broad
+enough to match *that* event (e.g. `{"status": "succeeded"}` — every
+successful run) would fire again on the run it just spawned, and so on:
+a feedback loop, bounded only by per-run budgets. The mitigation is the
+subscription filter, not a matcher guard: subscribe to a **specific
+upstream** by including `agent_definition_id` (or a `run_id`) in the
+`event_filter`, which the payload carries for exactly this reason. The
+spawned follow-up agent is a different definition, so its completion
+does not re-match. Work_ref dedupe does **not** help here — each
+distinct event has a distinct `event_id`, hence a distinct work_ref.
+
 ## Deferred work
-
-### Subscription matcher (depends on T5 #826)
-
-The drain loop in v0.2 stamps `processed_at` directly without
-matching subscribers. The matcher — looking up `scheduled_trigger`
-rows where `kind='event'` and `event_filter` matches `payload` — is
-deferred because:
-
-- The trigger-creation surface that populates `kind='event'` rows is
-  the admin surface in T5 #826. Until T5 ships, no `event` trigger
-  exists, so the matcher would always return zero matches.
-- The substrate proof — durable across restart, no double-fire,
-  same-transaction discipline — is independent of the matcher and is
-  the load-bearing correctness property this Task ships.
-
-When T5 lands, the matcher folds into the dispatch step: for each
-claimed row, `SELECT ... FROM scheduled_trigger WHERE kind='event' AND
-event_filter @> payload`, then fire each matched trigger through
-`AgentInvoker.run_scheduled` (the same seam the scheduler's cron /
-one-off paths use, G11.2-T2 #1096).
 
 ### Reconnect-with-backoff for the `LISTEN` connection
 
@@ -273,6 +364,14 @@ Both gated via env vars (defaults shown in parens):
     ticks, sum of processed == N exactly
   - `test_restart_durability_drains_unprocessed_rows` — publish →
     simulate kill → restart → tick drains the row
+- [backend/tests/test_event_matcher.py](backend/tests/test_event_matcher.py)
+  — subscription-matcher unit tests (#2878): containment direction,
+  end-to-end `agent_run.completed` → matching trigger → agent run with
+  work_ref, non-matching filter fires nothing, redelivery dedupe,
+  `BudgetExceededError` no-retry, input-less trigger fires with a
+  synthesised untrusted-enveloped prompt.
+- [backend/tests/integration/test_event_matcher_pg.py](backend/tests/integration/test_event_matcher_pg.py)
+  — the same end-to-end chain against a real Postgres container (#2878).
 - [backend/tests/migrations/test_migration_0027_event_outbox.py](backend/tests/migrations/test_migration_0027_event_outbox.py)
   — schema + index migration round-trip
 
@@ -283,8 +382,9 @@ Both gated via env vars (defaults shown in parens):
 - This Task #824 — research note (transactional-outbox vs
   LISTEN/NOTIFY durability)
 - Sibling Tasks: T1 #822 (substrate-decision spike), T2 #1065 (cron +
-  one-off, merged), T4 #825 (in-flight resume), T5 #826 (admin
-  surface — owns the subscription-matcher)
+  one-off, merged), T4 #825 (in-flight resume), T5 #826 (admin surface)
+- Task #2878 — the subscription matcher + `kind=event` dispatch
+  (`events/matcher.py`); Initiative #2877 (inbound event ingestion)
 - Companion: [scheduler.md](scheduler.md) — the cron + one-off
   substrate this layer joins on
 - PG `LISTEN`/`NOTIFY` durability:

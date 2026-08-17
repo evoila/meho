@@ -5388,6 +5388,18 @@ class EventOutbox(Base):
 
     * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
 
+    * ``dedupe_key`` -- Text, nullable (migration 0073). Producer-
+      supplied idempotency token for at-least-once external ingest.
+      NULL for internal producers; when set it is unique per tenant
+      (see ``event_outbox_tenant_dedupe_idx``) so a retried delivery
+      collides at insert instead of double-firing a subscriber. The
+      ingest path that populates it lands in #2881.
+
+    * ``origin`` -- Text, nullable (migration 0073). Event provenance:
+      NULL = internal MEHO producer, else the external event-source id.
+      Gives audit / policy surfaces a column to key "external input" on
+      instead of parsing the free-text ``event_kind``.
+
     Indexes
     -------
 
@@ -5398,6 +5410,11 @@ class EventOutbox(Base):
       ``event_id`` ``WHERE processed_at IS NULL`` on PG (plain b-tree
       on SQLite). Drives the global drain scan; partial keeps the
       index size flat as processed rows are tombstoned.
+    * ``event_outbox_tenant_dedupe_idx`` -- partial **unique** b-tree
+      on ``(tenant_id, dedupe_key)`` ``WHERE dedupe_key IS NOT NULL``
+      (migration 0073, emitted on both dialects). DB-enforced
+      idempotency for external ingest; NULL-``dedupe_key`` internal
+      rows stay out of the index and are unconstrained.
     """
 
     __tablename__ = "event_outbox"
@@ -5443,6 +5460,25 @@ class EventOutbox(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # Producer-supplied idempotency token (#2879). NULL for internal
+    # producers (agent-run completion, ...); a non-NULL value is unique
+    # per tenant via ``event_outbox_tenant_dedupe_idx`` below, so a
+    # retried at-least-once delivery (webhook ingest, #2881) collides at
+    # insert instead of double-firing a subscriber.
+    dedupe_key: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # Event provenance (#2879). NULL means an internal MEHO producer; a
+    # non-NULL value is the external event-source id, so audit / policy
+    # surfaces key "external input" on this column instead of parsing the
+    # free-text ``event_kind``.
+    origin: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -5457,6 +5493,23 @@ class EventOutbox(Base):
             "event_id",
             postgresql_using="btree",
             postgresql_where=sa.text("processed_at IS NULL"),
+        ),
+        # DB-enforced idempotency for external at-least-once ingest
+        # (#2879): a duplicate ``(tenant_id, dedupe_key)`` collides at
+        # insert. Partial (``WHERE dedupe_key IS NOT NULL``) so internal
+        # producers -- which leave ``dedupe_key`` NULL -- never enter the
+        # index and stay unconstrained. Emitted on both dialects
+        # (``sqlite_where`` alongside ``postgresql_where``) so the SQLite
+        # unit-test path enforces the same partial-unique shape PG does;
+        # SQLite has supported partial indexes since 3.8.0.
+        Index(
+            "event_outbox_tenant_dedupe_idx",
+            "tenant_id",
+            "dedupe_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text("dedupe_key IS NOT NULL"),
+            sqlite_where=sa.text("dedupe_key IS NOT NULL"),
         ),
     )
 

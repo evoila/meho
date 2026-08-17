@@ -2446,3 +2446,243 @@ VM_CUSTOMIZE_RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["status", "name", "spec_name"],
 }
+
+
+#: ``vmware.composite.vm.deploy_from_library`` parameter schema.
+#:
+#: Deploys an OVF/OVA content-library item to a new VM via the synchronous
+#: ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``. The
+#: library item is referenced either by ``library_item`` (id passthrough) or
+#: by ``library_item_name`` (resolved via ``POST:/content/library/item?action=find``,
+#: optionally scoped by ``library_name`` through
+#: ``POST:/content/library?action=find``) with ambiguity refused before any
+#: deploy. ``resource_pool`` is the one required placement (the vendor's
+#: ``DeploymentTarget.resource_pool_id`` is required); ``host`` / ``folder`` /
+#: ``datastore`` refine it. ``network_mappings`` is the OVF-network-key →
+#: portgroup-moid map the OVF descriptor's NetworkSection identifiers key
+#: into (spec: ``ResourcePoolDeploymentSpec.network_mappings`` is a map, not
+#: an array).
+VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_item": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Content-library OVF/OVA item id (passthrough). Rides the deploy "
+                "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
+                "?action=deploy``. Supply this **or** ``library_item_name`` — not "
+                "both needed; ``library_item`` wins when both are present."
+            ),
+        },
+        "library_item_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "OVF/OVA item display name, resolved to an id via "
+                "``POST:/content/library/item?action=find`` (filtered to "
+                "``type='ovf'``). A name matching no item returns "
+                "``status='item_not_found'``, more than one "
+                "``status='ambiguous_item'`` with the candidate ids — no deploy "
+                "fires. Ignored when ``library_item`` is given."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional library display name that scopes the "
+                "``library_item_name`` lookup to one library. Resolved to a "
+                "library id via ``POST:/content/library?action=find``; an unknown "
+                "name returns ``status='library_not_found'`` and an ambiguous one "
+                "``status='ambiguous_library'`` before any item lookup."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Target ``ResourcePool`` moid — the deploy target's required "
+                "``resource_pool_id``. When it is a stand-alone host or a "
+                "DRS-enabled cluster the server picks the host itself unless "
+                "``host`` is pinned."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional target ``HostSystem`` moid (``DeploymentTarget.host_id``). "
+                "Must be a member of the cluster owning ``resource_pool``."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional destination VM ``Folder`` moid "
+                "(``DeploymentTarget.folder_id``); the server chooses one if absent."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional default ``Datastore`` moid "
+                "(``ResourcePoolDeploymentSpec.default_datastore_id``) for OVF "
+                "storage sections without an explicit mapping."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional display name for the deployed VM; the server uses the "
+                "OVF descriptor's name when omitted."
+            ),
+        },
+        "network_mappings": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Map of OVF NetworkSection identifier → target ``Network`` moid "
+                "(portgroup). Sent verbatim as "
+                "``ResourcePoolDeploymentSpec.network_mappings`` (a map in the "
+                "pinned 9.0 spec). Keys the OVF descriptor does not declare come "
+                "back as a structured ``deploy_failed`` issue, not a raw fault."
+            ),
+        },
+        "storage_provisioning": {
+            "type": "string",
+            "enum": ["thin", "thick", "eagerZeroedThick"],
+            "description": (
+                "Optional default disk provisioning for all OVF storage sections "
+                "(``ResourcePoolDeploymentSpec.storage_provisioning``)."
+            ),
+        },
+        "storage_profile": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional default ``StorageProfile`` id "
+                "(``ResourcePoolDeploymentSpec.storage_profile_id``)."
+            ),
+        },
+        "ovf_properties": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Optional OVF product-section properties as ``{property_id: value}``. "
+                "Folded into a single ``PropertyParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. Property "
+                "values may be secret (e.g. appliance passwords), so the "
+                "park-time preview echoes only the property **ids**, never the "
+                "values."
+            ),
+        },
+        "accept_all_eula": {
+            "type": "boolean",
+            "description": (
+                "Whether to accept all EULAs declared by the OVF package "
+                "(``ResourcePoolDeploymentSpec.accept_all_eula``). Defaults to "
+                "``true`` — deploying a curated library item accepts its EULA; a "
+                "package with an unaccepted EULA returns ``status='deploy_failed'``."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "description": (
+                "Power the deployed VM on afterward via "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` (OVF deploy itself "
+                "never powers on). Best-effort: a power-on fault leaves "
+                "``status='deployed'`` with ``powered_on=false`` and an issue."
+            ),
+        },
+    },
+    "required": ["resource_pool"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.deploy_from_library`` response schema.
+VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "deployed",
+                "deploy_failed",
+                "deploy_error",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "item_not_found",
+                "ambiguous_item",
+            ],
+            "description": (
+                "``'deployed'`` — the OVF deploy report returned "
+                "``succeeded=true`` and a resource id; ``'deploy_failed'`` — the "
+                "report returned ``succeeded=false`` (network-mapping / placement "
+                "/ EULA / descriptor validation), with per-issue messages under "
+                "``issues``; ``'deploy_error'`` — the deploy call itself faulted "
+                "(HTTP 400/404 for invalid or missing placement resources), "
+                "surfaced as a structured message rather than a raw vendor error; "
+                "``'invalid_reference'`` — neither ``library_item`` nor "
+                "``library_item_name`` was supplied; ``'library_not_found'`` / "
+                "``'ambiguous_library'`` — the ``library_name`` lookup matched "
+                "zero / many libraries; ``'item_not_found'`` / ``'ambiguous_item'`` "
+                "— the ``library_item_name`` lookup matched zero / many items. "
+                "Every non-``deployed`` status is reached before or without a "
+                "successful mutation."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Deployed resource moid (``DeploymentResult.resource_id.id``); "
+                "``null`` unless ``status='deployed'``."
+            ),
+        },
+        "resource_type": {
+            "type": ["string", "null"],
+            "description": (
+                "``'VirtualMachine'`` or ``'VirtualApp'`` "
+                "(``DeploymentResult.resource_id.type``); ``null`` unless deployed."
+            ),
+        },
+        "library_item_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The library-item id the deploy used — the passthrough id, or the "
+                "id resolved from ``library_item_name``. ``null`` when resolution "
+                "failed before deploy."
+            ),
+        },
+        "powered_on": {
+            "type": "boolean",
+            "description": (
+                "Whether the follow-on power-on succeeded. Always ``false`` when "
+                "``power_on`` was not requested or the deploy did not succeed."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Per-issue projections ``{category, severity, message}`` drawn "
+                "from the OVF deploy report (errors / warnings / information) or "
+                "the resolution / power-on failure. Empty on a clean deploy."
+            ),
+        },
+        "candidates": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "Candidate ids on ``ambiguous_item`` (library-item ids) or "
+                "``ambiguous_library`` (library ids); ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm_id", "powered_on", "issues"],
+}

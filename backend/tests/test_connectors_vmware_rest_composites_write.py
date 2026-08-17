@@ -65,6 +65,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_from_template_composite,
     vm_create_composite,
     vm_customize_composite,
+    vm_deploy_from_library_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -530,6 +531,369 @@ async def test_vm_clone_non_string_deploy_payload_raises(gate: _GateRecorder) ->
             params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-1"},
             connector=conn,  # type: ignore[arg-type]
         )
+
+
+# ===========================================================================
+# vm.deploy_from_library (OVF/OVA content-library deploy -- #2909)
+# ===========================================================================
+
+_DEPLOY_OVF_OP = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_FIND_LIBRARY_PATH = "/api/content/library?action=find"
+_FIND_ITEM_PATH = "/api/content/library/item?action=find"
+
+
+def _deployment_result(
+    *,
+    succeeded: bool,
+    vm_id: str = "vm-ovf-9",
+    resource_type: str = "VirtualMachine",
+    errors: list[dict[str, Any]] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Canned ``Vcenter.Ovf.LibraryItem.DeploymentResult`` for the deploy stub."""
+    result: dict[str, Any] = {"succeeded": succeeded}
+    if succeeded:
+        result["resource_id"] = {"type": resource_type, "id": vm_id}
+    error_block: dict[str, Any] = {}
+    if errors is not None:
+        error_block["errors"] = errors
+    if warnings is not None:
+        error_block["warnings"] = warnings
+    if error_block:
+        result["error"] = error_block
+    return result
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_id_passthrough_deployed(gate: _GateRecorder) -> None:
+    """library_item id passthrough → one gated deploy → status='deployed' with the VM id."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-1"
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert out["resource_type"] == "VirtualMachine"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["powered_on"] is False
+    assert out["issues"] == []
+    # No name-resolution reads on the id path; only the deploy was gated.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> None:
+    """The deploy body carries the {deployment_spec, target} shape the pinned spec keys."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True
+            ),
+        }
+    )
+    await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "host": "host-19",
+            "folder": "group-v10",
+            "datastore": "datastore-15",
+            "network_mappings": {"nat": "dvportgroup-42", "mgmt": "dvportgroup-43"},
+            "storage_provisioning": "thin",
+            "storage_profile": "profile-1",
+            "ovf_properties": {"guestinfo.hostname": "router-01"},
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    body = conn.calls[0]["body"]
+    assert body["deployment_spec"] == {
+        "accept_all_eula": True,
+        "name": "router-01",
+        "network_mappings": {"nat": "dvportgroup-42", "mgmt": "dvportgroup-43"},
+        "storage_provisioning": "thin",
+        "storage_profile_id": "profile-1",
+        "default_datastore_id": "datastore-15",
+        "additional_parameters": [
+            {
+                "type": "PropertyParams",
+                "properties": [{"id": "guestinfo.hostname", "value": "router-01"}],
+            }
+        ],
+    }
+    assert body["target"] == {
+        "resource_pool_id": "resgroup-8",
+        "host_id": "host-19",
+        "folder_id": "group-v10",
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _GateRecorder) -> None:
+    """library_item_name + library_name → find library → find item (type=ovf) → deploy."""
+    conn = _RecordingConnector(
+        {
+            _FIND_LIBRARY_PATH: ["lib-7"],
+            _FIND_ITEM_PATH: ["li-resolved"],
+            "/api/vcenter/ovf/library-item/li-resolved?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-2"
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item_name": "holorouter-ova",
+            "library_name": "lab-templates",
+            "resource_pool": "resgroup-8",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["library_item_id"] == "li-resolved"
+    # Library find, then item find (scoped + type=ovf), then the deploy.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _FIND_LIBRARY_PATH),
+        ("POST", _FIND_ITEM_PATH),
+        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
+    ]
+    assert conn.calls[0]["body"] == {"spec": {"name": "lab-templates"}}
+    assert conn.calls[1]["body"] == {
+        "spec": {"name": "holorouter-ova", "type": "ovf", "library_id": "lib-7"}
+    }
+    # The finds are un-gated reads; only the deploy hit the policy seam.
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_ambiguous_item_refused(gate: _GateRecorder) -> None:
+    """An item name matching >1 item → ambiguous_item with candidates; no deploy, no gate."""
+    conn = _RecordingConnector({_FIND_ITEM_PATH: ["li-a", "li-b"]})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item_name": "dup-ova", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous_item"
+    assert out["candidates"] == ["li-a", "li-b"]
+    assert out["vm_id"] is None
+    assert out["library_item_id"] is None
+    assert [c["path"] for c in conn.calls] == [_FIND_ITEM_PATH]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_ambiguous_library_refused(gate: _GateRecorder) -> None:
+    """A library name matching >1 library → ambiguous_library before any item lookup."""
+    conn = _RecordingConnector({_FIND_LIBRARY_PATH: ["lib-1", "lib-2"]})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item_name": "ova",
+            "library_name": "dup-lib",
+            "resource_pool": "resgroup-8",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous_library"
+    assert out["candidates"] == ["lib-1", "lib-2"]
+    # Stopped at the library find; the item find never fired.
+    assert [c["path"] for c in conn.calls] == [_FIND_LIBRARY_PATH]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_item_not_found(gate: _GateRecorder) -> None:
+    """An item name matching zero items → item_not_found; no deploy."""
+    conn = _RecordingConnector({_FIND_ITEM_PATH: []})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item_name": "missing-ova", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "item_not_found"
+    assert out["candidates"] is None
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_invalid_reference(gate: _GateRecorder) -> None:
+    """Neither library_item nor library_item_name → invalid_reference; nothing touched."""
+    conn = _RecordingConnector({})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_reference"
+    assert conn.calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
+    gate: _GateRecorder,
+) -> None:
+    """succeeded=false → deploy_failed with the report's per-issue messages (not a raw fault)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=False,
+                errors=[
+                    {
+                        "category": "INPUT",
+                        "message": {"default_message": "network 'nat' not mapped"},
+                    },
+                    {
+                        "category": "SERVER",
+                        "error": {"messages": [{"default_message": "host busy"}]},
+                    },
+                ],
+                warnings=[
+                    {"category": "VALIDATION", "message": {"default_message": "deprecated hw"}}
+                ],
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    assert out["vm_id"] is None
+    assert out["library_item_id"] == "li-ovf"
+    assert out["issues"] == [
+        {"category": "INPUT", "severity": "error", "message": "network 'nat' not mapped"},
+        {"category": "SERVER", "severity": "error", "message": "host busy"},
+        {"category": "VALIDATION", "severity": "warning", "message": "deprecated hw"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorder) -> None:
+    """A 404 on the deploy (missing placement resource) → structured deploy_error, not a raise."""
+    fault = httpx.HTTPStatusError(
+        "not found",
+        request=httpx.Request(
+            "POST", "https://vc/api/vcenter/ovf/library-item/li-ovf?action=deploy"
+        ),
+        response=httpx.Response(404, json={"error_type": "NOT_FOUND"}),
+    )
+    conn = _RecordingConnector({"/api/vcenter/ovf/library-item/li-ovf?action=deploy": fault})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-missing"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["library_item_id"] == "li-ovf"
+    assert len(out["issues"]) == 1
+    assert out["issues"][0]["category"] == "placement"
+    assert "404" in out["issues"][0]["message"]
+    assert "NOT_FOUND" in out["issues"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_gate_short_circuits_before_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the OVF deploy returns verbatim; the deploy never reaches the wire."""
+    gate = _install_gate(
+        monkeypatch,
+        _GateRecorder(gate_for={_DEPLOY_OVF_OP: _awaiting(_DEPLOY_OVF_OP)}),
+    )
+    conn = _RecordingConnector({})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _DEPLOY_OVF_OP
+    # id passthrough → no resolution reads, and the deploy was gated off the wire.
+    assert conn.calls == []
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_power_on_after_deploy(gate: _GateRecorder) -> None:
+    """power_on=true → deploy then a gated power-start; powered_on=true."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-7"
+            ),
+            "/api/vcenter/vm/vm-ovf-7/power?action=start": {},
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["powered_on"] is True
+    assert out["issues"] == []
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+        ("POST", "/api/vcenter/vm/vm-ovf-7/power?action=start"),
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, "POST:/vcenter/vm/{vm}/power?action=start"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_power_on_failure_stays_deployed(gate: _GateRecorder) -> None:
+    """A power-on fault leaves status='deployed' with powered_on=false + a warning issue."""
+    fault = httpx.HTTPStatusError(
+        "conflict",
+        request=httpx.Request("POST", "https://vc/api/vcenter/vm/vm-ovf-7/power?action=start"),
+        response=httpx.Response(500, json={}),
+    )
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-7"
+            ),
+            "/api/vcenter/vm/vm-ovf-7/power?action=start": fault,
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-7"
+    assert out["powered_on"] is False
+    assert len(out["issues"]) == 1
+    assert out["issues"][0]["category"] == "power_on"
+    assert out["issues"][0]["severity"] == "warning"
 
 
 # ===========================================================================

@@ -175,15 +175,16 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 23 total: 5 reads
-    # (T5 #508) + 18 writes (T6 #509 + single-VM vm.power #2301 + mutating
+    # Embedding service called once per composite -- 24 total: 5 reads
+    # (T5 #508) + 19 writes (T6 #509 + single-VM vm.power #2301 + mutating
     # VI-JSON vm.disk.grow #2893 + folder-template vm.clone_from_template
     # #2894 + vim cluster/inventory writes cluster.drs_rule.create +
     # folder.create #2895 + the #2891 hardware writes vm.resize /
-    # vm.nic.repoint / vm.device.cdrom + GOSC create/apply #2892). (The
-    # former host.network_uplinks / host.vsan_health reads were re-shipped
-    # as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 23
+    # vm.nic.repoint / vm.device.cdrom + GOSC create/apply #2892 + OVF/OVA
+    # content-library deploy vm.deploy_from_library #2909). (The former
+    # host.network_uplinks / host.vsan_health reads were re-shipped as
+    # typed ops in #2258.)
+    assert stub_embedding_service.encode_one.call_count == 24
 
 
 @pytest.mark.asyncio
@@ -430,20 +431,21 @@ async def test_tags_include_composite_and_read_only(
 async def test_register_vmware_composite_operations_is_idempotent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 5 read rows persist; embedding stays at 23.
+    """Running the registrar twice -> 5 read rows persist; embedding stays at 24.
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
-    persist after the combined registrar (5 reads + 18 writes / T6 +
+    persist after the combined registrar (5 reads + 19 writes / T6 +
     single-VM vm.power #2301 + mutating VI-JSON vm.disk.grow #2893 +
     folder-template vm.clone_from_template #2894 + vim cluster/inventory
     writes cluster.drs_rule.create + folder.create #2895 + the #2891
     hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC
-    create/apply #2892).
+    create/apply #2892 + OVF/OVA content-library deploy
+    vm.deploy_from_library #2909).
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 23
+    assert first_count == 24
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

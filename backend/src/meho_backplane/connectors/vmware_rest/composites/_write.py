@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 18 protocol-driven composite handlers for the
+# code-quality-allow: 19 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
@@ -8,10 +8,11 @@
 # (plus the single-VM vm.power from #2301, the mutating VI-JSON disk-grow
 # from #2893, the folder-template clone from #2894, the vim cluster /
 # inventory writes — DRS-rule + folder create — from #2895, the #2891
-# hardware writes — vm.resize / vm.nic.repoint / vm.device.cdrom, and the
-# GOSC create/apply from #2892).
+# hardware writes — vm.resize / vm.nic.repoint / vm.device.cdrom, the
+# GOSC create/apply from #2892, and the OVF/OVA content-library deploy
+# from #2909).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (18 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (19 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -112,6 +113,7 @@ __all__ = [
     "vm_clone_from_template_composite",
     "vm_create_composite",
     "vm_customize_composite",
+    "vm_deploy_from_library_composite",
     "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
@@ -177,6 +179,31 @@ _OP_LIST_HOSTS = "GET:/vcenter/host"
 _OP_DEPLOY_LIBRARY_VM = (
     "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy"
 )
+# OVF/OVA content-library deploy (``vm.deploy_from_library`` / #2909). The
+# pinned spec keys the deploy on the OVF item as a *path* param
+# (``Vcenter.Ovf.LibraryItem_deploy``); like the VMTX deploy it is
+# synchronous, but its 200 body is a ``DeploymentResult`` structure
+# (``succeeded`` / ``resource_id`` / ``error``) — a deploy that fails OVF /
+# placement / network validation returns ``succeeded=false`` with an error
+# report rather than raising, so the composite surfaces it as a structured
+# status. Name-based item resolution rides the content-library find actions
+# (both served by the pinned ``vcenter.yaml``): items via
+# ``Content.Library.Item_find`` (filtered to ``type=ovf``), the optional
+# scoping library via ``Content.Library_find`` — both return a bare array of
+# id strings and mutate nothing, so they run un-gated like the REST listing
+# reads.
+_OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_OP_FIND_LIBRARY = "POST:/content/library?action=find"
+_OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
+# Content-library item type discriminator for OVF/OVA templates — the find
+# filter that keeps a colliding non-OVF item name (ISO, other) from matching.
+_OVF_LIBRARY_ITEM_TYPE = "ovf"
+# ``Vcenter.Ovf.OvfParams`` subtype discriminator for injected OVF
+# product-section properties. The pinned 9.0 ``/api`` schema keys the union on
+# ``type`` (the legacy ``/rest`` ``@class`` form is not used on the modern
+# mount); a single ``PropertyParams`` entry carries the operator's
+# ``ovf_properties`` map as ``{id, value}`` rows.
+_OVF_PROPERTY_PARAMS_TYPE = "PropertyParams"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
 # Per-host vLCM remediation (``Esx.Settings.Hosts.Software_apply$Task``).
 # The pinned spec serves no ``POST:/vcenter/host/{host}?action=patch``
@@ -562,6 +589,12 @@ _SUB_OPS_VM_CREATE: tuple[str, ...] = (
 _SUB_OPS_VM_CLONE: tuple[str, ...] = (
     _OP_GET_VM,
     _OP_DEPLOY_LIBRARY_VM,
+)
+_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
+    _OP_FIND_LIBRARY,
+    _OP_FIND_LIBRARY_ITEM,
+    _OP_DEPLOY_OVF_LIBRARY_ITEM,
+    _power_vm_op_id("start"),
 )
 _SUB_OPS_VM_MIGRATE: tuple[str, ...] = (_OP_RELOCATE_VM,)
 _SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
@@ -1120,6 +1153,359 @@ async def vm_clone_composite(
         "task_id": None,
         "vm_id": vm_id,
         "guidance": None,
+    }
+
+
+# ===========================================================================
+# vm.deploy_from_library (OVF/OVA content-library deploy -- #2909)
+# ===========================================================================
+#
+# Retires ``govc library.deploy`` for OVF/OVA appliances (the HoloRouter OVA
+# and friends). The deploy is the synchronous
+# ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``; unlike
+# ``vm.clone`` (whose 200 body is a bare VM id) its 200 body is a
+# ``DeploymentResult`` structure, so a deploy that fails OVF / network-mapping
+# / placement validation returns ``succeeded=false`` with an error report —
+# surfaced here as a structured ``deploy_failed`` status, never a raw fault.
+# Name-based item resolution rides the content-library find actions (both in
+# the pinned ``vcenter.yaml``), un-gated reads that mutate nothing.
+
+
+def _deploy_issue(category: str, severity: str, message: str) -> dict[str, Any]:
+    """Build one issue projection ``{category, severity, message}``."""
+    return {"category": category, "severity": severity, "message": message}
+
+
+def _deploy_failure(
+    status: str,
+    *,
+    library_item_id: str | None = None,
+    candidates: list[str] | None = None,
+    issues: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a non-``deployed`` response envelope (resolution / deploy failure)."""
+    return {
+        "status": status,
+        "vm_id": None,
+        "resource_type": None,
+        "library_item_id": library_item_id,
+        "powered_on": False,
+        "issues": issues or [],
+        "candidates": candidates,
+    }
+
+
+def _ovf_message(entry: dict[str, Any]) -> str:
+    """Best human-readable message from one OVF error/warning/info entry.
+
+    An ``Vcenter.Ovf.OvfError`` carries the localizable text under
+    ``message.default_message`` (INPUT category), or under
+    ``error.messages[].default_message`` (SERVER category); a VALIDATION
+    entry may carry only a ``name``. Defensive: any missing shape yields a
+    placeholder, never a raise.
+    """
+    message = entry.get("message")
+    if isinstance(message, dict):
+        default = message.get("default_message")
+        if isinstance(default, str) and default:
+            return default
+    error = entry.get("error")
+    if isinstance(error, dict):
+        for msg in error.get("messages") or []:
+            if isinstance(msg, dict):
+                default = msg.get("default_message")
+                if isinstance(default, str) and default:
+                    return default
+    name = entry.get("name")
+    if isinstance(name, str) and name:
+        return f"invalid OVF input parameter {name!r}"
+    return "<no message reported>"
+
+
+def _extract_ovf_issues(error_report: Any) -> list[dict[str, Any]]:
+    """Flatten an OVF ``ResultInfo`` (errors / warnings / information) to issues.
+
+    Returns one projection per reported message, severity-tagged. Empty when
+    the report is missing/malformed or carries no messages — so a clean
+    deploy yields ``[]`` and a warning-only deploy still surfaces the
+    warnings on the ``deployed`` envelope.
+    """
+    if not isinstance(error_report, dict):
+        return []
+    issues: list[dict[str, Any]] = []
+    for severity, key in (("error", "errors"), ("warning", "warnings"), ("info", "information")):
+        for entry in error_report.get(key) or []:
+            if isinstance(entry, dict):
+                category = entry.get("category")
+                issues.append(
+                    _deploy_issue(
+                        category if isinstance(category, str) else "unknown",
+                        severity,
+                        _ovf_message(entry),
+                    )
+                )
+    return issues
+
+
+async def _find_content_library_ids(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    op_id: str,
+    spec: dict[str, Any],
+) -> list[str]:
+    """Issue one content-library ``?action=find`` POST as an un-gated read.
+
+    The find actions (``Content.Library_find`` / ``Content.Library.Item_find``)
+    return a bare array of id strings and mutate nothing, so they skip the
+    :func:`enforce_subop_policy` seam like the REST listing reads — but they
+    are POST-shaped, so they ride ``_post_json`` rather than :func:`_read_sub_op`
+    (which is GET-only). The ``FindSpec`` is wrapped in the ``{"spec": ...}``
+    envelope the ``/api`` protocol expects for a single structured input
+    parameter (the same wrapping the ``CreateSpec`` writes use). Transport
+    faults raise :exc:`httpx.HTTPError` for the caller.
+    """
+    method, _, path = op_id.partition(":")
+    mounted = await connector.mount_op_path(target, path, operator)
+    payload = await connector._post_json(
+        target, mounted, operator=operator, verb=method, json={"spec": spec}
+    )
+    ids = _unwrap_value(payload)
+    if not isinstance(ids, list):
+        raise RuntimeError(f"expected id list from {op_id!r}, got {type(ids).__name__}")
+    return [entry for entry in ids if isinstance(entry, str)]
+
+
+async def _resolve_deploy_library_item(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve the OVF library-item id from *params*.
+
+    Returns ``(item_id, None)`` on success or ``(None, envelope)`` with a
+    terminal response dict on failure (``invalid_reference`` /
+    ``library_not_found`` / ``ambiguous_library`` / ``item_not_found`` /
+    ``ambiguous_item``). ``library_item`` (an id) short-circuits; otherwise
+    ``library_item_name`` is resolved via ``Content.Library.Item_find``
+    (filtered to ``type=ovf``), optionally scoped to the library
+    ``library_name`` resolves to via ``Content.Library_find``. Ambiguity is
+    refused before any deploy so the operator re-dispatches by explicit id.
+    """
+    passthrough = params.get("library_item")
+    if isinstance(passthrough, str) and passthrough:
+        return passthrough, None
+
+    item_name = params.get("library_item_name")
+    if not isinstance(item_name, str) or not item_name:
+        return None, _deploy_failure(
+            "invalid_reference",
+            issues=[
+                _deploy_issue(
+                    "input",
+                    "error",
+                    "supply library_item (id) or library_item_name to identify the OVF item",
+                )
+            ],
+        )
+
+    library_id: str | None = None
+    library_name = params.get("library_name")
+    if isinstance(library_name, str) and library_name:
+        library_ids = await _find_content_library_ids(
+            connector, target, operator, op_id=_OP_FIND_LIBRARY, spec={"name": library_name}
+        )
+        if not library_ids:
+            return None, _deploy_failure(
+                "library_not_found",
+                issues=[
+                    _deploy_issue("input", "error", f"library {library_name!r} matched no library")
+                ],
+            )
+        if len(library_ids) > 1:
+            return None, _deploy_failure(
+                "ambiguous_library",
+                candidates=library_ids,
+                issues=[
+                    _deploy_issue(
+                        "input",
+                        "error",
+                        f"library {library_name!r} matched {len(library_ids)} libraries",
+                    )
+                ],
+            )
+        library_id = library_ids[0]
+
+    item_spec: dict[str, Any] = {"name": item_name, "type": _OVF_LIBRARY_ITEM_TYPE}
+    if library_id is not None:
+        item_spec["library_id"] = library_id
+    item_ids = await _find_content_library_ids(
+        connector, target, operator, op_id=_OP_FIND_LIBRARY_ITEM, spec=item_spec
+    )
+    if not item_ids:
+        return None, _deploy_failure(
+            "item_not_found",
+            issues=[
+                _deploy_issue("input", "error", f"OVF item {item_name!r} matched no library item")
+            ],
+        )
+    if len(item_ids) > 1:
+        return None, _deploy_failure(
+            "ambiguous_item",
+            candidates=item_ids,
+            issues=[
+                _deploy_issue(
+                    "input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items"
+                )
+            ],
+        )
+    return item_ids[0], None
+
+
+def _build_ovf_deploy_body(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``{deployment_spec, target}`` OVF deploy request body.
+
+    ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
+    refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
+    map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
+    folds into a single ``PropertyParams`` entry in ``additional_parameters``.
+    ``accept_all_eula`` defaults to true (deploying a curated item accepts its
+    EULA).
+    """
+    deployment_spec: dict[str, Any] = {"accept_all_eula": bool(params.get("accept_all_eula", True))}
+    _put_if_str(deployment_spec, "name", params.get("name"))
+    network_mappings = params.get("network_mappings")
+    if isinstance(network_mappings, dict) and network_mappings:
+        deployment_spec["network_mappings"] = {str(k): str(v) for k, v in network_mappings.items()}
+    _put_if_str(deployment_spec, "storage_provisioning", params.get("storage_provisioning"))
+    _put_if_str(deployment_spec, "storage_profile_id", params.get("storage_profile"))
+    _put_if_str(deployment_spec, "default_datastore_id", params.get("datastore"))
+    ovf_properties = params.get("ovf_properties")
+    if isinstance(ovf_properties, dict) and ovf_properties:
+        deployment_spec["additional_parameters"] = [
+            {
+                "type": _OVF_PROPERTY_PARAMS_TYPE,
+                "properties": [{"id": str(k), "value": str(v)} for k, v in ovf_properties.items()],
+            }
+        ]
+
+    deploy_target: dict[str, Any] = {"resource_pool_id": params["resource_pool"]}
+    _put_if_str(deploy_target, "host_id", params.get("host"))
+    _put_if_str(deploy_target, "folder_id", params.get("folder"))
+    return {"deployment_spec": deployment_spec, "target": deploy_target}
+
+
+async def _power_on_deployed_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Best-effort power-on of a freshly deployed VM; ``(powered_on, issue?)``.
+
+    A power-on fault (or, defensively, a parked gate that cannot occur once
+    the deploy write cleared the same posture) never demotes the already-
+    successful deploy — it returns ``(False, issue)`` so the caller keeps
+    ``status='deployed'`` and folds the issue into the report.
+    """
+    try:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+        )
+    except httpx.HTTPError as exc:
+        return False, _deploy_issue(
+            "power_on", "warning", f"deploy succeeded but power-on failed: {exc}"
+        )
+    if gate is not None:
+        return False, _deploy_issue(
+            "power_on", "warning", "deploy succeeded but the follow-on power-on was not authorized"
+        )
+    return True, None
+
+
+async def vm_deploy_from_library_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Deploy an OVF/OVA content-library item to a new VM.
+
+    Op-id: ``vmware.composite.vm.deploy_from_library``. Resolves the library
+    item (id passthrough or name lookup, ambiguity-refusing), issues the
+    synchronous OVF deploy through the governed direct-session seam, and maps
+    the ``DeploymentResult`` to a structured envelope: ``deployed`` on
+    ``succeeded=true``, ``deploy_failed`` on ``succeeded=false`` (with the
+    report's per-issue messages), or ``deploy_error`` when the deploy call
+    itself faults (HTTP 400/404 for invalid / missing placement resources) —
+    so a placement or network-mapping error is a structured status, never a
+    raw vendor error. With ``power_on`` the deployed VM is started best-effort.
+    """
+    item_id, resolution_error = await _resolve_deploy_library_item(
+        connector=connector, target=target, operator=operator, params=params
+    )
+    if resolution_error is not None:
+        return resolution_error
+    assert item_id is not None  # resolution_error is None ⇒ item_id resolved
+
+    deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params)}
+    try:
+        gate, deploy_payload = await _write_sub_op(
+            connector, target, operator, _OP_DEPLOY_OVF_LIBRARY_ITEM, deploy_params
+        )
+    except httpx.HTTPError as exc:
+        status, error_type = _parse_vsphere_error(exc)
+        detail = f"HTTP {status}" if status is not None else "transport fault"
+        if error_type:
+            detail += f" ({error_type})"
+        return _deploy_failure(
+            "deploy_error",
+            library_item_id=item_id,
+            issues=[
+                _deploy_issue("placement", "error", f"OVF deploy call faulted: {detail}: {exc}")
+            ],
+        )
+    if gate is not None:
+        return gate
+
+    result = _unwrap_value(deploy_payload)
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"vm.deploy_from_library: deploy returned no DeploymentResult "
+            f"(payload={deploy_payload!r}); the pinned deploy is synchronous and its "
+            "200 body is a DeploymentResult structure"
+        )
+    issues = _extract_ovf_issues(result.get("error"))
+    if not result.get("succeeded"):
+        return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
+
+    resource = result.get("resource_id")
+    vm_id = resource.get("id") if isinstance(resource, dict) else None
+    resource_type = resource.get("type") if isinstance(resource, dict) else None
+    if not isinstance(vm_id, str):
+        raise RuntimeError(
+            "vm.deploy_from_library: deploy reported succeeded=true but no "
+            f"resource_id.id (resource_id={resource!r})"
+        )
+
+    powered_on = False
+    if bool(params.get("power_on", False)):
+        powered_on, power_issue = await _power_on_deployed_vm(connector, target, operator, vm_id)
+        if power_issue is not None:
+            issues.append(power_issue)
+
+    return {
+        "status": "deployed",
+        "vm_id": vm_id,
+        "resource_type": resource_type if isinstance(resource_type, str) else None,
+        "library_item_id": item_id,
+        "powered_on": powered_on,
+        "issues": issues,
+        "candidates": None,
     }
 
 

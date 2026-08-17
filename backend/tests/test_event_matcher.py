@@ -607,3 +607,60 @@ async def test_fire_matching_triggers_returns_fired_count() -> None:
         fired = await fire_matching_triggers(event, _make_invoker())
     assert fired == 2
     await _wait_for_runs(2)
+
+
+# ---------------------------------------------------------------------------
+# Self-trigger loop guard -- a trigger never fires off its own agent's completion
+# ---------------------------------------------------------------------------
+
+
+async def test_self_trigger_completion_event_is_suppressed() -> None:
+    """A trigger subscribed to its own agent's completion does not re-fire.
+
+    The direct feedback loop: a ``kind=event`` trigger spawns agent X with a
+    filter broad enough to match X's own ``agent_run.completed`` event. The
+    matcher guard suppresses the fire so the loop never starts -- no run, even
+    though the filter matches. The exploding invoker proves the guard short-
+    circuits before any model call.
+    """
+    def_id = await _seed_tenant_and_agent()
+    # Filter matches the completion event of the very agent this trigger spawns.
+    await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"agent_definition_id": str(def_id)},
+        inputs={"prompt": "follow up"},
+    )
+    # The event is *def_id*'s own completion -> the guard must suppress the fire.
+    event_id = await _publish_completed_event(status="succeeded", agent_definition_id=def_id)
+
+    processed = await run_one_drain_tick(invoker=_make_no_call_invoker())
+
+    assert processed == 1
+    assert await _is_processed(event_id)
+    assert await _all_runs() == []
+
+
+async def test_cross_agent_completion_event_still_fires() -> None:
+    """The guard leaves legitimate cross-agent chains intact.
+
+    A trigger spawning definition *def_id*, subscribed to a *different* upstream's
+    completion, fires normally -- the guard only blocks the one-hop self-loop
+    (matching ``agent_definition_id``), not a chain across two definitions.
+    """
+    def_id = await _seed_tenant_and_agent()
+    trigger = await _create_event_trigger(
+        agent_definition_id=def_id,
+        event_filter={"agent_definition_id": str(_UPSTREAM_DEF_ID)},
+        inputs={"prompt": "follow up"},
+    )
+    # Completion of a *different* agent (the upstream) -> the guard does not fire.
+    event_id = await _publish_completed_event(
+        status="succeeded", agent_definition_id=_UPSTREAM_DEF_ID
+    )
+
+    processed = await run_one_drain_tick(invoker=_make_invoker())
+
+    assert processed == 1
+    runs = await _wait_for_runs(1)
+    assert len(runs) == 1
+    assert runs[0].work_ref == f"event:{event_id}:{trigger.id}"

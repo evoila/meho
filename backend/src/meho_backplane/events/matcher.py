@@ -87,6 +87,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.operations.agent_run import AGENT_RUN_COMPLETED_EVENT_KIND
 from meho_backplane.scheduler.loop import (
     _coerce_inputs,
     _dispatch_invocation,
@@ -115,8 +116,8 @@ _EMPTY_DICT_RENDER = "{}"
 def _payload_contains(container: object, subset: object) -> bool:
     """Return ``True`` when *container* contains *subset* (jsonb ``@>`` semantics).
 
-    Portable equivalent of the Postgres ``container @> subset`` operator, used
-    for ``payload @> event_filter``:
+    A portable **approximation** of the Postgres ``container @> subset``
+    operator for the payload shapes we match (``payload @> event_filter``):
 
     * object contains object -- every key of *subset* is present in *container*
       and its value is (recursively) contained;
@@ -126,6 +127,14 @@ def _payload_contains(container: object, subset: object) -> bool:
 
     An empty object subset is contained by any object (vacuously true), so an
     empty ``event_filter`` matches every payload.
+
+    Two edges of the real ``@>`` are deliberately not modelled -- neither is
+    reachable with the ``agent_run.completed`` payloads and operator-authored
+    filters we match, and one predicate shared by both dialects is worth more
+    than bit-exact parity: PG treats a top-level array as containing a bare
+    scalar it holds (``'[1,2]'::jsonb @> '2'``), which the array branch below
+    does not; and Python conflates ``True == 1`` / ``False == 0`` where PG's
+    jsonb keeps ``true`` and ``1`` distinct.
     """
     if isinstance(subset, dict):
         return isinstance(container, dict) and all(
@@ -221,6 +230,26 @@ def _event_inputs(trigger: ScheduledTrigger, event: EventOutbox) -> str:
     return _synthesize_event_prompt(event)
 
 
+def _is_self_trigger_completion(event: EventOutbox, trigger: ScheduledTrigger) -> bool:
+    """Return ``True`` when firing *trigger* off *event* is a direct self-loop.
+
+    A ``kind=event`` trigger that spawns agent X, subscribed with a filter broad
+    enough to match X's own ``agent_run.completed`` event, would re-fire itself
+    on every completion -- and on a default install with no budget row that loop
+    is bounded only by the manual kill switch. This guard breaks the *direct*
+    one-hop loop with no schema change: it suppresses the fire when the draining
+    event is the completion of the very agent this trigger spawns
+    (``event_kind == agent_run.completed`` and the event payload's
+    ``agent_definition_id`` is this trigger's target). A cross-agent chain -- X's
+    completion firing a trigger that spawns a *different* definition Y -- is
+    unaffected, since the ids differ. A longer cycle (X -> Y -> X) is still the
+    subscription filter's job to avoid (see the module docstring).
+    """
+    if event.event_kind != AGENT_RUN_COMPLETED_EVENT_KIND:
+        return False
+    return event.payload.get("agent_definition_id") == str(trigger.agent_definition_id)
+
+
 async def _fire_event_trigger(
     trigger: ScheduledTrigger,
     event: EventOutbox,
@@ -228,11 +257,20 @@ async def _fire_event_trigger(
 ) -> bool:
     """Fire one matched event trigger; return ``True`` when a run was started.
 
-    Resolves definition + credentials via the scheduler's precondition gate,
+    Suppresses a direct self-trigger loop (:func:`_is_self_trigger_completion`),
+    resolves definition + credentials via the scheduler's precondition gate,
     dedupes on the ``event:{event_id}:{trigger_id}`` work_ref, then dispatches
     through the shared fire seam with the event prompt + dedupe work_ref
     overridden onto the prepared invocation.
     """
+    if _is_self_trigger_completion(event, trigger):
+        _log.info(
+            "event_trigger_self_fire_suppressed",
+            event_id=event.event_id,
+            trigger_id=str(trigger.id),
+            agent_definition_id=str(trigger.agent_definition_id),
+        )
+        return False
     prepared = await _prepare_invocation(trigger)
     if isinstance(prepared, _PreconditionSkip):
         # _prepare_invocation already logged the cause (definition

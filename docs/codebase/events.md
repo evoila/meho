@@ -298,6 +298,10 @@ scope here.)
 
 ### Storm controls
 
+- **Self-trigger guard**: a `kind=event` trigger never fires from the
+  `agent_run.completed` event of the agent it spawns (the direct
+  self-loop), suppressed in `_fire_event_trigger` and logged once as
+  `event_trigger_self_fire_suppressed` (see below).
 - **Budget gate**: `BudgetExceededError` refusals do not retry and log
   once — an event storm cannot repeatedly blast a kill switch.
 - **Zero-match quiet**: an event matching no subscriber is stamped with
@@ -311,13 +315,28 @@ A fired agent run reaches a terminal state, which the producer emits as
 its own `agent_run.completed` event. A subscription with a filter broad
 enough to match *that* event (e.g. `{"status": "succeeded"}` — every
 successful run) would fire again on the run it just spawned, and so on:
-a feedback loop, bounded only by per-run budgets. The mitigation is the
-subscription filter, not a matcher guard: subscribe to a **specific
-upstream** by including `agent_definition_id` (or a `run_id`) in the
-`event_filter`, which the payload carries for exactly this reason. The
-spawned follow-up agent is a different definition, so its completion
-does not re-match. Work_ref dedupe does **not** help here — each
-distinct event has a distinct `event_id`, hence a distinct work_ref.
+a feedback loop that, on a default install with no budget row, is
+bounded only by the manual kill switch. Two controls contain it:
+
+- **Matcher self-trigger guard (defence in depth).**
+  `_fire_event_trigger` refuses to fire a trigger from the
+  `agent_run.completed` event of the very agent that trigger spawns: it
+  skips when `event_kind == agent_run.completed` and the event payload's
+  `agent_definition_id` equals the trigger's `agent_definition_id`,
+  logging `event_trigger_self_fire_suppressed` once. This breaks the
+  *direct* one-hop self-loop with no schema change, while leaving
+  legitimate cross-agent chains intact — a trigger that spawns a
+  *different* definition Y off X's completion still fires because the
+  ids differ.
+- **Subscription filter (the recommended discipline).** The guard only
+  covers the one-hop self-loop; a longer cycle (X → Y → X) slips past
+  it. Subscribe to a **specific upstream** by including
+  `agent_definition_id` (or a `run_id`) in the `event_filter`, which the
+  payload carries for exactly this reason, so a subscription only wakes
+  on the intended producer.
+
+Work_ref dedupe does **not** help here — each distinct event has a
+distinct `event_id`, hence a distinct work_ref.
 
 ## Deferred work
 

@@ -1442,9 +1442,10 @@ _READ_OP_IDS: frozenset[str] = frozenset(
 )
 
 
-def test_holodeck_ops_has_thirteen_entries() -> None:
-    """about + 7 T2 reads + disk.usage + #2847 backups.list + 3 write ops = 13 total."""
-    assert len(HOLODECK_OPS) == 13
+def test_holodeck_ops_has_seventeen_entries() -> None:
+    """about + 7 T2 reads + disk.usage + #2847 backups.list + 3 write ops +
+    #2908 4 deploy-lifecycle ops = 17 total."""
+    assert len(HOLODECK_OPS) == 17
 
 
 def test_holodeck_ops_about_remains_at_index_zero() -> None:
@@ -1457,6 +1458,11 @@ def test_holodeck_ops_covers_expected_op_ids() -> None:
         "holodeck.k8s.pods.gc",
         "holodeck.backups.prune",
         "holodeck.images.import",
+        # #2908 deploy-lifecycle ops.
+        "holodeck.config.apply",
+        "holodeck.instance.start",
+        "holodeck.instance.status",
+        "holodeck.router.patch",
     }
     assert op_ids == expected
 
@@ -1534,6 +1540,11 @@ def test_holodeck_ops_group_keys_include_new_groups() -> None:
         "k8s-write",
         "backups-write",
         "images-write",
+        # #2908 deploy-lifecycle groups (``deploy-`` prefix avoids collision).
+        "deploy-config",
+        "deploy-lifecycle",
+        "deploy-status",
+        "deploy-patch",
     } == group_keys
 
 

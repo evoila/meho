@@ -3,10 +3,12 @@
 #
 # code-quality-allow: pre-existing legacy debt not introduced by this task.
 # On main the module was already 723 lines (> 600) with fingerprint (109) /
-# probe (111, C901 14) over budget; G3.18-T2 (#2154) only appends three
-# small write-op shims + the WRITE_OPS wiring. Splitting the connector or
-# refactoring fingerprint/probe is out of scope for an approval-gated write
-# addition and would balloon the review surface; tracked separately.
+# probe (111, C901 14) over budget; G3.18-T2 (#2154) appended three small
+# write-op shims + the WRITE_OPS wiring, and #2908 appends four more small
+# deploy-op delegating shims + the DEPLOY when_to_use merge. Every shim is a
+# 3-line delegate to ops_deploy; splitting the connector or refactoring
+# fingerprint/probe is out of scope for a typed-op addition and would balloon
+# the review surface; tracked separately.
 
 """HolodeckConnector -- typed SSH-transport connector for VMware Holodeck 9.0.
 
@@ -72,6 +74,9 @@ from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
+from meho_backplane.connectors.holodeck.ops_deploy import (
+    HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
+)
 from meho_backplane.connectors.holodeck.ops_write import (
     HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP,
 )
@@ -215,6 +220,11 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     # group keys above; the blurbs are the single source of truth in
     # ``ops_write`` and are merged in here for the registration walk.
     **HOLODECK_WHEN_TO_USE_WRITE_BY_GROUP,
+    # #2908 deploy-lifecycle groups (config.apply / instance.start /
+    # instance.status / router.patch). The keys carry a ``deploy-`` prefix
+    # so they never collide with the read/write group keys above; the blurbs
+    # are the single source of truth in ``ops_deploy``.
+    **HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
 }
 
 
@@ -737,6 +747,82 @@ class HolodeckConnector(SshConnector):
         )
 
         return await _holodeck_images_import(self, target, params, operator)
+
+    async def config_apply(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.config.apply`` (#2908).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_deploy.holodeck_config_apply`;
+        runs New-HoloDeckConfig (never ``-Default``) + Import-HoloDeckConfig on
+        the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_deploy import (
+            holodeck_config_apply as _holodeck_config_apply,
+        )
+
+        return await _holodeck_config_apply(self, target, params, operator)
+
+    async def instance_start(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.instance.start`` (#2908).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_deploy.holodeck_instance_start`;
+        runs the fail-fast Connect-VIServer precheck then the detached
+        New-HoloDeckInstance launch on the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_deploy import (
+            holodeck_instance_start as _holodeck_instance_start,
+        )
+
+        return await _holodeck_instance_start(self, target, params, operator)
+
+    async def instance_status(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.instance.status`` (#2908).
+
+        Safe read. Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_deploy.holodeck_instance_status`;
+        maps Get-HoloDeckInstance into the structured deploy-status envelope
+        (serves both a runbook OperationCallVerify target and a Sensor op).
+        """
+        from meho_backplane.connectors.holodeck.ops_deploy import (
+            holodeck_instance_status as _holodeck_instance_status,
+        )
+
+        return await _holodeck_instance_status(self, target, params, operator)
+
+    async def router_patch(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.router.patch`` (#2908).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_deploy.holodeck_router_patch`;
+        idempotently verify-then-applies the three per-appliance patches
+        (verify-only on 9.1) on the ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.holodeck.ops_deploy import (
+            holodeck_router_patch as _holodeck_router_patch,
+        )
+
+        return await _holodeck_router_patch(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

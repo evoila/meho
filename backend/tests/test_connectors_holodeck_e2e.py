@@ -500,17 +500,18 @@ async def holodeck_e2e(
 
 
 def test_holodeck_ops_registration_count() -> None:
-    """All 10 read ops + 3 G3.18-T2 write ops = 13 ops registered in HOLODECK_OPS.
+    """10 read ops + 3 G3.18-T2 write ops + 4 #2908 deploy ops = 17 in HOLODECK_OPS.
 
     ``EXPECTED_OP_IDS`` enumerates the 10 read ops (about + 7 T2 reads +
     ``holodeck.disk.usage`` + #2847 ``holodeck.backups.list``); the 3
     approval-gated write ids are asserted in
-    ``test_connectors_holodeck_write.py``.
+    ``test_connectors_holodeck_write.py`` and the 4 deploy-lifecycle ids in
+    ``test_connectors_holodeck_deploy.py``.
     """
     op_ids = {op.op_id for op in HOLODECK_OPS}
     missing = set(EXPECTED_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(HOLODECK_OPS) == 13, f"Expected 13 ops, got {len(HOLODECK_OPS)}"
+    assert len(HOLODECK_OPS) == 17, f"Expected 17 ops, got {len(HOLODECK_OPS)}"
 
 
 def test_holodeck_read_ops_all_safe_and_no_approval_required() -> None:
@@ -528,7 +529,7 @@ def test_holodeck_read_ops_all_safe_and_no_approval_required() -> None:
 
 
 def test_holodeck_ops_all_have_llm_instructions() -> None:
-    """All 13 ops carry non-empty llm_instructions for agent discoverability."""
+    """All 17 ops carry non-empty llm_instructions for agent discoverability."""
     for op in HOLODECK_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions
@@ -545,7 +546,7 @@ def test_holodeck_ops_all_carry_ssh_only_transport_note() -> None:
 
     The exact phrase to look for is "Holodeck has no REST API"; the
     shared :data:`SSH_TRANSPORT_NOTE` constant guarantees consistency
-    across all 13 ops.
+    across all 17 ops.
     """
     canonical_phrase = "Holodeck has no REST API"
     pwsh_phrase = "PowerShell-over-SSH"

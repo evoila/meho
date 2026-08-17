@@ -28,7 +28,9 @@ set for pre-eviction disk diagnosis — bringing the total to 9 ops. #2847
 appends `holodeck.backups.list` — a safe per-file inventory of
 `/var/backups` reusing `holodeck.backups.prune`'s own `find` listing —
 taking the read surface to **10 ops** (13 total, including the 3
-approval-gated write ops).
+approval-gated write ops). #2908 (Initiative #2907) appends the 4
+deploy-lifecycle ops (`config.apply`, `instance.start`, `instance.status`,
+`router.patch`) — **17 ops total**.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -78,8 +80,19 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 - **Op metadata** (`ops.py`) — the `HolodeckOp` dataclass and the
   `HOLODECK_OPS` tuple. T1 shipped the single `holodeck.about` canary; T2
   (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
-  (the 7 read ops defined in `ops_read.py`) onto the canary. The pattern
-  mirrors bind9's `_bind9_ops()` and pfSense's `_pfsense_ops()`.
+  (the 7 read ops defined in `ops_read.py`) onto the canary, and later tasks
+  append `WRITE_OPS` (`ops_write.py`, #2154) and `DEPLOY_OPS` (`ops_deploy.py`,
+  #2908) — **17 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
+  pfSense's `_pfsense_ops()`.
+
+- **Deploy-lifecycle op handlers + helpers** (`ops_deploy.py`, #2908) —
+  `holodeck_config_apply`, `holodeck_instance_start`, `holodeck_instance_status`,
+  `holodeck_router_patch`, plus the pure helpers `validate_config_apply_params`
+  (the depot-vs-5.2.x refusal, also unit-tested directly),
+  `map_instance_status_envelope` (the `Get-HoloDeckInstance` → flat envelope
+  mapper), `target_hr_version` (reads `Target.version` then `fingerprint.version`),
+  and `ROUTER_PATCHES` (the three `RouterPatchSpec` records: applied/unpatched
+  grep markers + the `sed` expression per patch).
 
 - **`parse_photon_version`** (`connector.py`) — pure parser for
   `/etc/photon-release` output; recovers the `<major>.<minor>(.<patch>)?`
@@ -348,6 +361,71 @@ resolver `backups.prune` and `backups.list` (#2847) both call.
 These three retire the recovery fallback where the VCF-9.x backup-fill outage
 (Initiative #2145) was fixed by hand-run local root SSH with no MEHO audit
 row.
+
+### Deploy-lifecycle ops (#2908 surface, Initiative #2907)
+
+`ops_deploy.py` (module `DEPLOY_OPS`, appended to `HOLODECK_OPS`) adds four ops
+that make the consumer's hand-run fresh-deploy procedure (`New-HoloDeckConfig`
+/ `New-HoloDeckInstance` / the three per-appliance patches) dispatchable as
+governed steps. Three are `dangerous` / `requires_approval=True`; one is a
+`safe` read.
+
+**Secret hygiene is by construction.** `_run_command` has no `env`/`stdin`
+seam and the `_pwsh` contract forbids credential material in the (argv-visible)
+script body, so **none of these ops handles secret bytes**. The vCenter
+deploy-target SSO credentials and the Broadcom build token live on the
+appliance — in its staged deploy environment (`$env:VC_USER`/`$env:VC_PW`) and
+in the persisted config (`/holodeck-runtime/config/<id>.json`, written by
+`New-HoloDeckConfig`) — and the composed PowerShell references them by variable
+**name** only. Nothing credential-shaped can reach the params-echo, audit, or
+broadcast surfaces.
+
+- **`holodeck.config.apply`** (group `deploy-config`). Composes
+  `New-HoloDeckConfig` **without `-Default`** (the flag triggers a buggy
+  internal `Set-HoloDeckConfig`) + `$null = Import-HoloDeckConfig`. Params carry
+  only non-secret config (version enum, variant, external IP, master CIDR / VLAN,
+  placement refs, and a 9.x-only `depot` whose `credential_ref` is a Vault
+  **path**). **Depot params are refused for a VCF 5.2.x version** (5.2 deploys
+  via Cloud Builder, no offline depot): the refusal is encoded in the parameter
+  schema as `if version~5.2 then not required depot`, so the framework
+  `validate_params` (Draft 2020-12) rejects it **pre-park** — an operator never
+  approves a config that would fail. `validate_config_apply_params` re-expresses
+  the same rule as a clear string for the handler belt-and-braces and the direct
+  test. It is deliberately **not** pinned credential-class, so it keeps its
+  generic param-echo preview (no secret is ever a param).
+- **`holodeck.instance.start`** (group `deploy-lifecycle`). Runs a **single-shot
+  fail-fast `Connect-VIServer` precheck before launch**: a pwsh script reads the
+  persisted config on the appliance, builds a `PSCredential`, and makes exactly
+  one `Connect-VIServer … -ErrorAction Stop` attempt. This catches a
+  stale/locked deploy-target credential *before* Holodeck's 4-retry-in-13s loop
+  storm-locks the SSO account (consumer #258 lesson). On any precheck failure
+  the instance is **never** launched. On a green precheck `New-HoloDeckInstance`
+  is started under `tmux new-session -d` (survives the dispatch returning) and
+  the op returns immediately with the instance id + a start marker.
+- **`holodeck.instance.status`** (group `deploy-status`, `safe`, no approval).
+  Maps `Get-HoloDeckInstance` into a flat envelope (`status`
+  running/completed/failed/unknown, `current_step`, `started_at`,
+  `updated_at`, `instance_id`, `notes`). The flat `status` field is the target
+  a runbook `OperationCallVerify` step matches and a deploy-in-progress Sensor
+  asserts on, so its shape never depends on approval state. `map_instance_status_envelope`
+  re-maps the **benign VCF 5.2.x terminal quirk** — the final
+  `Sync-HolodeckComponents` step throwing *"No route to host"* because VCF
+  Operations is not deployed in 5.2 — to `status="completed"` plus a structured
+  `notes` entry, so a verify/Sensor built on it never reads a fully-deployed
+  5.2.x lab as broken.
+- **`holodeck.router.patch`** (group `deploy-patch`). Idempotent
+  verify-then-apply of the three per-appliance patches (C1 `SddcMgmtDeployment.psm1`
+  `-eq 7`→`-ge 7`; C2 `HoloDeck.psm1` `BroadcomBuildToken` SecureString wrap; C3
+  `Auth.psm1` `Connect-VIServer` PSCredential). Per patch it greps the *applied*
+  marker (present at the expected count → `already_applied`), else the
+  *unpatched* marker (present → timestamped backup + `sed` + re-verify →
+  `applied`), else `not_applicable`. A **second run reports all
+  `already_applied`** (no `sed`). On a **9.1 HoloRouter it runs verify-only**
+  (patches fixed upstream) — it greps but never `sed`s. The patch strings are
+  fixed code constants (C2 references `$env:brcm_build_token` by name), and the
+  result reports only patch id / label / state — no file content. It **is**
+  pinned into `_CREDENTIAL_WRITE_OPS` (broadcast defence-in-depth) per the
+  `rke2.node.config.update` precedent.
 
 ### `execute(target, op_id, params)`
 

@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — holodeck deploy-lifecycle typed ops: `config.apply` / `instance.start` / `instance.status` / `router.patch` (#2908)
+
+- The `holodeck` connector gains four typed ops that make the consumer's
+  hand-run fresh-deploy procedure dispatchable as governed steps (17 ops total):
+  - `holodeck.config.apply` — `New-HoloDeckConfig` (never `-Default`) +
+    `Import-HoloDeckConfig`. Refuses depot params for a VCF 5.2.x version
+    (5.2 uses Cloud Builder, no offline depot) in `validate_params`.
+    `dangerous`, approval-gated, with a param-echo preview.
+  - `holodeck.instance.start` — a single-shot fail-fast `Connect-VIServer`
+    precheck (so a stale/locked deploy-target credential can't storm-lock the
+    SSO account) then a detached `New-HoloDeckInstance` launch. `dangerous`,
+    approval-gated.
+  - `holodeck.instance.status` — `Get-HoloDeckInstance` → a flat status
+    envelope (running/completed/failed) usable as a runbook
+    `OperationCallVerify` target and a deploy-in-progress Sensor op. Tolerates
+    the benign VCF 5.2.x `Sync-HolodeckComponents` "No route to host" terminal
+    quirk as a structured note, not a failure. `safe`, no approval.
+  - `holodeck.router.patch` — idempotent verify-then-apply of the three
+    per-appliance HoloRouter patches (C1/C2/C3), verify-only on a 9.1
+    HoloRouter. `dangerous`, approval-gated; the Broadcom build token and any
+    credential material never reach an approval / audit / broadcast surface
+    (#1503).
+
 ### Breaking changes — vmware composite param schemas tightened by the #2970 repoint
 
 - `vmware.composite.vm.clone` no longer accepts `wait_for_completion` /

@@ -209,6 +209,7 @@ def isolated_registry() -> Iterator[None]:
         result_query,
         runbook_runs,
         runbooks,
+        targets_register,
         topology,
         topology_bulk_import,
         topology_create_node,
@@ -297,6 +298,13 @@ def isolated_registry() -> Iterator[None]:
     # above would otherwise leave it unregistered in any test file that
     # imports this fixture after the first one runs in the process.
     importlib.reload(topology_bulk_import)
+    # #2861: the target-registry admin write tool (``meho_targets_register``)
+    # lives in its own module (mirroring ``topology_create_node``) so it joins
+    # the reload list for the same reason every other tool module does -- the
+    # autouse ``clear_registries()`` above would otherwise leave it
+    # unregistered in any test file that imports this fixture after the first
+    # one runs in the process.
+    importlib.reload(targets_register)
     # G12.2-T4 (#1298): the runbook template MCP tools
     # (``meho_runbook_*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse

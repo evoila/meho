@@ -291,6 +291,53 @@ A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
 rather than publish a schema its payloads violate.
 
+## Admin registry writes route through the dispatcher
+
+The `meho_*` admin namespace holds the `tenant_admin` write tools
+(`op_class="write"`) — outside CLAUDE.md's ~17-tool daily agent surface
+by design. A subset of them govern **registry** writes (create a graph
+node, register an agent principal, register a target). Where the write
+must be **approvable** — a human `tenant_admin` executes immediately
+while an agent-principal call parks for review — the MCP front does not
+call its service directly; it routes through
+`meho_backplane.operations.dispatcher.dispatch` so the single G11.2
+policy gate (`operations/_validate.py`) runs per call. The write is
+modelled as a **targetless typed op on a synthetic connector** (no
+vendor connector backs it), registered with `safety_level="caution"` +
+`requires_approval=False` — the dial that parks agent principals only
+(`caution` AGENT verdict floor → `needs-approval`) while a human rides
+the default-allow immediate branch. `requires_approval=True` would park
+humans too; `safety_level="dangerous"` would deny agents rather than
+park them.
+
+Three synthetic connectors follow this mould (natural key
+`(product, "1.x", impl_id)` → wire `connector_id`):
+
+| Wire `connector_id` | Op | MCP front | Since |
+|---|---|---|---|
+| `secret-broker-1.x` | `secret.move` | (dispatch-only) | #1577 |
+| `topology-graph-1.x` | `topology.create_node` / `.annotate` / … | `meho_topology_create_node` / `_annotate` / … | #2537 |
+| `targets-registry-1.x` | `targets.register` | `meho_targets_register` | #2861 |
+
+`meho_targets_register` (#2861,
+`mcp/tools/targets_register.py` + `connectors/targets/`) closes the last
+CRUD-shaped registry with no agent-surface write path: it reuses the
+`create_target` service that REST `POST /api/v1/targets` calls, so the
+product-token check, the `secret_ref` tenant-scope guard, the SSRF guard
+on `host`/`fqdn`, and the JWT-derived `tenant_id` all apply unchanged —
+none are re-implemented. `tenant_id` always comes from the caller
+identity; `additionalProperties: false` rejects a smuggled `tenant_id`
+and the server-managed `fingerprint` at the schema layer. Its
+`inputSchema` mirrors `TargetCreate` field-for-field (shared with the
+typed op's `parameter_schema` so the two validation layers cannot
+drift), and its `outputSchema` is the parked-shape `oneOf` union
+(`with_parked_shape`) so both the executed `{target_id, name, product,
+host, tenant_id}` payload and the `awaiting_approval` envelope conform
+(#2774). The dispatch shim flattens the service's `HTTPException` and the
+model's `ValidationError` to `ValueError` at its boundary so the
+dispatcher's `connector_error` maps them to `-32602` with a clean
+message.
+
 ## Audit URI redaction for query-bearing resources
 
 The `resources/read` dispatcher

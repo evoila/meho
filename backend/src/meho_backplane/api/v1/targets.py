@@ -1269,11 +1269,6 @@ async def create_target(
     ``permission denied``. Omitting ``secret_ref`` derives the
     per-tenant default (#1723) and always passes; no-op when the guard
     is disabled. See :func:`_enforce_secret_ref_tenant_scope`.
-
-    #2872. ``secret_ref`` resolution (omitted → derive the #1723 default;
-    explicit ``{"secret_ref": null}`` → persist ``NULL`` for the #2234
-    auth-optional branch) is delegated to
-    :func:`_resolve_create_secret_ref`.
     """
     # G0.18-T2 (#1355) / G0.27 / T3 (#1817). Validate the incoming product
     # token against the registered set so a value copied straight out of

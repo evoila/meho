@@ -187,6 +187,17 @@ connector-related release-notes line.
   invalid `extras.scheme` fails loud at key derivation rather than
   silently serving the stale client.
 
+### Fixed — target names free for re-registration after a soft-delete (#2874)
+
+- `targets_tenant_name_idx` is now a **partial** unique index —
+  `(tenant_id, name) WHERE deleted_at IS NULL` (migration 0072) — so a
+  soft-deleted target no longer 409-blocks re-using its name: `DELETE` +
+  re-`POST` of the same name now succeeds with a fresh UUID, while a *live*
+  duplicate still 409s. Names already wedged by an existing tombstone free
+  the moment the migration lands (no manual purge). The three unfiltered
+  console / keycloak target reads that previously surfaced tombstones now
+  exclude them, so the operator UI matches the re-registration semantics.
+
 ### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
 
 - `meho vcf-automation deployment list` now dispatches the typed

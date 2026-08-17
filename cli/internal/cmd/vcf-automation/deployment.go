@@ -40,7 +40,7 @@ func newDeploymentListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runTenantListVerb(cmd,
-				"GET:/iaas/api/deployments",
+				"vcfa.tenant.deployment.list",
 				targetName, jsonOut, backplaneOverride,
 				printDeploymentList,
 			)
@@ -64,6 +64,9 @@ func newDeploymentGetCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Ingested op_id on purpose: #2839 shipped the typed list op
+			// only — repointing `get` is blocked on a future
+			// vcfa.tenant.deployment.get typed op (#2942).
 			return runTenantGetVerb(cmd,
 				"GET:/iaas/api/deployments/{id}",
 				"id", args[0],
@@ -77,7 +80,7 @@ func newDeploymentGetCmd() *cobra.Command {
 }
 
 func printDeploymentList(w io.Writer, r *CallResult) {
-	const opID = "GET:/iaas/api/deployments"
+	const opID = "vcfa.tenant.deployment.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

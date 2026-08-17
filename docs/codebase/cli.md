@@ -1271,6 +1271,35 @@ instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
 
+### Typed op_id repoint contract (typed connectors, #2942)
+
+Typed connectors (nsx, sddc-manager, vcf-automation, vcf-fleet,
+vcf-operations, …) resolve only their dotted typed op_ids on a
+zero-catalog boot — a vendor verb left dispatching a legacy ingested
+`METHOD:/path` op_id after its backend read went typed is a dead end
+for operators even though the agent/backend path works (#2355 did the
+initial 19-verb sweep; #2942 closed the residual gap and added the
+recurrence guard). The contract for every future typed read op:
+
+1. **Repoint the CLI verb** that covers the read to the dotted typed
+   op_id (dispatch call + printer constant), aligning params to the
+   typed op's `parameter_schema`.
+2. **Pin it** in the connector's
+   `cli/internal/cmd/<vendor>/typed_opid_dispatch_test.go`:
+   - `typedDispatchCases` — every verb whose backend read is typed,
+     asserted to put the dotted op_id on the wire;
+   - `ingestedDispatchCases` — every verb that legitimately stays on
+     an ingested op_id (no typed counterpart), with the reason in a
+     comment;
+   - `typedOpCLICoverage` — classifies **every** backend typed op_id
+     (CLI verb or agent-surface-only).
+3. The guard's `TestBackendTypedOpsAreClassified` reconciles
+   `typedOpCLICoverage` against the backend registry
+   (`backend/src/meho_backplane/connectors/<name>/`, parsed by
+   `cli/internal/typedops`), so a typed op shipped without a CLI
+   repoint decision **fails CI** instead of silently stranding the
+   verb.
+
 ## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 
 `cli/internal/cmd/topology/` registers seven operator-facing topology

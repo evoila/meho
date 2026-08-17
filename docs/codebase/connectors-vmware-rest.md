@@ -452,9 +452,9 @@ calls another composite via `dispatch_child`. Two-level nesting:
 host.evacuate                                            # depth 0 (top-level dispatch)
   ├─ GET:/vcenter/vm                                     # depth 0 (direct session read)
   └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
-       ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 1 (direct session read)
+       ├─ vim RetrievePropertiesEx (drsRecommendation)  # depth 1 (direct vmomi read, #2970)
        └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
-  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 0 (direct session write, gated)
+  └─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
 ```
 
 `composite_depth_var` (default cap 8) handles the one nesting level
@@ -513,16 +513,16 @@ enum) are:
 | Composite | Status values |
 | --- | --- |
 | `vm.create` | `created`, `rolled_back` |
-| `vm.clone` | `completed`, `pending`, `timeout` |
-| `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found` |
+| `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
+| `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
-| `host.evacuate` | `evacuated`, `partial`, `aborted` |
-| `host.detach_from_vds` | `detached`, `incomplete` |
-| `cluster.patch` | `completed`, `stopped` |
+| `host.evacuate` | `evacuated`, `partial`, `aborted` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; fault/timeout raises `connector_error`, #2970) |
+| `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
+| `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
@@ -662,7 +662,7 @@ lives:
 
 | Op | Source | Path | When |
 | --- | --- | --- | --- |
-| `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items?action=deploy`, poll `GET:/cis/tasks/{task}` | the golden image is published to a content library |
+| `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy` (synchronous — the 200 body is the new VM id; #2970) | the golden image is published to a content library |
 | `vm.clone_from_template` | a **folder VM template** (a marked-as-template VM in a VM folder) | vim `POST:/VirtualMachine/{moId}/CloneVM_Task`, poll via `poll_vim_task` | the golden image is a plain marked-as-template VM (govc/terraform's `CloneVM_Task` path) |
 
 `vm.clone`'s content-library deploy path **cannot** clone a folder
@@ -853,7 +853,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
-| `cluster.patch` | `{cluster, patch_method, resolved, total_resolved}` | live read (`GET:/vcenter/cluster/{cluster}/host`) |
+| `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
@@ -1029,11 +1029,16 @@ they never park.
   there is **no** dedicated distributed-portgroup list resource at all —
   distributed portgroups are enumerated via the generic
   `GET:/vcenter/network` resource filtered to the
-  `DISTRIBUTED_PORTGROUP` type. Both corrected sub-ops live in the REST
-  Automation `vcenter.yaml` (this is **not** a VI-JSON MoRef family
-  swap). The generic `Network` summary carries no parent-DVS field, so
-  the per-portgroup `dvs`/`dvs_name` enrichment is best-effort and
-  `filter_dvs` scopes only the DVS-name index, not the portgroup set.
+  `DISTRIBUTED_PORTGROUP` type. **#2970 update:** the first run against
+  the *canonical pinned* `vcenter.yaml` showed the plural
+  `distributed-switches` path exists only under the NSX-scoped
+  `/vcenter/namespace-management/` tree — there is **no** generic DVS
+  list resource in the pinned REST spec at all — so the audit's DVS-list
+  step was dropped entirely. `dvs_name` is now always `null` (the
+  generic `Network` summary carries no parent-DVS field to join on, so
+  the name index was never consulted with a hit anyway), `dvs` stays
+  best-effort from the portgroup row itself, and `filter_dvs` is
+  accepted but inert.
   A build-time guard
   (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
   the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
@@ -1055,6 +1060,27 @@ they never park.
   parses the real pinned `vcenter.yaml` and asserts every `_SUB_OPS_*`
   REST path actually **exists** — skipping in CI where the spec-shelf is
   unprovisioned (the #1602 convention), running wherever it is wired.
+- **#2970 real-spec repoint** — running the #2944 guard against the real
+  shelf (the #2949 verification) found 11 op_ids the pinned
+  `vcenter.yaml` does not serve. The composites were repointed:
+  `vm.clone`'s deploy moved to the per-item
+  `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy`
+  (synchronous — the cis-task poll went away), cluster-host listing to
+  `GET:/vcenter/host` + `clusters` filter, `vm.create`'s NIC attach to
+  `POST:/vcenter/vm/{vm}/hardware/ethernet`, `host.detach_from_vds`'s
+  NIC migration to per-adapter
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, and `cluster.patch`'s
+  patch step to the vLCM
+  `POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true`.
+  Surfaces with **no** REST path in the pinned spec switched to vim
+  (`_VIM_SUB_OPS_*`, reconciled against `vi-json.yaml`): snapshot
+  list/revert (`VirtualMachine.snapshot` +
+  `VirtualMachineSnapshot.RevertToSnapshot_Task`), host maintenance
+  (`HostSystem.EnterMaintenanceMode_Task` / `ExitMaintenanceMode_Task`),
+  DRS recommendations (`ClusterComputeResource.drsRecommendation`), and
+  DVS host removal (`DistributedVirtualSwitch.ReconfigureDvs_Task` with
+  the `config.configVersion` read). The audit's DVS listing was dropped
+  (degradation note above).
 
 ## References
 

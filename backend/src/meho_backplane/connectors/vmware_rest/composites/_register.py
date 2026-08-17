@@ -362,14 +362,15 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=network_portgroup_audit_composite,
         summary="Audit distributed portgroups with parent DVS + connected VMs.",
         description=(
-            "Reads the distributed-switches listing (for parent-DVS name "
-            "enrichment) plus the distributed portgroups via "
+            "Lists the distributed portgroups via "
             "'GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP', "
             "then per-portgroup queries the VM list via "
             "'GET:/vcenter/vm?filter.networks=...'. Aggregates one row "
-            "per portgroup with its parent DVS + connected VM names. "
-            "Equivalent of 'govc dvs.portgroup.info' rolled up across "
-            "every portgroup. Read-only -- never mutates network "
+            "per portgroup with connected VM names. Parent-DVS name "
+            "enrichment is degraded (dvs_name always null): the pinned "
+            "spec serves no DVS list resource (#2970). Equivalent of "
+            "'govc dvs.portgroup.info' rolled up across every "
+            "portgroup. Read-only -- never mutates network "
             "configuration."
         ),
         parameter_schema=NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
@@ -388,7 +389,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Create a VM with NIC attach + optional power-on; rollback on failure.",
         description=(
             "Orchestrates folder lookup, POST:/vcenter/vm create, per-NIC "
-            "attach via PATCH:/vcenter/vm/{vm}/network, and optional "
+            "adapter create via POST:/vcenter/vm/{vm}/hardware/ethernet, "
+            "and optional "
             "POST:/vcenter/vm/{vm}/power start. Partial-failure rollback: "
             "if any step after the create succeeds fails, the half-"
             "created VM is removed via DELETE:/vcenter/vm/{vm} so the "
@@ -405,21 +407,20 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.clone",
         handler=vm_clone_composite,
-        summary="Clone a VM from a content-library template; poll the deploy task.",
+        summary="Clone a VM from a content-library template (synchronous deploy).",
         description=(
-            "Reads source VM config, dispatches "
-            "POST:/vcenter/vm-template/library-items?action=deploy, then "
-            "polls GET:/cis/tasks/{task} until completion or timeout. "
-            "Long-running -- blocks for up to timeout_seconds when "
-            "wait_for_completion=True (default). Setting "
-            "wait_for_completion=False returns the task id for caller "
-            "polling. Equivalent of 'govc vm.clone' for operator-facing "
+            "Reads source VM config, then dispatches "
+            "POST:/vcenter/vm-template/library-items/{templateLibraryItem}"
+            "?action=deploy. The pinned deploy operation is synchronous "
+            "-- its 200 body is the deployed VM id, so the composite "
+            "returns status='completed' with vm_id directly (no task "
+            "poll). Equivalent of 'govc vm.clone' for operator-facing "
             "dispatch."
         ),
         parameter_schema=VM_CLONE_PARAMETER_SCHEMA,
         response_schema=VM_CLONE_RESPONSE_SCHEMA,
         group_key="vm",
-        tags=["composite", "write", "vm", "lifecycle", "long-running"],
+        tags=["composite", "write", "vm", "lifecycle"],
         safety_level="dangerous",
         requires_approval=True,
     ),
@@ -428,10 +429,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=vm_snapshot_revert_composite,
         summary="Revert a VM to a named snapshot; reject on name ambiguity.",
         description=(
-            "Lists the VM's snapshot tree via "
-            "GET:/vcenter/vm/{vm}/snapshot, matches by snapshot name, "
-            "and dispatches "
-            "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert when "
+            "Reads the VM's snapshot tree (vim RetrievePropertiesEx on "
+            "VirtualMachine.snapshot -- the pinned REST spec serves no "
+            "snapshot resource, #2970), matches by snapshot name, and "
+            "dispatches the vim "
+            "VirtualMachineSnapshot.RevertToSnapshot_Task (polled to a "
+            "terminal state) when "
             "exactly one match is found. Multiple-match cases return "
             "status='ambiguous' with candidates listed so the operator "
             "can re-dispatch by snapshot moid. Idempotent within a "
@@ -452,8 +455,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=vm_migrate_composite,
         summary="Migrate a VM via DRS recommendation or explicit target host.",
         description=(
-            "Consults "
-            "GET:/vcenter/cluster/{cluster}/drs/recommendations for the "
+            "Consults the cluster's DRS migration recommendations (vim "
+            "RetrievePropertiesEx on "
+            "ClusterComputeResource.drsRecommendation -- the pinned REST "
+            "spec serves no DRS resource, #2970) for the "
             "VM, then dispatches POST:/vcenter/vm/{vm}?action=relocate "
             "with the recommended host. If DRS returns no recommendation "
             "and no target_host override is supplied, the composite "
@@ -575,8 +580,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.vm.migrate per VM (recursive composite "
             "call -- first production composite that calls another "
             "composite). On full migration success, the host enters "
-            "maintenance via "
-            "PATCH:/vcenter/host/{host}/maintenance?action=enter. "
+            "maintenance via the vim "
+            "HostSystem.EnterMaintenanceMode_Task (polled to a terminal "
+            "state -- the pinned REST spec serves no host-maintenance "
+            "path, #2970). "
             "tolerate_partial_failure=True lets maintenance-enter fire "
             "even with VMs left behind. Equivalent of 'govc host.evacuate' "
             "operator workflow."
@@ -594,10 +601,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Migrate host VM NICs off a DVS to a fallback network, then remove host from DVS.",
         description=(
             "Lists DVS portgroups on the host and VMs on the host, "
-            "migrates each VM's NICs off the DVS to the supplied "
-            "fallback_network via PATCH:/vcenter/vm/{vm}/network, and "
-            "then dispatches "
-            "POST:/vcenter/network/dvs/{dvs}?action=remove_host. "
+            "migrates each VM's NICs to the supplied fallback_network "
+            "per adapter (GET + "
+            "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}), and then "
+            "removes the host via the vim "
+            "DistributedVirtualSwitch.ReconfigureDvs_Task host-member "
+            "remove (polled to a terminal state -- the pinned REST spec "
+            "serves no DVS write path, #2970). "
             "vSphere refuses the host detach when any VM still has "
             "active NICs on the DVS -- the composite verifies every NIC "
             "migrated before attempting the detach; on partial NIC "
@@ -617,11 +627,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=cluster_patch_composite,
         summary="Sequentially patch every host in a cluster: maintenance + patch + exit.",
         description=(
-            "Lists cluster hosts via GET:/vcenter/cluster/{cluster}/host, "
-            "then iterates each host sequentially: "
-            "PATCH:/vcenter/host/{host}/maintenance?action=enter -> "
-            "POST:/vcenter/host/{host}?action=patch -> "
-            "PATCH:/vcenter/host/{host}/maintenance?action=exit. "
+            "Lists cluster hosts via GET:/vcenter/host?clusters=..., "
+            "then iterates each host sequentially: vim "
+            "EnterMaintenanceMode_Task -> vLCM "
+            "POST:/esx/settings/hosts/{host}/software?action=apply"
+            "&vmw-task=true (cis task polled to terminal) -> vim "
+            "ExitMaintenanceMode_Task, every task polled before the "
+            "next step. "
             "Sequential by design -- concurrent host patches would "
             "force every VM in the cluster to vMotion at once, "
             "overwhelming DRS. Per-host failure stops the loop; the "

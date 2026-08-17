@@ -90,6 +90,46 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — vmware composite param schemas tightened by the #2970 repoint
+
+- `vmware.composite.vm.clone` no longer accepts `wait_for_completion` /
+  `timeout_seconds` (the pinned deploy operation is synchronous — there
+  is no task to wait on). Migration: drop both keys from the params;
+  the response is always `status="completed"` with `vm_id` set and
+  `task_id` null.
+- `vmware.composite.cluster.patch` no longer accepts `patch_method` (it
+  fed a body field of the fictional `POST:/vcenter/host/{host}?action=patch`;
+  the real per-host vLCM apply takes an `ApplySpec`, sent empty =
+  latest desired-state commit). Migration: drop the key.
+- `vmware.composite.vm.create`'s `nics` entries gain an optional
+  `backing_type` (default `STANDARD_PORTGROUP`); entries with only
+  `network` keep working.
+
+### Fixed — vmware composites repointed at paths the real vcenter.yaml serves (#2970)
+
+- Running the #2944/#2949 real-spec reconcile lanes against the pinned
+  vendor shelf surfaced 11 composite op_ids the canonical `vcenter.yaml`
+  does not serve (shape-correct-but-nonexistent REST paths — every one
+  would 404 on a live vCenter 9.0). REST repoints: `vm.clone`'s deploy →
+  the per-item
+  `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy`
+  (synchronous — the 200 body is the new VM id, so the cis-task poll and
+  the `wait_for_completion`/`timeout_seconds` params went away),
+  cluster-host listing → `GET:/vcenter/host` + `clusters` filter,
+  `vm.create` NIC attach → `POST:/vcenter/vm/{vm}/hardware/ethernet`,
+  `host.detach_from_vds` NIC migration → per-adapter
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, and
+  `cluster.patch`'s patch step → the vLCM
+  `POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true`
+  with its cis task polled before maintenance-exit. Surfaces with no
+  REST path in the pinned spec switched to the governed vim seam
+  (snapshot list/revert, host maintenance enter/exit, DRS
+  recommendations, DVS host removal), each `*_Task` polled to terminal;
+  the portgroup audit's DVS-list step was dropped with a documented
+  degradation (`dvs_name` always null; `filter_dvs` inert). All five
+  spec lanes are green against the real shelf — the gate for arming
+  `SPEC_SHELF_TOKEN` (#2949 ADR).
+
 ### Added — vcfa tenant deployment detail read + `deployment get` repoint (#2960)
 
 - `vcfa.tenant.deployment.get` (`GET /iaas/api/deployments/{id}`,

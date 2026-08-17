@@ -785,9 +785,13 @@ async def test_datastore_usage_detail_error_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_reads_three_phases() -> None:
-    """DVS + portgroup listings + per-portgroup VM listings aggregate to the expected shape."""
-    dvs_listing = [{"vds": "dvs-1", "name": "DVS-A"}]
+async def test_network_portgroup_audit_reads_two_phases() -> None:
+    """Portgroup listing + per-portgroup VM listings aggregate to the expected shape.
+
+    Two phases post-#2970: the DVS-listing step was dropped (the pinned
+    vcenter.yaml serves no DVS list resource), so ``dvs_name`` is always
+    ``None`` and ``dvs`` is the pg row's own best-effort field.
+    """
     pg_listing = [
         {"network": "pg-1", "name": "PG-A", "vds": "dvs-1", "type": "DISTRIBUTED_PORTGROUP"},
         {"network": "pg-2", "name": "PG-B", "type": "DISTRIBUTED_PORTGROUP"},
@@ -796,7 +800,7 @@ async def test_network_portgroup_audit_reads_three_phases() -> None:
         "pg-1": [{"name": "vm-pg1-a"}, {"name": "vm-pg1-b"}],
         "pg-2": [],
     }
-    sequence: list[Any] = [dvs_listing, pg_listing]
+    sequence: list[Any] = [pg_listing]
     for pg in pg_listing:
         sequence.append(vms_per_pg[pg["network"]])
     conn = _RecordingConnector(sequence)
@@ -808,16 +812,15 @@ async def test_network_portgroup_audit_reads_three_phases() -> None:
         connector=conn,  # type: ignore[arg-type]
     )
 
-    # 1 + 1 + 2 portgroups = 4 calls.
-    assert len(conn.calls) == 4
-    assert conn.calls[0]["path"] == "/api/vcenter/network/distributed-switches"
+    # 1 + 2 portgroups = 3 calls (no DVS listing -- #2970).
+    assert len(conn.calls) == 3
     # Portgroups come from the generic network resource, type-filtered.
     # On the modern /api mount the filter params are sent bare (#2298).
-    assert conn.calls[1]["path"] == "/api/vcenter/network"
-    assert conn.calls[1]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[0]["path"] == "/api/vcenter/network"
+    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
     # Per-PG VM call filters by network + power state, bare on /api.
-    assert conn.calls[2]["path"] == "/api/vcenter/vm"
-    assert conn.calls[2]["query"] == {
+    assert conn.calls[1]["path"] == "/api/vcenter/vm"
+    assert conn.calls[1]["query"] == {
         "networks": ["pg-1"],
         "power_states": ["POWERED_ON"],
     }
@@ -826,7 +829,7 @@ async def test_network_portgroup_audit_reads_three_phases() -> None:
             "id": "pg-1",
             "name": "PG-A",
             "dvs": "dvs-1",
-            "dvs_name": "DVS-A",
+            "dvs_name": None,
             "type": "DISTRIBUTED_PORTGROUP",
             "vm_count": 2,
             "vm_names": ["vm-pg1-a", "vm-pg1-b"],
@@ -844,9 +847,13 @@ async def test_network_portgroup_audit_reads_three_phases() -> None:
 
 
 @pytest.mark.asyncio
-async def test_network_portgroup_audit_filter_dvs_scopes_dvs_listing_only() -> None:
-    """``filter_dvs`` scopes the DVS listing; the portgroup call is type-only."""
-    sequence = [[], []]
+async def test_network_portgroup_audit_filter_dvs_is_inert() -> None:
+    """``filter_dvs`` is accepted but changes nothing (#2970 degradation).
+
+    It only ever scoped the dropped DVS listing; the portgroup call stays
+    type-filtered only, and no extra sub-op fires.
+    """
+    sequence: list[Any] = [[]]
     conn = _RecordingConnector(sequence)
     await network_portgroup_audit_composite(
         operator=_make_operator(),
@@ -854,16 +861,15 @@ async def test_network_portgroup_audit_filter_dvs_scopes_dvs_listing_only() -> N
         params={"filter_dvs": "dvs-prod"},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert conn.calls[0]["query"] == {"vdses": ["dvs-prod"]}
-    # Portgroup call is type-filtered only -- no vdses filter.
-    assert conn.calls[1]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    assert len(conn.calls) == 1
+    # Portgroup call is type-filtered only -- no vdses filter anywhere.
+    assert conn.calls[0]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
 
 
 @pytest.mark.asyncio
 async def test_network_portgroup_audit_include_disconnected_drops_power_filter() -> None:
     """``include_disconnected_vms=True`` removes the ``POWERED_ON`` filter on the VM call."""
     sequence = [
-        [],
         [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}],
         [],
     ]
@@ -874,7 +880,7 @@ async def test_network_portgroup_audit_include_disconnected_drops_power_filter()
         params={"include_disconnected_vms": True},
         connector=conn,  # type: ignore[arg-type]
     )
-    vm_call = conn.calls[2]
+    vm_call = conn.calls[1]
     assert "networks" in vm_call["query"]
     assert "power_states" not in vm_call["query"]
 
@@ -919,21 +925,19 @@ async def test_portgroup_audit_keeps_filter_prefix_on_legacy_mount() -> None:
     ``filter.networks`` / ``filter.power_states`` on the legacy mount vcsim
     serves, or the existing vcsim fixtures break.
     """
-    dvs_listing = [{"vds": "dvs-1", "name": "DVS-A"}]
     pg_listing = [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}]
     conn = _RecordingConnector(
-        [dvs_listing, pg_listing, [{"name": "vm-a"}]],
+        [pg_listing, [{"name": "vm-a"}]],
         mount_prefix="/rest",
     )
     await network_portgroup_audit_composite(
         operator=_make_operator(),
         target=object(),
-        params={"filter_dvs": "dvs-1"},
+        params={},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert conn.calls[0]["query"] == {"filter.vdses": ["dvs-1"]}
-    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
-    assert conn.calls[2]["query"] == {
+    assert conn.calls[0]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[1]["query"] == {
         "filter.networks": ["pg-1"],
         "filter.power_states": ["POWERED_ON"],
     }

@@ -22,9 +22,9 @@ helpers, never the mutating sub-ops.
                           total_resolved}``
 ``host.detach_from_vds``  ``{host, dvs, fallback_network, resolved,
                           total_resolved}``
-``cluster.patch``         ``{cluster, patch_method, resolved, total_resolved}``
+``cluster.patch``         ``{cluster, resolved, total_resolved}``
 ``vm.create``             echo: name, guest_os, sizing, networks, power-on
-``vm.clone``              echo: source_vm, target_name, library_item, wait flag
+``vm.clone``              echo: source_vm, target_name, library_item
 ``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
                           resource_pool, datastore, host, power_on,
                           customization_spec_name
@@ -286,7 +286,6 @@ async def _cluster_patch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     )
     return {
         "cluster": cluster,
-        "patch_method": ctx.params.get("patch_method", "default"),
         **_capped_resolution(rows, _host_identity),
     }
 
@@ -330,7 +329,6 @@ async def _vm_clone_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "source_vm": source_vm,
         "target_name": target_name,
         "library_item": library_item,
-        "wait_for_completion": bool(ctx.params.get("wait_for_completion", True)),
     }
 
 

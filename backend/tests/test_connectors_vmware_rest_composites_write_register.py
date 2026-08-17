@@ -496,13 +496,18 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
     # Every row has a non-empty response_schema with a status enum.
     expected_status_values: dict[str, set[str]] = {
         "vmware.composite.vm.create": {"created", "rolled_back"},
-        "vmware.composite.vm.clone": {"completed", "pending", "timeout"},
-        "vmware.composite.vm.snapshot.revert": {"reverted", "ambiguous", "not_found"},
+        # #2970: the pinned deploy operation is synchronous, so the
+        # pending/timeout task-wait statuses are gone.
+        "vmware.composite.vm.clone": {"completed"},
+        # #2970: the revert is a polled vim *_Task -> a poll timeout is a
+        # legible status.
+        "vmware.composite.vm.snapshot.revert": {"reverted", "ambiguous", "not_found", "timeout"},
         "vmware.composite.vm.migrate": {"migrated", "no_recommendation"},
         "vmware.composite.vm.power": {"ok", "error", "tools_unavailable"},
         "vmware.composite.vm.disk.grow": {"grown", "invalid_shrink", "disk_not_found", "timeout"},
         "vmware.composite.host.evacuate": {"evacuated", "partial", "aborted"},
-        "vmware.composite.host.detach_from_vds": {"detached", "incomplete"},
+        # #2970: the DVS detach is a polled vim ReconfigureDvs_Task.
+        "vmware.composite.host.detach_from_vds": {"detached", "incomplete", "timeout"},
         "vmware.composite.cluster.patch": {"completed", "stopped"},
         "vmware.composite.vm.resize": {"resized", "requires_power_off", "no_change", "partial"},
         "vmware.composite.vm.nic.repoint": {"repointed", "not_found", "ambiguous"},

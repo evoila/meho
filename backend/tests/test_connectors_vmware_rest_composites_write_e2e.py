@@ -174,6 +174,23 @@ class _FakeVmwareTarget:
 # ---------------------------------------------------------------------------
 
 
+def _vmomi_retrieve_result(obj_type: str, moid: str, prop: str, val: Any) -> dict[str, Any]:
+    """A single-object ``RetrievePropertiesEx`` result carrying one property."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": obj_type, "value": moid},
+                "propSet": [{"name": prop, "val": val}],
+            }
+        ]
+    }
+
+
+def _vmomi_task_moref(value: str) -> dict[str, str]:
+    """A vim Task ``ManagedObjectReference`` as a ``*_Task`` method returns it."""
+    return {"type": "Task", "value": value}
+
+
 def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", url)
     response = httpx.Response(status, request=request)
@@ -202,6 +219,8 @@ class _RecordingVmwareConnector:
         self.responses: dict[str, Any] = {}
         self.failures: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
+        self.vmomi_responses: dict[str, Any] = {}
+        self.vmomi_calls: list[tuple[str, Any]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"{self._MOUNT}{path}"
@@ -238,6 +257,27 @@ class _RecordingVmwareConnector:
         if spec in self.failures:
             raise _http_error(500, f"https://vc{self._MOUNT}{spec}")
         return self.responses.get(spec, {"value": {}})
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        """Serve the vim sub-calls the #2970-switched composite steps issue.
+
+        Method paths are keyed verbatim in ``vmomi_responses``;
+        ``RetrievePropertiesEx`` bodies are keyed by the queried object
+        type instead, with an unkeyed ``Task`` read serving a
+        terminal-success ``Task.info`` (mirrors the unit-test stubs).
+        """
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/RetrievePropertiesEx"):
+            spec_type = json["specSet"][0]["propSet"][0]["type"]
+            if spec_type in self.vmomi_responses:
+                return self.vmomi_responses[spec_type]
+            if spec_type == "Task":
+                task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
+                return _vmomi_retrieve_result("Task", task_moid, "info", {"state": "success"})
+            raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+        return self.vmomi_responses[path]
 
 
 def _seed_connector(recorder: _RecordingVmwareConnector) -> None:
@@ -322,7 +362,6 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
             "source_vm": "vm-1",
             "target_name": "vm-clone",
             "library_item": "lib-1",
-            "wait_for_completion": False,
         },
         "vmware.composite.vm.snapshot.revert": {
             "vm": "vm-1",
@@ -366,18 +405,18 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
 
     Composites whose first sub-op is a listing read unwrap ``value`` and
     expect a *list*; an empty *list* envelope lets the composite short-circuit
-    to a benign no-work business status. ``vm.clone`` is fire-and-forget here
-    (``wait_for_completion=False``): it reads the source VM then deploys, so it
-    needs a deploy envelope carrying a task id to reach ``pending``.
+    to a benign no-work business status. ``vm.clone`` deploys synchronously
+    (#2970): its deploy envelope carries the new VM id string, reaching
+    ``completed``.
     """
     empty: dict[str, Any] = {"value": []}
     per_composite: dict[str, dict[str, Any]] = {
         "vmware.composite.vm.create": {"/vcenter/folder": empty},
         "vmware.composite.vm.clone": {
-            "/vcenter/vm-template/library-items?action=deploy": {"value": {"task": "task-benign"}},
+            "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-benign"},
         },
-        "vmware.composite.vm.snapshot.revert": {"/vcenter/vm/vm-1/snapshot": empty},
-        "vmware.composite.vm.migrate": {"/vcenter/cluster/domain-c1/drs/recommendations": empty},
+        "vmware.composite.vm.snapshot.revert": {},
+        "vmware.composite.vm.migrate": {},
         "vmware.composite.vm.power": {},
         "vmware.composite.vm.power.bulk": {"/vcenter/vm": empty},
         "vmware.composite.vm.resize": {
@@ -418,13 +457,49 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
             "/vcenter/network": empty,
             "/vcenter/vm": empty,
         },
-        "vmware.composite.cluster.patch": {"/vcenter/cluster/domain-c1/host": empty},
+        "vmware.composite.cluster.patch": {"/vcenter/host": empty},
         # create: the POST default ({"value": {}}) is enough -> status='created'.
         "vmware.composite.guest.customization_spec.create": {},
         # customize: empty VM listing -> status='not_found' (benign no-work).
         "vmware.composite.vm.customize": {"/vcenter/vm": empty},
     }
     return per_composite[composite_op_id]
+
+
+def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
+    """Per-op vim (VI-JSON) responses for the #2970 vim-switched benign paths.
+
+    ``snapshot.revert`` / ``vm.migrate`` read empty vim properties and
+    short-circuit (``not_found`` / ``no_recommendation``); ``host.evacuate``
+    (no VMs) still enters maintenance via the vim ``*_Task``;
+    ``host.detach_from_vds`` (no VMs) still reads the DVS configVersion and
+    fires the ReconfigureDvs_Task. Task polls serve the default
+    terminal-success ``Task.info``.
+    """
+    per_composite: dict[str, dict[str, Any]] = {
+        "vmware.composite.vm.snapshot.revert": {
+            "VirtualMachine": _vmomi_retrieve_result(
+                "VirtualMachine", "vm-1", "snapshot", {"rootSnapshotList": []}
+            ),
+        },
+        "vmware.composite.vm.migrate": {
+            "ClusterComputeResource": _vmomi_retrieve_result(
+                "ClusterComputeResource", "domain-c1", "drsRecommendation", []
+            ),
+        },
+        "vmware.composite.host.evacuate": {
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-benign"),
+        },
+        "vmware.composite.host.detach_from_vds": {
+            "DistributedVirtualSwitch": _vmomi_retrieve_result(
+                "DistributedVirtualSwitch", "dvs-1", "config.configVersion", "1"
+            ),
+            "/DistributedVirtualSwitch/dvs-1/ReconfigureDvs_Task": _vmomi_task_moref(
+                "t-dvs-benign"
+            ),
+        },
+    }
+    return per_composite.get(composite_op_id, {})
 
 
 # ===========================================================================
@@ -472,6 +547,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(_benign_responses_for(composite_op_id))
+    recorder.vmomi_responses.update(_benign_vmomi_for(composite_op_id))
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval(set(_WRITE_COMPOSITES), recorder)
 
@@ -530,7 +606,7 @@ async def test_vm_create_happy_path_sub_op_sequence(
     assert recorder.calls == [
         ("GET", "/vcenter/folder"),
         ("POST", "/vcenter/vm"),
-        ("PATCH", "/vcenter/vm/vm-123/network"),
+        ("POST", "/vcenter/vm/vm-123/hardware/ethernet"),
         ("POST", "/vcenter/vm/vm-123/power?action=start"),
     ]
 
@@ -549,7 +625,7 @@ async def test_vm_create_rollback_on_nic_failure(
             "/vcenter/vm": {"value": "vm-123"},
         }
     )
-    recorder.failures["/vcenter/vm/vm-123/network"] = "nic backend rejected the attach"
+    recorder.failures["/vcenter/vm/vm-123/hardware/ethernet"] = "nic backend rejected the attach"
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval({"vmware.composite.vm.create"}, recorder)
 
@@ -573,23 +649,23 @@ async def test_vm_create_rollback_on_nic_failure(
     assert recorder.calls == [
         ("GET", "/vcenter/folder"),
         ("POST", "/vcenter/vm"),
-        ("PATCH", "/vcenter/vm/vm-123/network"),
+        ("POST", "/vcenter/vm/vm-123/hardware/ethernet"),
         ("DELETE", "/vcenter/vm/vm-123"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_vm_clone_pending_path_sub_op_sequence(
+async def test_vm_clone_synchronous_deploy_sub_op_sequence(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """vm.clone (fire-and-forget): source read -> deploy -> return task id."""
+    """vm.clone: source read -> synchronous per-item deploy -> completed (#2970)."""
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
             "/vcenter/vm/vm-1": {"value": {"name": "src"}},
-            "/vcenter/vm-template/library-items?action=deploy": {"value": {"task": "task-9"}},
+            "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-cloned-9"},
         }
     )
     await _bootstrap(recorder, stub_embedding_service)
@@ -604,16 +680,16 @@ async def test_vm_clone_pending_path_sub_op_sequence(
             "source_vm": "vm-1",
             "target_name": "vm-clone",
             "library_item": "lib-1",
-            "wait_for_completion": False,
         },
     )
 
     assert result.status == "ok", result.error
-    assert result.result["status"] == "pending"
-    assert result.result["task_id"] == "task-9"
+    assert result.result["status"] == "completed"
+    assert result.result["task_id"] is None
+    assert result.result["vm_id"] == "vm-cloned-9"
     assert recorder.calls == [
         ("GET", "/vcenter/vm/vm-1"),
-        ("POST", "/vcenter/vm-template/library-items?action=deploy"),
+        ("POST", "/vcenter/vm-template/library-items/lib-1?action=deploy"),
     ]
 
 
@@ -623,11 +699,29 @@ async def test_vm_snapshot_revert_sub_op_sequence(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """vm.snapshot.revert: list -> match-by-name -> revert."""
+    """vm.snapshot.revert: vim tree read -> match-by-name -> vim revert (#2970)."""
     recorder = _RecordingVmwareConnector()
-    recorder.responses["/vcenter/vm/vm-1/snapshot"] = {
-        "value": [{"name": "snap-a", "snapshot": "snap-moid-1"}]
-    }
+    recorder.vmomi_responses.update(
+        {
+            "VirtualMachine": _vmomi_retrieve_result(
+                "VirtualMachine",
+                "vm-1",
+                "snapshot",
+                {
+                    "rootSnapshotList": [
+                        {
+                            "snapshot": {"type": "VirtualMachineSnapshot", "value": "snap-moid-1"},
+                            "name": "snap-a",
+                            "childSnapshotList": [],
+                        }
+                    ]
+                },
+            ),
+            "/VirtualMachineSnapshot/snap-moid-1/RevertToSnapshot_Task": _vmomi_task_moref(
+                "t-revert-1"
+            ),
+        }
+    )
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval({"vmware.composite.vm.snapshot.revert"}, recorder)
 
@@ -642,9 +736,10 @@ async def test_vm_snapshot_revert_sub_op_sequence(
     assert result.status == "ok", result.error
     assert result.result["status"] == "reverted"
     assert result.result["snapshot_id"] == "snap-moid-1"
-    assert recorder.calls == [
-        ("GET", "/vcenter/vm/vm-1/snapshot"),
-        ("POST", "/vcenter/vm/vm-1/snapshot/snap-moid-1?action=revert"),
+    # The whole snapshot surface is vim-only: no REST sub-call fired.
+    assert recorder.calls == []
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/RevertToSnapshot_Task")] == [
+        "/VirtualMachineSnapshot/snap-moid-1/RevertToSnapshot_Task"
     ]
 
 
@@ -654,11 +749,23 @@ async def test_vm_migrate_drs_path_sub_op_sequence(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """vm.migrate: DRS recommendation -> relocate."""
+    """vm.migrate: vim drsRecommendation read -> relocate (#2970)."""
     recorder = _RecordingVmwareConnector()
-    recorder.responses["/vcenter/cluster/domain-c1/drs/recommendations"] = {
-        "value": [{"vm": "vm-1", "target_host": "host-target"}]
-    }
+    recorder.vmomi_responses["ClusterComputeResource"] = _vmomi_retrieve_result(
+        "ClusterComputeResource",
+        "domain-c1",
+        "drsRecommendation",
+        [
+            {
+                "migrationList": [
+                    {
+                        "vm": {"type": "VirtualMachine", "value": "vm-1"},
+                        "destination": {"type": "HostSystem", "value": "host-target"},
+                    }
+                ]
+            }
+        ],
+    )
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval({"vmware.composite.vm.migrate"}, recorder)
 
@@ -673,9 +780,10 @@ async def test_vm_migrate_drs_path_sub_op_sequence(
     assert result.status == "ok", result.error
     assert result.result["status"] == "migrated"
     assert result.result["target_host"] == "host-target"
-    assert recorder.calls == [
-        ("GET", "/vcenter/cluster/domain-c1/drs/recommendations"),
-        ("POST", "/vcenter/vm/vm-1?action=relocate"),
+    # The DRS read is vim; the relocate is the only REST call.
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1?action=relocate")]
+    assert [p for p, _ in recorder.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
     ]
 
 
@@ -726,9 +834,26 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     recorder.responses.update(
         {
             "/vcenter/vm": {"value": [{"vm": "vm-a", "cluster": "domain-c1"}]},
-            "/vcenter/cluster/domain-c1/drs/recommendations": {
-                "value": [{"vm": "vm-a", "target_host": "host-target"}]
-            },
+        }
+    )
+    recorder.vmomi_responses.update(
+        {
+            "ClusterComputeResource": _vmomi_retrieve_result(
+                "ClusterComputeResource",
+                "domain-c1",
+                "drsRecommendation",
+                [
+                    {
+                        "migrationList": [
+                            {
+                                "vm": {"type": "VirtualMachine", "value": "vm-a"},
+                                "destination": {"type": "HostSystem", "value": "host-target"},
+                            }
+                        ]
+                    }
+                ],
+            ),
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-1"),
         }
     )
     await _bootstrap(recorder, stub_embedding_service)
@@ -748,11 +873,14 @@ async def test_host_evacuate_recursive_sub_op_sequence(
     assert result.result["status"] == "evacuated"
     assert result.result["maintenance_entered"] is True
     assert result.result["migrated_vms"] == ["vm-a"]
+    # The DRS read + maintenance-enter are vim (#2970); the REST calls are
+    # the listing + the recursion's relocate.
     assert recorder.calls == [
         ("GET", "/vcenter/vm"),
-        ("GET", "/vcenter/cluster/domain-c1/drs/recommendations"),
         ("POST", "/vcenter/vm/vm-a?action=relocate"),
-        ("PATCH", "/vcenter/host/host-1/maintenance?action=enter"),
+    ]
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")] == [
+        "/HostSystem/host-1/EnterMaintenanceMode_Task"
     ]
 
 
@@ -762,15 +890,17 @@ async def test_host_detach_from_vds_sub_op_sequence(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """host.detach_from_vds: portgroups -> VMs -> per-VM NIC migrate -> DVS detach."""
+    """host.detach_from_vds: portgroups -> VMs -> per-NIC migrate -> vim DVS detach."""
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
             # #1602 fix: distributed portgroups list via /vcenter/network.
             "/vcenter/network": {"value": []},
             "/vcenter/vm": {"value": [{"vm": "vm-a"}]},
+            "/vcenter/vm/vm-a/hardware/ethernet": {"value": [{"nic": "4000"}]},
         }
     )
+    recorder.vmomi_responses.update(_benign_vmomi_for("vmware.composite.host.detach_from_vds"))
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval({"vmware.composite.host.detach_from_vds"}, recorder)
 
@@ -785,11 +915,15 @@ async def test_host_detach_from_vds_sub_op_sequence(
     assert result.status == "ok", result.error
     assert result.result["status"] == "detached"
     assert result.result["vms_migrated"] == ["vm-a"]
+    # Per-adapter NIC repoint (#2970) + vim ReconfigureDvs_Task detach.
     assert recorder.calls == [
         ("GET", "/vcenter/network"),
         ("GET", "/vcenter/vm"),
-        ("PATCH", "/vcenter/vm/vm-a/network"),
-        ("POST", "/vcenter/network/dvs/dvs-1?action=remove_host"),
+        ("GET", "/vcenter/vm/vm-a/hardware/ethernet"),
+        ("PATCH", "/vcenter/vm/vm-a/hardware/ethernet/4000"),
+    ]
+    assert [p for p, _ in recorder.vmomi_calls if p.endswith("/ReconfigureDvs_Task")] == [
+        "/DistributedVirtualSwitch/dvs-1/ReconfigureDvs_Task"
     ]
 
 
@@ -799,9 +933,23 @@ async def test_cluster_patch_sequential_sub_op_sequence(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """cluster.patch: list hosts -> per-host maintenance enter -> patch -> exit."""
+    """cluster.patch: list hosts -> per-host vim enter -> vLCM apply -> vim exit (#2970)."""
     recorder = _RecordingVmwareConnector()
-    recorder.responses["/vcenter/cluster/domain-c1/host"] = {"value": [{"host": "host-1"}]}
+    recorder.responses.update(
+        {
+            "/vcenter/host": {"value": [{"host": "host-1"}]},
+            "/esx/settings/hosts/host-1/software?action=apply&vmw-task=true": {
+                "value": "task-apply-1"
+            },
+            "/cis/tasks/task-apply-1": {"value": {"status": "SUCCEEDED"}},
+        }
+    )
+    recorder.vmomi_responses.update(
+        {
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _vmomi_task_moref("t-enter-1"),
+            "/HostSystem/host-1/ExitMaintenanceMode_Task": _vmomi_task_moref("t-exit-1"),
+        }
+    )
     await _bootstrap(recorder, stub_embedding_service)
     await _clear_requires_approval({"vmware.composite.cluster.patch"}, recorder)
 
@@ -816,11 +964,16 @@ async def test_cluster_patch_sequential_sub_op_sequence(
     assert result.status == "ok", result.error
     assert result.result["status"] == "completed"
     assert result.result["patched_hosts"] == ["host-1"]
+    # REST: cluster-scoped host listing + vLCM apply + its cis-task poll.
     assert recorder.calls == [
-        ("GET", "/vcenter/cluster/domain-c1/host"),
-        ("PATCH", "/vcenter/host/host-1/maintenance?action=enter"),
-        ("POST", "/vcenter/host/host-1?action=patch"),
-        ("PATCH", "/vcenter/host/host-1/maintenance?action=exit"),
+        ("GET", "/vcenter/host"),
+        ("POST", "/esx/settings/hosts/host-1/software?action=apply&vmw-task=true"),
+        ("GET", "/cis/tasks/task-apply-1"),
+    ]
+    # vim: maintenance enter + exit, in order.
+    assert [p for p, _ in recorder.vmomi_calls if "MaintenanceMode_Task" in p] == [
+        "/HostSystem/host-1/EnterMaintenanceMode_Task",
+        "/HostSystem/host-1/ExitMaintenanceMode_Task",
     ]
 
 

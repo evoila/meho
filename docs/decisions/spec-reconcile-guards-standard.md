@@ -1,0 +1,152 @@
+# Spec-reconcile guards as standard — every hand-coded vendor path asserts against a pinned spec (decision)
+
+**Status:** accepted
+**Date:** 2026-08-17
+**Task:** [#2980](https://github.com/evoila/meho/issues/2980) (initiative
+[#2979](https://github.com/evoila/meho/issues/2979), wave 3 of the guard
+rollout; mechanics precedent
+[#2944](https://github.com/evoila/meho/issues/2944) /
+[#2970](https://github.com/evoila/meho/issues/2970))
+
+## The standard
+
+**Every hand-coded vendor-API path literal in a typed connector or
+composite MUST be asserted against a pinned vendor spec in CI, wherever
+such a spec exists or can be pinned.**
+
+The determination of record behind it (#2979, grounded 2026-08-17): *if
+we have the spec, we do not risk hallucinating an endpoint.* #2970
+checked 13 hand-coded vmware composite paths against the real pinned
+`vcenter.yaml` — **11 were not served** (typos, renamed endpoints, wrong
+API versions). Fixture-based tests cannot catch this defect class: they
+synthesise their fixture *from* the same constants they check, so they
+prove op_id **shape**, never real-path **existence**. Only the vendor's
+own pinned spec answers "does this path actually exist?" on every PR;
+otherwise the answer arrives from a live system, in production.
+
+Scope boundaries:
+
+- **Typed connectors and composites** are the exposure: their
+  `METHOD:/path` literals are hand-written and nothing else validates
+  them. Enumerate them by **introspecting the live constants** (the
+  #2944 pattern — never a hardcoded mirror that can drift).
+- **Generic (ingested) connectors are immune by construction** and need
+  no lane: their op_ids are emitted *from* the spec by the ingest
+  pipeline, so an unserved path cannot exist.
+- **Where no spec exists or can be pinned** (e.g. `nsx-9.0` publishes
+  no OpenAPI spec as of 2026-04-29 — see the shelf's
+  `nsx-9.0/MANIFEST.md`), the lane still ships and skips uniformly; it
+  arms itself the day the spec lands on the shelf. A task that proves a
+  spec is unobtainable records the evidenced exclusion instead
+  (#2993's contract).
+
+## The harness (what a lane is)
+
+`backend/tests/_spec_shelf.py` (#2980) generalises the vcenter-only
+resolver (`tests/acceptance/_vcenter_spec.py`, which now delegates its
+shelf-root branch to it) into three calls; a complete lane is
+`backend/tests/test_spec_shelf_example_lane.py` (<30 lines):
+
+```python
+spec_path = require_shelf_spec("<product>-<version>", "<spec-file>")
+served = openapi_served_op_ids(spec_path)          # real ingest parser
+assert_op_ids_served(declared, served, spec_label="<product>-<version>/<spec-file>")
+```
+
+- `require_shelf_spec` resolves
+  `$MEHO_CONSUMER_DOCS_ROOT/<product-dir>/<file>` or `pytest.skip`s
+  with a uniform reason naming the exact missing file — env unset,
+  shelf root missing, product dir absent (sparse checkout not yet
+  widened), and file absent all skip identically. CI sets
+  `MEHO_CONSUMER_DOCS_ROOT` unconditionally; the secret-gated checkout
+  decides whether the directory exists.
+- `openapi_served_op_ids` runs the pinned spec through the real
+  `parse_openapi`, so served op_ids are byte-for-byte the
+  `endpoint_descriptor.op_id` strings dispatch pre-flight resolves
+  against — including vCenter-style `?action=` path-key suffixes. Union
+  the sets when a product pins multiple specs.
+- `assert_op_ids_served` fails with an actionable diff: each unserved
+  `METHOD:/path` plus up to three near-miss candidates from the served
+  set (shared trailing resource name — the #2970 repoints were exactly
+  this shape: right resource, wrong API-family prefix). An empty
+  declared set **fails** — a lane that enumerates nothing guards
+  nothing.
+
+Non-OpenAPI spec artifacts (e.g. `hetzner-robot-2026-04`'s vendored
+webservice markdown) still use `require_shelf_spec` for resolution and
+skip semantics; the lane supplies its own served-set extraction and
+feeds `assert_op_ids_served` as usual.
+
+## Extension mechanics (per new vendor lane)
+
+Each lane task (#2981-#2993) ships all of:
+
+1. **The lane** — a `backend/tests/` module using the harness;
+   declared set introspected from the connector's live constants.
+2. **Spec pinned on the shelf** (when not already there) — a PR to the
+   consumer shelf repo adding `docs/<product>-<version>/<spec-file>` +
+   `MANIFEST.md` provenance. Freely-licensed (OSS) specs need only that
+   provenance note; vendor-licensed specs follow the signoff model
+   below.
+3. **CI checkout widened** — one line per job in
+   `.github/workflows/ci.yml`: add the product dir to the spec-shelf
+   `sparse-checkout` list, and one line in the fail-loud verify step so
+   a shelf-layout move fails the job instead of silently regressing the
+   lane to skip. Same `SPEC_SHELF_TOKEN`; **no new secret, ever** — the
+   PAT already reads the whole private shelf repo. These one-liners
+   collide trivially across parallel lane tasks; rebase, don't battle.
+4. **Signoff extended** — one paragraph per vendor appended to
+   [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)'s
+   signoff of record (what is fetched, same ephemeral-use conditions).
+   OSS-licensed specs need only the provenance note from step 2
+   referenced there.
+5. **Local pre-verify** — run the lane against a full local shelf
+   (`MEHO_CONSUMER_DOCS_ROOT=<shelf>/docs`) before merge. CI is armed:
+   a lane that would go red lands red on the PR itself, which is the
+   next section — but discovering it locally first is cheaper.
+
+## Red lane = finding (the protocol)
+
+A red lane on first run against the real shelf is **the guard working**,
+not harness noise — #2944 anticipated it verbatim ("a shelf-backed red
+is the guard surfacing a real finding … not a reason to withhold the
+guard") and #2970 confirmed it at 11/13. The protocol, per finding:
+
+1. **Never invent a path.** Every repoint must target a path the pinned
+   spec actually serves — grep the shelf's `*.paths.txt` / the spec
+   itself; the assert's near-miss hints are leads, not answers.
+2. **Mechanical fixes land in the same PR** (typo, plural/singular,
+   renamed segment), one per-op decision with rationale in the PR body
+   — the #2970 shape.
+3. **Design-level repoints split into a fix task** (e.g. the surface
+   only exists on another API family, as when #2970 moved snapshot /
+   maintenance / DRS surfaces from REST to vi-json): the lane PR
+   documents the red, the fix task re-points, the lane merges green
+   after it.
+4. **Never merge red.** Both reconcile-lane hosts are required
+   merge-gate jobs; a red lane on `main` turns every PR red.
+
+## Consequences
+
+- The five vcenter lanes are unchanged in behavior: same env-var
+  priority, same skip reason, same CI wiring (`_vcenter_spec.py` keeps
+  its public API and explicit/legacy env vars; only its shelf-root
+  branch delegates to the shared resolver).
+- New-connector reviews gain a checkable rule: a PR adding a hand-coded
+  `METHOD:/path` literal for a shelf-pinned product must extend that
+  product's lane (or the lane's introspection must already sweep it in).
+- The example lane doubles as the harness's CI-armed integration proof:
+  it runs against the real `vcenter-9.0` shelf on every same-repo PR.
+
+## References
+
+- Harness: `backend/tests/_spec_shelf.py`; example lane:
+  `backend/tests/test_spec_shelf_example_lane.py`; harness unit tests:
+  `backend/tests/test_spec_shelf_harness.py`.
+- Lane pattern of record:
+  `backend/tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
+  (#2944); findings precedent #2970.
+- Shelf provisioning, licensing record, secret runbook:
+  [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md).
+- Initiative: [#2979](https://github.com/evoila/meho/issues/2979)
+  (per-vendor lanes #2981-#2993).

@@ -70,6 +70,44 @@ curated ops do not cover (`/api/v1/status/tsdb`, `/api/v1/metadata`, …);
 its `path` param is re-validated by the same gate, so the passthrough
 cannot leave the read-only surface.
 
+## Derived numeric sample values (#2871)
+
+The Prometheus HTTP API encodes every sample value as a JSON **string**
+(`"value": [1786369537.197, "1"]`). The checks threshold comparator
+(`_compare_threshold`) requires a real number by contract (#2504) and maps
+a string to `unknown`, so a sensor could not assert an observed metric
+value directly — only the alert-shaped workaround (push the threshold into
+the PromQL, then assert the result-set count) worked.
+
+`query` and `query_range` therefore run their raw envelope through
+`_augment_numeric_samples` (`connectors/prometheus/ops_read.py`) before
+returning, adding derived numeric siblings in the `net.tls_inspect`
+`days_to_expiry` shape (#2772 / #2808):
+
+- **vector** result → `value_num` (float or null) on each sample dict,
+  beside the untouched `value`.
+- **matrix** result (`query_range`, and `query` with a range selector) →
+  `values_num` (a list of floats/nulls **parallel** to `values`) on each
+  series dict.
+- **`first_sample_value`** (float or null) on the top-level envelope — the
+  numeric of the first series' first sample, mirroring #2808's top-level
+  leaf alias. A sensor asserts `$.first_sample_value` directly. `scalar` /
+  `string` results (whose `result` is a bare `[ts, "val"]` pair, not a list
+  of dicts) surface only through this envelope alias.
+
+Non-finite (`NaN` / `+Inf` / `-Inf`) and unparseable values derive to
+**null**: JSON has no NaN/Inf literal (so the payload stays strict-JSON
+serialisable), and a null lands the sensor in `unknown` — fail-safe, never a
+bogus reading. The raw `value` / `values` fields are left **byte-identical**
+(wire fidelity); the derivation is purely additive.
+
+The fix lives entirely at the op layer. The checks evaluator's strict type
+contract is **untouched** — a central numeric coercion there was rejected
+because it would silently flip any existing sensor whose string field
+happens to parse (a port `"443"`, a version, a serial) from `unknown` to a
+live state on upgrade. `prometheus.alerts`' per-alert string `value` is left
+as-is (out of the minimal scope).
+
 ## Optional auth
 
 In-cluster Prometheus is typically reached via port-forward and is

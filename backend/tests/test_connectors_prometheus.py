@@ -19,6 +19,11 @@ Coverage matrix (per the Task #2234 acceptance criteria):
   prometheus.
 * **Recorded-fixture ops** — ``query`` / ``query_range`` / ``targets``
   round-trip recorded response fixtures and hit the correct wire path.
+* **Derived numeric samples (#2871)** — ``query`` / ``query_range`` carry
+  ``value_num`` / ``values_num`` per sample and ``first_sample_value`` on the
+  envelope (``NaN`` / ``+-Inf`` / unparseable -> null); the raw ``value`` /
+  ``values`` stay byte-identical; and a real result drives a threshold sensor
+  end-to-end through the untouched checks evaluator (#2504).
 
 The wire is mocked with ``respx``; the credential loader is injected so
 Vault is never touched. Handlers are invoked directly (not through the DB
@@ -28,6 +33,7 @@ dispatcher) so the suite stays a pure unit test.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,6 +42,8 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.checks.assertions import AssertionSpec, SelectSpec, ThresholdCompare
+from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.connectors.prometheus import (
     PROMETHEUS_OPS,
     PROMETHEUS_WHEN_TO_USE_BY_GROUP,
@@ -44,6 +52,11 @@ from meho_backplane.connectors.prometheus import (
 from meho_backplane.connectors.prometheus.connector import (
     PrometheusReadOnlyError,
     _enforce_read_only,
+)
+from meho_backplane.connectors.prometheus.ops_read import (
+    _augment_numeric_samples,
+    _numeric_sample_value,
+    _sample_pair_value,
 )
 from meho_backplane.connectors.registry import all_connectors_v2
 
@@ -291,7 +304,11 @@ async def test_query_roundtrips_fixture() -> None:
         _operator(), _target(), {"query": "up", "time": "2024-07-15T00:00:00Z"}
     )
     assert result["data"]["resultType"] == "vector"
+    # Raw wire value is left byte-identical.
     assert result["data"]["result"][0]["value"] == [1721000000, "1"]
+    # Derived numerics: per-sample value_num + envelope first_sample_value.
+    assert result["data"]["result"][0]["value_num"] == 1.0
+    assert result["first_sample_value"] == 1.0
     assert route.calls.last.request.url.params.get("time") == "2024-07-15T00:00:00Z"
     await connector.aclose()
 
@@ -308,6 +325,12 @@ async def test_query_range_roundtrips_fixture() -> None:
         {"query": "up", "start": "1721000000", "end": "1721000015", "step": "15s"},
     )
     assert result["data"]["resultType"] == "matrix"
+    series = result["data"]["result"][0]
+    # Raw wire values are left byte-identical.
+    assert series["values"] == [[1721000000, "1"], [1721000015, "1"]]
+    # Derived numerics: values_num parallel to values + envelope alias.
+    assert series["values_num"] == [1.0, 1.0]
+    assert result["first_sample_value"] == 1.0
     params = route.calls.last.request.url.params
     assert params.get("query") == "up"
     assert params.get("step") == "15s"
@@ -479,3 +502,188 @@ async def test_probe_ok_and_failure() -> None:
     assert bad.ok is False
     assert bad.reason
     await connector2.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Derived numeric samples (#2871)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("1", 1.0),
+        ("0", 0.0),
+        ("3.14", 3.14),
+        ("-2.5", -2.5),
+        ("1.5e9", 1.5e9),
+        ("NaN", None),
+        ("+Inf", None),
+        ("-Inf", None),
+        ("Inf", None),
+        ("", None),
+        ("not-a-number", None),
+    ],
+)
+def test_numeric_sample_value_parses_finite_floats_only(raw: str, expected: float | None) -> None:
+    """Finite floats parse; NaN / +-Inf / unparseable derive to None (fail-safe null)."""
+    result = _numeric_sample_value(raw)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("raw", [1, 1.0, None, ["1"], {"v": "1"}, True])
+def test_numeric_sample_value_non_string_is_none(raw: Any) -> None:
+    """Only JSON-string samples derive a number; a non-string never coerces."""
+    assert _numeric_sample_value(raw) is None
+
+
+@pytest.mark.parametrize(
+    "sample,expected",
+    [
+        ([1721000000, "1"], 1.0),
+        ([1721000000.5, "2.5"], 2.5),
+        ([1721000000, "NaN"], None),
+        ([1721000000, "oops"], None),
+        ([1721000000], None),  # too short to be a sample pair
+        ([1, "2", "3"], None),  # too long to be a sample pair
+        ("nope", None),  # not a list
+        (None, None),
+        ([1721000000, 5], None),  # value slot is not a string
+    ],
+)
+def test_sample_pair_value(sample: Any, expected: float | None) -> None:
+    result = _sample_pair_value(sample)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected)
+
+
+def test_augment_vector_adds_value_num_and_envelope_alias() -> None:
+    payload = {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [
+                {"metric": {"__name__": "up"}, "value": [1721000000, "7"]},
+                {"metric": {"__name__": "up", "n": "2"}, "value": [1721000000, "NaN"]},
+            ],
+        },
+    }
+    out = _augment_numeric_samples(payload)
+    assert out is payload  # mutated in place, same object returned
+    assert out["data"]["result"][0]["value_num"] == 7.0
+    assert out["data"]["result"][1]["value_num"] is None  # NaN -> null
+    # Raw wire values left byte-identical.
+    assert out["data"]["result"][0]["value"] == [1721000000, "7"]
+    assert out["data"]["result"][1]["value"] == [1721000000, "NaN"]
+    # Envelope alias = first sample's number.
+    assert out["first_sample_value"] == 7.0
+
+
+def test_augment_matrix_adds_values_num_parallel_to_values() -> None:
+    payload = {
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": [
+                {
+                    "metric": {"__name__": "up"},
+                    "values": [[1721000000, "1"], [1721000015, "+Inf"], [1721000030, "3"]],
+                },
+                {"metric": {"n": "2"}, "values": [[1721000000, "9"]]},
+            ],
+        },
+    }
+    out = _augment_numeric_samples(payload)
+    assert out["data"]["result"][0]["values_num"] == [1.0, None, 3.0]  # +Inf -> null
+    assert out["data"]["result"][1]["values_num"] == [9.0]
+    # Raw wire values left byte-identical.
+    assert out["data"]["result"][0]["values"][1] == [1721000015, "+Inf"]
+    # Envelope alias = first series' first sample.
+    assert out["first_sample_value"] == 1.0
+
+
+def test_augment_scalar_surfaces_only_envelope_alias() -> None:
+    """A scalar result is a bare [ts, 'val'] pair -- only the envelope alias applies."""
+    payload = {"status": "success", "data": {"resultType": "scalar", "result": [1721000000, "42"]}}
+    out = _augment_numeric_samples(payload)
+    assert out["first_sample_value"] == 42.0
+    # The bare pair is untouched (no dict to hang value_num on).
+    assert out["data"]["result"] == [1721000000, "42"]
+
+
+def test_augment_string_result_alias_null_for_label_string() -> None:
+    payload = {
+        "status": "success",
+        "data": {"resultType": "string", "result": [1721000000, "hello"]},
+    }
+    out = _augment_numeric_samples(payload)
+    assert out["first_sample_value"] is None
+
+
+def test_augment_empty_vector_alias_is_null() -> None:
+    payload = {"status": "success", "data": {"resultType": "vector", "result": []}}
+    out = _augment_numeric_samples(payload)
+    assert out["first_sample_value"] is None
+    assert out["data"]["result"] == []
+
+
+def test_augment_error_envelope_gets_null_alias_and_is_otherwise_untouched() -> None:
+    payload = {"status": "error", "errorType": "bad_data", "error": "parse error at char 3"}
+    out = _augment_numeric_samples(payload)
+    assert out["first_sample_value"] is None
+    assert out["status"] == "error"
+    assert out["error"] == "parse error at char 3"
+
+
+@respx.mock
+async def test_first_sample_value_drives_threshold_sensor_end_to_end() -> None:
+    """The reporter's live repro end-to-end through the untouched checks evaluator.
+
+    ``vector(1)`` -> ``$.first_sample_value`` with ``threshold gt critical: 0``
+    fires ``critical``, because the derived alias is a real float. Asserting
+    the raw JSON-string path (``$.data.result[0].value[1]``) still lands in
+    ``unknown`` -- the exact ergonomic gap #2871 closes -- proving the fix is
+    the derived field, not any change to ``_compare_threshold`` (#2504).
+    """
+    respx.get(f"{_BASE}/api/v1/query").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [{"metric": {}, "value": [1786369537.197, "1"]}],
+                },
+            },
+        )
+    )
+    connector = PrometheusConnector()
+    body = await connector.query(_operator(), _target(), {"query": "vector(1)"})
+    await connector.aclose()
+
+    now = datetime.now(UTC)
+    fires = evaluate_assertion(
+        AssertionSpec(
+            select=SelectSpec(path="$.first_sample_value"),
+            compare=ThresholdCompare(type="threshold", op="gt", critical=0),
+        ),
+        body,
+        now=now,
+    )
+    assert fires.state == "critical"
+    assert fires.value == 1.0
+
+    raw = evaluate_assertion(
+        AssertionSpec(
+            select=SelectSpec(path="$.data.result[0].value[1]"),
+            compare=ThresholdCompare(type="threshold", op="gt", critical=0),
+        ),
+        body,
+        now=now,
+    )
+    assert raw.state == "unknown"

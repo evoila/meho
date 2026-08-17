@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""End-to-end activation tests for the 14 vmware-rest write composites.
+"""End-to-end activation tests for the 15 vmware-rest write composites.
 
 Post-#2256 the write composites dispatch every raw-REST sub-op **directly
 on the connector session** (``connector._get_json`` / ``connector._post_json``
@@ -335,6 +335,7 @@ async def _clear_requires_approval(op_ids: set[str], recorder: _RecordingVmwareC
 _WRITE_COMPOSITES: dict[str, str] = {
     "vmware.composite.vm.create": "vm.create",
     "vmware.composite.vm.clone": "vm.clone",
+    "vmware.composite.vm.deploy_from_library": "vm.deploy_from_library",
     "vmware.composite.vm.snapshot.revert": "vm.snapshot.revert",
     "vmware.composite.vm.migrate": "vm.migrate",
     "vmware.composite.vm.power": "vm.power",
@@ -362,6 +363,10 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
             "source_vm": "vm-1",
             "target_name": "vm-clone",
             "library_item": "lib-1",
+        },
+        "vmware.composite.vm.deploy_from_library": {
+            "library_item": "li-1",
+            "resource_pool": "resgroup-8",
         },
         "vmware.composite.vm.snapshot.revert": {
             "vm": "vm-1",
@@ -414,6 +419,14 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
         "vmware.composite.vm.create": {"/vcenter/folder": empty},
         "vmware.composite.vm.clone": {
             "/vcenter/vm-template/library-items/lib-1?action=deploy": {"value": "vm-benign"},
+        },
+        # deploy_from_library: id passthrough → no finds; the synchronous OVF
+        # deploy returns a DeploymentResult that succeeds → status='deployed'.
+        "vmware.composite.vm.deploy_from_library": {
+            "/vcenter/ovf/library-item/li-1?action=deploy": {
+                "succeeded": True,
+                "resource_id": {"type": "VirtualMachine", "id": "vm-benign"},
+            },
         },
         "vmware.composite.vm.snapshot.revert": {},
         "vmware.composite.vm.migrate": {},
@@ -507,12 +520,13 @@ def _benign_vmomi_for(composite_op_id: str) -> dict[str, Any]:
 # ===========================================================================
 
 
-def test_write_composite_set_is_the_expected_fourteen() -> None:
+def test_write_composite_set_is_the_expected_fifteen() -> None:
     """Pins the REST-sub-op write set so a renamed / dropped composite can't shrink coverage.
 
-    Covers the 14 REST-sub-op write composites the parametrized fresh-boot +
+    Covers the 15 REST-sub-op write composites the parametrized fresh-boot +
     park machinery below drives (the 12 T6/#509 + vm.power + #2891 hardware
-    writes, plus the two GOSC composites / #2892). The four vi-json write
+    writes, the two GOSC composites / #2892, plus the OVF/OVA content-library
+    deploy ``vm.deploy_from_library`` / #2909). The four vi-json write
     composites (``vm.disk.grow`` / #2893, ``vm.clone_from_template`` / #2894,
     ``cluster.drs_rule.create`` + ``folder.create`` / #2895) are
     dispatch-shaped differently (vmomi sub-ops keyed by request body, not
@@ -521,7 +535,7 @@ def test_write_composite_set_is_the_expected_fourteen() -> None:
     """
     registrar_write_op_ids = {f"vmware.composite.{name}" for name in _WRITE_COMPOSITES.values()}
     assert set(_WRITE_COMPOSITES) == registrar_write_op_ids
-    assert len(_WRITE_COMPOSITES) == 14
+    assert len(_WRITE_COMPOSITES) == 15
 
 
 # ===========================================================================
@@ -540,7 +554,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 23 composite rows the registrar upserts. Reaching a business status
+    the 24 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).
@@ -995,7 +1009,7 @@ async def test_write_composite_human_dispatch_parks_for_approval(
     Every write composite ships ``requires_approval=True``; G11.7-T1 (#1401)
     routes a human/service principal to the approval queue
     (``awaiting_approval``) at the top-level gate — before the handler (and
-    thus any sub-op) runs. Proves the park half for all 14; the recorder
+    thus any sub-op) runs. Proves the park half for all 15; the recorder
     stays empty of writes because the composite never executed (the
     live-read preview builders issue read-only GETs, which is expected).
     """
@@ -1537,6 +1551,126 @@ async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
     assert result.status == "ok", result.error
     assert result.result["status"] == "cloned"
     assert recorder.clone_writes == ["/VirtualMachine/vm-42/CloneVM_Task"]
+
+
+# ===========================================================================
+# vm.deploy_from_library — park (with #2681 envelope) → approve → resume → deploy
+# ===========================================================================
+
+
+_DEPLOY_FROM_LIBRARY_PARAMS: dict[str, Any] = {
+    "library_item": "li-1",
+    "resource_pool": "resgroup-8",
+    "network_mappings": {"nat": "dvportgroup-9"},
+}
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_queue_approve_resume_with_2681_envelope(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.deploy_from_library: park (with #2681 op-identity envelope) → approve → resume → deploy.
+
+    1. A USER dispatch parks at ``awaiting_approval``; the durable row's
+       ``proposed_effect`` carries the uniform #2681 op-identity envelope
+       (``op_id`` / ``connector_id`` / ``target_id`` / ``op_class`` /
+       ``safety_level`` / ``preview_populated``) plus the param-echo deploy
+       preview. The OVF deploy never fires (the preview is pure param-echo —
+       no reads either).
+    2. A distinct human reviewer approves.
+    3. The ``_approved=True`` resume executes the composite: the (now
+       auto-executed) governed OVF deploy runs and the result is
+       ``status='deployed'``.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/ovf/library-item/li-1?action=deploy"] = {
+        "succeeded": True,
+        "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-9"},
+    }
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+
+    # Step 1: human dispatch -> awaiting_approval; the deploy never ran.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=target,
+        params=_DEPLOY_FROM_LIBRARY_PARAMS,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == [], "no deploy before approval"
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    assert pending.target_id == target_id
+    # #2681 uniform op-identity + metadata envelope on the parked row.
+    effect = pending.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.deploy_from_library"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target_id)
+    assert effect["op_class"] == "other"
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_populated"] is True
+    # The param-echo blast-radius preview — what the approver decides on.
+    assert effect["preview"] == {
+        "library_item": "li-1",
+        "library_item_name": None,
+        "library_name": None,
+        "name": None,
+        "resource_pool": "resgroup-8",
+        "host": None,
+        "folder": None,
+        "datastore": None,
+        "network_mappings": {"nat": "dvportgroup-9"},
+        "storage_provisioning": None,
+        "ovf_property_keys": [],
+        "power_on": False,
+    }
+
+    # Step 2: a distinct human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(
+            s, approval_request_id, operator=reviewer, params=_DEPLOY_FROM_LIBRARY_PARAMS
+        )
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: resume re-dispatch with the gate bypass -> the deploy executes.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.deploy_from_library",
+        target=target,
+        params=_DEPLOY_FROM_LIBRARY_PARAMS,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "deployed"
+    assert result2.result["vm_id"] == "vm-ovf-9"
+    # The synchronous OVF deploy fired exactly once, on the approved resume.
+    assert recorder.calls == [("POST", "/vcenter/ovf/library-item/li-1?action=deploy")]
 
 
 # ===========================================================================

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 23 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 24 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,14 +26,15 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 18 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 19 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
 ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
 hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
-``vm.device.cdrom``, and the two GOSC composites
-``guest.customization_spec.create`` / ``vm.customize`` / #2892) inherit
+``vm.device.cdrom``, the two GOSC composites
+``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
+OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909) inherit
 the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
 at the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -65,6 +66,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_from_template_composite,
     vm_create_composite,
     vm_customize_composite,
+    vm_deploy_from_library_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -105,6 +107,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CREATE_RESPONSE_SCHEMA,
     VM_CUSTOMIZE_PARAMETER_SCHEMA,
     VM_CUSTOMIZE_RESPONSE_SCHEMA,
+    VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
+    VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
     VM_DEVICE_CDROM_PARAMETER_SCHEMA,
     VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
@@ -201,7 +205,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "attach + optional power-on (rollback on partial failure), "
         "clone from a content-library template (long-running task "
         "polling) or from a folder VM template (CloneVM_Task, with "
-        "optional inline guest customization), revert to a named "
+        "optional inline guest customization), deploy an OVF/OVA "
+        "content-library item to a new VM (deploy_from_library — "
+        "OVF-network→portgroup mappings, ambiguity-rejecting name "
+        "lookup, structured deploy-report statuses), revert to a named "
         "snapshot (ambiguity-rejecting), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
@@ -421,6 +428,37 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=VM_CLONE_RESPONSE_SCHEMA,
         group_key="vm",
         tags=["composite", "write", "vm", "lifecycle"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.deploy_from_library",
+        handler=vm_deploy_from_library_composite,
+        summary="Deploy an OVF/OVA content-library item to a new VM (retires govc library.deploy).",
+        description=(
+            "Deploys an OVF/OVA package from a content library to a new VM via "
+            "the synchronous "
+            "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy. "
+            "The library item is referenced by id (passthrough) or by name — "
+            "resolved via POST:/content/library/item?action=find (filtered to "
+            "type=ovf), optionally scoped by library name through "
+            "POST:/content/library?action=find, with ambiguity refused "
+            "(status='ambiguous_item' / 'ambiguous_library') before any deploy. "
+            "resource_pool is the required placement anchor; host / folder / "
+            "datastore refine it, and network_mappings maps each OVF network key "
+            "to a portgroup. Unlike vm.clone (200 body is a bare VM id) the OVF "
+            "deploy's 200 body is a DeploymentResult: a failed OVF / network / "
+            "placement validation returns succeeded=false and surfaces as "
+            "status='deploy_failed' with per-issue messages, and an invalid / "
+            "missing placement resource (HTTP 400/404) as status='deploy_error' "
+            "— structured statuses, never a raw vendor error. With power_on the "
+            "deployed VM is started best-effort. Equivalent of 'govc "
+            "library.deploy' for operator-facing dispatch."
+        ),
+        parameter_schema=VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
+        response_schema=VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "ovf"],
         safety_level="dangerous",
         requires_approval=True,
     ),
@@ -839,14 +877,15 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 23 composites total -- 5 read (T5 / #508) + 18 write (T6 /
+    Scope: 24 composites total -- 5 read (T5 / #508) + 19 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
     ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
     hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
-    ``vm.device.cdrom``, and the two GOSC composites
-    ``guest.customization_spec.create`` / ``vm.customize`` / #2892). (The
+    ``vm.device.cdrom``, the two GOSC composites
+    ``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
+    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909). (The
     former ``host.network_uplinks`` / ``host.vsan_health`` reads were
     re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +

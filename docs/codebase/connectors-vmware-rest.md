@@ -8,18 +8,19 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 23 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 24 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 18 write composites (G3.1-T6 / `#509`, the
+in `#2258`) and 19 write composites (G3.1-T6 / `#509`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
 `cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
-`vm.device.cdrom`, and the two guest-customization (GOSC) composites
-`guest.customization_spec.create` + `vm.customize` / `#2892`). The
+`vm.device.cdrom`, the two guest-customization (GOSC) composites
+`guest.customization_spec.create` + `vm.customize` / `#2892`, and the
+OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -74,8 +75,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — fourteen module-level
+- **Write composites** (`composites/_write.py`) — fifteen module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
+  `vm_deploy_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
   `vm_power_composite`, `vm_power_bulk_composite`,
   `vm_resize_composite`, `vm_nic_repoint_composite`,
@@ -178,8 +180,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (`test_gosc_create_secret_hygiene_across_all_surfaces`).
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 23
-  `_CompositeSpec` rows (5 read + 18 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 24
+  `_CompositeSpec` rows (5 read + 19 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -308,7 +310,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
    queued registrar and upserts: the 23 `vmware.composite.*` rows with
    `source_kind="composite"` (5 reads with `safety_level="safe"` +
-   `requires_approval=False`; 18 writes with `safety_level="dangerous"`
+   `requires_approval=False`; 19 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -404,7 +406,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 23 composites (5 reads + 18 writes) land as `source_kind="composite"`
+The 24 composites (5 reads + 19 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -471,7 +473,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 23 composites are hand-authored aggregators the connector ships as
+The 24 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -514,6 +516,7 @@ enum) are:
 | --- | --- |
 | `vm.create` | `created`, `rolled_back` |
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
+| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error` with a structured message, and the name-resolution refusals are pre-deploy — so a placement/mapping error is a structured status, never a raw vendor fault) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
@@ -665,6 +668,19 @@ lives:
 | `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy` (synchronous — the 200 body is the new VM id; #2970) | the golden image is published to a content library |
 | `vm.clone_from_template` | a **folder VM template** (a marked-as-template VM in a VM folder) | vim `POST:/VirtualMachine/{moId}/CloneVM_Task`, poll via `poll_vim_task` | the golden image is a plain marked-as-template VM (govc/terraform's `CloneVM_Task` path) |
 
+A third content-library deploy path, `vm.deploy_from_library` (#2909,
+retiring `govc library.deploy`), covers a different **item type**: an
+**OVF/OVA** library item (content-library item `type=ovf`) rather than a
+VM-template item. It deploys via the synchronous REST
+`POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy` whose
+200 body is a `DeploymentResult` (not a bare VM id), so it can surface
+OVF-descriptor / network-mapping / placement validation failures as a
+structured `deploy_failed` / `deploy_error` status. It also resolves the
+item by name (`POST:/content/library/item?action=find`, filtered to
+`type=ovf`, optionally scoped by a library name resolved via
+`POST:/content/library?action=find`), refusing ambiguity before any
+deploy. See the OVF/OVA deploy section below.
+
 `vm.clone`'s content-library deploy path **cannot** clone a folder
 template — a marked-as-template VM has no content-library item to deploy
 — and the REST `POST:/vcenter/vm?action=clone` template-source acceptance
@@ -711,6 +727,55 @@ radius without leaking credential material. New vim sub-op paths
 (`CloneVM_Task`, `RetrievePropertiesEx`, `GetCustomizationSpec`) are
 declared in `_VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE` and reconciled against
 the pinned `vi-json.yaml`.
+
+### OVF/OVA content-library deploy (`vm.deploy_from_library`, #2909)
+
+Retires `govc library.deploy` for OVF/OVA appliances (the HoloRouter OVA
+and friends). Pure vSphere Automation REST — no `pyvmomi`. All four
+sub-ops are `vcenter.yaml`-served paths, so the composite reconciles
+through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep (not a
+`_VIM_SUB_OPS_*` lane).
+
+**Item resolution.** `library_item` (an id) is a passthrough. Otherwise
+`library_item_name` is resolved to an id via
+`POST:/content/library/item?action=find` (a *read* — returns a bare id
+array — issued un-gated through the `_find_content_library_ids` helper,
+which rides `_post_json` since find is POST-shaped), filtered to
+`type=ovf` so a colliding non-OVF item name never matches. An optional
+`library_name` first resolves to a library id via
+`POST:/content/library?action=find` to scope the item lookup. Zero
+matches → `item_not_found` / `library_not_found`; more than one →
+`ambiguous_item` / `ambiguous_library` with the candidate ids — every
+refusal is **pre-deploy**, so the operator re-dispatches by explicit id.
+
+**Deploy.** The body is `{deployment_spec, target}` (two top-level params
+— not the single-`spec` wrapper the `find` reads and `CreateSpec` writes
+use). `target.resource_pool_id` is the one **required** placement
+(`host_id` / `folder_id` refine it); `deployment_spec` carries
+`accept_all_eula` (defaults true), `name`, the OVF-network-key →
+portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
+not an array), `storage_provisioning` / `storage_profile_id` /
+`default_datastore_id`, and any `ovf_properties` folded into a single
+`PropertyParams` entry in `additional_parameters`. Note the pinned 9.0
+spec keys the EULA field `accept_all_eula` (lowercase) — divergent from
+`govmomi`'s legacy `accept_all_EULA`; the connector follows the pinned
+spec it ingests.
+
+**Result mapping — structured statuses, never a raw vendor error.** The
+deploy is synchronous, but unlike `vm.clone` its 200 body is a
+`DeploymentResult` structure. `succeeded=true` → `deployed` with the VM
+moid from `resource_id.id` (+ `resource_type`); `succeeded=false` →
+`deploy_failed` with the report's per-issue messages
+(`error.errors/warnings/information`, each projected to
+`{category, severity, message}`) — this is how a bad network-mapping key
+or OVF-descriptor validation surfaces. An HTTP 400/404 (invalid args, or
+a placement moid that does not exist) is **caught** and mapped to
+`deploy_error` with a parsed message rather than re-raised — so a
+placement/mapping error is always a structured status. With `power_on`,
+a best-effort `POST:/vcenter/vm/{vm}/power?action=start` follows a
+successful deploy; a power-on fault leaves `status='deployed'` with
+`powered_on=false` and a `power_on` warning issue (a deployed appliance
+is never rolled back over a power-on hiccup).
 
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
@@ -835,7 +900,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 18 write composites ship `requires_approval=True`, so a human/agent
+All 19 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -859,6 +924,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, sizing, networks, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
+| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |

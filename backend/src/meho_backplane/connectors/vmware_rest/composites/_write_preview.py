@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 18 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 19 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 18 write composites onto the per-op preview hook shipped
+This wires all 19 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -124,7 +124,7 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 18 op_ids classify as ``write`` (``.create`` /
+any builder fires: the 19 op_ids classify as ``write`` (``.create`` /
 ``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` — and
 ``vm.clone_from_template`` — ``_template`` — are not write suffixes) —
 none is a credential class, so none is suppressed. The
@@ -329,6 +329,58 @@ async def _vm_clone_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "source_vm": source_vm,
         "target_name": target_name,
         "library_item": library_item,
+    }
+
+
+async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.deploy_from_library`` — echo the deploy coordinates (no I/O).
+
+    Param-echo: the params name the blast radius — which library item (id or
+    name, plus scoping library), where it lands (resource pool / host / folder
+    / datastore), the OVF-network→portgroup map, provisioning, and whether it
+    powers on. ``ovf_properties`` may carry secret values (appliance
+    passwords), so only its **keys** (property ids) are echoed, never the
+    values (#1503 secret-hygiene). No live read is issued, so the preview
+    cannot drift from the approved dispatch. Declines (``None``) when neither
+    library reference nor the required ``resource_pool`` is a string.
+    """
+    library_item = ctx.params.get("library_item")
+    library_item_name = ctx.params.get("library_item_name")
+    resource_pool = ctx.params.get("resource_pool")
+    has_reference = isinstance(library_item, str) or isinstance(library_item_name, str)
+    if not has_reference or not isinstance(resource_pool, str):
+        return None
+    network_mappings = ctx.params.get("network_mappings")
+    ovf_properties = ctx.params.get("ovf_properties")
+    return {
+        "library_item": library_item if isinstance(library_item, str) else None,
+        "library_item_name": library_item_name if isinstance(library_item_name, str) else None,
+        "library_name": (
+            ctx.params.get("library_name")
+            if isinstance(ctx.params.get("library_name"), str)
+            else None
+        ),
+        "name": ctx.params.get("name") if isinstance(ctx.params.get("name"), str) else None,
+        "resource_pool": resource_pool,
+        "host": ctx.params.get("host") if isinstance(ctx.params.get("host"), str) else None,
+        "folder": ctx.params.get("folder") if isinstance(ctx.params.get("folder"), str) else None,
+        "datastore": (
+            ctx.params.get("datastore") if isinstance(ctx.params.get("datastore"), str) else None
+        ),
+        "network_mappings": (
+            {str(k): str(v) for k, v in network_mappings.items()}
+            if isinstance(network_mappings, dict)
+            else {}
+        ),
+        "storage_provisioning": (
+            ctx.params.get("storage_provisioning")
+            if isinstance(ctx.params.get("storage_provisioning"), str)
+            else None
+        ),
+        "ovf_property_keys": (
+            sorted(str(k) for k in ovf_properties) if isinstance(ovf_properties, dict) else []
+        ),
+        "power_on": bool(ctx.params.get("power_on", False)),
     }
 
 
@@ -762,11 +814,12 @@ async def _vm_customize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-#: op_id → builder for the 18 write composites. Module-level so the
+#: op_id → builder for the 19 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
+    "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
     "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
@@ -787,7 +840,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 18 write-composite park-time preview builders. Import-time.
+    """Wire the 19 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

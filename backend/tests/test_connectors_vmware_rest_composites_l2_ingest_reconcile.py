@@ -3,11 +3,12 @@
 
 """op_id reconciliation between the write composites and the ingest pipeline.
 
-G3.16-T1 (#1414). The 13 REST-sub-op vmware-rest write composites each
+G3.16-T1 (#1414). The 14 REST-sub-op vmware-rest write composites each
 declare the L2 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
 :mod:`~meho_backplane.connectors.vmware_rest.composites._write` (the
-T6/#509 + vm.power writes, the #2891 hardware trio, and the two GOSC
-composites / #2892); the four vi-json write composites (``vm.disk.grow`` /
+T6/#509 + vm.power writes, the #2891 hardware trio, the two GOSC
+composites / #2892, and the OVF/OVA content-library deploy / #2909); the
+four vi-json write composites (``vm.disk.grow`` /
 #2893, ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
 writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch
 into vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
@@ -107,7 +108,7 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 13 REST write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 14 REST write composites.
 
     The vi-json sub-ops live in ``_VIM_SUB_OPS_*`` tuples (a distinct
     namespace this ``_SUB_OPS_*`` sweep deliberately skips), so a
@@ -133,8 +134,10 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Thirteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
-    writes, the #2891 hardware trio, plus the two GOSC composites / #2892).
+    Fourteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    writes, the #2891 hardware trio, the two GOSC composites / #2892, plus
+    the OVF/OVA content-library deploy / #2909 — whose reads ride the
+    content-library find actions, both served by the pinned vcenter.yaml).
     ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
     the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
     REST resource), so its manifest lives in
@@ -152,6 +155,7 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
         "_SUB_OPS_VM_CUSTOMIZE",
+        "_SUB_OPS_VM_DEPLOY_FROM_LIBRARY",
         "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_MIGRATE",
         "_SUB_OPS_VM_NIC_REPOINT",
@@ -159,6 +163,49 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_POWER_BULK",
         "_SUB_OPS_VM_RESIZE",
     ]
+
+
+def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
+    """Pin the deploy_from_library manifest so a drift can't shrink the reconcile.
+
+    All four sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
+    both content-library find actions used for name resolution, and the
+    power-on), so — unlike the vim-shaped writes — they reconcile through the
+    generic ``_SUB_OPS_*`` sweep above rather than a ``_VIM_SUB_OPS_*`` lane.
+    """
+    assert set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
+        "POST:/content/library?action=find",
+        "POST:/content/library/item?action=find",
+        "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    }
+
+
+def test_vm_deploy_from_library_sub_ops_resolve_against_pinned_vcenter_spec() -> None:
+    """The #2909 OVF deploy + find + power paths are real ``vcenter.yaml`` paths.
+
+    The definitive #2909 grounding (the issue's ingest-reconcile-against-the-
+    pinned-spec-rows criterion, scoped to the ovf/library-item deploy paths):
+    parse the canonical pinned ``vcenter.yaml`` through the real
+    :func:`parse_openapi` and assert every ``_SUB_OPS_VM_DEPLOY_FROM_LIBRARY``
+    op_id is in the emitted descriptor set — real path existence for the OVF
+    library-item deploy, both content-library find actions, and the power-on.
+    Skips when the spec-shelf is unconfigured (the canary's convention), so CI
+    — where the env vars are wired — is the operator-visible signal.
+    """
+    spec_path = resolve_vcenter_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    required = set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    rows = parse_openapi(f"file://{spec_path}", spec_source="spec:vcenter.yaml", content=spec_text)
+    ingested_op_ids = {row.op_id for row in rows}
+    missing = required - ingested_op_ids
+    assert not missing, (
+        "vm.deploy_from_library declares REST sub-op_ids the real vcenter.yaml "
+        f"ingest does not emit: {sorted(missing)} — re-check the OVF deploy / "
+        "content-library find paths against the pinned 9.0 spec."
+    )
 
 
 # ---------------------------------------------------------------------------

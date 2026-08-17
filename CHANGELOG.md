@@ -113,6 +113,26 @@ connector-related release-notes line.
     credential material never reach an approval / audit / broadcast surface
     (#1503).
 
+### Added — `vmware.composite.vm.deploy_from_library` OVF/OVA content-library deploy (#2909)
+
+- Add `vmware.composite.vm.deploy_from_library` — a curated OVF/OVA
+  content-library deploy composite on the vmware-rest connector,
+  retiring the `govc library.deploy` pivot in the consumer's
+  deploy/clone procedures (#2909). Resolves the OVF item by id
+  (passthrough) or by name (`POST:/content/library/item?action=find`,
+  filtered to `type=ovf`, optionally scoped by a library name), refusing
+  ambiguity before any deploy; issues the synchronous
+  `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`
+  through the governed direct-session seam (zero-ingest, `#2247`); and
+  maps the `DeploymentResult` to a structured envelope — `deployed`,
+  `deploy_failed` (OVF/network/placement validation, with the report's
+  per-issue messages), or `deploy_error` (HTTP 400/404) — so a
+  placement/mapping error is never a raw vendor error. Params cover
+  placement (resource pool / host / folder / datastore), OVF-network →
+  portgroup mappings, storage/provisioning options, additional OVF
+  properties, and optional power-on. `safety_level=dangerous`,
+  `requires_approval=True`, with a secret-hygienic param-echo preview.
+
 ### Breaking changes — vmware composite param schemas tightened by the #2970 repoint
 
 - `vmware.composite.vm.clone` no longer accepts `wait_for_completion` /

@@ -116,11 +116,14 @@ class _RecordingConnector:
 
     Serves canned read payloads and records writes. The governance tests
     assert on whether a *write* ``_post_json`` ever fires -- the read
-    payloads only need to steer the handler to its first write.
+    payloads only need to steer the handler to its first write. ``vmomi``
+    serves the VI-JSON reads the #2970 vim-switched steps issue (keyed by
+    the ``RetrievePropertiesEx`` object type).
     """
 
-    def __init__(self, reads: dict[str, Any]) -> None:
+    def __init__(self, reads: dict[str, Any], *, vmomi: dict[str, Any] | None = None) -> None:
         self._reads = reads
+        self._vmomi = vmomi or {}
         self.writes: list[dict[str, Any]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
@@ -150,6 +153,44 @@ class _RecordingConnector:
     ) -> Any:
         self.writes.append({"verb": verb, "path": path, "body": json})
         return {"value": "vm-should-not-exist"}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        assert path.endswith("/RetrievePropertiesEx"), (
+            f"governance tests only expect vmomi reads here, got {path!r}"
+        )
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        return self._vmomi[spec_type]
+
+
+def _drs_recommendation_vmomi(vm_moid: str, destination: str) -> dict[str, Any]:
+    """Canned ``ClusterComputeResource.drsRecommendation`` property read (#2970)."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": "c-1"},
+                "propSet": [
+                    {
+                        "name": "drsRecommendation",
+                        "val": [
+                            {
+                                "migrationList": [
+                                    {
+                                        "vm": {"type": "VirtualMachine", "value": vm_moid},
+                                        "destination": {
+                                            "type": "HostSystem",
+                                            "value": destination,
+                                        },
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
 
 
 @pytest.mark.asyncio
@@ -196,7 +237,7 @@ async def test_gated_write_subop_queues_for_approval_via_composite(session: Asyn
 async def test_dangerous_write_subop_denied_without_grant(session: AsyncSession) -> None:
     """An agent with no grant is denied the dangerous relocate write; it never runs."""
     conn = _RecordingConnector(
-        {"/api/vcenter/cluster/c-1/drs/recommendations": [{"vm": "vm-1", "target_host": "host-A"}]}
+        {}, vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")}
     )
     out = await vm_migrate_composite(
         operator=_operator(sub="agent-no-grant"),
@@ -224,7 +265,7 @@ async def test_human_operator_subop_auto_executes(session: AsyncSession) -> None
     gate and the write proceeds -- no double-gate on the resume path.
     """
     conn = _RecordingConnector(
-        {"/api/vcenter/cluster/c-1/drs/recommendations": [{"vm": "vm-1", "target_host": "host-A"}]}
+        {}, vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")}
     )
     out = await vm_migrate_composite(
         operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),

@@ -158,19 +158,17 @@ _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
 _OP_LIST_DATASTORES = "GET:/vcenter/datastore"
 _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
 _OP_LIST_VMS = "GET:/vcenter/vm"
-# vSphere Automation REST keys the distributed-switch listing under the
-# *plural* resource path (a preview feature on the appliance-served
-# ``vcenter.yaml``); the singular ``distributed-switch`` spelling that
-# G3.1-T5 #508 shipped does not exist in the spec and never resolved
-# against a real ingest (#1602). The DVS-list response carries a
-# ``vds``/``distributed_switch`` moid per entry, which drives the
-# ``dvs_index`` enrichment below.
-_OP_LIST_DVS = "GET:/vcenter/network/distributed-switches"
-# There is NO dedicated ``distributed-portgroup(s)`` list resource in
-# the REST Automation API: distributed portgroups are enumerated via the
-# generic network resource filtered to ``DISTRIBUTED_PORTGROUP`` (the
-# singular ``distributed-portgroup`` op_id #508 declared was absent from
-# every ingest -- #1602). The generic ``Network`` summary returns only
+# There is NO distributed-switch list resource in the pinned REST spec at
+# all: the plural ``distributed-switches`` path #1602 repointed to exists
+# only under ``/vcenter/namespace-management/networks/nsx/`` (NSX-scoped)
+# in the canonical ``vcenter.yaml`` -- the #2970 real-spec reconcile
+# finding. The audit's DVS-list step is therefore dropped (see the
+# handler's degradation note); enumerating switches is a vim-only surface.
+# There is likewise NO dedicated ``distributed-portgroup(s)`` list
+# resource: distributed portgroups are enumerated via the generic network
+# resource filtered to ``DISTRIBUTED_PORTGROUP`` (the singular
+# ``distributed-portgroup`` op_id #508 declared was absent from every
+# ingest -- #1602). The generic ``Network`` summary returns only
 # ``{network (id), name, type}`` -- it carries no parent-DVS field, so
 # the per-portgroup ``dvs``/``dvs_name`` enrichment is best-effort (see
 # the handler note).
@@ -201,7 +199,6 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
     _OP_LIST_VMS,
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
-    _OP_LIST_DVS,
     _OP_LIST_NETWORK,
     _OP_LIST_VMS,
 )
@@ -644,26 +641,18 @@ async def network_portgroup_audit_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Audit distributed portgroups with parent DVS + connected-VM aggregation.
+    """Audit distributed portgroups with connected-VM aggregation.
 
     Op-id: ``vmware.composite.network.portgroup.audit``.
 
     Sub-ops read directly on the connector session:
 
-    1. ``GET:/vcenter/network/distributed-switches`` -- list DVS
-       entries (filtered to ``filter_dvs`` via the resource's
-       ``filter.vdses`` query when supplied). Drives the DVS index
-       used to enrich each portgroup with its switch name.
-    2. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
+    1. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
        -- list distributed portgroups. The REST Automation API has no
        dedicated distributed-portgroup resource; portgroups are
        enumerated through the generic ``Network`` resource filtered to
-       the ``DISTRIBUTED_PORTGROUP`` type (#1602). ``filter_dvs`` is
-       *not* applied here -- the generic ``Network`` FilterSpec exposes
-       ``types``/``names``/``networks``/``datacenters``/``folders`` but
-       no per-DVS filter, so DVS scoping narrows the index (and thus the
-       enriched ``dvs_name``) rather than the portgroup set.
-    3. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
+       the ``DISTRIBUTED_PORTGROUP`` type (#1602).
+    2. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
        VMs connected to the portgroup. Drives the ``vm_count`` +
        ``vm_names`` aggregation.
 
@@ -674,39 +663,26 @@ async def network_portgroup_audit_composite(
         "dvs_name": <str|None>, "type": ..., "vm_count": ...,
         "vm_names": [...]}, ...]}``.
 
-    The generic ``Network`` summary carries only ``{network (id), name,
-    type}`` -- it has no parent-DVS reference -- so ``dvs``/``dvs_name``
-    are best-effort: populated when the upstream payload happens to
-    expose a ``vds``/``distributed_switch`` field (e.g. a richer target
-    or a future spec revision), ``None`` otherwise.
+    Degradation note (#2970): the pre-#2970 step 1 listed distributed
+    switches via ``GET:/vcenter/network/distributed-switches`` to build a
+    moid->name index for ``dvs_name`` enrichment -- but the pinned
+    ``vcenter.yaml`` serves that path only under the NSX-scoped
+    ``/vcenter/namespace-management/`` tree, so the step 404s on a real
+    vCenter 9.0 and is dropped. ``dvs_name`` is therefore always ``None``
+    (it already was in practice: the generic ``Network`` summary carries
+    only ``{network (id), name, type}`` -- no parent-DVS reference to
+    join on -- so the index was never consulted with a hit). ``dvs``
+    stays best-effort: populated when the upstream payload happens to
+    expose a ``vds``/``distributed_switch`` field, ``None`` otherwise.
+    ``filter_dvs`` only ever scoped that index, so it is accepted but
+    inert -- see the parameter schema note.
     """
-    filter_dvs = params.get("filter_dvs")
     include_disconnected = bool(params.get("include_disconnected_vms", False))
-
-    dvs_query: dict[str, Any] = {}
-    if isinstance(filter_dvs, str):
-        dvs_query["filter.vdses"] = [filter_dvs]
-
-    dvs_listing = await _read_sub_op(connector, target, operator, _OP_LIST_DVS, query=dvs_query)
-    dvs_entries = _unwrap_value(dvs_listing)
-    if not isinstance(dvs_entries, list):
-        dvs_entries = []
-    # Build a moid->name lookup so the per-portgroup row carries the
-    # DVS name in addition to its id.
-    dvs_index: dict[str, str | None] = {}
-    for entry in dvs_entries:
-        if not isinstance(entry, dict):
-            continue
-        dvs_id = entry.get("vds") or entry.get("distributed_switch")
-        if isinstance(dvs_id, str):
-            name = entry.get("name") if isinstance(entry.get("name"), str) else None
-            dvs_index[dvs_id] = name
 
     # Distributed portgroups come from the generic network resource
     # filtered to the DISTRIBUTED_PORTGROUP type -- there is no
-    # standalone distributed-portgroup list endpoint. ``filter_dvs`` has
-    # no analogue on this FilterSpec, so it is deliberately not threaded
-    # in here (it scopes the DVS index above instead).
+    # standalone distributed-portgroup list endpoint (and no DVS list
+    # resource at all; see the degradation note above).
     pg_query: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
 
     pg_listing = await _read_sub_op(connector, target, operator, _OP_LIST_NETWORK, query=pg_query)
@@ -744,7 +720,11 @@ async def network_portgroup_audit_composite(
                 "id": pg_id,
                 "name": entry.get("name"),
                 "dvs": dvs_ref_str,
-                "dvs_name": dvs_index.get(dvs_ref_str) if dvs_ref_str else None,
+                # Always None post-#2970: the DVS-list step that built the
+                # moid->name index is not served by the pinned spec (see
+                # the handler degradation note). Key retained for
+                # response-envelope stability.
+                "dvs_name": None,
                 "type": entry.get("type"),
                 "vm_count": len(vm_names),
                 "vm_names": vm_names,

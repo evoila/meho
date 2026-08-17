@@ -415,7 +415,6 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
                 "source_vm": "vm-1",
                 "target_name": "vm-clone",
                 "library_item": "lib-1",
-                "wait_for_completion": False,
             }
         )
     )
@@ -423,7 +422,6 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
         "source_vm": "vm-1",
         "target_name": "vm-clone",
         "library_item": "lib-1",
-        "wait_for_completion": False,
     }
 
 
@@ -814,7 +812,9 @@ async def test_cluster_patch_park_resolves_host_set(
     stub_embedding_service: AsyncMock,
 ) -> None:
     recorder = await _bootstrap_registry(stub_embedding_service)
-    recorder.responses["/vcenter/cluster/domain-c1/host"] = {
+    # #2970: cluster hosts resolve via the cluster-filtered Host_list --
+    # the pinned spec serves no per-cluster /vcenter/cluster/{c}/host.
+    recorder.responses["/vcenter/host"] = {
         "value": [
             {"host": "host-1", "name": "esx-1"},
             {"host": "host-2", "name": "esx-2"},
@@ -827,7 +827,6 @@ async def test_cluster_patch_park_resolves_host_set(
         "op_class": "write",
         "preview": {
             "cluster": "domain-c1",
-            "patch_method": "default",
             "resolved": [
                 {"host": "host-1", "name": "esx-1"},
                 {"host": "host-2", "name": "esx-2"},
@@ -838,7 +837,7 @@ async def test_cluster_patch_park_resolves_host_set(
         "safety_level": "dangerous",
     }
     # Only the host listing fired — no maintenance / patch sub-ops.
-    assert recorder.specs == ["/vcenter/cluster/domain-c1/host"]
+    assert recorder.specs == ["/vcenter/host"]
 
 
 # ===========================================================================

@@ -275,12 +275,13 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional Distributed-Virtual-Switch managed-object ID. "
-                "When supplied, scopes the distributed-switch listing "
-                "(and thus the parent-DVS name enrichment) to this DVS. "
-                "Distributed portgroups are listed via the generic "
-                "network resource, which has no per-DVS filter, so the "
-                "returned portgroup set is not narrowed by this value."
+                "Accepted but inert (#2970 degradation): this only ever "
+                "scoped the distributed-switch listing that fed the "
+                "``dvs_name`` enrichment, and the pinned vcenter.yaml "
+                "serves no DVS list resource, so that step was dropped. "
+                "The generic network resource has no per-DVS filter "
+                "either, so the returned portgroup set was never "
+                "narrowed by this value."
             ),
         },
         "include_disconnected_vms": {
@@ -541,9 +542,10 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     "dvs_name": {
                         "type": ["string", "null"],
                         "description": (
-                            "Parent DVS display name resolved via the "
-                            "DVS listing; ``null`` when the parent DVS "
-                            "is unknown or unnamed."
+                            "Always ``null`` (#2970 degradation): the "
+                            "DVS listing that resolved display names is "
+                            "not served by the pinned spec. Key retained "
+                            "for response-envelope stability."
                         ),
                     },
                     "type": {
@@ -631,14 +633,30 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": "Network moid the NIC attaches to.",
                     },
+                    "backing_type": {
+                        "type": "string",
+                        "enum": [
+                            "STANDARD_PORTGROUP",
+                            "DISTRIBUTED_PORTGROUP",
+                            "OPAQUE_NETWORK",
+                        ],
+                        "default": "STANDARD_PORTGROUP",
+                        "description": (
+                            "``Ethernet.BackingSpec.type`` for the NIC's "
+                            "network backing. Defaults to a standard "
+                            "portgroup."
+                        ),
+                    },
                 },
                 "required": ["network"],
             },
             "default": [],
             "description": (
                 "Per-NIC spec. Each entry drives a "
-                "``PATCH:/vcenter/vm/{vm}/network`` after the VM is "
-                "created. Empty list creates the VM with no NICs."
+                "``POST:/vcenter/vm/{vm}/hardware/ethernet`` adapter "
+                "create (the network rides the ``backing`` spec) after "
+                "the VM is created. Empty list creates the VM with no "
+                "NICs."
             ),
         },
         "power_on_after_create": {
@@ -658,9 +676,10 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.vm.clone`` parameter schema.
 #:
-#: Orchestrates a content-library deploy. Long-running: blocks until
-#: the vSphere task completes or ``timeout_seconds`` elapses. The
-#: caller can opt into fire-and-forget via ``wait_for_completion=False``.
+#: Orchestrates a content-library deploy. The pinned spec's deploy
+#: operation is synchronous (its 200 body is the deployed VM id -- no
+#: ``vmw-task=true`` variant exists, #2970), so there is no task wait to
+#: configure.
 VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -681,28 +700,9 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Content-library template item id. Passed to "
-                "``POST:/vcenter/vm-template/library-items?action=deploy``."
-            ),
-        },
-        "wait_for_completion": {
-            "type": "boolean",
-            "default": True,
-            "description": (
-                "When true (default), block on the vSphere task until "
-                "``timeout_seconds`` elapses. When false, return "
-                "immediately with the task id for caller-side polling."
-            ),
-        },
-        "timeout_seconds": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 600,
-            "description": (
-                "Upper bound on the task wait when "
-                "``wait_for_completion=True``. On timeout the composite "
-                "returns ``status='timeout'`` with the task id; the "
-                "task itself may still complete in the background."
+                "Content-library template item id. Rides the deploy path as "
+                "``POST:/vcenter/vm-template/library-items/"
+                "{templateLibraryItem}?action=deploy``."
             ),
         },
     },
@@ -1029,17 +1029,6 @@ CLUSTER_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": "Cluster moid.",
         },
-        "patch_method": {
-            "type": "string",
-            "minLength": 1,
-            "default": "default",
-            "description": (
-                "Patch backend selector. The handler forwards the "
-                "string verbatim to the per-host patch sub-op so vendor "
-                "patch flows can dispatch into ``vlcm`` / ``vum`` / "
-                "``firmware`` without changing the composite's contract."
-            ),
-        },
     },
     "required": ["cluster"],
     "additionalProperties": False,
@@ -1239,32 +1228,28 @@ VM_CLONE_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["completed", "pending", "timeout"],
+            "enum": ["completed"],
             "description": (
-                "``'completed'`` when the deploy task finished and "
-                "wait_for_completion was true; ``'pending'`` when "
-                "wait_for_completion was false (caller-side polling); "
-                "``'timeout'`` when wait_for_completion expired."
+                "``'completed'`` -- the synchronous deploy returned the "
+                "new VM id. Deploy failures raise and surface as "
+                "``connector_error`` rather than a status."
             ),
         },
         "task_id": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
-                "vSphere task id from the deploy. Always present so callers can poll independently."
+                "Always ``null``: the pinned deploy operation is "
+                "synchronous (no cis task). Key retained for "
+                "response-envelope stability (#2970)."
             ),
         },
         "vm_id": {
             "type": ["string", "null"],
-            "description": (
-                "New VM moid surfaced when the task completed. ``null`` on pending/timeout."
-            ),
+            "description": "Deployed VM moid (the deploy operation's 200 body).",
         },
         "guidance": {
             "type": ["string", "null"],
-            "description": (
-                "Operator-facing next-step hint on non-completed "
-                "statuses; ``null`` when ``status='completed'``."
-            ),
+            "description": "``null`` on ``status='completed'``.",
         },
     },
     "required": ["status", "task_id"],
@@ -1365,11 +1350,14 @@ VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["reverted", "ambiguous", "not_found"],
+            "enum": ["reverted", "ambiguous", "not_found", "timeout"],
             "description": (
                 "``'reverted'`` on a successful revert; "
                 "``'ambiguous'`` when multiple snapshots share the "
-                "name; ``'not_found'`` when no snapshot matches."
+                "name; ``'not_found'`` when no snapshot matches; "
+                "``'timeout'`` when the RevertToSnapshot_Task poll "
+                "deadline elapsed (the revert may still complete in "
+                "the background)."
             ),
         },
         "snapshot_id": {
@@ -1571,16 +1559,23 @@ HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["detached", "incomplete"],
+            "enum": ["detached", "incomplete", "timeout"],
             "description": (
                 "``'detached'`` -- every NIC migrated and the host "
                 "removed from the DVS; ``'incomplete'`` -- one or more "
-                "NIC migrations failed, the DVS detach was skipped."
+                "NIC migrations failed, the DVS detach was skipped; "
+                "``'timeout'`` -- the ReconfigureDvs_Task poll deadline "
+                "elapsed (the detach may still complete in the "
+                "background)."
             ),
         },
         "host": {
             "type": "string",
             "description": "Host moid the operator targeted.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": ("Operator hint on ``timeout``; absent/``null`` otherwise."),
         },
         "vm_migration_failures": {
             "type": "array",

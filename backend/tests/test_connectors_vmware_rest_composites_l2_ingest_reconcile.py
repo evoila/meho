@@ -3,15 +3,18 @@
 
 """op_id reconciliation between the write composites and the ingest pipeline.
 
-G3.16-T1 (#1414). The 14 REST-sub-op vmware-rest write composites each
+G3.16-T1 (#1414). The 13 REST-sub-op vmware-rest write composites each
 declare the L2 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
-:mod:`~meho_backplane.connectors.vmware_rest.composites._write` (the nine
+:mod:`~meho_backplane.connectors.vmware_rest.composites._write` (the
 T6/#509 + vm.power writes, the #2891 hardware trio, and the two GOSC
 composites / #2892); the four vi-json write composites (``vm.disk.grow`` /
 #2893, ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
 writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch
 into vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
-(reconciled in the dedicated vi-json section at the end of this module). At
+(reconciled in the dedicated vi-json section at the end of this module),
+as do the composite steps #2970 switched to vim because the pinned
+vcenter.yaml serves no REST path for them (snapshot list/revert, host
+maintenance, DRS recommendations, DVS host removal). At
 dispatch time :func:`~...composites._preflight.preflight_l2_dependencies`
 looks each sub-op_id up in ``endpoint_descriptor`` and raises
 :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
@@ -29,8 +32,7 @@ the parser emits from ``vcenter.yaml``. The two surfaces that could drift:
   query suffix *in the path key itself* (it does not model the verb as a
   body/query parameter on a shared base path). The parser passes the path
   key through verbatim into the op_id, so the action suffix survives. The
-  composites' ``_power_vm_op_id`` / ``_host_maintenance_op_id`` helpers
-  build the same string.
+  composites' ``_power_vm_op_id`` helper builds the same string.
 
 This module proves the match automatically, without a live backplane:
 
@@ -105,13 +107,13 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 14 REST write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 13 REST write composites.
 
-    The four vi-json write composites' sub-ops live in ``_VIM_SUB_OPS_*``
-    tuples (a distinct namespace this ``_SUB_OPS_*`` sweep deliberately
-    skips), so a vcenter.yaml-shaped fixture never has to model a vi-json
-    path; the vi-json section at the end of this module reconciles them
-    separately.
+    The vi-json sub-ops live in ``_VIM_SUB_OPS_*`` tuples (a distinct
+    namespace this ``_SUB_OPS_*`` sweep deliberately skips), so a
+    vcenter.yaml-shaped fixture never has to model a vi-json path; the
+    vi-json sections at the end of this module reconcile them separately
+    (the four vi-json write composites plus the #2970 vim-switched steps).
 
     Excludes composite-to-composite references (``vmware.composite.*``):
     those are not ``endpoint_descriptor`` rows and the pre-flight walk
@@ -131,11 +133,15 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Fourteen ``_SUB_OPS_*`` module constants today, one per REST write
-    composite (the nine T6/#509 + vm.power writes, the #2891 hardware trio,
-    plus the two GOSC composites / #2892). Pinning the exact set means a
-    renamed or dropped constant can't silently shrink the reconciled set to
-    a vacuous pass.
+    Thirteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    writes, the #2891 hardware trio, plus the two GOSC composites / #2892).
+    ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
+    the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
+    REST resource), so its manifest lives in
+    ``_VIM_SUB_OPS_VM_SNAPSHOT_REVERT`` and is reconciled against
+    ``vi-json.yaml`` below. Pinning the exact set means a renamed or
+    dropped constant can't silently shrink the reconciled set to a
+    vacuous pass.
     """
     tuple_names = sorted(n for n in dir(_write) if n.startswith("_SUB_OPS_"))
     assert tuple_names == [
@@ -152,7 +158,6 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_POWER",
         "_SUB_OPS_VM_POWER_BULK",
         "_SUB_OPS_VM_RESIZE",
-        "_SUB_OPS_VM_SNAPSHOT_REVERT",
     ]
 
 
@@ -245,10 +250,13 @@ def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest() -> None
     """
     action_op_ids = {op_id for op_id in _required_raw_sub_op_ids() if "?action=" in op_id}
     # Sanity: the write composites really do depend on action-bearing ops.
+    # (Host maintenance left this set in #2970 -- it is vim-only in the
+    # pinned spec; the vLCM apply carries the compound
+    # ``?action=apply&vmw-task=true`` suffix instead.)
     assert {
         "POST:/vcenter/vm/{vm}/power?action=start",
         "POST:/vcenter/vm/{vm}/power?action=stop",
-        "PATCH:/vcenter/host/{host}/maintenance?action=enter",
+        "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
         "POST:/vcenter/vm/{vm}?action=relocate",
     } <= action_op_ids
 
@@ -581,4 +589,88 @@ def test_folder_create_vi_json_paths_exist_in_the_pinned_spec() -> None:
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "folder.create vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #2970 vim-switched composite steps — snapshot revert, DRS recommendations,
+# host maintenance, DVS host removal. The pinned vcenter.yaml serves no REST
+# path for any of these surfaces, so the affected steps ride vim and their
+# manifests reconcile against the pinned vi-json.yaml like the #2893-#2895
+# write composites above.
+# ---------------------------------------------------------------------------
+
+#: Expected #2970 vim manifests, pinned so a drift can't shrink a reconcile.
+_EXPECTED_2970_VIM_MANIFESTS: dict[str, set[str]] = {
+    "_VIM_SUB_OPS_VM_SNAPSHOT_REVERT": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task",
+    },
+    "_VIM_SUB_OPS_VM_MIGRATE": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    },
+    "_VIM_SUB_OPS_HOST_EVACUATE": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+    },
+    "_VIM_SUB_OPS_CLUSTER_PATCH": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+        "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task",
+    },
+    "_VIM_SUB_OPS_HOST_DETACH_FROM_VDS": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task",
+    },
+}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_sub_op_manifests_are_pinned(manifest_name: str) -> None:
+    """Pin each #2970 vim manifest so a drift can't shrink the reconcile."""
+    assert set(getattr(_write, manifest_name)) == _EXPECTED_2970_VIM_MANIFESTS[manifest_name]
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_sub_ops_round_trip_through_ingest(manifest_name: str) -> None:
+    """The #2970 vim op_ids are byte-for-byte what ``parse_openapi`` emits.
+
+    Same proof shape as the #2893-#2895 round-trips above: the ``{moId}``
+    path template survives the parser, so governance op_ids / grants
+    resolve against the ingested rows once ``vi-json.yaml`` is ingested.
+    """
+    required = set(getattr(_write, manifest_name))
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
+    """Each #2970 vim sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #2970 grounding: the vim-switched steps must target
+    paths the pinned spec actually serves. Skips when the spec-shelf is
+    not configured (the canary's convention), so CI is the
+    operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in getattr(_write, manifest_name):
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            f"{manifest_name} vim sub-op targets a path the spec does not serve"
         )

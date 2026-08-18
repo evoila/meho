@@ -87,6 +87,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.event_source import router as api_v1_event_source_router
+from meho_backplane.api.v1.events_ingest import router as api_v1_events_ingest_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
@@ -813,6 +814,13 @@ app.include_router(api_v1_targets_router)
 # JWT-less sender against; secrets are custodied in Vault, the row keeps
 # only the derived secret_ref path.
 app.include_router(api_v1_event_source_router)
+# T4 (#2881) -- inbound event ingest at POST /api/v1/events/ingest/{slug}.
+# JWT-less: the sender is authenticated per-source against the source's
+# Vault-custodied secret (constant-time), body-capped / rate-limited /
+# replay-gated / deduped, then published to event_outbox in the same
+# transaction as a synchronous __ingest__ audit row (postulate 7). No
+# operator dependency, so the chassis AuditMiddleware writes no row for it.
+app.include_router(api_v1_events_ingest_router)
 # G9.1-T5 (#453) — topology REST surface at /api/v1/topology*. Three
 # query routes (dependents / dependencies / path) wrapping the T4
 # recursive-CTE verbs + POST /refresh/{target_name} wrapping the T3

@@ -133,6 +133,24 @@ connector-level TLS handling.
 - Write bodies are sent form-encoded (`application/x-www-form-urlencoded`) —
   the canonical Proxmox write shape; flat scalar params.
 
+## Spec-reconcile guard
+
+The connector's four hand-coded `METHOD:/path` literals — the `GET /version` +
+`GET /nodes` fingerprint reads, the `POST /access/ticket` ticket mint, and the
+`GET /nodes/{node}/tasks/{upid}/status` task poll — are asserted against the
+pinned Proxmox VE 8.4 API schema on every CI run by
+`backend/tests/test_connectors_proxmox_spec_reconcile.py` (#2992, initiative
+#2979). Proxmox publishes no OpenAPI, so the lane parses the vendor's apidoc
+tree (`apidata.js`) with its own tree-walking extractor and reconciles the
+captured wire paths against it — catching a typo or renamed endpoint at PR time
+instead of against a live cluster. The declared set is captured from live
+handler execution (a `_get_json`-recording subclass), so an inline path edit
+flows into the reconcile automatically; the generic `proxmox.api.get` /
+`proxmox.api.write` passthroughs carry no hand-coded path and are excluded. The
+schema is pinned on the operator's spec-shelf (`docs/proxmox-8.4/`, AGPL-3.0);
+the lane skips cleanly where the shelf is not provisioned. Standard:
+[`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
 ## References
 
 - Task #2238; Initiative #2228; write-surface mold

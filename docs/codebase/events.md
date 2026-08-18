@@ -40,7 +40,12 @@ backend/src/meho_backplane/events/
 ├── __init__.py        # re-exports publish, start_event_drain, stop_event_drain
 ├── outbox.py          # producer-side publish() + post-commit NOTIFY hint
 ├── drain.py           # background drain loop + advisory-lock + claim + dispatch
-└── matcher.py         # subscription matcher: payload @> event_filter -> fire triggers
+├── matcher.py         # subscription matcher: payload @> event_filter -> fire triggers
+├── ingest/            # inbound webhook path (#2881): auth, config, rate-limit, service
+└── normalizers/       # per-kind payload normalisers + prompt synthesis (#2882)
+    ├── __init__.py    #   registry + normalize_event() + synthesize_event_prompt()
+    ├── base.py        #   NormalizedEvent + shared defensive accessors
+    ├── alertmanager.py, grafana.py, vcf_operations.py, harbor.py, generic_json.py
 ```
 
 Plus the persistence shape in
@@ -426,6 +431,142 @@ because a slug is a high-entropy routing token (not enumerable), while
 the uniform 404 still hides the operationally sensitive paused-vs-missing
 distinction.
 
+## First-wave payload normalisers (#2882)
+
+#2881 lands one `event_outbox` row per delivery, but its normalisation was
+**lite** — the whole body under a single `data` key. #2882 replaces that with
+a **per-kind normaliser** selected by the resolved source's
+`EventSourceKind`, plus per-vendor **prompt synthesis** for the fired agent.
+The code is `events/normalizers/`; the two seams it plugs into are
+`events/ingest/service.py::_normalise` (ingest time) and
+`events/matcher.py::_synthesize_event_prompt` (fire time).
+
+### The normalised envelope
+
+Every normaliser reduces the raw body to a `NormalizedEvent(event_type,
+match_fields, raw)`, and the ingest service builds the outbox `payload` from
+it:
+
+```json
+{
+  "<canonical match fields, lifted to the top level>": "...",
+  "source":     {"slug": "...", "kind": "alertmanager", "id": "<uuid>"},
+  "event_type": "firing",
+  "received_at": "2026-08-18T10:00:00+00:00",
+  "raw":        { "...": "full sender body, verbatim" }
+}
+```
+
+- **`event_kind`** (the outbox column, not a payload key) is
+  `external.{kind}.{event_type}`, e.g. `external.alertmanager.firing`.
+- **Match fields are lifted to the top level** so `event_filter` authoring is
+  simple: a filter names the field directly (`{"status": "firing"}`), no
+  `raw.` prefix, and the matcher's `payload @> event_filter` containment does
+  the rest.
+- **The four reserved keys** (`source` / `event_type` / `received_at` / `raw`)
+  are written **last**, so a vendor match field can never shadow them. A body
+  whose own top-level key collides with a reserved name (possible only for
+  `generic-json`) is shadowed at the top level but stays filterable under
+  `raw` (`{"raw": {"source": "..."}}`).
+- **Untrusted input is defensive throughout.** A wrong-typed / missing field
+  degrades to absent (pruned), and a top-level **array or scalar** body (legal
+  JSON that is not an object) normalises to an empty match set with the body
+  under `raw` — never a crash. Combined with the #2881 parse boundary (a
+  non-JSON body → `400`), a malformed or partial vendor payload always
+  **fails closed**, never `500`.
+
+### Source-kind matrix
+
+| Kind | Covers | Typical sender auth | `event_type` from | Lifted match fields |
+|---|---|---|---|---|
+| `alertmanager` | Prometheus, Loki ruler, anything AM-compatible | bearer / basic (`static-header` / `basic`; no native HMAC) | group `status` (`firing`/`resolved`) | `status`, `labels` (commonLabels), `annotations` (commonAnnotations), `alertname`, `receiver`, `num_alerts` |
+| `grafana` | Grafana Alerting ≥ 12.0 | `hmac-sha256` (`X-Grafana-Alerting-Signature` + timestamp) | group `status` | AM core + `state` (`alerting`/`ok`), `title` |
+| `vcf-operations` | vCenter / NSX / vSAN alerts via the VCF Operations outbound webhook plugin — the only viable vSphere push path in 2026 | `static-header` (Auth header) | `status` | `alert_name`, `status`, `criticality`, `alert_type`, `sub_type`, `resource_name`, `resource_kind`, `adapter_kind`, `alert_id` |
+| `harbor` | Registry automation: push/pull/delete artifact, scan complete/failed, quota, replication, tag-retention | `static-header` (Auth Header) | `type` (`PUSH_ARTIFACT`, `SCANNING_COMPLETED`, …) | `type`, `operator`, `repository`, `namespace` |
+| `generic-json` | Templated senders: ArgoCD, Proxmox VE ≥ 8.3, Keycloak events SPI, custom scripts | `hmac-sha256` (`X-Meho-Signature` + timestamp) | top-level `type` | **every** top-level key |
+
+Auth is per-source config (`event_source.extras`, #2881), not welded to the
+kind — the column above is the vendor's usual story. Header names
+(`X-Grafana-Alerting-Signature`, `X-Meho-Signature`) are `extras` overrides,
+so vendor-specific signing stays config, never a normaliser branch.
+
+### Filter recipes
+
+Author `event_filter` against the lifted top-level fields:
+
+| Kind | Example `event_filter` | Matches |
+|---|---|---|
+| `alertmanager` | `{"status": "firing", "labels": {"severity": "critical"}}` | critical firing alerts |
+| `grafana` | `{"state": "alerting", "labels": {"severity": "warning"}}` | warning alerts still alerting |
+| `vcf-operations` | `{"status": "active", "criticality": "critical"}` | active critical VMware alerts |
+| `vcf-operations` | `{"resource_kind": "VirtualMachine"}` | any alert on a VM |
+| `harbor` | `{"type": "SCANNING_COMPLETED", "repository": {"namespace": "prod"}}` | scans finishing in the `prod` project |
+| `generic-json` | `{"severity": "high"}` | any body with a top-level `severity: high` |
+
+`{}` (empty filter) matches every event of the tenant — scope with the source
+`kind` in mind, since a tenant's sources share the outbox.
+
+### VCF Operations: the recommended payload template
+
+The VCF Operations Webhook notification plugin's body is **operator-templated**
+(Configure → Alerts → Payload Templates), so there is no vendor-fixed schema.
+Paste a template that emits the top-level keys the normaliser lifts, mapping
+each from the plugin's parameter browser (the confirmed parameters
+`${ALERT_DEFINITION}` and `${RESOURCE_NAME}` are shown; select the rest from
+the same browser):
+
+```json
+{
+  "alert_name":    "${ALERT_DEFINITION}",
+  "status":        "<alert status parameter>",
+  "criticality":   "<alert criticality parameter>",
+  "alert_type":    "<alert type parameter>",
+  "sub_type":      "<alert sub-type parameter>",
+  "resource_name": "${RESOURCE_NAME}",
+  "resource_kind": "<object type parameter>",
+  "adapter_kind":  "<adapter kind parameter>",
+  "alert_id":      "<alert id parameter>"
+}
+```
+
+An operator who keeps a different template still ingests fine — their fields
+are absent from the match set but preserved verbatim under `raw`, filterable
+as `{"raw": {...}}`.
+
+### Prompt synthesis (fire time)
+
+When a matched `kind=event` trigger carries no operator `inputs`, the matcher
+synthesises the fired agent's prompt from the event via
+`normalizers.synthesize_event_prompt(event_kind, payload)`. It builds a
+**per-vendor triage body** for an `external.{kind}.*` event (e.g. an
+Alertmanager alert → "alert group '<name>' is firing … Triage this alert …")
+and the generic structured render for an internal producer event
+(`agent_run.completed`). Either way the composed body is **always** wrapped
+with `wrap_untrusted_text` (`untrusted_text.py`): the inbound payload is
+untrusted external input, so the fired agent sees it as data to act on, not a
+directive channel — and a body that forges the envelope terminator cannot
+escape the block (the wrapper emits the terminator positionally). The trusted
+lead-in sentence sits *outside* the envelope; every interpolated sender value
+sits *inside* it.
+
+### Events (push) vs. Sensors (pull) — operator guidance
+
+The events plane is **push**: a vendor delivers a webhook the instant
+something happens, and a subscribed agent fires with sub-second latency. The
+Sensors / Checks plane ([sensor.md](sensor.md)) is **pull**: it polls an
+operation on a cadence and asserts `degraded` / `critical` thresholds, rolling
+state up into dashboards. They are complementary, not alternatives:
+
+- **Reach for events** when the vendor *can* push and you want low-latency
+  agent triage off a discrete alert (an Alertmanager critical → an agent run).
+- **Reach for sensors** when you need MEHO to actively *watch* a metric the
+  vendor will not push, or you want threshold roll-ups, dashboards, and the
+  diagnose-only investigator.
+
+**Pull stays the metrics-paging plane; push is the low-latency escalation
+plane.** A vendor with no webhook (bare vCenter) is a sensor target; a vendor
+that aggregates and pushes (VCF Operations) is an event source.
+
 ## Deferred work
 
 ### Reconnect-with-backoff for the `LISTEN` connection
@@ -504,6 +645,15 @@ Both gated via env vars (defaults shown in parens):
     broadcast fail-open, 429/400 mapping
   - [backend/tests/test_events_ingest_e2e.py](backend/tests/test_events_ingest_e2e.py)
     — POSTed event → drain tick → matched `kind=event` trigger → agent run
+- First-wave normalisers (#2882):
+  - [backend/tests/test_event_normalizers.py](backend/tests/test_event_normalizers.py)
+    — golden per-vendor payloads (Alertmanager v4, Grafana ≥ 12,
+    VCF Operations template, Harbor default + CloudEvents, generic-json):
+    `event_type` + match-field extraction, the top-level lift + filter-recipe
+    containment (`payload @> event_filter`), reserved-key precedence,
+    non-object-body fail-closed, the registry-covers-every-kind drift guard,
+    and per-vendor untrusted-enveloped prompt synthesis (incl. the
+    forged-terminator no-escape assertion)
 
 ## References
 
@@ -518,7 +668,9 @@ Both gated via env vars (defaults shown in parens):
 - Task #2879 — `event_outbox.dedupe_key` / `origin` columns the ingest
   path populates; Task #2880 — the `event_source` registry + Vault
   secret custody the ingest path resolves against; Task #2881 — this
-  inbound ingest endpoint (`api/v1/events_ingest.py`, `events/ingest/`)
+  inbound ingest endpoint (`api/v1/events_ingest.py`, `events/ingest/`);
+  Task #2882 — the first-wave per-vendor payload normalisers + prompt
+  synthesis (`events/normalizers/`)
 - Companion: [scheduler.md](scheduler.md) — the cron + one-off
   substrate this layer joins on
 - PG `LISTEN`/`NOTIFY` durability:

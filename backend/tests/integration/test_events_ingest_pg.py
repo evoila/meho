@@ -100,8 +100,10 @@ async def test_accepted_event_commits_outbox_and_audit_on_pg(pg_engine: None) ->
         assert len(outbox) == 1
         assert outbox[0].origin is not None
         assert outbox[0].dedupe_key is not None
-        # JSONB envelope round-trips through the real dialect.
-        assert outbox[0].payload["data"] == {"type": "alert", "severity": "critical"}
+        # JSONB envelope round-trips through the real dialect. The synthetic
+        # body has no Alertmanager ``status``, so it lands under ``raw`` with
+        # an empty match set (#2882 normaliser).
+        assert outbox[0].payload["raw"] == {"type": "alert", "severity": "critical"}
 
         audits = (
             (await session.execute(select(AuditLog).where(AuditLog.method == "INGEST")))

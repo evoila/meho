@@ -488,10 +488,12 @@ failure-coping apparatus is gone (Task #2259): the dispatch-time
 exceptions, and the `composite_l2_missing` / `composite_l2_disabled`
 structured errors are deleted, not guarded. The `_SUB_OPS_*` tuples in
 `_read.py` / `_write.py` are retained purely as the canonical
-sub-op-path manifest the ingest-reconcile acceptance guard
-(`tests/acceptance/test_portgroup_audit_op_id_reconcile.py` and
-`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`)
-checks against the vCenter spec.
+sub-op-path manifest the spec-reconcile lanes
+(`tests/test_connectors_vmware_rest_composites_read_reconcile.py` — the
+exhaustive read lane, #2986 —
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`,
+and `tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) check
+against the pinned vCenter specs.
 
 The sole remaining safety net is the platform-wide registration-time
 invariant (`operations.composite_invariant`, `#2252`): if any future
@@ -1147,6 +1149,27 @@ they never park.
   DVS host removal (`DistributedVirtualSwitch.ReconfigureDvs_Task` with
   the `config.configVersion` read). The audit's DVS listing was dropped
   (degradation note above).
+- **#2986 read-composite residual + exhaustive read lane** — #2970's
+  sweep covered the write composites; the read side's
+  `_OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"` was
+  recorded as an adjacent finding (unserved by the pinned
+  `vcenter.yaml`, which has **no** cluster DRS REST resource — the
+  `/vcenter/cluster` family is list/get/evc-mode only). #2986 switched
+  the `cluster.drs_recommendations` DRS leg to vim: one
+  `RetrievePropertiesEx` on the `propertyCollector` singleton reading
+  `ClusterComputeResource.configurationEx.drsConfig`
+  (`ClusterDrsConfigInfo`) and — when
+  `include_recommendations_history=True` — `drsRecommendation` in the
+  same call (the surface `vm.migrate`'s DRS lookup already uses; the
+  response envelope keys are unchanged, `drs` now carries the vim
+  config object). The same task added the exhaustive read lane
+  (`tests/test_connectors_vmware_rest_composites_read_reconcile.py`,
+  #2980 harness): every `_OP_*` constant in `_read.py` is introspected
+  live, cross-checked against the `_SUB_OPS_*` manifests, and asserted
+  against the spec serving its dispatch leg — GET legs vs
+  `vcenter-9.0/vcenter.yaml`, vmomi POST legs vs
+  `vcenter-9.0/vi-json.yaml` — skipping uniformly without the shelf,
+  running for real in CI.
 
 ## References
 

@@ -294,10 +294,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Orchestrates a cluster summary read plus a DRS-config read, "
             "returning a single aggregated payload. Equivalent of "
             "'govc cluster.recommendations' for the operator-facing "
-            "workflow: one composite call replaces two raw vCenter REST "
-            "GETs while preserving the audit-tree linkage between the "
-            "parent composite row and each sub-op row. Read-only -- "
-            "never mutates cluster state."
+            "workflow: one composite call replaces a raw vCenter REST "
+            "GET plus a vim property read (DRS state is vim-only in "
+            "vSphere 9.0). Read-only -- never mutates cluster state."
         ),
         parameter_schema=CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,

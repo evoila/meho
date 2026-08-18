@@ -194,15 +194,36 @@ def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
 # ---------------------------------------------------------------------------
 
 
+_RETRIEVE_PROPERTIES_PATH = "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+
+def _retrieve_result(prop_sets: dict[str, Any]) -> dict[str, Any]:
+    """Build a single-object ``RetrievePropertiesEx`` result payload."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": "domain-c123"},
+                "propSet": [{"name": name, "val": val} for name, val in prop_sets.items()],
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
-async def test_cluster_drs_recommendations_reads_summary_and_drs_in_order() -> None:
-    """Two GETs fire: cluster summary then DRS config, both mounted, cluster in path."""
+async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -> None:
+    """Cluster summary GET then a vmomi RetrievePropertiesEx read of drsConfig.
+
+    The pinned vcenter.yaml serves no cluster DRS REST resource (#2986),
+    so the second leg is a vi-json property read on the PropertyCollector
+    singleton -- routed through ``_post_vmomi_json``, never the Automation
+    mount.
+    """
     cluster_payload = {"name": "Cluster-A", "drs_enabled": True}
-    drs_payload = {"enabled": True, "automation_level": "FULLY_AUTOMATED"}
+    drs_config = {"enabled": True, "defaultVmBehavior": "fullyAutomated", "vmotionRate": 3}
     conn = _RecordingConnector(
         {
             "/api/vcenter/cluster/domain-c123": cluster_payload,
-            "/api/vcenter/cluster/domain-c123/drs": drs_payload,
+            _RETRIEVE_PROPERTIES_PATH: _retrieve_result({"configurationEx.drsConfig": drs_config}),
         }
     )
 
@@ -215,55 +236,103 @@ async def test_cluster_drs_recommendations_reads_summary_and_drs_in_order() -> N
 
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("GET", "/api/vcenter/cluster/domain-c123"),
-        ("GET", "/api/vcenter/cluster/domain-c123/drs"),
+        ("POST", _RETRIEVE_PROPERTIES_PATH),
     ]
-    # Both paths were mounted (spec-relative -> live prefix).
-    assert conn.mount_calls == [
-        "/vcenter/cluster/domain-c123",
-        "/vcenter/cluster/domain-c123/drs",
-    ]
-    assert out == {"cluster": cluster_payload, "drs": drs_payload}
+    # Only the Automation GET resolves through mount_op_path; the vmomi
+    # leg rides the VI-JSON seam (#2466).
+    assert conn.mount_calls == ["/vcenter/cluster/domain-c123"]
+    assert conn.calls[1]["vmomi"] is True
+    # The filter spec scopes one PropertyFilterSpec to the cluster MoRef
+    # and reads only the DRS config (no history requested).
+    body = conn.calls[1]["body"]
+    assert body == {
+        "specSet": [
+            {
+                "propSet": [
+                    {
+                        "type": "ClusterComputeResource",
+                        "pathSet": ["configurationEx.drsConfig"],
+                    }
+                ],
+                "objectSet": [{"obj": {"type": "ClusterComputeResource", "value": "domain-c123"}}],
+            }
+        ],
+        "options": {},
+    }
+    assert out == {"cluster": cluster_payload, "drs": drs_config}
 
 
 @pytest.mark.asyncio
-async def test_cluster_drs_recommendations_history_flag_surfaces_history_slice() -> None:
-    """``include_recommendations_history=True`` surfaces ``history`` from the DRS payload."""
+async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces_recs() -> None:
+    """``include_recommendations_history=True`` reads ``drsRecommendation`` too."""
+    recs = [{"key": "1", "rating": 5, "migrationList": []}]
     conn = _RecordingConnector(
         {
-            "/api/vcenter/cluster/domain-c1": {"name": "Cluster-A"},
-            "/api/vcenter/cluster/domain-c1/drs": {
-                "enabled": True,
-                "history": [{"recommendation_id": "rec-1", "reason": "load balance"}],
-            },
+            "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
+            _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
+                {"configurationEx.drsConfig": {"enabled": True}, "drsRecommendation": recs}
+            ),
         }
     )
     out = await cluster_drs_recommendations_composite(
         operator=_make_operator(),
         target=object(),
-        params={"cluster": "domain-c1", "include_recommendations_history": True},
+        params={"cluster": "domain-c123", "include_recommendations_history": True},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert out["recommendations_history"] == [
-        {"recommendation_id": "rec-1", "reason": "load balance"}
-    ]
+    # The flag widens the same RetrievePropertiesEx read -- no extra call.
+    assert len(conn.calls) == 2
+    path_set = conn.calls[1]["body"]["specSet"][0]["propSet"][0]["pathSet"]
+    assert path_set == ["configurationEx.drsConfig", "drsRecommendation"]
+    assert out["drs"] == {"enabled": True}
+    assert out["recommendations_history"] == recs
 
 
 @pytest.mark.asyncio
 async def test_cluster_drs_recommendations_history_flag_default_omits_key() -> None:
-    """Default ``include_recommendations_history=False`` omits the key."""
+    """Default ``include_recommendations_history=False`` omits the key and the prop."""
     conn = _RecordingConnector(
         {
-            "/api/vcenter/cluster/domain-c1": {"name": "Cluster-A"},
-            "/api/vcenter/cluster/domain-c1/drs": {"enabled": False, "history": [1, 2]},
+            "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
+            _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
+                {"configurationEx.drsConfig": {"enabled": False}}
+            ),
         }
     )
     out = await cluster_drs_recommendations_composite(
         operator=_make_operator(),
         target=object(),
-        params={"cluster": "domain-c1"},
+        params={"cluster": "domain-c123"},
         connector=conn,  # type: ignore[arg-type]
     )
     assert "recommendations_history" not in out
+    path_set = conn.calls[1]["body"]["specSet"][0]["propSet"][0]["pathSet"]
+    assert "drsRecommendation" not in path_set
+
+
+@pytest.mark.asyncio
+async def test_cluster_drs_recommendations_tolerates_missing_props_and_envelope() -> None:
+    """Unset vim properties degrade to the documented defaults.
+
+    vim omits unset properties from ``propSet`` (they land in
+    ``missingSet``), and a legacy target may wrap the RetrieveResult in
+    the pre-7 ``{"value": ...}`` envelope: ``drs`` degrades to ``{}``
+    and ``recommendations_history`` to ``[]``.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
+            _RETRIEVE_PROPERTIES_PATH: {"value": _retrieve_result({})},
+        }
+    )
+    out = await cluster_drs_recommendations_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "domain-c123", "include_recommendations_history": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["drs"] == {}
+    assert out["recommendations_history"] == []
 
 
 @pytest.mark.asyncio

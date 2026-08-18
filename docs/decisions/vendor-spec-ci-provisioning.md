@@ -346,6 +346,27 @@ no explicit open license, so this extension records a reference to the
 which names hetzner-robot-2026-04 explicitly) instead of a fresh
 attestation.
 
+### Extension: keycloak / keycloak-26.3 (#2988)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/keycloak-26.3/` directory (`keycloak-admin-openapi.json`, OpenAPI
+3.0.3, ~0.5 MB, 247 paths — the Keycloak Admin REST API at the lab's
+deployed 26.3.3) for the keycloak reconcile lane
+(`backend/tests/test_connectors_keycloak_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is a build artifact of the **public, Apache-2.0**
+[`keycloak/keycloak`](https://github.com/keycloak/keycloak) project,
+distributed on Maven Central as
+`org.keycloak:keycloak-api-docs-dist:26.3.3` (zip sha256 verified
+against Maven Central's published checksum, retrieved 2026-08-18) — the
+provenance note of record is the shelf's `keycloak-26.3/MANIFEST.md`,
+per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

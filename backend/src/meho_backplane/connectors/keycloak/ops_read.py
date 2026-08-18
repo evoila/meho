@@ -78,6 +78,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from meho_backplane.connectors.keycloak._paths import (
+    _ADMIN_REALM_PATH,
+    _CLIENT_PATH,
+    _CLIENT_SCOPES_PATH,
+    _CLIENTS_PATH,
+    _ROLE_USERS_PATH,
+    _ROLES_PATH,
+    _USER_ROLE_MAPPINGS_PATH,
+    _USERS_PATH,
+    fill_path,
+)
 from meho_backplane.connectors.keycloak.redaction import redact_secret_fields
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
@@ -152,7 +163,7 @@ async def keycloak_realm_get(
     del params  # declared empty; intentionally ignored
     realms = resolve_realm_config(target)
     realm = await self._get_admin_json(
-        target, f"/admin/realms/{realms.managed_realm}", operator=operator
+        target, fill_path(_ADMIN_REALM_PATH, {"realm": realms.managed_realm}), operator=operator
     )
     return {"realm": redact_secret_fields(realm)}
 
@@ -180,7 +191,7 @@ async def keycloak_client_list(
         query["max"] = max_results
     rows = await self._get_admin_list(
         target,
-        f"/admin/realms/{realms.managed_realm}/clients",
+        fill_path(_CLIENTS_PATH, {"realm": realms.managed_realm}),
         operator=operator,
         params=query or None,
     )
@@ -208,7 +219,7 @@ async def keycloak_client_get(
     client_uuid = quote_segment(params["id"])
     client = await self._get_admin_json(
         target,
-        f"/admin/realms/{realms.managed_realm}/clients/{client_uuid}",
+        fill_path(_CLIENT_PATH, {"realm": realms.managed_realm, "client-uuid": client_uuid}),
         operator=operator,
     )
     return {"client": redact_secret_fields(client)}
@@ -230,7 +241,7 @@ async def keycloak_client_scope_list(
     realms = resolve_realm_config(target)
     rows = await self._get_admin_list(
         target,
-        f"/admin/realms/{realms.managed_realm}/client-scopes",
+        fill_path(_CLIENT_SCOPES_PATH, {"realm": realms.managed_realm}),
         operator=operator,
     )
     scrubbed = [redact_secret_fields(row) for row in rows]
@@ -261,7 +272,7 @@ async def keycloak_user_list(
         query["max"] = max_results
     rows = await self._get_admin_list(
         target,
-        f"/admin/realms/{realms.managed_realm}/users",
+        fill_path(_USERS_PATH, {"realm": realms.managed_realm}),
         operator=operator,
         params=query or None,
     )
@@ -287,7 +298,10 @@ async def keycloak_role_mapping_get(
     user_uuid = quote_segment(params["id"])
     mappings = await self._get_admin_json(
         target,
-        f"/admin/realms/{realms.managed_realm}/users/{user_uuid}/role-mappings",
+        fill_path(
+            _USER_ROLE_MAPPINGS_PATH,
+            {"realm": realms.managed_realm, "user-id": user_uuid},
+        ),
         operator=operator,
     )
     return {"role_mappings": redact_secret_fields(mappings)}
@@ -315,7 +329,7 @@ async def keycloak_role_list(
     realms = resolve_realm_config(target)
     rows = await self._get_admin_list(
         target,
-        f"/admin/realms/{realms.managed_realm}/roles",
+        fill_path(_ROLES_PATH, {"realm": realms.managed_realm}),
         operator=operator,
     )
     scrubbed = [redact_secret_fields(row) for row in rows]
@@ -344,7 +358,7 @@ async def keycloak_role_users(
     role_name = quote_segment(params["name"])
     rows = await self._get_admin_list(
         target,
-        f"/admin/realms/{realms.managed_realm}/roles/{role_name}/users",
+        fill_path(_ROLE_USERS_PATH, {"realm": realms.managed_realm, "role-name": role_name}),
         operator=operator,
     )
     scrubbed = [redact_secret_fields(row) for row in rows]

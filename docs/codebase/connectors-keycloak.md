@@ -274,6 +274,28 @@ default. The builders are pure (no connector I/O) and so fail-soft by
 construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
 hook" for the registry contract.
 
+**Spec-reconcile lane (#2988).** Every request path the connector dispatches
+lives as a `_*_PATH` template constant in
+`backend/src/meho_backplane/connectors/keycloak/_paths.py` (hoisted out of
+inline f-strings by #2988); handlers fill a template via `fill_path`, whose
+placeholder names are byte-for-byte the pinned spec's own parameter names
+(`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`). The lane
+[`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
+(the #2980 harness; parse-only, runs in the required unit sweep, uniform
+skip when the shelf is unconfigured) introspects those live constants and
+asserts all 18 reconciled `METHOD:/path` op_ids are served by the pinned
+`keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
+Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
+`org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
+paths are pinned as evidenced exclusions rather than reconciled — the OIDC
+token mint (`POST /realms/{realm}/protocol/openid-connect/token`; specified
+by OAuth 2.0 / OIDC discovery, not the Admin REST OpenAPI) and
+`GET /admin/serverinfo` (unmodeled by the published spec; already
+best-effort in `fingerprint`) — and an armed test asserts they stay
+unserved, so a future spec pin that begins serving one forces its promotion
+into the reconciled set. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
 ## Target configuration
 
 Base URL is `https://{host}[:{port}]` from `HttpConnector._base_url`. The

@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — keycloak real-spec reconcile lane (#2988)
+
+- Every hand-coded `METHOD:/path` the keycloak connector dispatches —
+  18 reconciled op_ids across the 8 read ops, 9 write ops, the
+  fingerprint probe, and the name→UUID resolver reads — is now
+  asserted against the pinned `keycloak-26.3` shelf spec
+  (`keycloak-admin-openapi.json`, the vendor's Admin REST API OpenAPI
+  at the lab's deployed Keycloak 26.3.3; Apache-2.0, from Maven
+  Central `org.keycloak:keycloak-api-docs-dist:26.3.3`) on every PR
+  via the #2980 harness
+  (`backend/tests/test_connectors_keycloak_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). To make the enumeration introspectable, every request
+  path moved out of inline f-strings into the `_*_PATH` template
+  constants of `connectors/keycloak/_paths.py` (placeholders carry the
+  spec's own parameter names; handlers fill them via the fail-loud
+  `fill_path`) — wire requests are byte-identical. Two dispatched
+  paths are pinned as evidenced exclusions (the OIDC token mint and
+  `GET /admin/serverinfo` — both outside the Admin REST OpenAPI's
+  scope by construction), with an armed tripwire that forces their
+  promotion the day a newer pinned spec serves them. First armed run:
+  all 18 served, no repoints needed. CI's secret-gated spec-shelf
+  checkout is widened to `docs/keycloak-26.3` in both Python jobs.
+
 ### Breaking changes — hetzner-robot `about` op + CLI verb removed (#2985 / #3014)
 
 - `hetzner-robot.about` (`GET:/query`) and the `meho hetzner-robot

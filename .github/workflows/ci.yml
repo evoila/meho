@@ -193,15 +193,7 @@ jobs:
     # (#585/#603), and the #799 re-embed fix landed; the 50-min cap was
     # generous headroom from that era. Job name is intentionally unchanged so
     # the existing branch-protection required check stays satisfied.
-    #
-    # STOPGAP (added in #3001; revert tracked by #3005): raised 25 -> 50.
-    # The G0.7 vSphere canary now actually runs (post-#2949 spec-shelf
-    # wiring), and its function-scoped `ingested_canary` fixture re-ingests
-    # ~3,470 ops (vcenter 1275 + vi-json 2195) for each of its 16 tests,
-    # serialized onto a single `--dist loadscope` worker -> that worker
-    # blows the 25-min cap (observed 25m19s, cancelled mid-run). #3005 makes
-    # the ingest module-scoped (once per module) and reverts this back to 25.
-    timeout-minutes: 50
+    timeout-minutes: 25
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT

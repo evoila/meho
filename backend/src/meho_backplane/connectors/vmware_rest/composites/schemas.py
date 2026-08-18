@@ -96,10 +96,13 @@ __all__ = [
 
 #: ``vmware.composite.cluster.drs_recommendations`` parameter schema.
 #:
-#: Reads cluster summary + DRS state (optionally surfacing
-#: ``recommendations_history`` from the DRS payload when present). The
-#: composite dispatches one ``GET:/vcenter/cluster/{cluster}`` and one
-#: ``GET:/vcenter/cluster/{cluster}/drs`` to a single target.
+#: Reads cluster summary + DRS state (optionally surfacing the cluster's
+#: current DRS recommendation list). The composite dispatches one
+#: ``GET:/vcenter/cluster/{cluster}`` plus one vi-json
+#: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (reading
+#: ``ClusterComputeResource.configurationEx.drsConfig`` and, on request,
+#: ``drsRecommendation``) to a single target -- the pinned vcenter.yaml
+#: serves no cluster DRS REST resource (#2986).
 CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -116,10 +119,12 @@ CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, the handler will also surface the historical "
-                "recommendation summary from the DRS sub-op response. "
-                "Read-only on either setting; the flag toggles aggregation "
-                "shape, not the underlying calls."
+                "When true, the handler also reads the cluster's current "
+                "DRS recommendation list (the vim ``drsRecommendation`` "
+                "property) in the same RetrievePropertiesEx call and "
+                "surfaces it as ``recommendations_history``. Read-only "
+                "on either setting; the flag widens the property read, "
+                "never adds a mutating call."
             ),
         },
     },
@@ -339,18 +344,21 @@ CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
         "drs": {
             "type": "object",
             "description": (
-                "DRS configuration payload from "
-                "``GET:/vcenter/cluster/{cluster}/drs`` (vSphere REST "
-                "owns the inner shape)."
+                "DRS configuration payload: the cluster's vim "
+                "``configurationEx.drsConfig`` (``ClusterDrsConfigInfo`` "
+                "-- the vim API owns the inner shape) read via "
+                "``RetrievePropertiesEx``; ``{}`` when the property is "
+                "unset on the target."
             ),
         },
         "recommendations_history": {
             "type": "array",
             "items": {"type": "object"},
             "description": (
-                "Optional history slice surfaced from the DRS payload "
-                "when ``include_recommendations_history=True``. Always "
-                "a list when present; absent otherwise."
+                "Optional list of the cluster's current DRS "
+                "recommendations (vim ``drsRecommendation`` rows) when "
+                "``include_recommendations_history=True``. Always a "
+                "list when present; absent otherwise."
             ),
         },
     },

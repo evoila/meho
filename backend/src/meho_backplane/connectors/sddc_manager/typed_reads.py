@@ -31,8 +31,10 @@ https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/:
 
 * ``sddc.domain.list`` -- ``GET /v1/domains`` (management + workload
   domain inventory).
-* ``sddc.domain.status`` -- ``GET /v1/domains/{id}/status`` (per-domain
-  status: the READY / ACTIVATING / ERROR lifecycle state).
+* ``sddc.domain.status`` -- ``GET /v1/domains/{id}`` (the domain object,
+  whose top-level ``status`` field carries the ACTIVE / ACTIVATING /
+  ERROR lifecycle state; the pinned 9.0 spec serves no dedicated
+  ``/status`` sub-resource -- the #2982 spec-reconcile finding).
 * ``sddc.cluster.list`` -- ``GET /v1/clusters`` (vSphere cluster
   inventory; optional ``domainId`` filter).
 * ``sddc.host.list`` -- ``GET /v1/hosts`` (ESXi host inventory; optional
@@ -102,7 +104,7 @@ _log = structlog.get_logger(__name__)
 # the ``Authorization: Bearer <accessToken>`` header the token session
 # primed (#2290).
 _DOMAINS_PATH = "/v1/domains"
-_DOMAIN_STATUS_PATH = "/v1/domains/{id}/status"
+_DOMAIN_STATUS_PATH = "/v1/domains/{id}"
 _CLUSTERS_PATH = "/v1/clusters"
 _HOSTS_PATH = "/v1/hosts"
 _VCENTERS_PATH = "/v1/vcenters"
@@ -211,13 +213,17 @@ async def sddc_domain_status_impl(
     target: SddcTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``sddc.domain.status`` -- ``GET /v1/domains/{id}/status``.
+    """``sddc.domain.status`` -- ``GET /v1/domains/{id}``.
 
-    Reads the lifecycle status of one VCF domain (its ACTIVE / ACTIVATING
-    / ERROR state and the last status transition). Requires a domain
-    ``id`` from ``sddc.domain.list``; the read an operator runs when a
-    domain-create or expand workflow is in flight or a domain is reported
-    unhealthy.
+    Reads one VCF domain by id and surfaces its lifecycle state: the
+    returned domain object carries a top-level ``status`` (ACTIVE /
+    ACTIVATING / UPGRADING / ERROR / ...) plus ``upgradeState`` /
+    ``upgradeStatus``. The pinned SDDC Manager 9.0 spec serves no
+    dedicated ``/v1/domains/{id}/status`` sub-resource (the #2982
+    spec-reconcile finding), so the domain read *is* the status read.
+    Requires a domain ``id`` from ``sddc.domain.list``; the read an
+    operator runs when a domain-create or expand workflow is in flight
+    or a domain is reported unhealthy.
     """
     domain_id = params["id"]
     path = _DOMAIN_STATUS_PATH.format(id=domain_id)

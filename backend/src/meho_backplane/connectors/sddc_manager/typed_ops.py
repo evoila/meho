@@ -235,11 +235,13 @@ _DOMAIN_STATUS = SddcTypedOp(
     summary="Lifecycle status of one VCF domain.",
     description=(
         "Reads the lifecycle status of one VCF domain via "
-        "GET /v1/domains/{id}/status -- its ACTIVE / ACTIVATING / ERROR "
-        "state and the last status transition. Requires a domain id from "
-        "sddc.domain.list. The read an operator runs when a domain-create "
-        "or expand workflow is in flight or a domain is reported unhealthy. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "GET /v1/domains/{id} -- the domain object's top-level status "
+        "field carries the ACTIVE / ACTIVATING / UPGRADING / ERROR state "
+        "(SDDC Manager 9.0 serves no dedicated /status sub-resource). "
+        "Requires a domain id from sddc.domain.list. The read an operator "
+        "runs when a domain-create or expand workflow is in flight or a "
+        "domain is reported unhealthy. Works with zero catalog ingest. "
+        "safety_level=safe, read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -264,7 +266,10 @@ _DOMAIN_STATUS = SddcTypedOp(
             "still activating / errored -- e.g. while a domain-expand "
             "workflow runs."
         ),
-        output_shape="{status, ...}. Surface the state and any error detail.",
+        output_shape=(
+            "{id, name, status, upgradeState, ...} -- the full domain "
+            "object. Surface the top-level status and any error detail."
+        ),
         parameter_hints={"id": "The VCF domain id from sddc.domain.list."},
     ),
 )

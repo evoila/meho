@@ -99,6 +99,15 @@ from meho_backplane.connectors._shared.vault_creds import (
 )
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector, _retryable
+from meho_backplane.connectors.keycloak._paths import (
+    _ADMIN_REALM_PATH,
+    _CLIENTS_PATH,
+    _ROLE_PATH,
+    _SERVERINFO_PATH,
+    _TOKEN_PATH,
+    _USERS_PATH,
+    fill_path,
+)
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
     KeycloakAdminCredentialsLoader,
@@ -426,7 +435,7 @@ class KeycloakConnector(HttpConnector):
         realms = resolve_realm_config(target)
         creds = await self._credentials_loader(target, operator)
         client = await self._http_client(target)
-        token_path = f"/realms/{realms.admin_realm}/protocol/openid-connect/token"
+        token_path = fill_path(_TOKEN_PATH, {"realm": realms.admin_realm})
         try:
             resp = await client.post(
                 token_path,
@@ -509,13 +518,14 @@ class KeycloakConnector(HttpConnector):
 
         probed_at = datetime.now(UTC)
         realms = resolve_realm_config(target)
-        probe_method = f"GET /admin/realms/{realms.managed_realm}"
+        realm_path = fill_path(_ADMIN_REALM_PATH, {"realm": realms.managed_realm})
+        probe_method = f"GET {realm_path}"
         effective_operator = operator if operator is not None else synthesise_system_operator()
 
         try:
             realm_repr = await self._get_json(
                 target,
-                f"/admin/realms/{realms.managed_realm}",
+                realm_path,
                 operator=effective_operator,
             )
         except (
@@ -559,7 +569,7 @@ class KeycloakConnector(HttpConnector):
         canonical reachability signal, the version is a nice-to-have.
         """
         try:
-            info = await self._get_json(target, "/admin/serverinfo", operator=operator)
+            info = await self._get_json(target, _SERVERINFO_PATH, operator=operator)
         except (
             httpx.HTTPError,
             OSError,
@@ -717,7 +727,7 @@ class KeycloakConnector(HttpConnector):
         """
         rows = await self._get_admin_list(
             target,
-            f"/admin/realms/{managed_realm}/clients",
+            fill_path(_CLIENTS_PATH, {"realm": managed_realm}),
             operator=operator,
             params={"clientId": client_id},
         )
@@ -746,7 +756,7 @@ class KeycloakConnector(HttpConnector):
         """
         rows = await self._get_admin_list(
             target,
-            f"/admin/realms/{managed_realm}/users",
+            fill_path(_USERS_PATH, {"realm": managed_realm}),
             operator=operator,
             params={"username": username, "exact": "true"},
         )
@@ -777,7 +787,7 @@ class KeycloakConnector(HttpConnector):
         try:
             role = await self._get_admin_json(
                 target,
-                f"/admin/realms/{managed_realm}/roles/{role_name}",
+                fill_path(_ROLE_PATH, {"realm": managed_realm, "role-name": role_name}),
                 operator=operator,
             )
         except httpx.HTTPStatusError as exc:

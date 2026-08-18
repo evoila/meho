@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, cast
 import structlog
 
 from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors.keycloak._paths import _USER_RESET_PASSWORD_PATH, fill_path
 from meho_backplane.connectors.keycloak.connector import KeycloakConnector
 from meho_backplane.connectors.keycloak.ops_write import KeycloakUserNotFoundError
 from meho_backplane.connectors.keycloak.session import KeycloakTargetLike, quote_segment
@@ -235,8 +236,10 @@ class KeycloakCredentialSecretEndpoint:
         await connector._write_admin(
             target,
             "PUT",
-            f"/admin/realms/{quote_segment(self._realm)}/users/"
-            f"{quote_segment(uuid)}/reset-password",
+            fill_path(
+                _USER_RESET_PASSWORD_PATH,
+                {"realm": quote_segment(self._realm), "user-id": quote_segment(uuid)},
+            ),
             operator=operator,
             json=credential,
             idempotent_conflict=False,

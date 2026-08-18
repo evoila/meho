@@ -152,7 +152,11 @@ On each tick (default 10s, settable via
    `pg_try_advisory_lock(0x4D45_484F_4556_5442)` — see
    [Advisory-lock keys](#advisory-lock-keys) below. Only one
    replica's drain runs the tick body at a time. A second replica's
-   tick is a no-op until the holder releases.
+   tick is a no-op until the holder releases. The lock is hosted on a
+   dedicated pinned connection
+   (`meho_backplane/db/advisory.py::advisory_lock`, #3010 — advisory
+   lock and unlock must run on the same connection, and the drain's
+   mid-tick commits would strand a lock taken on the work session).
 
 2. **Scan + claim unprocessed rows** via:
 

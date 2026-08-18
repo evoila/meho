@@ -96,14 +96,17 @@ DBOS rebase swaps only the loop module.
                   +------------------------------------------+
                   | run_one_tick()                           |
                   | 1. pg_try_advisory_lock(MEHOSCHD)        |
-                  |    (no-op on SQLite test path)           |
+                  |    on a dedicated pinned connection      |
+                  |    (db/advisory.py; no-op on SQLite)     |
                   | 2. claim_due_triggers(now=now(UTC),      |
-                  |       limit=50)                          |
+                  |       limit=50)  -- separate work        |
+                  |    session, commits per row              |
                   |    -- SELECT ... FOR UPDATE SKIP LOCKED  |
                   | 3. for each row:                         |
                   |      kind==cron: advance + invoke        |
                   |      kind==one_off: mark fired + invoke  |
-                  | 4. pg_advisory_unlock                    |
+                  | 4. pg_advisory_unlock on the SAME        |
+                  |    pinned connection                     |
                   +------------------------------------------+
                                                  |
                                                  v
@@ -380,8 +383,21 @@ Two backplane pods sharing one Postgres are coordinated by two layers:
 
 1. **Process-wide advisory lock** (`pg_try_advisory_lock(MEHOSCHD)`):
    only one replica's loop runs the tick body at a time. The losing
-   replica's `try_advisory_lock` returns `False` and the tick is skipped.
-   Non-blocking.
+   replica reads `False`, debug-logs `scheduler_tick_lock_busy`, counts
+   on `advisory_lock_busy_total{subsystem="scheduler"}`, and skips the
+   tick. Non-blocking.
+
+   **Advisory lock and unlock must run on the same connection**
+   (#3010). The lock is session-level — owned by the DBAPI connection,
+   unaffected by commit/rollback — and the tick body commits per fired
+   row, which returns the work session's pooled connection. The lock is
+   therefore hosted on a dedicated pinned connection
+   (`meho_backplane/db/advisory.py::advisory_lock`), never on the work
+   session: taken there, the first commit would strand it on an idle
+   pooled connection, the unlock would land on a different connection
+   (PG warns and returns `false`, nothing raises), and every later tick
+   drawing another connection would skip silently — the sensor runner's
+   #3010 starvation, same shape here.
 2. **Per-row claim under `FOR UPDATE SKIP LOCKED`** plus the conditional
    `UPDATE` in the advance/mark-fired step. Belt-and-braces — even if the
    advisory lock were removed, single-fire would still hold across
@@ -427,7 +443,10 @@ lock — see "Known issues / limitations" (#1502).
   so the durable `agent_run` row's provenance column reflects the
   scheduler vs. a direct REST/MCP/CLI invocation.
 - **`pg_try_advisory_lock` / `pg_advisory_unlock`** — Postgres
-  session-level advisory locks. No-op on SQLite via dialect gate.
+  session-level advisory locks, held via the shared pinned-connection
+  helper `meho_backplane/db/advisory.py::advisory_lock` (#3010: lock and
+  unlock must run on the same connection). No-op on SQLite via dialect
+  gate.
 - **`SELECT ... FOR UPDATE SKIP LOCKED`** — SQLAlchemy 2.0
   `with_for_update(skip_locked=True)`; emitted only on PG.
 

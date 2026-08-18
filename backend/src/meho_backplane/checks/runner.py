@@ -32,7 +32,15 @@ Replica-safety (copied from ``scheduler/loop.py``'s belt-and-braces)
 Each tick acquires a process-wide ``pg_try_advisory_lock`` under
 :data:`_SENSOR_RUNNER_ADVISORY_LOCK_KEY` (a fixed 63-bit key distinct from the
 scheduler's ``_SCHEDULER_ADVISORY_LOCK_KEY`` and the topology per-target
-keyspace) so only one replica runs the tick body at a time. Due rows are
+keyspace) so only one replica runs the tick body at a time. The lock is
+hosted on a dedicated pinned connection via
+:func:`meho_backplane.db.advisory.advisory_lock` — **advisory lock and
+unlock must run on the same connection** (#3010): the tick body commits
+per claimed row, and a lock taken on the work session would strand on
+the pooled connection the first commit releases, silently starving every
+later tick that draws a different connection. A lock-miss tick logs
+``sensor_tick_lock_busy`` and counts on ``advisory_lock_busy_total``;
+it stamps the watchdog's tick facet but not its claim facet. Due rows are
 claimed with ``FOR UPDATE SKIP LOCKED`` and each claimed row's ``next_fire_at``
 is advanced by a conditional ``UPDATE ... WHERE next_fire_at=:previous`` that
 commits *before* dispatch. The advisory lock alone leaves the SQLite test path
@@ -120,8 +128,6 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.runner_identity import (
@@ -139,6 +145,7 @@ from meho_backplane.checks.repository import (
     record_sensor_result,
 )
 from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_state
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.operations.dispatcher import dispatch
@@ -271,29 +278,6 @@ class _SensorSnapshot:
             assertion=row.assertion,
             identity_sub=row.identity_sub,
         )
-
-
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire the process-wide PG advisory lock; ``True`` on non-PG.
-
-    Returns ``True`` when the lock is held (or the dialect has no advisory
-    locks -- the SQLite single-replica test path) and the caller should
-    proceed; ``False`` when another replica holds it and this tick is skipped.
-    Mirrors :func:`meho_backplane.scheduler.loop._try_advisory_lock`.
-    """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
-    return bool(locked)
-
-
-async def _advisory_unlock(session: AsyncSession, key: int) -> None:
-    """Release the advisory lock; no-op on non-PG dialects."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
 
 
 async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
@@ -566,24 +550,44 @@ async def run_one_sensor_tick() -> int:
     Every *completed* tick -- including the lock-not-acquired no-op -- stamps
     the #2763 watchdog via :func:`~meho_backplane.checks.watchdog.note_tick_completed`
     (which also emits the recovery event when a stall was flagged, and never
-    raises). A tick that raises deliberately does not stamp: a loop that fails
-    every tick is a stalled evaluation plane and must trip the watchdog.
+    raises); only a lock-acquired tick also stamps the claim facet
+    (``lock_acquired``, #3010), so a runner starved by a stranded or
+    contended lock stays visible on ``seconds_since_last_claim`` while its
+    loop still reads alive. A tick that raises deliberately does not stamp: a
+    loop that fails every tick is a stalled evaluation plane and must trip the
+    watchdog.
     """
-    dispatched = await _claim_and_spawn_due()
-    await note_tick_completed()
+    lock_acquired, dispatched = await _claim_and_spawn_due()
+    await note_tick_completed(lock_acquired=lock_acquired)
     return dispatched
 
 
-async def _claim_and_spawn_due() -> int:
-    """The tick body: claim + advance under the lock, then spawn evaluations."""
+async def _claim_and_spawn_due() -> tuple[bool, int]:
+    """The tick body: claim + advance under the lock, then spawn evaluations.
+
+    Returns ``(lock_acquired, dispatched)`` so the caller can stamp the
+    watchdog's claim facet only for ticks that actually held the lock.
+
+    The advisory lock lives on its own pinned connection
+    (:func:`~meho_backplane.db.advisory.advisory_lock`, #3010) while the
+    claim/advance work runs on a separate session that commits per row.
+    Lock and unlock must run on the same connection: taken on the work
+    session, the first per-row commit would return that connection to the
+    pool, the ``finally`` unlock would land on a different one, and the
+    lock would strand on an idle pooled connection -- every later tick
+    drawing any other connection would skip silently (#3010's observed
+    ~35-50 % cadence).
+    """
     now = datetime.now(UTC)
     to_dispatch: list[_SensorSnapshot] = []
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        locked = await _try_advisory_lock(session, _SENSOR_RUNNER_ADVISORY_LOCK_KEY)
+    async with advisory_lock(_SENSOR_RUNNER_ADVISORY_LOCK_KEY, subsystem="sensor_runner") as locked:
         if not locked:
-            return 0
-        try:
+            # #3010: the silent zero-claim tick made the stranded-lock class
+            # invisible; the log + the helper's counter make it observable.
+            _log().info("sensor_tick_lock_busy")
+            return (False, 0)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
             rows = await claim_due_sensors(session, now=now, limit=_CLAIM_BATCH_LIMIT)
             for row in rows:
                 try:
@@ -617,9 +621,6 @@ async def _claim_and_spawn_due() -> int:
                     # Per-row isolation: one bad row never stalls the tick.
                     _log().exception("sensor_tick_row_failed", sensor_id=str(row.id))
                     await session.rollback()
-        finally:
-            await _advisory_unlock(session, _SENSOR_RUNNER_ADVISORY_LOCK_KEY)
-            await session.commit()
 
     # Advisory lock released, advances committed. Spawn the evaluations as
     # background tasks -- never awaited here (the #1502 lock-wedge class).
@@ -627,7 +628,7 @@ async def _claim_and_spawn_due() -> int:
     for snap in to_dispatch:
         if _spawn_evaluation(snap):
             dispatched += 1
-    return dispatched
+    return (True, dispatched)
 
 
 async def _runner_loop() -> None:

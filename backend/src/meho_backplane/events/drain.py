@@ -10,7 +10,14 @@ event-subscription trigger. On each cadence (default 10s, settable via
 1. **Claim the process-wide advisory lock**
    (``pg_try_advisory_lock``) so only one replica's drain is running
    the tick body at a time. Mirrors the scheduler-loop precedent
-   (:mod:`meho_backplane.scheduler.loop`).
+   (:mod:`meho_backplane.scheduler.loop`). The lock lives on a
+   dedicated pinned connection
+   (:func:`meho_backplane.db.advisory.advisory_lock`, #3010) —
+   **advisory lock and unlock must run on the same connection**: the
+   tick commits mid-lock (the claim stamp, each processed stamp), and a
+   lock taken on the work session would strand on the pooled connection
+   the first commit releases, silently skipping every later drain tick
+   that draws a different connection.
 
 2. **Scan + claim unprocessed rows** via
    ``SELECT ... WHERE processed_at IS NULL ORDER BY event_id LIMIT N
@@ -26,8 +33,9 @@ event-subscription trigger. On each cadence (default 10s, settable via
    no subscriber is still durably consumed (stamped, no fire, no log
    noise).
 
-4. **Release the advisory lock** in a ``finally`` so a crash mid-tick
-   never strands the lock for the rest of the connection's life.
+4. **Release the advisory lock** on the same pinned connection that
+   acquired it (the helper's ``finally``) so a crash mid-tick never
+   strands the lock for the rest of the connection's life.
 
 LISTEN/NOTIFY wake hint
 =======================
@@ -93,9 +101,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import EVENT_OUTBOX_NOTIFY_CHANNEL, EventOutbox
 from meho_backplane.settings import get_settings
@@ -138,29 +147,6 @@ def _claimer_identity() -> str:
     the offending pod / process from this stamp.
     """
     return f"{socket.gethostname()}:{os.getpid()}"
-
-
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire the process-wide PG advisory lock; ``True`` on non-PG."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(
-        text("SELECT pg_try_advisory_lock(:k)"),
-        {"k": key},
-    )
-    return bool(locked)
-
-
-async def _advisory_unlock(session: AsyncSession, key: int) -> None:
-    """Release the advisory lock; no-op on non-PG dialects."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(
-        text("SELECT pg_advisory_unlock(:k)"),
-        {"k": key},
-    )
 
 
 async def _claim_unprocessed(
@@ -304,16 +290,19 @@ async def run_one_drain_tick(invoker: AgentInvoker | None = None) -> int:
         from meho_backplane.agent.invocation import get_agent_invoker
 
         invoker = get_agent_invoker()
-    sessionmaker = get_sessionmaker()
     processed = 0
-    async with sessionmaker() as session:
-        locked = await _try_advisory_lock(
-            session,
-            _EVENT_DRAIN_ADVISORY_LOCK_KEY,
-        )
+    # The advisory lock lives on its own pinned connection (#3010): the
+    # mid-tick commits below (claim stamps, per-row processed stamps)
+    # each return the work session's connection to the pool, so a lock
+    # taken on that session would migrate off it at the first commit and
+    # strand -- silently skipping every later drain tick that draws a
+    # different connection.
+    async with advisory_lock(_EVENT_DRAIN_ADVISORY_LOCK_KEY, subsystem="event_drain") as locked:
         if not locked:
+            _log.debug("event_drain_tick_skipped_lock_held")
             return 0
-        try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
             now = datetime.now(UTC)
             rows = await _claim_unprocessed(session, limit=_DRAIN_BATCH_LIMIT)
             if not rows:
@@ -328,10 +317,11 @@ async def run_one_drain_tick(invoker: AgentInvoker | None = None) -> int:
             # subscription fires an agent run that commits in its own session,
             # and the drain must hold no open write across that commit (the
             # scheduler-fire precedent -- loop.py commits the trigger-state
-            # write before dispatching). The advisory lock (session-scoped, so
-            # a mid-tick commit does not release it) plus the ``processed_at IS
-            # NULL`` conditional in `_mark_processed` remain the single-
-            # processing guards once the claim's row locks release here.
+            # write before dispatching). The advisory lock (pinned to its own
+            # dedicated connection, which a work-session commit cannot touch)
+            # plus the ``processed_at IS NULL`` conditional in
+            # `_mark_processed` remain the single-processing guards once the
+            # claim's row locks release here.
             await session.commit()
             for row in rows:
                 try:
@@ -351,9 +341,6 @@ async def run_one_drain_tick(invoker: AgentInvoker | None = None) -> int:
                         "event_drain_dispatch_failed",
                         event_id=row.event_id,
                     )
-        finally:
-            await _advisory_unlock(session, _EVENT_DRAIN_ADVISORY_LOCK_KEY)
-            await session.commit()
     return processed
 
 

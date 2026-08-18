@@ -413,6 +413,11 @@ widened verify step can pass.
 The same secret-gated checkout additionally fetches the shelf's
 `docs/loki-3.7/` directory (~0.06 MB) for the loki reconcile lane
 (`backend/tests/test_connectors_loki_spec_reconcile.py`), under the
+### Extension: Proxmox VE (proxmox-8.4, #2992)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/proxmox-8.4/` directory (~3.4 MB) for the proxmox reconcile lane
+(`backend/tests/test_connectors_proxmox_spec_reconcile.py`), under the
 identical ephemeral-use conditions recorded above (sparse read-only
 checkout, workspace destroyed at job end, never committed, never in
 artifacts or logs, secret withheld from fork PRs and the Dependabot
@@ -433,6 +438,23 @@ extension mechanics; the documented-route precedent is
 `hetzner-robot-2026-04`, here from an OSS source. **Sequencing:** the
 pin lands via consumer-repo PR (`claude-rdc-hetzner-dc#2547`) which must
 merge before this repo's widened verify step can pass.
+Proxmox VE publishes no OpenAPI/Swagger for its REST API, so the pinned
+artifact is the vendor's own apidoc schema (`apidata.js`, the file the
+API viewer serves) and the lane supplies its own tree-walking extractor
+(the `rabbitmq-4.3` / `hetzner-robot-2026-04` non-OpenAPI precedent).
+`apidata.js` is a `.js` file, and per pve-docs `debian/copyright` the
+`*.js` file set is **AGPL-3.0-or-later** (the `.adoc` guide prose is
+GFDL-1.3; the schema is not) — an OSS license, so the provenance-note
+form applies: the note of record is the shelf's `proxmox-8.4/MANIFEST.md`
+(source URL + pinned `stable-bookworm` commit, sha256, the AGPL clause,
+and the latest-stable-8.x version rationale), per the OSS-licensed-spec
+form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The lab runs no Proxmox deployment, so the shelf
+pins latest stable 8.x (PVE 8.4); meho's `proxmox-api` connector
+advertises `>=7.0,<9.0`. **Sequencing:** the pin lands via consumer-repo
+PR (`claude-rdc-hetzner-dc#2546`) which must merge before this repo's
+widened verify step can pass.
 
 ## Consequences
 

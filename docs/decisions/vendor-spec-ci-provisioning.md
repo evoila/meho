@@ -455,6 +455,31 @@ pins latest stable 8.x (PVE 8.4); meho's `proxmox-api` connector
 advertises `>=7.0,<9.0`. **Sequencing:** the pin lands via consumer-repo
 PR (`claude-rdc-hetzner-dc#2546`) which must merge before this repo's
 widened verify step can pass.
+### Extension: harbor / harbor-2.12 (#2990)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/harbor-2.12/` directory (~0.3 MB; the lane parses
+`harbor-swagger.yaml`, the `harbor-core` Swagger 2.0 document, 134
+paths) for the harbor reconcile lane
+(`backend/tests/test_connectors_harbor_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is vendored at `api/v2.0/swagger.yaml` in the **public, Apache-2.0**
+[`goharbor/harbor`](https://github.com/goharbor/harbor) repo (pinned at
+tag `v2.12.2`, commit `73072d0d`, retrieved 2026-08-18 — matching the
+lab's deployed Harbor `v2.12.2-73072d0d`) — the provenance note of
+record is the shelf's `harbor-2.12/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The artifact stays Swagger 2.0 (no OpenAPI 3
+derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
+lane supplies its own extraction — folding the document's
+`basePath: /api/v2.0` onto every path key (the argocd `argocd-swagger.json`
+precedent, reading YAML rather than JSON). **Sequencing:** the pin lands
+via consumer-repo PR (`claude-rdc-hetzner-dc#2549`) which must merge
+before this repo's widened verify step can pass.
 
 ## Consequences
 

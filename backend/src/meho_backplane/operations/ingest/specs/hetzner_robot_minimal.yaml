@@ -31,9 +31,13 @@
 # and MUST be reproduced verbatim -- the dispatcher addresses the real
 # Webservice with the persisted `path` / `op_id` (op_id = `METHOD:path`).
 # The GET op_ids here (GET:/server, GET:/server/{server-ip},
-# GET:/vswitch, GET:/vswitch/{id}, GET:/firewall/{server-ip}, GET:/rdns)
-# match the paths cross-checked in ROBOT_CORE_OPS so the ingested rows and
-# the curated core agree on the same op_id strings.
+# GET:/vswitch, GET:/vswitch/{vswitch-id}, GET:/firewall/{server-ip},
+# GET:/rdns) match the paths in ROBOT_CORE_OPS so the ingested rows and
+# the curated core agree on the same op_id strings. Every path (template
+# segments included) is reconciled against the pinned vendor reference by
+# tests/test_connectors_hetzner_robot_spec_reconcile.py; the {server-ip}
+# paths are the vendor's documented deprecated IP-addressed alternatives
+# to the {server-number} routes.
 #
 # NO `servers` BLOCK. #1796 made the OpenAPI Server Object load-bearing --
 # the ingest parser folds a relative `servers[].url` onto every op path.
@@ -115,7 +119,7 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/VswitchEnvelope"
-  /vswitch/{id}:
+  /vswitch/{vswitch-id}:
     get:
       operationId: getVswitch
       summary: Get one vSwitch
@@ -123,7 +127,7 @@ paths:
         Return the full detail of one vSwitch by its numeric id, including
         all member servers and their statuses.
       parameters:
-        - name: id
+        - name: vswitch-id
           in: path
           required: true
           description: The vSwitch numeric id.
@@ -144,7 +148,7 @@ paths:
         The Robot Webservice expects the server IPs as form fields; the body
         below is the JSON-schema view of those fields.
       parameters:
-        - name: id
+        - name: vswitch-id
           in: path
           required: true
           description: The vSwitch numeric id.
@@ -170,7 +174,7 @@ paths:
         Remove one or more dedicated servers from a vSwitch's VLAN
         membership.
       parameters:
-        - name: id
+        - name: vswitch-id
           in: path
           required: true
           description: The vSwitch numeric id.

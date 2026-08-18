@@ -303,6 +303,27 @@ pins nothing because nothing pinnable exists — that half of the lane is
 the evidenced exclusion recorded in the standard doc's
 `vcf-automation-9.0` entry.
 
+### Signoff extension — Hetzner Robot (hetzner-robot-2026-04, 2026-08-18, #2985)
+
+The hetzner-robot spec-reconcile lane
+(`backend/tests/test_connectors_hetzner_robot_spec_reconcile.py`) arms
+against one additional vendor-licensed artifact, fetched by the **same**
+secret-gated sparse checkout (widened to `docs/hetzner-robot-2026-04`;
+same `SPEC_SHELF_TOKEN`, no new secret) under the **same** ephemeral-use
+conditions recorded in "What CI does with the specs" above. What is
+fetched: the shelf's `docs/hetzner-robot-2026-04/` directory (~0.2 MB) —
+`webservice-en.md`, the vendor's single HTML API reference
+(<https://robot.hetzner.com/doc/webservice/en.html>) converted to
+markdown; Hetzner publishes **no machine-readable spec** for the Robot
+Webservice, so the lane extracts the documented route list from this
+page (provenance: the shelf's `hetzner-robot-2026-04/MANIFEST.md`,
+retrieved 2026-04-30). The page is vendor-published documentation with
+no explicit open license, so this extension records a reference to the
+**wave-3 blanket determination** above
+(<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>,
+which names hetzner-robot-2026-04 explicitly) instead of a fresh
+attestation.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

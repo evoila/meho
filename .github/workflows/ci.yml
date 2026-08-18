@@ -296,15 +296,16 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~33 MB nsx-9.0 + ~2 MB sddc-manager-9.0 +
-          # ~18 MB vcenter-9.0 + ~3 MB vcf-automation-9.0), not the
-          # whole consumer repo. No
+          # spec files (~0.2 MB hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
+          # ~2 MB sddc-manager-9.0 + ~18 MB vcenter-9.0 + ~3 MB
+          # vcf-automation-9.0), not the whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
           # matching the local-dev contract documented in
           # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
           # Keep the list sorted.
           sparse-checkout: |
+            docs/hetzner-robot-2026-04
             docs/nsx-9.0
             docs/sddc-manager-9.0
             docs/vcenter-9.0
@@ -327,6 +328,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in \
+            spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
             spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
@@ -338,7 +340,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -957,6 +959,7 @@ jobs:
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           sparse-checkout: |
+            docs/hetzner-robot-2026-04
             docs/nsx-9.0
             docs/sddc-manager-9.0
             docs/vcenter-9.0
@@ -972,6 +975,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in \
+            spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
             spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
@@ -983,7 +987,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

@@ -90,6 +90,44 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — hetzner-robot `about` op + CLI verb removed (#2985 / #3014)
+
+- `hetzner-robot.about` (`GET:/query`) and the `meho hetzner-robot
+  about` CLI verb are removed. The op dispatched `GET /query` — an
+  endpoint the Hetzner Robot Webservice does not serve, so every live
+  call 404s — and the vendor documents no identity/version-class
+  endpoint anywhere in the API, so there is no path to repoint it to
+  (removal per the #2970 never-invent-a-path protocol; the op only
+  ever "worked" against mocks). Migration: for a
+  cheapest-authenticated-probe / first-call check, use
+  `meho hetzner-robot server list` (`GET:/server` — the connector's
+  actual fingerprint/first-probe op); the G3.7 canary's audit-row
+  carrier re-anchors to `GET:/key`. Re-ingesting
+  `hetzner_robot_minimal.yaml` also renames the vswitch op_ids
+  `…/{id}` → `…/{vswitch-id}` to match the vendor doc's path
+  templates — wire requests are byte-identical, only the op_id
+  strings agents and operators reference change.
+
+### Added — hetzner-robot real-spec reconcile lane (#2985 / #3014)
+
+- Every hand-coded `METHOD:/path` the hetzner-robot connector
+  dispatches (the 10 curated core ops, the `hetzner_robot_minimal.yaml`
+  ingest verbs, the inline `GET /server` fingerprint probe) is now
+  asserted against the pinned `hetzner-robot-2026-04` vendor doc on
+  every PR via the #2980 harness
+  (`backend/tests/test_connectors_hetzner_robot_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). Hetzner publishes no machine-readable spec for the
+  Robot Webservice, so the lane extracts the documented route list
+  from the shelf's markdown-converted API reference (105 routes in
+  the 2026-04 snapshot, plus `@deprecated` alternative rows) and pins
+  the exact three deprecated-only `{server-ip}` routes the connector
+  still serves as a bidirectional tripwire. CI's secret-gated
+  spec-shelf checkout is widened to `docs/hetzner-robot-2026-04` in
+  both Python jobs. First armed run surfaced the `GET:/query` fiction
+  and the `{vswitch-id}` template drift, both fixed in the same PR
+  per the #2970 protocol — see the Breaking-changes entry above.
+
 ### Added — vcf-automation real-spec reconcile lane + region-list repoint (#2983)
 
 - Every hand-coded `METHOD:/path` the vcf-automation connector

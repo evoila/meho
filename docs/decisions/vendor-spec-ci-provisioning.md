@@ -364,6 +364,27 @@ distributed on Maven Central as
 against Maven Central's published checksum, retrieved 2026-08-18) — the
 provenance note of record is the shelf's `keycloak-26.3/MANIFEST.md`,
 per the OSS-licensed-spec form in
+### Extension: RabbitMQ (rabbitmq-4.3, 2026-08-18, #2989)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/rabbitmq-4.3/` directory (~0.1 MB) for the rabbitmq reconcile
+lane (`backend/tests/test_connectors_rabbitmq_spec_reconcile.py`),
+under the identical ephemeral-use conditions recorded above (sparse
+read-only checkout, workspace destroyed at job end, never committed,
+never in artifacts or logs, secret withheld from fork PRs and the
+Dependabot store). No vendor-license attestation is needed for this
+extension: RabbitMQ publishes no OpenAPI for the management HTTP API
+(negative + evidence in the shelf MANIFEST), so the pinned artifacts
+are the management plugin's own HTTP API route table
+(`/api/index.html`, converted to `http-api-index.md`) and the
+shovel-management dispatcher module
+(`rabbit_shovel_mgmt_shovels.erl`, the route registry for the
+`/api/shovels[/{vhost}]` surface the core table does not document) —
+both from the **public, MPL-2.0**
+[`rabbitmq/rabbitmq-server`](https://github.com/rabbitmq/rabbitmq-server)
+repo (pinned at tag `v4.3.5`, retrieved 2026-08-18) — the provenance
+note of record is the shelf's `rabbitmq-4.3/MANIFEST.md`, per the
+OSS-licensed-spec form in
 [`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
 extension mechanics.
 

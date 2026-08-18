@@ -353,6 +353,13 @@ The same secret-gated checkout additionally fetches the shelf's
 3.0.3, ~0.5 MB, 247 paths — the Keycloak Admin REST API at the lab's
 deployed 26.3.3) for the keycloak reconcile lane
 (`backend/tests/test_connectors_keycloak_spec_reconcile.py`), under the
+### Extension: argocd / argocd-3.3 (#2987)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/argocd-3.3/` directory (~0.4 MB; the lane parses
+`argocd-swagger.json`, the `argocd-server` Swagger 2.0 document, 80
+paths) for the argocd reconcile lane
+(`backend/tests/test_connectors_argocd_spec_reconcile.py`), under the
 identical ephemeral-use conditions recorded above (sparse read-only
 checkout, workspace destroyed at job end, never committed, never in
 artifacts or logs, secret withheld from fork PRs and the Dependabot
@@ -387,6 +394,19 @@ note of record is the shelf's `rabbitmq-4.3/MANIFEST.md`, per the
 OSS-licensed-spec form in
 [`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
 extension mechanics.
+spec is vendored at `assets/swagger.json` in the **public, Apache-2.0**
+[`argoproj/argo-cd`](https://github.com/argoproj/argo-cd) repo (pinned
+at tag `v3.3.9`, commit `1b1bb48f`, retrieved 2026-08-18 — matching the
+newer of the lab's two deployed 3.3.x instances) — the provenance note
+of record is the shelf's `argocd-3.3/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The artifact stays Swagger 2.0 (no OpenAPI 3
+derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
+lane supplies its own extraction — the vcf-automation `vra-iaas.json`
+precedent. **Sequencing:** the pin lands via consumer-repo PR
+(`claude-rdc-hetzner-dc#2540`) which must merge before this repo's
+widened verify step can pass.
 
 ## Consequences
 

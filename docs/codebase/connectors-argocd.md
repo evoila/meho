@@ -59,6 +59,22 @@ Source: `backend/src/meho_backplane/connectors/argocd/`.
 - **`register_argocd_typed_operations`** (`__init__.py`) — the lifespan-driven
   registrar (queued via `register_typed_op_registrar`) that delegates to
   `ArgoCdConnector.register_operations()`.
+- **`*_ROUTE` constants + `route_method` / `route_path`** (`routes.py`,
+  #2987) — the connector's full hand-coded REST surface as fourteen
+  `"METHOD:/path"` constants; every handler in `connector.py` /
+  `ops_write.py` derives its verb and its concrete request path
+  (placeholder filled with the URL-encoded resource name) from the same
+  constant. Template segments carry the vendor's own gRPC-gateway
+  parameter names (`{name}` on most application routes,
+  `{applicationName}` on `managed-resources` / `resource-tree`,
+  `{project.metadata.name}` on the project-update PUT) because the
+  spec-reconcile lane
+  ([`tests/test_connectors_argocd_spec_reconcile.py`](../../backend/tests/test_connectors_argocd_spec_reconcile.py))
+  compares these values byte-for-byte against the pinned `argocd-3.3`
+  shelf spec (`docs/decisions/spec-reconcile-guards-standard.md`). New
+  endpoints must land here as a `*_ROUTE` constant — an inline path
+  literal in a handler dodges the reconcile and fails the lane's
+  pinned-manifest guard in review.
 
 ## Control flow
 
@@ -296,6 +312,14 @@ shim.
   (`awaiting_approval`, handler never fires), the `app.sync`/`rollback`
   operationState poll to a terminal phase, the `app.set`/`delete`/`appproject.update`
   `proposed_effect` snapshots, and the bearer-rides-never-leaks guarantee.
+- `tests/test_connectors_argocd_spec_reconcile.py` — the real-spec
+  reconcile lane (#2987, the #2980 harness): sweeps the live `*_ROUTE`
+  constants of `routes.py` and asserts every hand-coded `METHOD:/path`
+  is served by the pinned `argocd-3.3` shelf spec (`argocd-swagger.json`,
+  Swagger 2.0 — the lane supplies its own extraction since ingest
+  rejects Swagger 2.0 by decision #2090). Skips uniformly when
+  `MEHO_CONSUMER_DOCS_ROOT` is unset; the constant-name and op_id
+  manifest pins run unconditionally.
 
 ## Known issues
 

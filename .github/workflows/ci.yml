@@ -296,7 +296,8 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~0.2 MB hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
+          # spec files (~0.4 MB argocd-3.3 + ~0.2 MB
+          # hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~2 MB sddc-manager-9.0 + ~18 MB vcenter-9.0 + ~3 MB
           # vcf-automation-9.0 + ~5 MB vcf-operations-9.0), not the
           # whole consumer repo. No
@@ -306,6 +307,7 @@ jobs:
           # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
           # Keep the list sorted.
           sparse-checkout: |
+            docs/argocd-3.3
             docs/hetzner-robot-2026-04
             docs/keycloak-26.3
             docs/nsx-9.0
@@ -332,6 +334,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in \
+            spec-shelf/docs/argocd-3.3/argocd-swagger.json \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
             spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
@@ -348,7 +351,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -967,6 +970,7 @@ jobs:
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           sparse-checkout: |
+            docs/argocd-3.3
             docs/hetzner-robot-2026-04
             docs/keycloak-26.3
             docs/nsx-9.0
@@ -986,6 +990,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in \
+            spec-shelf/docs/argocd-3.3/argocd-swagger.json \
             spec-shelf/docs/hetzner-robot-2026-04/webservice-en.md \
             spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
@@ -1002,7 +1007,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

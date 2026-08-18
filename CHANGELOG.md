@@ -132,6 +132,30 @@ connector-related release-notes line.
   templates — wire requests are byte-identical, only the op_id
   strings agents and operators reference change.
 
+### Added — argocd real-spec reconcile lane (#2987)
+
+- Every hand-coded `METHOD:/path` the argocd connector dispatches (the
+  seven curated reads, the seven approval-gated writes, the
+  unauthenticated `GET /api/version` fingerprint/probe) is now asserted
+  against the pinned `argocd-3.3` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_argocd_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). The connector's path literals are hoisted into a
+  single route table (`connectors/argocd/routes.py`, fourteen
+  `"METHOD:/path"` constants) that both dispatch and the lane derive
+  from, so the reconcile introspects live constants rather than a
+  mirror. The pinned spec is ArgoCD's own `assets/swagger.json`
+  (Apache-2.0, tag `v3.3.9` — the newer of the lab's two deployed
+  3.3.x instances); it is Swagger 2.0, so the lane supplies its own
+  extraction per the standard's non-OpenAPI clause (ingest rejects
+  Swagger 2.0 by decision #2090). CI's secret-gated spec-shelf
+  checkout is widened to `docs/argocd-3.3` in both Python jobs. First
+  reconcile surfaced three findings, all vendor template-segment
+  renames adopted in the same PR per the #2970 protocol
+  (`{applicationName}` on `managed-resources` / `resource-tree`,
+  `{project.metadata.name}` on the project-update PUT) — wire requests
+  are byte-identical; no endpoint fictions, no repoints.
+
 ### Added — hetzner-robot real-spec reconcile lane (#2985 / #3014)
 
 - Every hand-coded `METHOD:/path` the hetzner-robot connector

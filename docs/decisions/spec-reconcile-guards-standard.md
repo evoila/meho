@@ -38,7 +38,9 @@ Scope boundaries:
   `nsx-9.0/MANIFEST.md`), the lane still ships and skips uniformly; it
   arms itself the day the spec lands on the shelf. A task that proves a
   spec is unobtainable records the evidenced exclusion instead
-  (#2993's contract).
+  (#2993's contract; the entries live in the
+  [Evidenced exclusions](#evidenced-exclusions-no-pinnable-spec-today)
+  section below).
 
 ## The harness (what a lane is)
 
@@ -181,6 +183,54 @@ Each lane task (#2981-#2993) ships all of:
    (`MEHO_CONSUMER_DOCS_ROOT=<shelf>/docs`) before merge. CI is armed:
    a lane that would go red lands red on the PR itself, which is the
    next section — but discovering it locally first is cheaper.
+
+## Evidenced exclusions (no pinnable spec today)
+
+The per-product record for lanes that ship **dormant** because no vendor
+spec exists or can be pinned. Each entry states what was checked (with
+dates), why nothing is pinnable, and what activates the lane. An entry
+here is not an exemption from the standard — the lane still ships,
+skipping uniformly, and the day a spec lands the activating task runs
+the full extension mechanics above (CI checkout widened, signoff
+extended, first-run red triaged per the protocol below).
+
+### nsx-9.0 (#2981, recorded 2026-08-18)
+
+- **Lane:** `backend/tests/test_connectors_nsx_spec_reconcile.py` — 11
+  hand-coded op_ids introspected live (ten `GET` typed-read paths +
+  the session-establish `POST`); dormant, skips with the harness's
+  uniform reason.
+- **Why no spec is pinnable** (evidence grounded 2026-04-29, per the
+  shelf's `nsx-9.0/MANIFEST.md`): no public NSX 9 OpenAPI artifact
+  exists in any checked location — `vmware/vcf-api-specs` covers the
+  sibling VCF components (SDDC Manager, vSphere, VCF Installer, VCF
+  Operations, vSAN DP) but **not NSX**; the `vmware-nsx` GitHub org
+  publishes no 9.x spec; `vmware/go-vmware-nsxt` is Go bindings, not a
+  spec; `vmware-archive/nsxraml` predates NSX-T. Live-manager fetch is
+  also closed: 30 candidate spec endpoints
+  (`/api/v1/spec/openapi.json`, `/policy/api/v1/openapi.json`,
+  `/v3/api-docs`, `/swagger`, …) probed against a live NSX 9.0.2
+  manager returned 404 or 302-to-UI under **both** HTTP Basic and the
+  session-cookie + `X-XSRF-TOKEN` flow (per-path table in the shelf's
+  `kb/nsx-9.0-overview.md` and `kb/vcf-9.0-in-ui-explorer-survey.md`).
+  The vendor's NSX REST API reference exists only as a documentation
+  portal (`developer.broadcom.com/xapis/nsx-t-data-center-rest-api/`),
+  with no downloadable machine-readable spec.
+- **Deliberately not done while dormant:** no `ci.yml`
+  sparse-checkout/verify widening (the shelf dir carries only the
+  manifest — fetching it adds CI surface for zero guard value) and no
+  `vendor-spec-ci-provisioning.md` signoff extension (that signoff
+  covers vendor content fetched in CI; none is fetched for nsx).
+- **Activation:** a spec landing at `nsx-9.0/nsx-openapi.json` on the
+  shelf (re-ground seeds in the shelf manifest: re-check
+  `vcf-api-specs`, the VCF 9 doc hub, PowerCLI's bundled
+  `VMware.Sdk.Nsx.*` spec files, and the live-manager endpoints on
+  maintenance releases) arms the lane automatically wherever
+  `MEHO_CONSUMER_DOCS_ROOT` resolves it. The activating task then
+  widens the CI checkout, extends the signoff, and triages any
+  first-run red — expect at least the `{id}` template segment of
+  `GET:/api/v1/transport-nodes/{id}/state` to need reconciling against
+  the vendor's parameter naming.
 
 ## Red lane = finding (the protocol)
 

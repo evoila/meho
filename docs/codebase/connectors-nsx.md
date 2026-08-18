@@ -315,6 +315,12 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
     — install a test-only `ForceHandleReducer`, dispatch the
     segment-list op, assert `OperationResult.handle` is populated
     by the dispatcher seam.
+- Spec-reconcile lane: `backend/tests/test_connectors_nsx_spec_reconcile.py`
+  (#2981) — asserts the 11 hand-coded `METHOD:/path` literals against a
+  pinned `nsx-9.0` shelf spec through the #2980 harness. Ships dormant
+  (uniform skip): no public NSX 9 OpenAPI spec is pinnable today —
+  evidence + activation steps in the "Evidenced exclusions" section of
+  `docs/decisions/spec-reconcile-guards-standard.md`.
 - Precedent: `connectors/vmware_rest/connector.py` (session auth +
   fingerprint + probe + dispatch shim);
   `connectors/vmware_rest/__init__.py` (registration);

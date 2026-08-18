@@ -227,9 +227,11 @@ async def test_accepted_event_publishes_outbox_and_audit(client: TestClient) -> 
         row = outbox[0]
         assert row.origin is not None  # source id
         assert row.dedupe_key is not None
-        assert row.event_kind == "external.alertmanager.alert"
+        # This synthetic body carries no Alertmanager ``status``, so the
+        # alertmanager normaliser (#2882) derives the default ``event`` type.
+        assert row.event_kind == "external.alertmanager.event"
         assert row.payload["source"]["slug"] == "prod-am"
-        assert row.payload["data"] == {"type": "alert", "severity": "critical"}
+        assert row.payload["raw"] == {"type": "alert", "severity": "critical"}
 
         audits = (
             (await session.execute(select(AuditLog).where(AuditLog.method == "INGEST")))

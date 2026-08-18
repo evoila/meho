@@ -13,8 +13,9 @@ order the issue fixes:
 2. Verify the sender against the source's auth strategy (constant-time).
 3. Enforce the per-source rate limit.
 4. Compute the dedupe key (sender delivery id, else body hash).
-5. Normalise-lite (parse the JSON body into an envelope) and
-   :func:`~meho_backplane.events.outbox.publish` it to ``event_outbox`` **in
+5. Normalise the parsed body with the source kind's per-vendor normaliser
+   (:mod:`meho_backplane.events.normalizers`, #2882) into the outbox envelope
+   and :func:`~meho_backplane.events.outbox.publish` it to ``event_outbox`` **in
    the same transaction** as a synchronous ``__ingest__`` audit row -- the
    spec's "no success without a committed audit row" invariant (CLAUDE.md
    postulate 7). A ``dedupe_key`` collision is mapped to an idempotent
@@ -73,6 +74,7 @@ from meho_backplane.event_source.secrets import read_event_source_secret
 from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_auth
 from meho_backplane.events.ingest.config import IngestConfig
 from meho_backplane.events.ingest.rate_limit import enforce_ingest_rate_limit
+from meho_backplane.events.normalizers import normalize_event
 from meho_backplane.events.outbox import publish
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.settings import get_settings
@@ -108,9 +110,6 @@ _INGEST_OP_CLASS: str = "other"
 #: Defensive cap on a sender-supplied delivery id used as the dedupe basis,
 #: so an attacker cannot bloat the ``dedupe_key`` column with a huge header.
 _MAX_DELIVERY_ID_LEN: int = 200
-
-#: Max length of the derived ``event_type`` token in ``external.{kind}.{type}``.
-_MAX_EVENT_TYPE_LEN: int = 64
 
 
 class IngestPayloadError(Exception):
@@ -213,38 +212,30 @@ def _parse_json_or_fail(raw_body: bytes) -> object:
         raise IngestPayloadError(f"body is not valid JSON: {type(exc).__name__}") from exc
 
 
-def _sanitise_event_type(raw: object) -> str:
-    """Reduce a payload ``type`` hint to a safe ``[a-z0-9._-]`` token.
-
-    Untrusted external input, so a non-string / empty / all-stripped value
-    degrades to ``"event"`` and anything outside the allowed set is dropped.
-    """
-    if not isinstance(raw, str):
-        return "event"
-    kept = "".join(c for c in raw.lower() if c.isalnum() or c in "._-")
-    return kept[:_MAX_EVENT_TYPE_LEN] or "event"
-
-
-def _normalise_lite(
+def _normalise(
     source: ResolvedSource, parsed_body: object, now: datetime
 ) -> tuple[str, dict[str, object]]:
-    """Build ``(event_kind, envelope)`` from the parsed body (normalise-lite).
+    """Build ``(event_kind, envelope)`` via the source kind's normaliser (#2882).
 
-    The external (untrusted) body is nested under ``data`` so it can never
-    collide with the envelope's own ``source`` / ``event_type`` keys, and the
-    outbox ``payload`` is always a JSON object regardless of the body's shape
-    (a top-level array/scalar body still yields a dict envelope). Richer
-    per-vendor normalisation is #2882.
+    The per-kind normaliser (selected by ``source.kind``) reduces the raw body
+    to a ``{type}`` token, the canonical **match fields**, and the full body.
+    This builds the outbox envelope from that: the match fields are lifted to
+    the **top level** (so ``event_filter`` authoring is simple --
+    ``{"status": "firing"}`` matches without a ``raw.`` prefix), the full
+    sender body sits under ``raw``, and the reserved envelope keys (``source``
+    / ``event_type`` / ``received_at`` / ``raw``) are written **last** so a
+    vendor match field can never shadow them. The payload is always a JSON
+    object regardless of the body's shape (a top-level array/scalar body still
+    yields a dict envelope with an empty match set).
     """
-    event_type = _sanitise_event_type(
-        parsed_body.get("type") if isinstance(parsed_body, dict) else None
-    )
-    event_kind = f"external.{source.kind}.{event_type}"
-    envelope = {
+    normalized = normalize_event(source.kind, parsed_body)
+    event_kind = f"external.{source.kind}.{normalized.event_type}"
+    envelope: dict[str, object] = {
+        **normalized.match_fields,
         "source": {"slug": source.slug, "kind": source.kind, "id": str(source.id)},
-        "event_type": event_type,
+        "event_type": normalized.event_type,
         "received_at": now.isoformat(),
-        "data": parsed_body,
+        "raw": normalized.raw,
     }
     return event_kind, envelope
 
@@ -373,7 +364,7 @@ async def accept_ingest_event(
 
     dedupe_key = _dedupe_key(source, headers, raw_body, config)
     parsed_body = _parse_json_or_fail(raw_body)
-    event_kind, envelope = _normalise_lite(source, parsed_body, now)
+    event_kind, envelope = _normalise(source, parsed_body, now)
 
     audit_id = uuid.uuid4()
     outcome = await _publish_with_audit(

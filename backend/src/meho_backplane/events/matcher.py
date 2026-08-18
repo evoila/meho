@@ -51,8 +51,11 @@ values differ for an event fire and are overridden on the prepared invocation:
   input-less event trigger reaches here with no operator prompt. Rather than
   let the fire fail typed at the no-input guard
   (:meth:`AgentInvoker._launch_scheduled_run`), the matcher synthesises a
-  prompt from the matched event. Event bodies are untrusted, so the composed
-  text is wrapped with
+  prompt from the matched event via
+  :func:`~meho_backplane.events.normalizers.synthesize_event_prompt` -- a
+  per-vendor triage body for an ``external.{kind}.*`` event (#2882), the
+  generic render otherwise. Event bodies are untrusted, so the composed text
+  is always wrapped with
   :func:`~meho_backplane.untrusted_text.wrap_untrusted_text`.
 * **work_ref** -- the fired run's work_ref is ``event:{event_id}:{trigger_id}``,
   the fire-dedupe key. It rides the existing ``agent_run_tenant_work_ref_idx``
@@ -71,7 +74,6 @@ so the check-then-fire dedupe never races itself in production.
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 
 import structlog
@@ -87,6 +89,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.events.normalizers import synthesize_event_prompt
 from meho_backplane.operations.agent_run import AGENT_RUN_COMPLETED_EVENT_KIND
 from meho_backplane.scheduler.loop import (
     _coerce_inputs,
@@ -94,7 +97,6 @@ from meho_backplane.scheduler.loop import (
     _PreconditionSkip,
     _prepare_invocation,
 )
-from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = ["fire_matching_triggers"]
 
@@ -197,22 +199,14 @@ async def _run_exists_for_work_ref(tenant_id: object, work_ref: str) -> bool:
 def _synthesize_event_prompt(event: EventOutbox) -> str:
     """Compose a prompt describing *event*, wrapped in the untrusted-text guard.
 
-    Used for an input-less event trigger. The event kind + payload are
-    agent-authored / externally-sourced untrusted data, so the composed body
-    is wrapped with :func:`wrap_untrusted_text` -- the reading agent sees it as
-    data to act on, not a directive channel.
+    Used for an input-less event trigger. Delegates to
+    :func:`~meho_backplane.events.normalizers.synthesize_event_prompt`, which
+    builds a per-vendor body for an ``external.{kind}.*`` event (#2882) and the
+    generic structured render for an internal event, and **always** wraps the
+    composed body with :func:`wrap_untrusted_text` -- the reading agent sees the
+    externally-sourced event as data to act on, not a directive channel.
     """
-    body = json.dumps(
-        {"event_kind": event.event_kind, "payload": event.payload},
-        sort_keys=True,
-        indent=2,
-        default=str,
-    )
-    return (
-        "A subscribed MEHO event matched this trigger's filter and started this "
-        "run. The event that fired it is described below; decide what to do "
-        "based on it.\n\n" + wrap_untrusted_text(body)
-    )
+    return synthesize_event_prompt(event.event_kind, event.payload)
 
 
 def _event_inputs(trigger: ScheduledTrigger, event: EventOutbox) -> str:

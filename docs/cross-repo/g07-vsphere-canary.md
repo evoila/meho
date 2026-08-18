@@ -60,10 +60,16 @@ parameter-ref parser branch and #503 extended this canary):
    ``is_enabled=True``, surfacing them through the agent meta-tools.
 6. **Search.** T8's
    [`search_operations`](../../backend/src/meho_backplane/operations/meta_tools.py)
-   hybrid BM25 + pgvector cosine RRF retrieval returns the canonical
-   operation in the top-3 hits for 10 of 13 representative govc-parity
-   queries (10 vcenter + 3 vi-json). Three vcenter queries currently
-   fail; see *Known gaps* below.
+   hybrid BM25 + pgvector cosine RRF retrieval, scoped with the
+   ``group`` filter to the operation group an agent would pick
+   (the sanctioned flow, architecture postulate 4), returns the
+   canonical operation in the top-3 hits for 9 of 13 representative
+   govc-parity queries (10 vcenter + 3 vi-json). Four queries miss
+   top-3 even within their group and are xfail-documented; see
+   *Known gaps* below. Raw corpus-wide ranking is deliberately not
+   asserted — at the 3,470-op two-spec scale it fails intuitive
+   relevance bars (evoila/meho#3006 tracks whether that is worth
+   improving).
 
 ## Prerequisites
 
@@ -200,16 +206,19 @@ meta-tools see the connector.
 
 ```bash
 meho operation groups vmware-rest-9.0
-meho operation search vmware-rest-9.0 "list virtual machines" --limit 10
+meho operation search vmware-rest-9.0 "list clusters" --group cluster --limit 10
 ```
 
 The first command should return 12-18 enabled groups in two-spec
 mode (8-15 single-spec fallback). The second should return ranked
 hits — the load-bearing acceptance bar is "top-3 contains the
-canonical operation for the workflow". The
+canonical operation for the workflow, searching within the group an
+agent would pick from the groups listing" (the sanctioned agent
+flow; raw corpus-wide search is not the acceptance bar — see
+*Known gaps*). The
 [`acceptance test`](../../backend/tests/acceptance/test_g07_vsphere_canary.py)
 runs thirteen such queries (ten vcenter + three vi-json) and
-asserts the top-3 contract.
+asserts the group-scoped top-3 contract.
 
 ### Step 7 — verify dispatch end-to-end
 
@@ -277,40 +286,52 @@ The acceptance test asserts:
 - One vi-json ``{moId}`` path substitutes cleanly via
   :func:`meho_backplane.operations._branches._substitute_path`
   without special-casing.
-- ``search_operations`` returns the canonical operation in the
-  top-3 for 10 of 13 govc-parity queries (three vcenter cardinal-op
-  queries marked ``xfail``; vi-json queries skip in single-spec mode).
+- ``search_operations`` with the ``group`` filter (the sanctioned
+  agent flow) returns the canonical operation in the group-scoped
+  top-3 for 9 of 13 govc-parity queries (four queries that miss
+  top-3 even in-group are marked ``xfail`` with their measured
+  rank; vi-json queries skip in single-spec mode).
 - LLM call count tracks the two-pass / multi-ingest contract:
   single-spec ≈ ``1 + 26`` calls, two-spec ≈ ``1 + 26 + 44`` calls
   (Pass-1 runs once, Pass-2 runs per spec on its unassigned ops).
 - ``search_operations`` against an unknown connector returns an
   empty hit list (not an error).
 
-The 13 (query, expected_op_id) govc-parity pairs are:
+The 13 (query, group, expected_op_id) govc-parity triples are —
+``group`` being the operation group an agent would pick from
+``list_operation_groups``, and the one ``search_operations`` is
+scoped to:
 
-| # | Query | Canonical op (top-3 expected) |
-|---|---|---|
-| 1 | `list virtual machines` | `GET:/vcenter/vm` (currently xfail — see *Known gaps*) |
-| 2 | `list clusters` | `GET:/vcenter/cluster` |
-| 3 | `list datacenters` | `GET:/vcenter/datacenter` |
-| 4 | `list datastores` | `GET:/vcenter/datastore` |
-| 5 | `list networks` | `GET:/vcenter/network` |
-| 6 | `list hosts` | `GET:/vcenter/host` |
-| 7 | `power on virtual machine` | `POST:/vcenter/vm/{vm}/power?action=start` (currently xfail — see *Known gaps*) |
-| 8 | `power off virtual machine` | `POST:/vcenter/vm/{vm}/power?action=stop` (currently xfail — see *Known gaps*) |
-| 9 | `create login session` | `POST:/session` |
-| 10 | `get virtual machine info` | `GET:/vcenter/vm/{vm}` |
-| 11 | `revert vsphere snapshot` | `POST:/VirtualMachine/{moId}/RevertToSnapshot_Task` (vi-json) |
-| 12 | `tail vsphere events` | `POST:/EventManager/{moId}/QueryEvents` (vi-json) |
-| 13 | `get vm performance metrics` | `POST:/PerformanceManager/{moId}/QueryPerf` (vi-json) |
+| # | Query | Group | Canonical op (group-scoped top-3 expected) |
+|---|---|---|---|
+| 1 | `list virtual machines` | `vm` | `GET:/vcenter/vm` (xfail: in-group rank 7 measured — see *Known gaps*) |
+| 2 | `list clusters` | `cluster` | `GET:/vcenter/cluster` |
+| 3 | `list datacenters` | `datacenter` | `GET:/vcenter/datacenter` |
+| 4 | `list datastores` | `datastore` | `GET:/vcenter/datastore` |
+| 5 | `list networks` | `network` | `GET:/vcenter/network` |
+| 6 | `list hosts` | `host` | `GET:/vcenter/host` |
+| 7 | `power on virtual machine` | `vm` | `POST:/vcenter/vm/{vm}/power?action=start` (xfail: in-group rank 5-6 — see *Known gaps*) |
+| 8 | `power off virtual machine` | `vm` | `POST:/vcenter/vm/{vm}/power?action=stop` (xfail: in-group rank 5-6 — see *Known gaps*) |
+| 9 | `create login session` | `session` | `POST:/session` |
+| 10 | `get virtual machine info` | `vm` | `GET:/vcenter/vm/{vm}` |
+| 11 | `revert vsphere snapshot` | `vm_managed_objects` | `POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task` (vi-json) |
+| 12 | `tail vsphere events` | `events` | `POST:/EventManager/{moId}/QueryEvents` (vi-json; xfail: in-group rank 4 — see *Known gaps*) |
+| 13 | `get vm performance metrics` | `performance` | `POST:/PerformanceManager/{moId}/QueryPerf` (vi-json) |
 
 The three vi-json queries (#11-#13) skip in single-spec CI matrices
-where only ``MEHO_VCENTER_OPENAPI_VCENTER`` is set. They are NOT
-marked xfail: their target ops have descriptive method names
-(``RevertToSnapshot_Task``, ``QueryEvents``, ``QueryPerf``) that
-the BM25 arm picks up cleanly. A consistent first-run failure would
-indicate a vi-json description-quality issue worth filing a
-follow-up for — not silently absorbing via xfail.
+where only ``MEHO_VCENTER_OPENAPI_VCENTER`` is set. Query #11's
+expected op is the spec truth: in vi-json.yaml (as in the VIM API),
+``RevertToSnapshot_Task`` is a method of *VirtualMachineSnapshot*,
+not of *VirtualMachine* — the previously-listed
+``POST:/VirtualMachine/{moId}/RevertToSnapshot_Task`` does not
+exist in the corpus (VirtualMachine only carries
+``RevertToCurrentSnapshot_Task``) and was latent because the armed
+integration lane runs ``pytest -x`` and stopped on the
+`list clusters` failure before this case ever executed. Query #12
+is xfail-documented: ``QueryEvents`` measures at a stable in-group
+rank 4 (the short EventManager property-reads win on BM25 text
+density) — the same per-op description-quality limitation as the
+vcenter cardinal ops, surfaced rather than silently absorbed.
 
 ## Opt-in extensions
 
@@ -321,19 +342,22 @@ substrate — no production code changes shipped with these.
 ### Real-LLM eyeball check (`G07_CANARY_REAL_LLM=1` + `ANTHROPIC_API_KEY`)
 
 The default canary uses a deterministic stub that classifies operations
-by URL path prefix; the three queries marked `xfail` in the stub
-benchmark (`list virtual machines`, `power on virtual machine`,
-`power off virtual machine`) reflect the stub's inability to enrich
+by URL path prefix; the queries marked `xfail` in the stub
+benchmark reflect the stub's inability to enrich
 `when_to_use` strings beyond what the spec source carries.
 
 The opt-in `test_g07_canary_real_llm_eyeball` test drives the same
 ingestion pipeline against Claude Haiku
 (`claude-haiku-4-5-20251001`) over `httpx` — no `anthropic` SDK
 dependency, the chassis stays narrow. The test then asserts the
-**strict top-3** govc-parity contract on all 10 queries, naming any
-that miss. This is the parallel signal the parent Initiative's
-acceptance criteria call for; the stub-path xfail markers remain
-unchanged.
+**strict top-3** govc-parity contract on the 10 vcenter queries
+(the vi-json entries are excluded — this fixture ingests
+`vcenter.yaml` only), naming any that miss. Unlike the stub
+benchmark (group-scoped since PR #2995), the eyeball deliberately
+searches **raw** — it measures exactly the raw-relevance question
+evoila/meho#3006 tracks, and it never runs in CI. This is the
+parallel signal the parent Initiative's acceptance criteria call
+for; the stub-path xfail markers remain unchanged.
 
 Operator command:
 
@@ -405,40 +429,54 @@ introspection via ``meho connector review``.
 The govc workflows that fundamentally need vi-json ops are now
 covered by benchmark queries #11-#13:
 
-- ``govc snapshot.revert`` → ``POST:/VirtualMachine/{moId}/RevertToSnapshot_Task``
+- ``govc snapshot.revert`` → ``POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task``
 - ``govc events`` → ``POST:/EventManager/{moId}/QueryEvents``
 - ``govc metric.sample`` → ``POST:/PerformanceManager/{moId}/QueryPerf``
 
-These three benchmark queries are NOT marked xfail — their target
-ops have descriptive method names and should rank top-3 cleanly.
-Failures here would indicate a real vi-json description-quality
-issue, not a substrate gap.
+Queries #11 and #13 pass group-scoped (ranks 2 and 1 measured
+2026-08-17). Query #12 is xfail-documented at a stable in-group
+rank 4 — a real vi-json description-quality finding (the short
+EventManager property-reads out-score ``QueryEvents`` on BM25 text
+density), surfaced in the suite report rather than silently
+absorbed; the fix belongs to the same per-op enrichment follow-up
+as the vcenter cardinal ops below.
 
-### 2. Cardinal-op descriptions under-rank against sub-paths
+### 2. Weak per-op descriptions under-rank inside their own group
 
-Three govc-parity queries (`list virtual machines`,
-`power on virtual machine`, `power off virtual machine`) currently
-return sub-paths (``GET:/vcenter/vm/{vm}/data-sets``,
-``POST:/vcenter/vm/{vm}/hardware/ethernet/{nic}?action=connect``,
-``...?action=disconnect``) in their top-3 hits instead of the
-canonical short-path operation.
+Four govc-parity queries miss the group-scoped top-3 (both probe
+samples, 2026-08-17, two-spec corpus — the group filter removes
+cross-spec noise, so what remains is purely in-group ranking):
+
+- `list virtual machines` → ``GET:/vcenter/vm`` at in-group rank 7
+  (148-op `vm` group; ``GET:/vcenter/vm/{vm}/data-sets`` and
+  hardware sub-paths out-rank the cardinal).
+- `power on virtual machine` / `power off virtual machine` →
+  ``power?action=start`` / ``?action=stop`` at in-group rank 5-6
+  (hardware ``?action=connect`` / ``?action=disconnect`` sub-paths
+  win).
+- `tail vsphere events` → ``QueryEvents`` at in-group rank 4
+  (8-op `events` group; the short property-reads ``latestEvent`` /
+  ``description`` plus ``LogUserEvent`` win on BM25 text density).
 
 Two drivers:
-- The vCenter spec's cardinal-op descriptions carry vendor-schema
+- The vendor specs' cardinal-op descriptions carry vendor-schema
   prose ("Vcenter.VM.FilterSpec", "Powers on a powered-off or
   suspended virtual machine") rather than natural-operator-language
   summaries.
 - T3's LLM-grouping pass produces per-group hints but does **not**
   yet generate per-op ``llm_instructions`` or rewrite ``summary``.
-  Both would lift retrieval quality for cardinal ops with weak
-  upstream descriptions.
+  Both would lift retrieval quality for ops with weak upstream
+  descriptions.
 
-The acceptance test marks these three queries ``xfail``
-(non-strict, because pgvector's IVFFlat approximation makes the
-failure non-deterministic — the same query against the same data
-can pass or fail depending on the index's probed lists). The
-canary's other 7 queries plus the non-benchmark assertions verify
-the substrate is healthy.
+The acceptance test marks these four queries ``xfail`` (non-strict,
+because pgvector's IVFFlat approximation can drift ranks between
+runs — and the integration lane runs ``pytest -x``, where a single
+variance flap would kill the lane) with the measured in-group rank
+in each reason string. The canary's other 9 queries plus the
+non-benchmark assertions verify the substrate is healthy. Raw
+corpus-wide ranking at multi-spec scale is a separate, broader
+question — evoila/meho#3006 holds that evidence and decides whether
+ranking work is warranted.
 
 ### 3. `tests/integration/conftest.py` TRUNCATE statement is stale
 

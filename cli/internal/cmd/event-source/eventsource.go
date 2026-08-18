@@ -81,8 +81,8 @@ type EventSource struct {
 	DeletedAt    *string        `json:"deleted_at"`
 }
 
-// EventSourceSummary mirrors the backend EventSourceSummary list row.
-type EventSourceSummary struct {
+// Summary mirrors the backend EventSourceSummary list row.
+type Summary struct {
 	Name         string  `json:"name"`
 	Slug         string  `json:"slug"`
 	Kind         string  `json:"kind"`
@@ -91,10 +91,10 @@ type EventSourceSummary struct {
 	SecretRef    *string `json:"secret_ref"`
 }
 
-// EventSourceListResponse mirrors the {items, next_cursor} envelope.
-type EventSourceListResponse struct {
-	Items      []EventSourceSummary `json:"items"`
-	NextCursor *string              `json:"next_cursor"`
+// ListResponse mirrors the {items, next_cursor} envelope.
+type ListResponse struct {
+	Items      []Summary `json:"items"`
+	NextCursor *string   `json:"next_cursor"`
 }
 
 // --------------------------------------------------------------------- secret input

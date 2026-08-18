@@ -55,7 +55,7 @@ func newListCmd() *cobra.Command {
 			if err != nil {
 				return renderRequestErr(cmd, backplaneURL, err, jsonOut)
 			}
-			var envelope EventSourceListResponse
+			var envelope ListResponse
 			if err := json.Unmarshal(raw, &envelope); err != nil {
 				return output.RenderError(cmd.ErrOrStderr(),
 					output.Unexpected(fmt.Sprintf("decode event source list: %v", err)), jsonOut)
@@ -75,7 +75,7 @@ func newListCmd() *cobra.Command {
 	return cmd
 }
 
-func printTable(w io.Writer, items []EventSourceSummary) {
+func printTable(w io.Writer, items []Summary) {
 	if len(items) == 0 {
 		fmt.Fprintln(w, "no event sources registered in this tenant")
 		return

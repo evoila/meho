@@ -149,6 +149,23 @@ connector-related release-notes line.
   repointed to `GET /cloudapi/vcf/regions` per the pinned
   go-vcloud-director v3.0.0 endpoint map and the shelf's live-probe
   record.
+### Added — vcf-operations real-spec reconcile lane (#2984)
+
+- Every hand-coded `METHOD:/path` the vcf-operations connector dispatches
+  (the four typed-read paths from #2303/#2838 and the
+  `POST /suite-api/api/auth/token/acquire` session mint) is now asserted
+  against the pinned `vcf-operations-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/vcf-operations-9.0` in both Python jobs. First armed run surfaced
+  one real finding — the vendor-published core spec itself fails the ingest
+  metaschema gate (three `"required": []` schema entries, illegal per
+  OpenAPI 3.0), so an operator ingest fails identically; the shelf now pins
+  a deterministic ingest-consumable derivative
+  (`vcf-operations-openapi.ingestable.json`, recipe + sha256 in the shelf
+  MANIFEST) that the lane parses. All five op_ids are served; no path
+  repoints were needed.
 
 ### Added — sddc-manager real-spec reconcile lane (#2982)
 

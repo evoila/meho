@@ -298,7 +298,8 @@ jobs:
           # lazy blob filter: the runner materialises just the pinned
           # spec files (~0.2 MB hetzner-robot-2026-04 + ~33 MB nsx-9.0 +
           # ~2 MB sddc-manager-9.0 + ~18 MB vcenter-9.0 + ~3 MB
-          # vcf-automation-9.0), not the whole consumer repo. No
+          # vcf-automation-9.0 + ~5 MB vcf-operations-9.0), not the
+          # whole consumer repo. No
           # `ref:` pin — the shelf's default branch IS the
           # operator-curated pin (the directories are version-named),
           # matching the local-dev contract documented in
@@ -310,6 +311,7 @@ jobs:
             docs/sddc-manager-9.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-operations-9.0
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -334,13 +336,14 @@ jobs:
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json; do
+            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -964,6 +967,7 @@ jobs:
             docs/sddc-manager-9.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
+            docs/vcf-operations-9.0
           filter: blob:none
           persist-credentials: false
 
@@ -981,13 +985,14 @@ jobs:
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
-            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json; do
+            spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/vra-iaas.json \
+            spec-shelf/docs/vcf-operations-9.0/vcf-operations-openapi.ingestable.json; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

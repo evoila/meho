@@ -195,6 +195,22 @@ Ingress is permitted only from the namespace whose
 `networkPolicy.ingressControllerNamespace` (default `ingress-nginx`,
 RKE2's bundled controller).
 
+`networkPolicy.ingestAllowedNamespaces` (default `[]`) renders a
+**second** ingress rule for **in-cluster webhook senders** delivering to
+the inbound event-ingest endpoint (`POST
+/api/v1/events/ingest/{source_slug}`, #2881): each listed namespace
+becomes an OR-ed `kubernetes.io/metadata.name` peer admitted to
+`tcp/8000`, matched on the label kube-apiserver stamps on every namespace
+(Kubernetes ≥ 1.22). Empty by default, so the rule is omitted and the
+backplane stays default-deny — a sender in another namespace otherwise
+has to hair-pin through the ingress hostname. The full operator flow
+(enable the knob, register the `event_source`, custody its per-source
+secret, point the sender's webhook at the in-cluster Service URL) is the
+[In-cluster webhook senders](../deploying.md#in-cluster-webhook-senders)
+section of the deploy guide. SaaS-origin senders and the satellite-runner
+inbound listener are out of scope — they reach the endpoint through the
+ingress hostname, not this rule.
+
 The three egress CIDR fields ship **empty** in `values.yaml` and are
 required-with-shape-validation in the schema **when
 `networkPolicy.enabled: true`**. The chart will not render with the

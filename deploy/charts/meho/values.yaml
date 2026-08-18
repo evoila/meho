@@ -1064,6 +1064,20 @@ networkPolicy:
   vaultCIDR: ""
   # -- Keycloak egress CIDR. Same conditional rules as postgresCIDR.
   keycloakCIDR: ""
+  # -- Namespaces whose Pods may reach the inbound event-ingest endpoint
+  # (`POST /api/v1/events/ingest/{source_slug}`, #2881) on tcp/8000
+  # directly, for **in-cluster** webhook senders (Alertmanager, Grafana,
+  # Harbor, VCF Operations, ...) running in another namespace of the same
+  # cluster. Each entry is a namespace name matched by its
+  # `kubernetes.io/metadata.name` label; the rendered ingress rule OR-s
+  # them. Default empty — the backplane stays default-deny and every
+  # sender reaches it through the ingress hostname instead. Add a
+  # namespace here only after registering the matching event source
+  # (`meho event-source add`); see the "In-cluster webhook senders"
+  # section of docs/deploying.md. SaaS-origin senders and the
+  # satellite-runner inbound listener are out of scope — they use the
+  # ingress hostname, not this rule.
+  ingestAllowedNamespaces: []
 
 # -- Node selector applied to the Pod template.
 nodeSelector: {}

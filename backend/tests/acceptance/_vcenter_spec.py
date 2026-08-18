@@ -20,6 +20,10 @@ local path to each spec by checking, in priority order:
    is expected to contain ``vcenter-9.0/vcenter.yaml`` and
    ``vcenter-9.0/vi-json.yaml``. Local-dev convenience for the
    maintainer with the consumer repo cloned at a known sibling path.
+   This branch delegates to the product-agnostic shelf resolver
+   (:mod:`tests._spec_shelf`, #2980) that every per-vendor reconcile
+   lane shares; only the vcenter-specific explicit/legacy env vars
+   above stay here.
 
 When no source resolves, the test skips with a pointer to this
 docstring rather than failing — the canary verifies a substrate that
@@ -32,6 +36,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+from tests._spec_shelf import resolve_shelf_file
 
 __all__ = [
     "VCENTER_SPEC_REASON",
@@ -75,12 +81,7 @@ def resolve_vcenter_yaml() -> Path | None:
             return legacy_path
         if legacy_path.is_dir() and (legacy_path / "vcenter.yaml").is_file():
             return legacy_path / "vcenter.yaml"
-    consumer_root = os.getenv("MEHO_CONSUMER_DOCS_ROOT")
-    if consumer_root:
-        candidate = Path(consumer_root).expanduser() / "vcenter-9.0" / "vcenter.yaml"
-        if candidate.is_file():
-            return candidate
-    return None
+    return resolve_shelf_file("vcenter-9.0", "vcenter.yaml")
 
 
 def resolve_vi_json_yaml() -> Path | None:
@@ -88,9 +89,4 @@ def resolve_vi_json_yaml() -> Path | None:
     explicit = _expand_optional_path(os.getenv("MEHO_VCENTER_OPENAPI_VI_JSON"))
     if explicit is not None:
         return explicit
-    consumer_root = os.getenv("MEHO_CONSUMER_DOCS_ROOT")
-    if consumer_root:
-        candidate = Path(consumer_root).expanduser() / "vcenter-9.0" / "vi-json.yaml"
-        if candidate.is_file():
-            return candidate
-    return None
+    return resolve_shelf_file("vcenter-9.0", "vi-json.yaml")

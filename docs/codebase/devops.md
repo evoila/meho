@@ -816,10 +816,31 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
   (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
   skips, the directory doesn't exist, and the resolvers
-  (`backend/tests/acceptance/_vcenter_spec.py`) return `None` → the lanes
+  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness the
+  vcenter-specific `backend/tests/acceptance/_vcenter_spec.py` delegates its
+  shelf-root branch to) return `None` → the lanes
   `pytest.skip()` exactly as before the wiring. When the secret exists, all
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
+- Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
+  the unit sweep; the canary's full-ingest tests run armed only in
+  `python-integration` — its pytest step selects
+  `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
+  sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
+  `skipif` marker on the canary's full-ingest tests, backstopped in its
+  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
+  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
+  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
+  original per-test-ingest shape was 25 ingests and timeout-killed the
+  60-min integration cap on its first armed run). Rationale + rule +
+  the shared-corpus pattern for future heavy lanes:
+  [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
+  §Lane placement.
+- Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
+  wiring — one `sparse-checkout` line + one verify line per product dir,
+  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
+  mechanics + red-lane protocol:
+  [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
   the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
   token value.

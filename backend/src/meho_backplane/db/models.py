@@ -5326,9 +5326,10 @@ class EventOutbox(Base):
     ``cancelled``; future kinds: audit predicates, connector alerts).
     A separate drain loop (:mod:`meho_backplane.events.drain`) scans the
     outbox via ``SELECT ... FOR UPDATE SKIP LOCKED``, claims unprocessed
-    rows, and dispatches them to subscribed
-    :class:`ScheduledTrigger` rows of kind ``'event'`` once the
-    subscription matcher lands (T5 #826).
+    rows, and dispatches them through the subscription matcher
+    (:mod:`meho_backplane.events.matcher`, #2878), which fires every
+    subscribed :class:`ScheduledTrigger` row of kind ``'event'`` whose
+    ``event_filter`` the payload contains.
 
     Why a transactional outbox (not raw ``LISTEN/NOTIFY``)
     ------------------------------------------------------
@@ -5366,7 +5367,7 @@ class EventOutbox(Base):
       / :attr:`ScheduledTrigger.tenant_id`.
 
     * ``event_kind`` -- Text NOT NULL. The discriminator the matcher
-      will use once the subscription-junction lands. Free-text (not a
+      keys a subscriber's filter against. Free-text (not a
       closed enum) because event kinds are added per-Initiative
       without coordinated DB migrations; the matching policy lives in
       the subscriber. v0.2 values shipped: ``agent_run.completed``.
@@ -5382,9 +5383,9 @@ class EventOutbox(Base):
       observe which replica is handling a stuck claim.
 
     * ``processed_at`` -- ``timestamptz`` nullable. Stamped after the
-      event has been dispatched (or marked no-op in v0.2 when no
-      subscriber matches). NULL means "not yet processed"; the partial
-      index keys on this column.
+      event has been dispatched to the matcher (an event that matches
+      no subscriber is still stamped, with no fire). NULL means "not
+      yet processed"; the partial index keys on this column.
 
     * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
 
@@ -5404,8 +5405,8 @@ class EventOutbox(Base):
     -------
 
     * ``event_outbox_tenant_unprocessed_idx`` -- b-tree on
-      ``(tenant_id, processed_at, event_id)``. Drives the future
-      tenant-scoped scan once the matcher lands.
+      ``(tenant_id, processed_at, event_id)``. Reserved for a future
+      tenant-scoped drain scan; the drain scans globally today.
     * ``event_outbox_unprocessed_idx`` -- partial b-tree on
       ``event_id`` ``WHERE processed_at IS NULL`` on PG (plain b-tree
       on SQLite). Drives the global drain scan; partial keeps the

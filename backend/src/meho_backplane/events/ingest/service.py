@@ -74,6 +74,7 @@ from meho_backplane.events.ingest.auth import IngestAuthError, verify_ingest_aut
 from meho_backplane.events.ingest.config import IngestConfig
 from meho_backplane.events.ingest.rate_limit import enforce_ingest_rate_limit
 from meho_backplane.events.outbox import publish
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -305,6 +306,7 @@ async def _publish_ingest_broadcast(
     Aggregate/attribution metadata only -- no external body content -- so the
     read-class default holds without a redactor pass.
     """
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=now,
@@ -316,6 +318,9 @@ async def _publish_ingest_broadcast(
         op_class=_INGEST_OP_CLASS,
         result_status="ok",
         audit_id=audit_id,
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
         payload={
             "op_class": _INGEST_OP_CLASS,
             "result_status": "ok",

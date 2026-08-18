@@ -892,6 +892,15 @@
         "keycloakCIDR": {
           "type": "string",
           "description": "Keycloak egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+        },
+        "ingestAllowedNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          },
+          "description": "Namespaces whose Pods are admitted to the inbound event-ingest endpoint on tcp/8000, for in-cluster webhook senders (Alertmanager, Grafana, Harbor, VCF Operations) in another namespace of the same cluster. Each entry is an RFC 1123 namespace name matched by its kubernetes.io/metadata.name label; the rendered ingress rule OR-s them. Default empty — the backplane stays default-deny and senders reach it via the ingress hostname. SaaS-origin senders and the satellite-runner inbound listener are out of scope."
         }
       },
       "allOf": [

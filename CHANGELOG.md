@@ -191,6 +191,31 @@ connector-related release-notes line.
   MANIFEST) that the lane parses. All five op_ids are served; no path
   repoints were needed.
 
+### Fixed — sensor-runner advisory lock leaked onto idle pooled connections, silently starving evaluations (#3010)
+
+- Every background tick loop (sensor runner, agent scheduler, event
+  drain, agent-run reaper, gateway dead-man sweeper) took its
+  `pg_try_advisory_lock` on the tick's pooled work session and committed
+  inside the locked region — each commit returns the session's
+  connection, so the `finally` unlock landed on a *different* connection
+  (PG warns `you don't own a lock`, returns `false`, nothing raises) and
+  the lock stranded on an idle pooled connection. Every later tick that
+  drew any other connection silently claimed nothing: a 300 s sensor
+  recorded 75–118 evaluations/day (expected 288) while the #2763
+  watchdog read healthy. Locks now live on a dedicated pinned connection
+  (`meho_backplane/db/advisory.py::advisory_lock`) so work-session
+  commits can never move them; the invariant — advisory lock and unlock
+  must run on the same connection — is documented on the runner and
+  scheduler pages and regression-tested against real PG (`pg_locks`
+  probes, cross-connection-commit shape).
+- Lock-miss ticks are visible: structured skip logs per subsystem
+  (`sensor_tick_lock_busy`, `scheduler_tick_lock_busy`, …), a new
+  `advisory_lock_busy_total{subsystem}` Prometheus counter, and the
+  `sensor_runner` health facet gains `seconds_since_last_claim` — a
+  claim-based liveness number that keeps growing when the loop ticks
+  without ever winning the lock, the signature `seconds_since_last_tick`
+  was structurally blind to.
+
 ### Added — sddc-manager real-spec reconcile lane (#2982)
 
 - Every hand-coded `METHOD:/path` the sddc-manager connector dispatches

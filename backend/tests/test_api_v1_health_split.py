@@ -229,6 +229,7 @@ def test_read_only_liveness_returns_200_without_vault_touch(
         # reads the enabled-but-not-started shape.
         "sensor_runner": {
             "seconds_since_last_tick": None,
+            "seconds_since_last_claim": None,
             "stalled": False,
             "stall_threshold_seconds": 60.0,
         },

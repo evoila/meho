@@ -62,6 +62,22 @@ TOPOLOGY_REFRESH_TOTAL: Counter = Counter(
     labelnames=("outcome",),
 )
 
+#: Counter for background-loop ticks skipped because the subsystem's
+#: process-wide PG advisory lock was already held, partitioned by
+#: ``subsystem`` (``sensor_runner`` / ``scheduler`` / ``event_drain`` /
+#: ``agent_run_reaper`` / ``gateway_deadman``). #3010: a lock-miss tick
+#: used to be a silent ``return 0`` — a stranded lock (the
+#: cross-connection unlock leak) starved the sensor runner to ~35-50 %
+#: cadence with no signal anywhere. Incremented by
+#: :func:`meho_backplane.db.advisory.advisory_lock` so a sustained
+#: non-zero rate on a single-replica deploy is directly alertable.
+#: Same module-level-singleton rationale as ``HTTP_REQUESTS_TOTAL``.
+ADVISORY_LOCK_BUSY_TOTAL: Counter = Counter(
+    "advisory_lock_busy_total",
+    "Background-loop ticks skipped because the advisory lock was held.",
+    labelnames=("subsystem",),
+)
+
 
 def render_metrics() -> tuple[bytes, str]:
     """Render the default registry as Prometheus exposition bytes.

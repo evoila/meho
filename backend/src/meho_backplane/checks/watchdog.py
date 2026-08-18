@@ -125,6 +125,18 @@ __all__ = [
 #: lock-not-acquired no-op ticks — see the module docstring).
 _LAST_TICK_COMPLETED_AT: datetime | None = None
 
+#: When the last tick that actually **held the advisory lock** finished,
+#: per process (#3010). A lock-miss tick proves the loop coroutine is
+#: alive but not that this process is evaluating anything — the observed
+#: failure mode was a lock stranded on an idle pooled connection: every
+#: tick completed, ``seconds_since_last_tick`` stayed green, and zero
+#: sensors were claimed for hours. This stamp feeds the
+#: ``seconds_since_last_claim`` facet so that class is visible. On a
+#: multi-replica deploy only the lock-winning replica's claim stamp
+#: advances — which is why ``stalled`` deliberately stays keyed on the
+#: tick stamp, not this one.
+_LAST_CLAIM_AT: datetime | None = None
+
 #: Watchdog start instant — the staleness reference until the first tick
 #: completes, so a runner that never manages a single tick still trips
 #: the detector instead of hiding behind a ``None`` stamp.
@@ -161,9 +173,21 @@ class SensorRunnerLiveness:
     directly). ``stalled`` is derived live from the stamp against the
     threshold on every read, deliberately **not** from the watchdog's
     emission latch, so a dead watchdog task cannot blind the health facet.
+
+    ``seconds_since_last_claim`` (#3010) measures from the last tick that
+    actually **held** the advisory lock (falling back to the watchdog
+    start, like the tick reference). It diverges from
+    ``seconds_since_last_tick`` exactly when the loop is alive but never
+    winning the lock — the stranded-lock starvation the tick facet is
+    structurally blind to. It is per-process and informational: on a
+    multi-replica deploy the non-leader replicas' claim staleness grows
+    legitimately, so ``stalled`` stays keyed on the tick stamp and an
+    external prober alerts on claim staleness fleet-wide (min across
+    replicas), not per pod.
     """
 
     seconds_since_last_tick: float | None
+    seconds_since_last_claim: float | None
     stalled: bool
     stall_threshold_seconds: float
 
@@ -174,8 +198,9 @@ def reset_watchdog_state() -> None:
     Called from :func:`meho_backplane.checks.runner.reset_sensor_runner_state`
     so the runner test fixtures reset both modules in one place.
     """
-    global _LAST_TICK_COMPLETED_AT, _BASELINE, _STALLED_SINCE, _STALL_TENANTS
+    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _BASELINE, _STALLED_SINCE, _STALL_TENANTS
     _LAST_TICK_COMPLETED_AT = None
+    _LAST_CLAIM_AT = None
     _BASELINE = None
     _STALLED_SINCE = None
     _STALL_TENANTS = ()
@@ -213,15 +238,21 @@ def sensor_runner_liveness(now: datetime | None = None) -> SensorRunnerLiveness:
     check_at = now if now is not None else datetime.now(UTC)
     threshold = _stall_threshold_seconds()
     reference = _staleness_reference()
+    claim_reference = _LAST_CLAIM_AT if _LAST_CLAIM_AT is not None else _BASELINE
+    claim_seconds = (
+        (check_at - claim_reference).total_seconds() if claim_reference is not None else None
+    )
     if reference is None:
         return SensorRunnerLiveness(
             seconds_since_last_tick=None,
+            seconds_since_last_claim=claim_seconds,
             stalled=False,
             stall_threshold_seconds=threshold,
         )
     quiet_seconds = (check_at - reference).total_seconds()
     return SensorRunnerLiveness(
         seconds_since_last_tick=quiet_seconds,
+        seconds_since_last_claim=claim_seconds,
         stalled=quiet_seconds > threshold,
         stall_threshold_seconds=threshold,
     )
@@ -237,20 +268,30 @@ async def _active_sensor_tenant_ids() -> list[uuid.UUID]:
         return list(rows)
 
 
-async def note_tick_completed(now: datetime | None = None) -> None:
+async def note_tick_completed(now: datetime | None = None, *, lock_acquired: bool = True) -> None:
     """Stamp a completed runner tick; emit recovery if a stall was flagged.
 
     Called by :func:`~meho_backplane.checks.runner.run_one_sensor_tick` on
-    every completed tick. **Never raises**: the stamp and the stall-latch
-    clear commit before any emission, and the emission block is guarded,
-    so a broadcast or logging failure cannot fail the tick that proved
-    the loop alive. *now* is injectable for deterministic tests.
+    every completed tick. *lock_acquired* (#3010) says whether the tick
+    actually held the advisory lock: only those ticks stamp the claim
+    facet, so a loop that completes every tick but never wins the lock (a
+    stranded lock on an idle pooled connection, or genuine multi-replica
+    contention) shows a growing ``seconds_since_last_claim`` instead of
+    reading fully healthy. The tick stamp itself is unconditional — a
+    lock-miss tick still proves the loop coroutine alive, which is the
+    stall class the tick facet exists for. **Never raises**: the stamp and
+    the stall-latch clear commit before any emission, and the emission
+    block is guarded, so a broadcast or logging failure cannot fail the
+    tick that proved the loop alive. *now* is injectable for
+    deterministic tests.
     """
-    global _LAST_TICK_COMPLETED_AT, _STALLED_SINCE, _STALL_TENANTS
+    global _LAST_TICK_COMPLETED_AT, _LAST_CLAIM_AT, _STALLED_SINCE, _STALL_TENANTS
     stamp = now if now is not None else datetime.now(UTC)
     stalled_since = _STALLED_SINCE
     notified = _STALL_TENANTS
     _LAST_TICK_COMPLETED_AT = stamp
+    if lock_acquired:
+        _LAST_CLAIM_AT = stamp
     if stalled_since is None:
         return
     _STALLED_SINCE = None

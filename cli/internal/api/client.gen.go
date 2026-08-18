@@ -4568,6 +4568,15 @@ type HealthResponse struct {
 	// always a number. The value is per-process: each replica reports its
 	// own loop, which is exactly the failure mode observed (one process's
 	// loop coroutine going quiet).
+	//
+	// ``seconds_since_last_claim`` (#3010) measures from the last tick
+	// that actually **held** the runner's advisory lock. It diverges from
+	// ``seconds_since_last_tick`` when the loop is alive but never winning
+	// the lock — the stranded-lock starvation ``stalled`` is structurally
+	// blind to (every tick completes; nothing is ever claimed). Per-process
+	// and informational: on a multi-replica deploy only the lock-winning
+	// replica's claim stamp advances, so alert on the minimum across
+	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
@@ -5042,6 +5051,15 @@ type LivenessResponse struct {
 	// always a number. The value is per-process: each replica reports its
 	// own loop, which is exactly the failure mode observed (one process's
 	// loop coroutine going quiet).
+	//
+	// ``seconds_since_last_claim`` (#3010) measures from the last tick
+	// that actually **held** the runner's advisory lock. It diverges from
+	// ``seconds_since_last_tick`` when the loop is alive but never winning
+	// the lock — the stranded-lock starvation ``stalled`` is structurally
+	// blind to (every tick completes; nothing is ever claimed). Per-process
+	// and informational: on a multi-replica deploy only the lock-winning
+	// replica's claim stamp advances, so alert on the minimum across
+	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 }
 
@@ -6840,7 +6858,17 @@ type SensorResultReadState string
 // always a number. The value is per-process: each replica reports its
 // own loop, which is exactly the failure mode observed (one process's
 // loop coroutine going quiet).
+//
+// “seconds_since_last_claim“ (#3010) measures from the last tick
+// that actually **held** the runner's advisory lock. It diverges from
+// “seconds_since_last_tick“ when the loop is alive but never winning
+// the lock — the stranded-lock starvation “stalled“ is structurally
+// blind to (every tick completes; nothing is ever claimed). Per-process
+// and informational: on a multi-replica deploy only the lock-winning
+// replica's claim stamp advances, so alert on the minimum across
+// replicas, not per pod.
 type SensorRunnerStatus struct {
+	SecondsSinceLastClaim *float32 `json:"seconds_since_last_claim"`
 	SecondsSinceLastTick  *float32 `json:"seconds_since_last_tick"`
 	StallThresholdSeconds float32  `json:"stall_threshold_seconds"`
 	Stalled               bool     `json:"stalled"`

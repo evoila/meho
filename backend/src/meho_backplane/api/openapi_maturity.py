@@ -72,6 +72,10 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "conventions": "memory_knowledge",
     "discovery": "auth_tenancy",
     "docs": "doc_collections",
+    # The event_source registry (#2880) is the inbound producer side of the
+    # event -> kind=event ScheduledTrigger substrate (Initiative #2877), so
+    # it follows the scheduler feature it feeds.
+    "event-sources": "scheduler",
     "feed": "broadcast",
     "gateway": "satellite_gateway",
     "knowledge": "memory_knowledge",

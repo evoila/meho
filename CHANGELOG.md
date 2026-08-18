@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — vcf-automation real-spec reconcile lane + region-list repoint (#2983)
+
+- Every hand-coded `METHOD:/path` the vcf-automation connector
+  dispatches (the seven typed-op paths, the two per-plane login POSTs,
+  the two fingerprint probes) is now swept by the #2980-harness lane
+  (`backend/tests/test_connectors_vcf_automation_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). VCFA's shelf is a mosaic, so the lane splits by
+  plane: the tenant half asserts against the pinned Apache-2.0
+  `vra-iaas.json` (Swagger 2.0; lane-supplied extraction per the
+  standard's non-OpenAPI clause), the provider half is an evidenced
+  exclusion (no pinnable wire spec exists — recorded in
+  `docs/decisions/spec-reconcile-guards-standard.md`). CI's
+  secret-gated spec-shelf checkout is widened to
+  `docs/vcf-automation-9.0` in both Python jobs. First run surfaced
+  one real finding, fixed per the #2970 protocol:
+  `vcfa.provider.region.list` targeted `GET /cloudapi/1.0.0/regions`,
+  which VCFA 9.0 404s (Region moved to the `vcf/` cloudapi prefix) —
+  repointed to `GET /cloudapi/vcf/regions` per the pinned
+  go-vcloud-director v3.0.0 endpoint map and the shelf's live-probe
+  record.
+
 ### Added — sddc-manager real-spec reconcile lane (#2982)
 
 - Every hand-coded `METHOD:/path` the sddc-manager connector dispatches

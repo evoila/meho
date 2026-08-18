@@ -31165,6 +31165,10 @@
       "x-maturity": "experimental"
     },
     {
+      "name": "event-sources",
+      "x-maturity": "beta"
+    },
+    {
       "name": "feed",
       "x-maturity": "beta"
     },

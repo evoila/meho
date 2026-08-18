@@ -288,6 +288,12 @@ The same secret-gated checkout additionally fetches the shelf's
 `swagger-vra-sdk-go-v0.6.5/vra-iaas.json`, the tenant-plane IaaS API
 Swagger 2.0 document, 143 paths) for the vcf-automation reconcile lane
 (`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`),
+### Extension: vcf-operations / vcf-operations-9.0 (#2984)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/vcf-operations-9.0/` directory (~5 MB) for the vcf-operations
+reconcile lane
+(`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`),
 under the identical ephemeral-use conditions recorded above (sparse
 read-only checkout, workspace destroyed at job end, never committed,
 never in artifacts or logs, secret withheld from fork PRs and the
@@ -302,6 +308,22 @@ extension mechanics. The provider (cloudapi / classic `/api/*`) plane
 pins nothing because nothing pinnable exists — that half of the lane is
 the evidenced exclusion recorded in the standard doc's
 `vcf-automation-9.0` entry.
+extension: the core (vROps Suite API) spec is published by VMware in
+the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+(pinned at `85151f6b`, retrieved 2026-04-29) — the provenance note of
+record is the shelf's `vcf-operations-9.0/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics; the wave-3 blanket above is not needed here. The
+file the lane parses is `vcf-operations-openapi.ingestable.json` — a
+deterministic derivative pinned next to the byte-identical vendor fetch
+(the vendor document carries three empty `required` arrays, illegal per
+the OpenAPI 3.0 metaschema, so `parse_openapi` refuses it; recipe +
+sha256 in the shelf MANIFEST — the nsx-9.0 derived-artifact shape).
+**Sequencing:** the derivative lands via consumer-repo PR
+(`claude-rdc-hetzner-dc#2534`) which must merge before this repo's
+widened verify step can pass.
 
 ### Signoff extension — Hetzner Robot (hetzner-robot-2026-04, 2026-08-18, #2985)
 

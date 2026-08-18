@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — sddc-manager real-spec reconcile lane (#2982)
+
+- Every hand-coded `METHOD:/path` the sddc-manager connector dispatches
+  (the 14 typed-read paths, the `POST /v1/tokens` session mint, the
+  profile fingerprint's `GET /v1/releases/system`) is now asserted
+  against the pinned `sddc-manager-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/sddc-manager-9.0` in both Python jobs. First armed run surfaced
+  one real finding, fixed in the same PR per the #2970 protocol:
+  `sddc.domain.status` targeted `GET /v1/domains/{id}/status`, which the
+  pinned 9.0 spec does not serve — repointed to `GET /v1/domains/{id}`,
+  whose domain object carries the top-level `status` lifecycle field the
+  op documents (the op now returns the full domain object; `status`
+  stays top-level).
+
 ### Added — holodeck deploy-lifecycle typed ops: `config.apply` / `instance.start` / `instance.status` / `router.patch` (#2908)
 
 - The `holodeck` connector gains four typed ops that make the consumer's

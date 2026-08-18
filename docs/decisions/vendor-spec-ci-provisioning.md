@@ -208,6 +208,24 @@ Until this section is completed, the question stands as **recorded and
 routed**, not resolved — and the `SPEC_SHELF_TOKEN` secret must not be
 provisioned.
 
+### Extension: sddc-manager / sddc-manager-9.0 (#2982)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/sddc-manager-9.0/` directory (`sddc-manager-openapi.json`, OpenAPI
+3.0.1, ~1.6 MB, 280 paths) for the sddc-manager reconcile lane
+(`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`), under
+the identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is published by VMware in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+(pinned at `85151f6b`, retrieved 2026-04-29) — the provenance note of
+record is the shelf's `sddc-manager-9.0/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

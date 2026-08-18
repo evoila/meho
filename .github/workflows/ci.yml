@@ -293,14 +293,16 @@ jobs:
           repository: evoila-bosnia/claude-rdc-hetzner-dc
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
-          # Cone-mode sparse checkout of the shelf directory only +
-          # lazy blob filter: the runner materialises just the
-          # vcenter-9.0 spec files (~18 MB), not the whole consumer
-          # repo. No `ref:` pin — the shelf's default branch IS the
-          # operator-curated pin (the directory is version-named
-          # vcenter-9.0/), matching the local-dev contract documented
-          # in tests/acceptance/_vcenter_spec.py.
-          sparse-checkout: docs/vcenter-9.0
+          # Cone-mode sparse checkout of the shelf directories only +
+          # lazy blob filter: the runner materialises just the pinned
+          # spec files (~20 MB), not the whole consumer repo. No `ref:`
+          # pin — the shelf's default branch IS the operator-curated
+          # pin (the directories are version-named, e.g. vcenter-9.0/),
+          # matching the local-dev contract documented in
+          # tests/acceptance/_vcenter_spec.py. Keep the list sorted.
+          sparse-checkout: |
+            docs/sddc-manager-9.0
+            docs/vcenter-9.0
           filter: blob:none
           # Read-only consumer; never pushes. Don't leave the token in
           # the shelf clone's local git config after checkout.
@@ -318,13 +320,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          for f in spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+          for f in spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
             if [ ! -f "$f" ]; then
-              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the vCenter real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
+              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
+          echo "spec-shelf OK: sddc-manager-openapi.json + vcenter.yaml + vi-json.yaml present under spec-shelf/docs/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -942,7 +944,9 @@ jobs:
           repository: evoila-bosnia/claude-rdc-hetzner-dc
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
-          sparse-checkout: docs/vcenter-9.0
+          sparse-checkout: |
+            docs/sddc-manager-9.0
+            docs/vcenter-9.0
           filter: blob:none
           persist-credentials: false
 
@@ -953,13 +957,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          for f in spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+          for f in spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
             if [ ! -f "$f" ]; then
-              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the vCenter real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
+              echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
+          echo "spec-shelf OK: sddc-manager-openapi.json + vcenter.yaml + vi-json.yaml present under spec-shelf/docs/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

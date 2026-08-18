@@ -242,12 +242,19 @@ async def test_domain_status_builds_path_from_id(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """AC #1: sddc.domain.status interpolates the domain id into the path."""
+    """AC #1: sddc.domain.status interpolates the domain id into the path.
+
+    The op reads ``GET /v1/domains/{id}`` -- the domain object whose
+    top-level ``status`` carries the lifecycle state; the pinned 9.0 spec
+    serves no dedicated ``/status`` sub-resource (the #2982 reconcile
+    finding).
+    """
     await _register_and_resolve(_stub_embedding)
 
+    domain_payload = {"id": "domain-mgmt", "name": "sfo-m01", "status": "ACTIVE"}
     async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
         mock.post(_TOKEN_PATH).respond(200, json={"accessToken": _ACCESS_TOKEN})
-        route = mock.get("/v1/domains/domain-mgmt/status").respond(200, json={"status": "ACTIVE"})
+        route = mock.get("/v1/domains/domain-mgmt").respond(200, json=domain_payload)
         result = await dispatch(
             operator=_make_operator(),
             connector_id=SDDC_CONNECTOR_ID,
@@ -257,7 +264,7 @@ async def test_domain_status_builds_path_from_id(
         )
 
     assert result.status == "ok", result.error
-    assert result.result == {"status": "ACTIVE"}
+    assert result.result == domain_payload
     assert route.called and route.call_count == 1
 
 

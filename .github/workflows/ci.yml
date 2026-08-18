@@ -309,6 +309,7 @@ jobs:
             docs/hetzner-robot-2026-04
             docs/keycloak-26.3
             docs/nsx-9.0
+            docs/rabbitmq-4.3
             docs/sddc-manager-9.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
@@ -335,6 +336,8 @@ jobs:
             spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
             spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
+            spec-shelf/docs/rabbitmq-4.3/http-api-index.md \
+            spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
@@ -345,7 +348,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -967,6 +970,7 @@ jobs:
             docs/hetzner-robot-2026-04
             docs/keycloak-26.3
             docs/nsx-9.0
+            docs/rabbitmq-4.3
             docs/sddc-manager-9.0
             docs/vcenter-9.0
             docs/vcf-automation-9.0
@@ -986,6 +990,8 @@ jobs:
             spec-shelf/docs/keycloak-26.3/keycloak-admin-openapi.json \
             spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
             spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
+            spec-shelf/docs/rabbitmq-4.3/http-api-index.md \
+            spec-shelf/docs/rabbitmq-4.3/rabbit_shovel_mgmt_shovels.erl \
             spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
             spec-shelf/docs/vcenter-9.0/vcenter.yaml \
             spec-shelf/docs/vcenter-9.0/vi-json.yaml \
@@ -996,7 +1002,7 @@ jobs:
               exit 1
             fi
           done
-          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
+          echo "spec-shelf OK: webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

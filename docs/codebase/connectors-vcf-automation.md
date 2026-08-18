@@ -30,12 +30,24 @@ session with **zero catalog state**. Seven ops:
 | op_id | plane | path |
 |---|---|---|
 | `vcfa.provider.org.list` | provider | `GET /cloudapi/1.0.0/orgs` |
-| `vcfa.provider.region.list` | provider | `GET /cloudapi/1.0.0/regions` |
+| `vcfa.provider.region.list` | provider | `GET /cloudapi/vcf/regions` |
 | `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/site` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
 | `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
 | `vcfa.tenant.deployment.get` | tenant | `GET /iaas/api/deployments/{id}` |
 | `vcfa.tenant.about` | tenant | `GET /iaas/api/about` |
+
+The region list rides the `vcf/` cloudapi prefix, not the classic
+`1.0.0/` one — VCFA 9.0 moved Region there and 404s the classic form
+(repointed by the #2983 reconcile; rationale on the
+`PROVIDER_REGIONS_PATH` constant). Every hand-coded `METHOD:/path` in
+the connector is swept by the spec-reconcile lane
+(`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`,
+#2983): the tenant-plane half asserts against the pinned Apache-2.0
+`vra-iaas.json` on the spec shelf; the provider-plane half is an
+evidenced exclusion (no pinnable wire spec exists — see the
+`vcf-automation-9.0` entry in
+`docs/decisions/spec-reconcile-guards-standard.md`).
 
 Each op **declares the plane it rides**; `typed_ops._validate_typed_op_planes`
 asserts at import time that the declared `plane` matches

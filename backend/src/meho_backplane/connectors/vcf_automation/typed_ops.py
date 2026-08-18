@@ -24,7 +24,7 @@ Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT session):
 
 * ``vcfa.provider.org.list`` — ``GET /cloudapi/1.0.0/orgs``
-* ``vcfa.provider.region.list`` — ``GET /cloudapi/1.0.0/regions``
+* ``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions``
 * ``vcfa.provider.health`` — ``GET /cloudapi/1.0.0/site`` (appliance
   site identity + product version; the provider-plane health/probe
   surface ``fingerprint`` and the operator use to confirm which VCFA
@@ -91,7 +91,15 @@ __all__ = [
 # connector handler bodies so the two never drift. plane_for_path()
 # reads these to pick the auth plane at transport time.
 PROVIDER_ORGS_PATH: Final[str] = "/cloudapi/1.0.0/orgs"
-PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/1.0.0/regions"
+#: VCFA 9.0 serves Region under the ``vcf/`` cloudapi prefix, not the
+#: classic ``1.0.0/`` one (#2983 reconcile finding): the SDK the vendor's
+#: own terraform provider pins for VCFA 9.0 maps regions as
+#: ``OpenApiPathVcf`` (``go-vcloud-director@v3.0.0``
+#: ``govcd/openapi_endpoints.go``), and the shelf's live-probe record
+#: has ``GET /cloudapi/1.0.0/regions`` → 404 with ``/cloudapi/vcf/regions``
+#: serving (consumer kb ``vcf-automation-9.0-provider-object-model.md``,
+#: probes 2026-05-16 / 2026-07-21).
+PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/vcf/regions"
 PROVIDER_SITE_PATH: Final[str] = "/cloudapi/1.0.0/site"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
 TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
@@ -263,7 +271,7 @@ _PROVIDER_REGION_LIST = VcfaTypedOp(
     path=PROVIDER_REGIONS_PATH,
     summary="List VCFA regions on the appliance (provider plane).",
     description=(
-        "Lists VCFA regions via GET /cloudapi/1.0.0/regions on the provider "
+        "Lists VCFA regions via GET /cloudapi/vcf/regions on the provider "
         "plane — the VCFA 9 evolution of the vCloud-Director provider VDC. "
         "Each region groups compute/memory/networking under one NSX domain, "
         "typically backed by one or more VCF workload domains. Supports "

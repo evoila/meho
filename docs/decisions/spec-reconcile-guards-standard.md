@@ -269,6 +269,82 @@ pinnable. The record below replaces the exclusion; the lane is armed.
   (`claude-rdc-hetzner-dc#2514`) which must merge before this repo's
   widened verify step can pass.
 
+### vcf-automation-9.0 — tenant plane ARMED, provider plane excluded (#2983)
+
+VCFA is dual-plane and its shelf is a **mosaic** (the shelf's
+`vcf-automation-9.0/MANIFEST.md`, grounded 2026-04-30, is the
+provenance record): the tenant/consumption plane has a pinnable
+published spec; the provider (cloudapi / classic `/api/*`) plane has
+none. The lane
+(`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`)
+splits accordingly — its manifest pin sweeps **all ten** hand-coded
+op_ids unconditionally, so the enumeration stays whole across the
+split.
+
+- **Armed (tenant plane, 5 op_ids under `/iaas/api/*`):** asserted
+  against the pinned
+  `swagger-vra-sdk-go-v0.6.5/vra-iaas.json` (IaaS API, Swagger 2.0,
+  143 paths) — vendored in the **public Apache-2.0**
+  [`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) repo at
+  tag `v0.6.5`; the on-prem VCFA appliance serves the same path shapes
+  (MANIFEST caveat). `parse_openapi` rejects Swagger 2.0 by decision
+  (#2090), so the lane supplies its own served-set extraction per this
+  standard's non-OpenAPI-artifact clause. Deliberately **no** OpenAPI 3
+  conversion is pinned (contrast nsx-9.0): unlike the nsx conversions
+  — which are byte-for-byte what an operator ingest consumes — nothing
+  VCFA-tenant is ever ingested (the typed ops exist precisely because
+  ingest rejects these fragments), so a conversion would be a
+  test-only artifact with no dispatch-fidelity value.
+- **Excluded (provider plane, 5 op_ids: `GET:/cloudapi/1.0.0/orgs`,
+  `GET:/cloudapi/vcf/regions`, `GET:/cloudapi/1.0.0/site`,
+  `POST:/cloudapi/1.0.0/sessions/provider`, `GET:/api/versions`).**
+  What was checked, per family: (1) **vendor-published artifacts** —
+  no `automation/` directory in
+  [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs)
+  (checked 2026-04-30; re-checked at filing); no swagger/openapi
+  artifact vendored in `go-vcloud-director@v3.0.0` (the exact SDK tag
+  the vendor's own `terraform-provider-vcfa@v1.0.0` pins for VCFA 9.0)
+  or in the provider repo itself — a `find` for `*swagger*` /
+  `*openapi*.{json,yaml}` is empty in both; the hand-written
+  `govcd/openapi_endpoints.go` endpoint→version map is the only
+  machine-readable surface (consumer kb
+  `vcf-automation-9.0-provider-object-model.md`, #501). That map
+  covers only the cloudapi object families — not the classic `/api/*`
+  surface, not the session endpoints, not `/site` — so pinning it
+  cannot serve a reconcile authority for the five paths above without
+  false reds. (2) **Appliance-served spec** —
+  `/cloudapi/1.0.0/openapi*` → 404 with a correctly-versioned
+  `Accept` (live Holodeck VCFA 9.0.2, 2026-05-16, #501). (3)
+  **Broadcom dev-portal (xapis)** — the VCFA pages there cover the
+  consumption/tenant surface already vendored in `vra-sdk-go`
+  (MANIFEST survey note). **Residual risk, named** (the nsx lesson —
+  an exclusion must cover every vendor-documented family): no probe
+  has surveyed appliance spec-serving locations beyond
+  `/cloudapi/1.0.0/openapi*`; if a vendor-documented spec-serving
+  family emerges, that falsifies this exclusion and is the activation
+  trigger.
+- **Activation:** `vmware/vcf-api-specs` gaining an automation spec
+  (the MANIFEST's re-grounding trigger) or an appliance-served spec
+  being evidenced. The activating task runs the full extension
+  mechanics and reconciles the five provider op_ids on first run.
+- **First-run findings (1), dispositioned in the lane PR:**
+  `vcfa.provider.region.list` targeted `GET:/cloudapi/1.0.0/regions`
+  — surfaced by the shelf's provenance record rather than a spec
+  parse (the path is provider-plane): the pinned SDK map places
+  Region under the `vcf/` cloudapi prefix, and the shelf's live-probe
+  record has the `1.0.0/` form → 404 with `/cloudapi/vcf/regions`
+  serving (2026-05-16 #505 build run; re-confirmed by later probes,
+  #499/#2006). **Mechanical repoint** to `GET:/cloudapi/vcf/regions`
+  — same resource, same paged `values[]`/`resultTotal` envelope, same
+  `Accept` (the cloudapi form; `provider_accept_for_path` keys on the
+  `/api/` prefix only), plane classification unchanged. One residual
+  the exclusion cannot discharge: `GET:/cloudapi/1.0.0/site`
+  (`vcfa.provider.health`) is unverifiable today — no spec serves it,
+  no live probe of the singular `/site` form is recorded (the plural
+  `/sites` 404s live, 2026-05-05), and vCD 10.5 serves the singular
+  form. Left as-is per "never invent a path"; the activation run
+  reconciles it.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

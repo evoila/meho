@@ -281,6 +281,28 @@ Future lane tasks record a reference to that comment here instead of
 obtaining a fresh attestation; OSS-licensed specs continue to use the
 provenance-note form and need no attestation.
 
+### Extension: vcf-automation / vcf-automation-9.0 (#2983)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/vcf-automation-9.0/` directory (~3 MB; the lane parses
+`swagger-vra-sdk-go-v0.6.5/vra-iaas.json`, the tenant-plane IaaS API
+Swagger 2.0 document, 143 paths) for the vcf-automation reconcile lane
+(`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`),
+under the identical ephemeral-use conditions recorded above (sparse
+read-only checkout, workspace destroyed at job end, never committed,
+never in artifacts or logs, secret withheld from fork PRs and the
+Dependabot store). No vendor-license attestation is needed for this
+extension: the spec is vendored by VMware in the **public, Apache-2.0**
+[`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) repo
+(pinned at tag `v0.6.5`, commit `a886fc67`, retrieved 2026-04-30) — the
+provenance note of record is the shelf's
+`vcf-automation-9.0/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The provider (cloudapi / classic `/api/*`) plane
+pins nothing because nothing pinnable exists — that half of the lane is
+the evidenced exclusion recorded in the standard doc's
+`vcf-automation-9.0` entry.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

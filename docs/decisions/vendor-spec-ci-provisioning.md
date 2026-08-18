@@ -226,6 +226,61 @@ OSS-licensed-spec form in
 [`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
 extension mechanics.
 
+### Signoff extension — NSX (nsx-9.0, 2026-08-18, #2981 / PR #3007)
+
+The nsx spec-reconcile lane
+(`backend/tests/test_connectors_nsx_spec_reconcile.py`) arms against
+two additional vendor-licensed artifacts, fetched by the **same**
+secret-gated sparse checkout (widened to `docs/nsx-9.0`; same
+`SPEC_SHELF_TOKEN`, no new secret) under the **same** ephemeral-use
+conditions recorded in "What CI does with the specs" above:
+
+- **What is fetched:** the shelf's `docs/nsx-9.0/` directory (~33 MB)
+  — `nsx_api.json` + `nsx_policy_api.json` (NSX Manager / Policy API
+  Swagger 2.0 documents, **served by the licensed NSX manager
+  appliance itself** at the vendor-documented
+  `GET /api/v1/spec/openapi/…` endpoints; fetched 2026-08-18 from the
+  operator's lab manager, NSX 9.1.0.0.25318225, session-auth) plus
+  their deterministic OpenAPI 3.0 conversions
+  (`*.openapi3.json`, the files the lane parses) and sidecars.
+  Provenance, sha256, and the conversion recipe: the shelf's
+  `nsx-9.0/MANIFEST.md`.
+- **Same conditions:** read-only pytest input on an ephemeral ARC
+  runner destroyed at job end; never committed to this public repo;
+  never in build artifacts or logs (the verify step prints file
+  presence only); secret withheld from fork PRs and the Dependabot
+  store; `persist-credentials: false`.
+- **Provenance difference vs vSphere, recorded for the reviewer:**
+  the vSphere specs are vendor-*published* (public
+  `vmware/vcf-api-specs`); the NSX specs are vendor-*served* — NSX
+  publishes no public artifact, and each licensed manager serves its
+  own spec to its authenticated operators. The shelf copy is the
+  operator's lawful fetch from the operator's own licensed appliance,
+  handled thereafter identically to the vSphere specs.
+
+**Attestation for the NSX extension:** completed (mirrors the #2949
+flow — attestation comment linked below).
+
+- **Reviewer:** Damir Topic (@damir-topic), maintainer/operator
+- **Date:** 2026-08-18
+- **Determination:** Attestation that fetching the pinned NSX
+  manager-served OpenAPI specs from the private spec-shelf into
+  ephemeral same-repo CI jobs, under the conditions above, is
+  acceptable under the operator's vendor license. The specs were
+  obtained from the operator's own lab NSX manager — same conditions
+  as the 2026-08-17 vSphere determination.
+- **Attestation link:**
+  <https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>
+
+**Wave-3 blanket determination:** the attestation comment above also
+records a standing blanket for the remaining wave-3 vendor-spec pins
+(initiative #2979 — e.g. vcf-automation-9.0, vcf-operations-9.0,
+hetzner-robot-2026-04, and any further vendor spec pinned to the
+operator's shelf for reconcile lanes) under identical conditions.
+Future lane tasks record a reference to that comment here instead of
+obtaining a fresh attestation; OSS-licensed specs continue to use the
+provenance-note form and need no attestation.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;
@@ -237,7 +292,12 @@ extension mechanics.
 - The shelf's `docs/` also carries other vendor spec directories (`nsx-9.0/`,
   `sddc-manager-9.0/`, …). The same checkout could serve future sibling
   canaries by widening the `sparse-checkout` list — deliberately not done
-  here (#2949's DoD is the vCenter lanes). The G4.1 consumer-kb canary does
+  here (#2949's DoD is the vCenter lanes). *Update 2026-08-18:* the
+  first such widenings happened — `docs/sddc-manager-9.0` was added
+  for the sddc-manager reconcile lane (#2982 / PR #3008; see the
+  sddc-manager extension above) and `docs/nsx-9.0` for the nsx
+  reconcile lane (#2981 / PR #3007; see the "Signoff extension — NSX"
+  section above). The G4.1 consumer-kb canary does
   **not** light up: it resolves `<docs-root>/kb`, which does not exist under
   the shelf's `docs/` (the consumer's `kb/` is a repo-root sibling).
 - Rotation is a secret-value swap (runbook step 3); revocation (delete the

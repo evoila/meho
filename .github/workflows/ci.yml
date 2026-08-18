@@ -264,15 +264,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Checkout vendor vCenter spec-shelf (secret-gated, #2949)
-        # The vSphere OpenAPI specs (vcenter.yaml ~961 paths,
-        # vi-json.yaml ~2,195 paths) are Broadcom/VMware
-        # vendor-licensed and deliberately NOT committed to this public
-        # repo — they live in the operator's private spec-shelf repo.
-        # This step fetches ONLY the pinned vcenter-9.0 shelf directory
-        # into the ephemeral runner workspace so the real-spec
-        # ingest/reconcile lanes stop skipping. Licensing record +
-        # provisioning runbook (secret scope, signoff gate):
+      - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
+        # The vendor OpenAPI specs (vSphere: vcenter.yaml ~961 paths +
+        # vi-json.yaml ~2,195 paths; NSX: the manager-served
+        # nsx_api / nsx_policy_api pair, ~3,510 paths) are
+        # Broadcom/VMware vendor-licensed and deliberately NOT
+        # committed to this public repo — they live in the operator's
+        # private spec-shelf repo. This step fetches ONLY the pinned
+        # shelf directories into the ephemeral runner workspace so the
+        # real-spec ingest/reconcile lanes stop skipping. Licensing
+        # record + provisioning runbook (secret scope, signoff gate):
         # docs/decisions/vendor-spec-ci-provisioning.md. The specs are
         # never committed, never uploaded as artifacts (the
         # upload-artifact steps in this workflow enumerate exact
@@ -295,12 +296,15 @@ jobs:
           path: spec-shelf
           # Cone-mode sparse checkout of the shelf directories only +
           # lazy blob filter: the runner materialises just the pinned
-          # spec files (~20 MB), not the whole consumer repo. No `ref:`
-          # pin — the shelf's default branch IS the operator-curated
-          # pin (the directories are version-named, e.g. vcenter-9.0/),
+          # spec files (~33 MB nsx-9.0 + ~2 MB sddc-manager-9.0 +
+          # ~18 MB vcenter-9.0), not the whole consumer repo. No
+          # `ref:` pin — the shelf's default branch IS the
+          # operator-curated pin (the directories are version-named),
           # matching the local-dev contract documented in
-          # tests/acceptance/_vcenter_spec.py. Keep the list sorted.
+          # tests/acceptance/_vcenter_spec.py + tests/_spec_shelf.py.
+          # Keep the list sorted.
           sparse-checkout: |
+            docs/nsx-9.0
             docs/sddc-manager-9.0
             docs/vcenter-9.0
           filter: blob:none
@@ -308,7 +312,7 @@ jobs:
           # the shelf clone's local git config after checkout.
           persist-credentials: false
 
-      - name: Verify spec-shelf provisioned the pinned vCenter specs
+      - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard: once the secret exists, a shelf
         # layout move (or a sparse-checkout typo here) must fail THIS
         # job — otherwise the resolvers would return None and the spec
@@ -320,13 +324,18 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          for f in spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+          for f in \
+            spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
+            spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
+            spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
+            spec-shelf/docs/vcenter-9.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: sddc-manager-openapi.json + vcenter.yaml + vi-json.yaml present under spec-shelf/docs/"
+          echo "spec-shelf OK: nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -932,7 +941,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Checkout vendor vCenter spec-shelf (secret-gated, #2949)
+      - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
         # Same secret-gated sparse checkout as the python-lint-test
         # job's spec-shelf step — see that step's comment for the
         # licensing pointer (docs/decisions/vendor-spec-ci-
@@ -945,25 +954,31 @@ jobs:
           token: ${{ secrets.SPEC_SHELF_TOKEN }}
           path: spec-shelf
           sparse-checkout: |
+            docs/nsx-9.0
             docs/sddc-manager-9.0
             docs/vcenter-9.0
           filter: blob:none
           persist-credentials: false
 
-      - name: Verify spec-shelf provisioned the pinned vCenter specs
+      - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard — same rationale as the
         # python-lint-test job's occurrence.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          for f in spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json spec-shelf/docs/vcenter-9.0/vcenter.yaml spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
+          for f in \
+            spec-shelf/docs/nsx-9.0/nsx_api.openapi3.json \
+            spec-shelf/docs/nsx-9.0/nsx_policy_api.openapi3.json \
+            spec-shelf/docs/sddc-manager-9.0/sddc-manager-openapi.json \
+            spec-shelf/docs/vcenter-9.0/vcenter.yaml \
+            spec-shelf/docs/vcenter-9.0/vi-json.yaml; do
             if [ ! -f "$f" ]; then
               echo "::error title=Spec-shelf layout drift::${f} missing after the spec-shelf checkout — the real-spec lanes would silently skip. Fix the shelf layout or this workflow's sparse-checkout path."
               exit 1
             fi
           done
-          echo "spec-shelf OK: sddc-manager-openapi.json + vcenter.yaml + vi-json.yaml present under spec-shelf/docs/"
+          echo "spec-shelf OK: nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the

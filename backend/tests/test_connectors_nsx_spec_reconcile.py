@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""nsx real-spec reconcile lane — hand-coded paths vs the pinned nsx-9.0 spec.
+"""nsx real-spec reconcile lane — hand-coded paths vs the pinned nsx-9.0 specs.
 
 #2981 (initiative #2979): every hand-coded ``METHOD:/path`` literal in the
-nsx connector asserts against the pinned ``nsx-9.0`` spec through the
+nsx connector asserts against the pinned ``nsx-9.0`` specs through the
 #2980 harness (:mod:`tests._spec_shelf`). The declared set is introspected
 from the connector's live module constants — the ten ``*_PATH`` typed-read
 paths in :mod:`meho_backplane.connectors.nsx.typed_reads` (all dispatched
@@ -13,21 +13,37 @@ via ``HttpConnector._get_json``, hence ``GET``) plus the session-establish
 fingerprint probe's inline ``/api/v1/node`` literal collapses into the
 ``GET:/api/v1/node`` typed-read op_id, so the sweep covers it too.
 
-**This lane ships dormant.** No public NSX 9 OpenAPI spec exists to pin as
-of 2026-04-29: the shelf's ``nsx-9.0/`` directory carries only a
-``MANIFEST.md`` recording the negative result (five public locations
-checked; 30 candidate spec endpoints probed on a live NSX 9.0.2 manager
-under both HTTP Basic and session auth — all 404 or 302 to the UI). The
-harness's uniform skip covers exactly this shape, so the lane skips with
-a reason naming the missing file and arms itself the day a spec lands at
-``nsx-9.0/nsx-openapi.json`` on the shelf — no code change needed here.
-Evidence + activation steps: the "Evidenced exclusions" section of
+**This lane is armed** (PR #3007 review blocker B1 resolution,
+2026-08-18). NSX serves its own specs from every live manager at the
+vendor-documented ``GET /api/v1/spec/openapi/nsx_api.{json,yaml}`` and
+``nsx_policy_api.{json,yaml}`` endpoints — the shelf's earlier
+"no pinnable spec" negative (2026-04-29, 30 probed paths) never covered
+that family. The shelf's ``nsx-9.0/`` directory pins the fetched JSON
+artifacts plus deterministic OpenAPI 3.0 conversions (``parse_openapi``
+accepts 3.0/3.1 only; the conversion recipe and provenance live in the
+shelf's ``nsx-9.0/MANIFEST.md``). NSX splits its surface across two
+specs — the Manager API (``servers[0].url = /api/v1``) and the Policy
+API (``/policy/api/v1``) — so the lane resolves both files and unions
+their served sets per the standard's multi-spec guidance.
+
+One vendor-spec quirk is mapped rather than repointed: the Manager API
+spec models the session-establish endpoint as path key
+``/api/session/create`` **under** ``basePath: /api/v1``, so its ingested
+op_id is ``POST:/api/v1/api/session/create``. The live manager serves
+both concatenations (probed 2026-08-18: the canonical documented
+``/api/session/create`` is the working session-auth flow; the
+base-folded path answers HTTP 400 on an empty body where garbage-path
+controls answer 404). The connector keeps the canonical endpoint;
+:data:`_SPEC_MODELED_OP_IDS` translates it to the spec's modeling for
+the reconcile only.
+
+Evidence + activation record: the ``nsx-9.0`` entry of
 ``docs/decisions/spec-reconcile-guards-standard.md``.
 
 The manifest-pin test below runs unconditionally, so the enumeration
-wiring stays proven while the lane itself is dormant: a renamed constant,
-a dropped path, or a new hand-coded path shows up as a loud diff there,
-never as a silently shrunk (or vacuously green) reconcile.
+wiring stays proven even where the shelf is not provisioned: a renamed
+constant, a dropped path, or a new hand-coded path shows up as a loud
+diff there, never as a silently shrunk (or vacuously green) reconcile.
 """
 
 from __future__ import annotations
@@ -41,7 +57,17 @@ from tests._spec_shelf import (
 )
 
 _SPEC_DIR = "nsx-9.0"
-_SPEC_FILE = "nsx-openapi.json"
+#: Both manager-served specs, converted to OpenAPI 3.0 on the shelf
+#: (see the module docstring); the lane unions their served sets.
+_SPEC_FILES = ("nsx_api.openapi3.json", "nsx_policy_api.openapi3.json")
+
+#: Live-truth op_ids translated to the pinned spec's modeling for the
+#: reconcile assert only. Every entry is a documented vendor-spec quirk,
+#: never a repoint of working connector code — see the module docstring
+#: for the single current case (session-create under ``basePath``).
+_SPEC_MODELED_OP_IDS = {
+    "POST:/api/session/create": "POST:/api/v1/api/session/create",
+}
 
 
 def _declared_op_ids() -> set[str]:
@@ -66,10 +92,11 @@ def test_nsx_hand_coded_op_id_manifest_is_pinned() -> None:
     """Pin the swept op_id set so drift can't silently shrink the reconcile.
 
     Runs unconditionally (no shelf needed), so the enumeration is proven
-    on every sweep even while the lane below is dormant. A new hand-coded
-    path, a renamed ``*_PATH`` constant, or a typed op that stops using
-    ``GET`` must update this manifest consciously — and the lane's
-    declared set moves with it.
+    on every sweep. A new hand-coded path, a renamed ``*_PATH``
+    constant, or a typed op that stops using ``GET`` must update this
+    manifest consciously — and the lane's declared set moves with it.
+    Template segments carry the vendor's own parameter names (reconciled
+    against the pinned specs in the lane below).
     """
     assert _declared_op_ids() == {
         "GET:/api/v1/alarms",
@@ -78,29 +105,31 @@ def test_nsx_hand_coded_op_id_manifest_is_pinned() -> None:
         "GET:/api/v1/cluster/status",
         "GET:/api/v1/node",
         "GET:/api/v1/transport-nodes",
-        "GET:/api/v1/transport-nodes/{id}/state",
+        "GET:/api/v1/transport-nodes/{transport-node-id}/state",
         "GET:/policy/api/v1/infra/segments",
-        "GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones",
+        "GET:/policy/api/v1/infra/sites/{site-id}/enforcement-points"
+        "/{enforcementpoint-id}/transport-zones",
         "GET:/policy/api/v1/infra/tier-1s",
         "POST:/api/session/create",
     }
 
 
-def test_nsx_hand_coded_paths_are_served_by_the_pinned_spec() -> None:
-    """Every hand-coded nsx op_id is served by the pinned nsx-9.0 spec.
+def test_nsx_hand_coded_paths_are_served_by_the_pinned_specs() -> None:
+    """Every hand-coded nsx op_id is served by the pinned nsx-9.0 specs.
 
-    Dormant until a spec lands on the shelf (see the module docstring);
-    skips with the harness's uniform reason today. Wherever
-    ``MEHO_CONSUMER_DOCS_ROOT`` resolves ``nsx-9.0/nsx-openapi.json`` the
-    lane runs for real, and a red first run is the guard surfacing a
-    finding — triage per docs/decisions/spec-reconcile-guards-standard.md
-    (expect at least the ``{id}`` template segment of the transport-node
-    state path to need reconciling against the vendor's parameter name).
+    Resolves both shelf specs (skipping with the harness's uniform
+    reason wherever either is unprovisioned), unions their served sets,
+    and asserts the declared set — with :data:`_SPEC_MODELED_OP_IDS`
+    applied — against the union. A red run here is the guard surfacing
+    a finding; triage per docs/decisions/spec-reconcile-guards-standard.md.
     """
-    spec_path = require_shelf_spec(_SPEC_DIR, _SPEC_FILE)
-    served = openapi_served_op_ids(spec_path)
+    served: set[str] = set()
+    for spec_file in _SPEC_FILES:
+        spec_path = require_shelf_spec(_SPEC_DIR, spec_file)
+        served |= openapi_served_op_ids(spec_path)
+    declared = {_SPEC_MODELED_OP_IDS.get(op_id, op_id) for op_id in _declared_op_ids()}
     assert_op_ids_served(
-        _declared_op_ids(),
+        declared,
         served,
-        spec_label=f"{_SPEC_DIR}/{_SPEC_FILE}",
+        spec_label=f"{_SPEC_DIR}/{{{' + '.join(_SPEC_FILES)}}}",
     )

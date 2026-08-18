@@ -46,7 +46,8 @@ The audited set:
 * ``nsx.transport_node.list`` -- ``GET /api/v1/transport-nodes`` (the
   edge/host transport-node fabric inventory; live per-node state lives on
   the ``.../state`` sub-resource below, not on the list row).
-* ``nsx.transport_node.state`` -- ``GET /api/v1/transport-nodes/{id}/state``
+* ``nsx.transport_node.state`` --
+  ``GET /api/v1/transport-nodes/{transport-node-id}/state``
   (one node's realization + maintenance-mode + tunnel/host-switch state --
   the edge-health read before a maintenance-mode or failover action).
 * ``nsx.alarm.list`` -- ``GET /api/v1/alarms`` with optional
@@ -95,13 +96,17 @@ _NODE_PATH = "/api/v1/node"
 _CLUSTER_STATUS_PATH = "/api/v1/cluster/status"
 _BACKUP_CONFIG_PATH = "/api/v1/cluster/backups/config"
 _BACKUP_STATUS_PATH = "/api/v1/cluster/backups/status"
+# Vendor template paths carry the vendor's own parameter names (the
+# spec-reconcile lane asserts these literals against the pinned specs);
+# call sites instantiate them via .format(**{...}) — str.format accepts
+# hyphenated keys through keyword-dict unpacking.
 _TRANSPORT_ZONES_PATH = (
-    "/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones"
+    "/policy/api/v1/infra/sites/{site-id}/enforcement-points/{enforcementpoint-id}/transport-zones"
 )
 _TIER1S_PATH = "/policy/api/v1/infra/tier-1s"
 _SEGMENTS_PATH = "/policy/api/v1/infra/segments"
 _TRANSPORT_NODES_PATH = "/api/v1/transport-nodes"
-_TRANSPORT_NODE_STATE_PATH = "/api/v1/transport-nodes/{id}/state"
+_TRANSPORT_NODE_STATE_PATH = "/api/v1/transport-nodes/{transport-node-id}/state"
 _ALARMS_PATH = "/api/v1/alarms"
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
@@ -250,14 +255,17 @@ async def nsx_transport_zone_list_impl(
 ) -> dict[str, Any]:
     """``nsx.transport_zone.list`` -- policy-API transport zones.
 
-    ``GET /policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones``
-    -- the transport-zone inventory under the default enforcement point.
-    Returns ``{"results": [...]}`` where each zone carries ``id``,
-    ``display_name``, ``tz_type`` (OVERLAY / VLAN), and
-    ``host_switch_name``.
+    ``GET /policy/api/v1/infra/sites/{site-id}/enforcement-points``
+    ``/{enforcementpoint-id}/transport-zones``
+    (vendor template), always instantiated at the ``default`` site and
+    ``default`` enforcement point -- the transport-zone inventory under
+    the default enforcement point. Returns ``{"results": [...]}`` where
+    each zone carries ``id``, ``display_name``, ``tz_type``
+    (OVERLAY / VLAN), and ``host_switch_name``.
     """
     del params  # schema declares the param object empty
-    return await connector._get_json(target, _TRANSPORT_ZONES_PATH, operator=operator)
+    path = _TRANSPORT_ZONES_PATH.format(**{"site-id": "default", "enforcementpoint-id": "default"})
+    return await connector._get_json(target, path, operator=operator)
 
 
 async def nsx_tier1_list_impl(
@@ -329,7 +337,8 @@ async def nsx_transport_node_state_impl(
     target: NsxTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``nsx.transport_node.state`` -- ``GET /api/v1/transport-nodes/{id}/state``.
+    """``nsx.transport_node.state`` --
+    ``GET /api/v1/transport-nodes/{transport-node-id}/state``.
 
     Reads one transport node's realization + fabric health, given a node
     ``id`` from ``nsx.transport_node.list``. The read an operator runs
@@ -345,7 +354,7 @@ async def nsx_transport_node_state_impl(
     paired with its ``.list`` op.
     """
     node_id = params["id"]
-    path = _TRANSPORT_NODE_STATE_PATH.format(id=node_id)
+    path = _TRANSPORT_NODE_STATE_PATH.format(**{"transport-node-id": node_id})
     return await connector._get_json(target, path, operator=operator)
 
 

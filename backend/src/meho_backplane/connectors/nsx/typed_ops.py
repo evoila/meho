@@ -461,7 +461,7 @@ _TRANSPORT_NODE_STATE = NsxTypedOp(
     summary="Realization + maintenance-mode + tunnel state of one NSX transport node.",
     description=(
         "Reads one transport node's realization + fabric health via "
-        "GET /api/v1/transport-nodes/{id}/state -- requires a node id from "
+        "GET /api/v1/transport-nodes/{transport-node-id}/state -- requires a node id from "
         "nsx.transport_node.list. NSX's TransportNodeState carries state "
         "(overall realization result), maintenance_mode_state (whether the "
         "node is already draining -- the datum that says whether the "

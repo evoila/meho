@@ -315,6 +315,21 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
     — install a test-only `ForceHandleReducer`, dispatch the
     segment-list op, assert `OperationResult.handle` is populated
     by the dispatcher seam.
+- Spec-reconcile lane: `backend/tests/test_connectors_nsx_spec_reconcile.py`
+  (#2981) — asserts the 11 hand-coded `METHOD:/path` literals against
+  the pinned `nsx-9.0` shelf specs through the #2980 harness,
+  **armed 2026-08-18** (PR #3007): NSX serves its own specs from every
+  live manager (`GET /api/v1/spec/openapi/nsx_api.{json,yaml}` /
+  `nsx_policy_api.{json,yaml}`); the shelf pins the fetched JSON pair
+  plus OpenAPI 3.0 conversions (`nsx_api.openapi3.json` +
+  `nsx_policy_api.openapi3.json` — the files the lane parses and
+  unions). Template constants carry the vendor's parameter names
+  (`{transport-node-id}`, `{site-id}`/`{enforcementpoint-id}` —
+  call sites instantiate `default`/`default`); the session-establish
+  op is translated to the spec's under-basePath modeling via the
+  lane's `_SPEC_MODELED_OP_IDS` map. Activation record + first-run
+  findings: the `nsx-9.0` entry of
+  `docs/decisions/spec-reconcile-guards-standard.md`.
 - Precedent: `connectors/vmware_rest/connector.py` (session auth +
   fingerprint + probe + dispatch shim);
   `connectors/vmware_rest/__init__.py` (registration);

@@ -33,12 +33,16 @@ Scope boundaries:
 - **Generic (ingested) connectors are immune by construction** and need
   no lane: their op_ids are emitted *from* the spec by the ingest
   pipeline, so an unserved path cannot exist.
-- **Where no spec exists or can be pinned** (e.g. `nsx-9.0` publishes
-  no OpenAPI spec as of 2026-04-29 — see the shelf's
-  `nsx-9.0/MANIFEST.md`), the lane still ships and skips uniformly; it
-  arms itself the day the spec lands on the shelf. A task that proves a
-  spec is unobtainable records the evidenced exclusion instead
-  (#2993's contract).
+- **Where no spec exists or can be pinned**, the lane still ships and
+  skips uniformly; it arms itself the day the spec lands on the shelf.
+  A task that proves a spec is unobtainable records the evidenced
+  exclusion instead (#2993's contract; the entries live in the
+  [Evidenced exclusions](#evidenced-exclusions-no-pinnable-spec-today)
+  section below). Cautionary precedent: `nsx-9.0` shipped as exactly
+  such an exclusion and was falsified in review — its 30-path probe
+  never covered the vendor-documented spec endpoints (see the
+  activation record below). An exclusion's evidence must cover every
+  endpoint family the vendor documents, not just conventional guesses.
 
 ## The harness (what a lane is)
 
@@ -181,6 +185,89 @@ Each lane task (#2981-#2993) ships all of:
    (`MEHO_CONSUMER_DOCS_ROOT=<shelf>/docs`) before merge. CI is armed:
    a lane that would go red lands red on the PR itself, which is the
    next section — but discovering it locally first is cheaper.
+
+## Evidenced exclusions (no pinnable spec today)
+
+The per-product record for lanes that ship **dormant** because no vendor
+spec exists or can be pinned. Each entry states what was checked (with
+dates), why nothing is pinnable, and what activates the lane. An entry
+here is not an exemption from the standard — the lane still ships,
+skipping uniformly, and the day a spec lands the activating task runs
+the full extension mechanics above (CI checkout widened, signoff
+extended, first-run red triaged per the protocol below).
+
+### nsx-9.0 — **ACTIVATED 2026-08-18** (#2981; exclusion withdrawn, retained as history)
+
+This entry shipped on 2026-08-17/18 as an evidenced exclusion ("no
+pinnable NSX 9 spec"). Review of PR #3007 (blocker B1) falsified it:
+the exclusion's probe record had a **coverage gap**, and the specs are
+pinnable. The record below replaces the exclusion; the lane is armed.
+
+- **Lane:** `backend/tests/test_connectors_nsx_spec_reconcile.py` — 11
+  hand-coded op_ids introspected live (ten `GET` typed-read paths +
+  the session-establish `POST`), asserted against the **union** of the
+  two pinned specs per the harness's multi-spec guidance.
+- **Why the exclusion fell.** The 2026-04-29 evidence (30 candidate
+  spec endpoints probed 404/302 on a live NSX 9.0.2 manager under both
+  auth flows; no public artifact in `vcf-api-specs` / `vmware-nsx` /
+  `go-vmware-nsxt` / `nsxraml`) was real but incomplete: **none of the
+  30 paths covered the vendor-documented
+  `/api/v1/spec/openapi/nsx_*` family** the NSX REST API portal
+  (`developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/`)
+  actually names. Probed 2026-08-18 against the live lab manager
+  (`c2fs1-nsx` / `nsx-mgmt-01a`, NSX 9.1.0.0.25318225, session-auth):
+  `GET /api/v1/spec/openapi/nsx_api.json` (200; 4,417,173 B),
+  `nsx_api.yaml` (200; 5,429,995 B), `nsx_policy_api.json` (200;
+  12,195,576 B), `nsx_policy_api.yaml` (200; 14,683,229 B). The public
+  half of the negative stands (no public artifact); the "live-manager
+  fetch is closed" half was never evidenced and is false. The shelf's
+  probe-history records carry dated corrections
+  (`kb/nsx-9.0-overview.md`, `kb/vcf-9.0-in-ui-explorer-survey.md`).
+- **What is pinned** (shelf `nsx-9.0/MANIFEST.md`, full provenance +
+  sha256): `nsx_api.json` (Manager API, Swagger 2.0, `basePath:
+  /api/v1`, 1,193 paths) and `nsx_policy_api.json` (Policy API,
+  `basePath: /policy/api/v1`, 2,317 paths) byte-identical as fetched,
+  plus deterministic OpenAPI 3.0 conversions
+  (`nsx_api.openapi3.json` / `nsx_policy_api.openapi3.json` —
+  swagger2openapi@7.0.8, placeholder `host`/`schemes` stripped so the
+  relative basePath lands in `servers[0].url` for the #1796 fold,
+  minified under ingest's 20 MiB cap). The lane pins the conversions:
+  `parse_openapi` accepts 3.0/3.1 only and documents conversion as the
+  Swagger-2.0 remediation, so they are byte-for-byte what an operator
+  ingest consumes.
+- **First-run reconcile findings (the protocol working), all
+  dispositioned in PR #3007:**
+  1. `GET:/api/v1/transport-nodes/{id}/state` — unserved; vendor
+     template is `{transport-node-id}`. **Mechanical rename** of the
+     constant's template segment (anticipated verbatim by the dormant
+     entry).
+  2. `GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones`
+     — unserved; the constant hard-coded the `default`/`default`
+     instantiation of the served template
+     `…/sites/{site-id}/enforcement-points/{enforcementpoint-id}/transport-zones`.
+     **Mechanical**: constant now carries the vendor template; the
+     call site instantiates `default`/`default` — runtime request path
+     byte-identical.
+  3. `POST:/api/session/create` — the Manager API spec models the
+     session endpoints as path keys under `basePath: /api/v1`, so the
+     ingested op_id is `POST:/api/v1/api/session/create`. Live probe
+     2026-08-18: **both** concatenations serve (the canonical
+     documented `/api/session/create` is the working session-auth
+     flow; the base-folded path returns 400 on an empty body where
+     garbage-path controls return 404). **Not a repoint** — the
+     connector keeps the canonical endpoint; the lane translates via
+     its documented `_SPEC_MODELED_OP_IDS` map. A repoint of working
+     production auth to satisfy a literal comparison would invert the
+     protocol's "never invent a path" rule.
+- **Extension mechanics run** (per the section above): CI
+  sparse-checkout + fail-loud verify widened to `docs/nsx-9.0` in both
+  Python jobs; signoff extended in
+  [`vendor-spec-ci-provisioning.md`](vendor-spec-ci-provisioning.md)
+  (vendor-licensed form — NSX manager-served content is fetched into
+  ephemeral CI); local pre-verify green against a full local shelf.
+  **Sequencing:** the shelf pin lands via consumer-repo PR
+  (`claude-rdc-hetzner-dc#2514`) which must merge before this repo's
+  widened verify step can pass.
 
 ## Red lane = finding (the protocol)
 

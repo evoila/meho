@@ -5477,8 +5477,7 @@ class EventSource(Base):
             sqlite_where=sa.text("deleted_at IS NULL"),
         ),
         sa.CheckConstraint(
-            "kind IN ('alertmanager', 'grafana', 'vcf-operations', "
-            "'harbor', 'generic-json')",
+            "kind IN ('alertmanager', 'grafana', 'vcf-operations', 'harbor', 'generic-json')",
             name="ck_event_source_kind",
         ),
         sa.CheckConstraint(

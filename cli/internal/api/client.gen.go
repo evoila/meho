@@ -4184,6 +4184,16 @@ type EvalResult struct {
 // EvalResultOverallVerdict defines model for EvalResult.OverallVerdict.
 type EvalResultOverallVerdict string
 
+// EventIngestResponse Accepted (“202“) or deduplicated (“200“) acknowledgement.
+//
+// “event_id“ is the “event_outbox“ row id the delivery landed on (the
+// original row's id on a duplicate); “None“ only in the rare race where a
+// duplicate collided but the original row was concurrently removed.
+type EventIngestResponse struct {
+	Deduplicated bool `json:"deduplicated"`
+	EventId      *int `json:"event_id"`
+}
+
 // EventSource Full read shape. Maps 1:1 to the live “event_source“ columns.
 //
 // Frozen. Carries “secret_ref“ (the Vault *path*) but never the secret
@@ -11361,6 +11371,9 @@ type ClientInterface interface {
 
 	UpdateEventSourceApiV1EventSourcesSlugPatch(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// IngestEventApiV1EventsIngestSourceSlugPost request
+	IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13639,6 +13652,18 @@ func (c *Client) UpdateEventSourceApiV1EventSourcesSlugPatchWithBody(ctx context
 
 func (c *Client) UpdateEventSourceApiV1EventSourcesSlugPatch(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUpdateEventSourceApiV1EventSourcesSlugPatchRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestEventApiV1EventsIngestSourceSlugPostRequest(c.Server, sourceSlug)
 	if err != nil {
 		return nil, err
 	}
@@ -23163,6 +23188,40 @@ func NewUpdateEventSourceApiV1EventSourcesSlugPatchRequestWithBody(server string
 			req.Header.Set("authorization", headerParam0)
 		}
 
+	}
+
+	return req, nil
+}
+
+// NewIngestEventApiV1EventsIngestSourceSlugPostRequest generates requests for IngestEventApiV1EventsIngestSourceSlugPost
+func NewIngestEventApiV1EventsIngestSourceSlugPostRequest(server string, sourceSlug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "source_slug", runtime.ParamLocationPath, sourceSlug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/events/ingest/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -39050,6 +39109,9 @@ type ClientWithResponsesInterface interface {
 
 	UpdateEventSourceApiV1EventSourcesSlugPatchWithResponse(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error)
 
+	// IngestEventApiV1EventsIngestSourceSlugPostWithResponse request
+	IngestEventApiV1EventsIngestSourceSlugPostWithResponse(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error)
+
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -41822,6 +41884,29 @@ func (r UpdateEventSourceApiV1EventSourcesSlugPatchResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UpdateEventSourceApiV1EventSourcesSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type IngestEventApiV1EventsIngestSourceSlugPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *EventIngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestEventApiV1EventsIngestSourceSlugPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestEventApiV1EventsIngestSourceSlugPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -48912,6 +48997,15 @@ func (c *ClientWithResponses) UpdateEventSourceApiV1EventSourcesSlugPatchWithRes
 	return ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse(rsp)
 }
 
+// IngestEventApiV1EventsIngestSourceSlugPostWithResponse request returning *IngestEventApiV1EventsIngestSourceSlugPostResponse
+func (c *ClientWithResponses) IngestEventApiV1EventsIngestSourceSlugPostWithResponse(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error) {
+	rsp, err := c.IngestEventApiV1EventsIngestSourceSlugPost(ctx, sourceSlug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestEventApiV1EventsIngestSourceSlugPostResponse(rsp)
+}
+
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
 func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
 	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
@@ -54874,6 +54968,39 @@ func ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse(rsp *http.Response
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestEventApiV1EventsIngestSourceSlugPostResponse parses an HTTP response from a IngestEventApiV1EventsIngestSourceSlugPostWithResponse call
+func ParseIngestEventApiV1EventsIngestSourceSlugPostResponse(rsp *http.Response) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestEventApiV1EventsIngestSourceSlugPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest EventIngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

@@ -1647,6 +1647,49 @@
         }
       }
     },
+    "/api/v1/events/ingest/{source_slug}": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Ingest Event",
+        "description": "Accept one external event for *source_slug*. See the module docstring.",
+        "operationId": "ingest_event_api_v1_events_ingest__source_slug__post",
+        "parameters": [
+          {
+            "name": "source_slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source Slug"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventIngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/topology/dependents/{name}": {
       "get": {
         "tags": [
@@ -25304,6 +25347,26 @@
         "title": "EvalResult",
         "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
       },
+      "EventIngestResponse": {
+        "properties": {
+          "event_id": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Event Id"
+          },
+          "deduplicated": {
+            "type": "boolean",
+            "title": "Deduplicated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "deduplicated"
+        ],
+        "title": "EventIngestResponse",
+        "description": "Accepted (``202``) or deduplicated (``200``) acknowledgement.\n\n``event_id`` is the ``event_outbox`` row id the delivery landed on (the\noriginal row's id on a duplicate); ``None`` only in the rare race where a\nduplicate collided but the original row was concurrently removed."
+      },
       "EventSource": {
         "properties": {
           "id": {
@@ -31166,6 +31229,10 @@
     },
     {
       "name": "event-sources",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "events",
       "x-maturity": "beta"
     },
     {

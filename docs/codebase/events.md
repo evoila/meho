@@ -49,14 +49,21 @@ Plus the persistence shape in
   `BIGSERIAL` / SQLite `Integer`), `tenant_id` (FK), `event_kind`
   (free-text discriminator), `payload` (JSONB / JSON), `created_at`,
   `claimed_at` (observability), `claimed_by` (observability),
-  `processed_at` (`NULL` until claimed and dispatched), and a partial
-  index `(processed_at, event_id)` on `processed_at IS NULL` to drive
-  the drain's claim query.
+  `processed_at` (`NULL` until claimed and dispatched), `dedupe_key`
+  (`NULL` for internal producers; a producer-supplied idempotency token
+  for at-least-once external ingest), and `origin` (`NULL` = internal
+  producer, else the external event-source id). Two partial indexes:
+  `(processed_at, event_id)` on `processed_at IS NULL` drives the
+  drain's claim query, and the **unique** `event_outbox_tenant_dedupe_idx`
+  on `(tenant_id, dedupe_key)` `WHERE dedupe_key IS NOT NULL` makes a
+  duplicate external delivery collide at insert.
 - `EVENT_OUTBOX_NOTIFY_CHANNEL` — the PG channel name the producer
   side `NOTIFY`s on and the drain side `LISTEN`s on.
 
-Migration: `backend/alembic/versions/0027_create_event_outbox.py`
-(revises `0026`, which is #1125's agent-run lease/reaper columns).
+Migrations: `backend/alembic/versions/0027_create_event_outbox.py`
+(revises `0026`, #1125's agent-run lease/reaper columns) created the
+table; `0073_event_outbox_dedupe_key_origin.py` (#2879) adds the
+`dedupe_key` / `origin` columns and the partial unique dedupe index.
 
 ## The producer side — `publish()`
 
@@ -275,6 +282,10 @@ Both gated via env vars (defaults shown in parens):
     simulate kill → restart → tick drains the row
 - [backend/tests/migrations/test_migration_0027_event_outbox.py](backend/tests/migrations/test_migration_0027_event_outbox.py)
   — schema + index migration round-trip
+- [backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py](backend/tests/migrations/test_migration_0073_event_outbox_dedupe.py)
+  — `dedupe_key` / `origin` additive columns + partial unique dedupe
+  index (per-tenant uniqueness, NULL-unconstrained, SQLite partial-index
+  parity, downgrade round-trip)
 
 ## References
 

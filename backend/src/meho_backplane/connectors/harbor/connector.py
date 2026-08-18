@@ -62,7 +62,6 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import structlog
@@ -74,6 +73,17 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.harbor._paths import (
+    _ARTIFACT_VULNERABILITIES_PATH,
+    _HEALTH_PATH,
+    _PROJECT_SUMMARY_PATH,
+    _QUOTAS_PATH,
+    _ROBOT_PATH,
+    _ROBOTS_PATH,
+    _SYSTEMINFO_PATH,
+    encode_segment,
+    fill_path,
+)
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -138,19 +148,6 @@ def _parse_harbor_version(harbor_version: str) -> tuple[str | None, str | None]:
 #: wins); pinning the current type alone keeps the projected field names
 #: stable instead of depending on which format Harbor falls back to.
 _VULN_REPORT_MIME = "application/vnd.security.vulnerability.report; version=1.1"
-
-
-def _encode_segment(value: Any) -> str:
-    """Percent-encode one URL path segment (OpenAPI ``style: simple``).
-
-    Matches how the generic dispatcher expands a ``{var}`` path template
-    (:func:`meho_backplane.operations._branches._substitute_path`): every
-    reserved char is encoded (empty safe set), so a nested ``repository_name``
-    (``team/nginx`` -> ``team%2Fnginx``) cannot leak a path separator and a
-    ``sha256:`` digest reference has its ``:`` encoded to ``%3A``. This is the
-    same resolution ``harbor.artifact.info`` uses, one segment shallower.
-    """
-    return quote(str(value), safe="")
 
 
 def _project_vulnerability(item: dict[str, Any]) -> dict[str, Any]:
@@ -358,7 +355,7 @@ class HarborConnector(HttpConnector):
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_json(
-                target, "/api/v2.0/systeminfo", operator=synthesise_system_operator()
+                target, _SYSTEMINFO_PATH, operator=synthesise_system_operator()
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
@@ -366,7 +363,7 @@ class HarborConnector(HttpConnector):
                 product="harbor",
                 reachable=False,
                 probed_at=probed_at,
-                probe_method="GET /api/v2.0/systeminfo",
+                probe_method=f"GET {_SYSTEMINFO_PATH}",
                 extras={"error": f"{type(exc).__name__}: {exc}"},
             )
         harbor_version = payload.get("harbor_version") or ""
@@ -378,7 +375,7 @@ class HarborConnector(HttpConnector):
             build=build_str,
             reachable=True,
             probed_at=probed_at,
-            probe_method="GET /api/v2.0/systeminfo",
+            probe_method=f"GET {_SYSTEMINFO_PATH}",
             extras={
                 "auth_mode": payload.get("auth_mode"),
                 "registry_url": payload.get("registry_url"),
@@ -402,7 +399,7 @@ class HarborConnector(HttpConnector):
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_json(
-                target, "/api/v2.0/health", operator=synthesise_system_operator()
+                target, _HEALTH_PATH, operator=synthesise_system_operator()
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return ProbeResult(
@@ -538,8 +535,7 @@ class HarborConnector(HttpConnector):
                 }
             ],
         }
-        path = "/api/v2.0/robots"
-        result = await self._post_json(target, path, operator=operator, json=body)
+        result = await self._post_json(target, _ROBOTS_PATH, operator=operator, json=body)
         return {
             "id": result["id"],
             "name": result["name"],
@@ -596,7 +592,7 @@ class HarborConnector(HttpConnector):
         """
         robot_id = int(params["id"])
 
-        path = f"/api/v2.0/robots/{robot_id}"
+        path = fill_path(_ROBOT_PATH, {"robot_id": str(robot_id)})
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("DELETE", path, headers=headers)
@@ -742,12 +738,13 @@ class HarborConnector(HttpConnector):
             been scanned). The dispatcher wraps it as a ``connector_error``
             OperationResult.
         """
-        project = _encode_segment(params["project_name"])
-        repository = _encode_segment(params["repository_name"])
-        reference = _encode_segment(params["reference"])
-        path = (
-            f"/api/v2.0/projects/{project}/repositories/{repository}"
-            f"/artifacts/{reference}/additions/vulnerabilities"
+        path = fill_path(
+            _ARTIFACT_VULNERABILITIES_PATH,
+            {
+                "project_name": encode_segment(params["project_name"]),
+                "repository_name": encode_segment(params["repository_name"]),
+                "reference": encode_segment(params["reference"]),
+            },
         )
         payload = await self._request_json(
             target,
@@ -826,8 +823,10 @@ class HarborConnector(HttpConnector):
             On any 4xx/5xx from Harbor (e.g. 404 for an unknown project).
             The dispatcher wraps it as a ``connector_error`` OperationResult.
         """
-        project = quote(str(params["project_name"]), safe="")
-        path = f"/api/v2.0/projects/{project}/summary"
+        path = fill_path(
+            _PROJECT_SUMMARY_PATH,
+            {"project_name_or_id": encode_segment(params["project_name"])},
+        )
         payload = await self._request_json(
             target,
             "GET",
@@ -916,9 +915,7 @@ class HarborConnector(HttpConnector):
             "page": int(params.get("page") or 1),
             "page_size": int(params.get("page_size") or 50),
         }
-        payload: Any = await self._get_json(
-            target, "/api/v2.0/quotas", operator=operator, params=query
-        )
+        payload: Any = await self._get_json(target, _QUOTAS_PATH, operator=operator, params=query)
         quotas = payload if isinstance(payload, list) else []
         return {
             "quotas": [

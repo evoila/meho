@@ -27,9 +27,10 @@ arm, which evicts the cached credentials via the connector's public
 :meth:`HarborConnector.invalidate_credentials` hook (#2396) and
 re-dispatches once.
 
-The audited 9-read set (paths confirmed against the pinned Harbor
-2.11.0 OpenAPI spec, ``goharbor/harbor`` tag ``v2.11.0``,
-``api/v2.0/swagger.yaml``):
+The audited 9-read set (each ``METHOD:/path`` reconciled against the
+pinned Harbor 2.12 spec on the operator's shelf by
+:mod:`tests.test_connectors_harbor_spec_reconcile` (#2990); the path
+templates live in :mod:`~meho_backplane.connectors.harbor._paths`):
 
 * ``harbor.about`` -- ``GET /api/v2.0/systeminfo`` (appliance version,
   auth mode, registry URL).
@@ -63,9 +64,21 @@ The audited 9-read set (paths confirmed against the pinned Harbor
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import quote
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.harbor._paths import (
+    _ARTIFACT_PATH,
+    _ARTIFACTS_PATH,
+    _HEALTH_PATH,
+    _PROJECT_PATH,
+    _PROJECT_REPOSITORIES_PATH,
+    _PROJECTS_PATH,
+    _REPOSITORY_PATH,
+    _ROBOTS_PATH,
+    _SYSTEMINFO_PATH,
+    encode_segment,
+    fill_path,
+)
 from meho_backplane.connectors.harbor.session import HarborTargetLike
 
 if TYPE_CHECKING:
@@ -83,28 +96,6 @@ __all__ = [
     "harbor_repository_list_impl",
     "harbor_robot_list_impl",
 ]
-
-# Spec-relative Harbor endpoints. Every path lives under the ``/api/v2.0``
-# base the connector's pooled per-target client targets; HTTP Basic auth
-# rides every request.
-_SYSTEMINFO_PATH = "/api/v2.0/systeminfo"
-_HEALTH_PATH = "/api/v2.0/health"
-_PROJECTS_PATH = "/api/v2.0/projects"
-_ROBOTS_PATH = "/api/v2.0/robots"
-
-
-def _seg(value: object) -> str:
-    """Percent-encode one path segment with an empty safe set.
-
-    Reproduces the encoding the retired generic-ingested dispatch applied
-    to ``{var}`` placeholders (``_substitute_path``'s RFC6570 simple
-    expansion, ``quote(value, safe="")``): a reserved char like ``/`` in a
-    value becomes ``%2F`` so a value can never leak a path separator, and a
-    ``sha256:`` digest reference has its ``:`` encoded to ``%3A``. Behaviour
-    for the common bare names (``library`` / ``ubuntu`` / ``latest``) is a
-    no-op.
-    """
-    return quote(str(value), safe="")
 
 
 def _query(params: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any] | None:
@@ -189,7 +180,7 @@ async def harbor_project_info_impl(
     the summary endpoint (``harbor.project.summary``, #2858). Requires
     ``project_name`` from ``harbor.project.list``.
     """
-    path = f"{_PROJECTS_PATH}/{_seg(params['project_name'])}"
+    path = fill_path(_PROJECT_PATH, {"project_name_or_id": encode_segment(params["project_name"])})
     return await connector._get_json(target, path, operator=operator)
 
 
@@ -205,7 +196,10 @@ async def harbor_repository_list_impl(
     names within a project. Requires ``project_name``; optional ``q`` /
     ``sort`` / ``page`` / ``page_size``. Returns a bare JSON array.
     """
-    path = f"{_PROJECTS_PATH}/{_seg(params['project_name'])}/repositories"
+    path = fill_path(
+        _PROJECT_REPOSITORIES_PATH,
+        {"project_name": encode_segment(params["project_name"])},
+    )
     query = _query(params, ("q", "sort", "page", "page_size"))
     raw = await connector._get_json(target, path, operator=operator, params=query)
     return cast("list[dict[str, Any]]", raw)
@@ -224,9 +218,13 @@ async def harbor_repository_info_impl(
     repository. ``repository_name`` is the bare image name (without the
     project prefix).
     """
-    project = _seg(params["project_name"])
-    repository = _seg(params["repository_name"])
-    path = f"{_PROJECTS_PATH}/{project}/repositories/{repository}"
+    path = fill_path(
+        _REPOSITORY_PATH,
+        {
+            "project_name": encode_segment(params["project_name"]),
+            "repository_name": encode_segment(params["repository_name"]),
+        },
+    )
     return await connector._get_json(target, path, operator=operator)
 
 
@@ -245,9 +243,13 @@ async def harbor_artifact_list_impl(
     optional ``q`` / ``sort`` / ``page`` / ``page_size`` and the ``with_*``
     flags. Returns a bare JSON array.
     """
-    project = _seg(params["project_name"])
-    repository = _seg(params["repository_name"])
-    path = f"{_PROJECTS_PATH}/{project}/repositories/{repository}/artifacts"
+    path = fill_path(
+        _ARTIFACTS_PATH,
+        {
+            "project_name": encode_segment(params["project_name"]),
+            "repository_name": encode_segment(params["repository_name"]),
+        },
+    )
     query = _query(
         params,
         (
@@ -280,10 +282,14 @@ async def harbor_artifact_info_impl(
     ``with_*`` include flag is passed) the vulnerability scan overview,
     SBOM accessors, and signature status.
     """
-    project = _seg(params["project_name"])
-    repository = _seg(params["repository_name"])
-    reference = _seg(params["reference"])
-    path = f"{_PROJECTS_PATH}/{project}/repositories/{repository}/artifacts/{reference}"
+    path = fill_path(
+        _ARTIFACT_PATH,
+        {
+            "project_name": encode_segment(params["project_name"]),
+            "repository_name": encode_segment(params["repository_name"]),
+            "reference": encode_segment(params["reference"]),
+        },
+    )
     query = _query(
         params,
         (

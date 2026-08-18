@@ -408,6 +408,32 @@ precedent. **Sequencing:** the pin lands via consumer-repo PR
 (`claude-rdc-hetzner-dc#2540`) which must merge before this repo's
 widened verify step can pass.
 
+### Extension: Loki (loki-3.7, 2026-08-18, #2991)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/loki-3.7/` directory (~0.06 MB) for the loki reconcile lane
+(`backend/tests/test_connectors_loki_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension:
+Grafana Loki publishes no OpenAPI/Swagger for its HTTP API (negative +
+evidence in the shelf MANIFEST — the only `openapi`-named artifacts in
+`grafana/loki` at `v3.7.6` are the Loki Operator's CRD schemas and Go
+module names, not an HTTP API spec), so the pinned artifact is the
+vendor's own documented HTTP API reference
+(`docs/sources/reference/loki-http-api.md`, byte-identical from the
+release tag) from the **public, AGPL-3.0**
+[`grafana/loki`](https://github.com/grafana/loki) repo (pinned at tag
+`v3.7.6`, retrieved 2026-08-18 — matching the lab's deployed fleet
+Loki 3.7.6) — the provenance note of record is the shelf's
+`loki-3.7/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics; the documented-route precedent is
+`hetzner-robot-2026-04`, here from an OSS source. **Sequencing:** the
+pin lands via consumer-repo PR (`claude-rdc-hetzner-dc#2547`) which must
+merge before this repo's widened verify step can pass.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

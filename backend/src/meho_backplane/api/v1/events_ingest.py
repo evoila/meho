@@ -32,10 +32,25 @@ Reconciliation note (404 vs 401)
 
 The #2880 resolver's docstring suggests mapping a missing slug to the *same*
 response as an auth failure. This endpoint instead follows the #2881 issue
-contract: missing/paused -> ``404``, bad signature -> ``401``. The residual
-"a 404 vs 401 distinguishes a real slug" oracle is acceptable because a slug
-is a high-entropy routing token (not enumerable), and the uniform 404 still
-hides the operationally sensitive paused-vs-missing distinction.
+contract: missing/paused -> ``404``, bad signature -> ``401``. That leaves a
+residual oracle -- a ``404`` vs ``401`` tells a prober whether a slug is
+registered, and because the ``404`` short-circuits *before* the Vault secret
+read the difference is observable in latency as well as in status.
+
+This is **not** defended by slug entropy: slugs are operator-named and
+guessable (``grafana``, ``harbor``, ...), so an attacker can enumerate the
+likely ones. The oracle is acceptable for two other, load-bearing reasons:
+
+1. The backplane is internal-only (never publicly exposed), so a prober must
+   already be inside the trust boundary to reach this route at all.
+2. Confirming a slug exists grants nothing by itself: forging any event still
+   requires that source's per-source secret, which is Vault-custodied and
+   never leaves the backplane.
+
+The uniform ``404`` still hides the operationally sensitive paused-vs-missing
+distinction. If this endpoint were ever exposed externally, the 404-vs-401
+(and the pre-Vault timing) split would have to be closed first -- e.g. by
+enforcing slug entropy or emitting a uniform response before the resolver read.
 """
 
 from __future__ import annotations

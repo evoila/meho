@@ -229,3 +229,13 @@ The runbook for end-to-end ingest + enable + verify is
   <https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vcf-fleet.sh>
 - VCF Fleet / vRSLCM API:
   <https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager-api/latest/>
+- Spec-reconcile guard (#2993):
+  [`backend/tests/test_connectors_vcf_fleet_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_fleet_spec_reconcile.py)
+  asserts every hand-coded `/lcm/*` literal against a pinned vRSLCM 1.3.0 LCM
+  REST OpenAPI. Ships **dormant** (skips until the spec is pinned): the spec
+  exists — appliance-served (`/api/swagger-ui.html`), Broadcom-portal-documented,
+  and ingested by the G3.6 canary — but is **not** the public
+  `vmware/vcf-api-specs` `fleet-lcm-openapi.yaml` (that is the new
+  `/fleet-lcm/v1/*` service, a different surface serving none of these paths).
+  Determination + pin handoff: the lane docstring and the vcf-fleet note in
+  [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md).

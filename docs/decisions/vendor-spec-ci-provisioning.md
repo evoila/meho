@@ -481,6 +481,43 @@ precedent, reading YAML rather than JSON). **Sequencing:** the pin lands
 via consumer-repo PR (`claude-rdc-hetzner-dc#2549`) which must merge
 before this repo's widened verify step can pass.
 
+### Extension: vcf-logs (vRLI, `vcf-operations-9.0/vcf-operations-for-logs-openapi.json`, #2993)
+
+The vcf-logs (VCF Operations for Logs / vRealize Log Insight) reconcile lane
+(`backend/tests/test_connectors_vcf_logs_spec_reconcile.py`) reads the Logs
+(vRLI) OpenAPI document that **already ships** in the shelf's
+`docs/vcf-operations-9.0/` directory — the same directory the vcf-operations
+core lane (#2984) already provisions — so **no sparse-checkout widening** is
+needed; `vcf-operations-for-logs-openapi.json` is added to the fail-loud verify
+step of both Python jobs so a shelf-layout move can't silently regress the lane
+to skip. No vendor-license attestation is needed: the spec is vendored by VMware
+in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo (pinned at
+`85151f6b`, retrieved 2026-04-29) — the provenance note of record is the shelf's
+`vcf-operations-9.0/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. Unlike the vcf-operations core spec, **no `.ingestable.json`
+derivative is pinned**: the vendor document fails `parse_openapi`'s OpenAPI 3.0
+metaschema gate on a malformed `securitySchemes.Bearer` (a `type: http` scheme
+carrying the apiKey-only `name`/`in` keys), but the vcf-logs reconciled paths are
+all **typed** (the version probe, the events query, the session-login POST) —
+never operator-ingested — so a repaired derivative would be a test-only artifact
+(the vcf-automation `vra-iaas.json` reasoning); the lane extracts the served set
+directly per the standard's non-OpenAPI-artifact clause. The file already being
+on the shelf, this extension arms with **no consumer-repo PR** (outcome (a) of
+#2993).
+
+**vcf-fleet (vRSLCM, #2993) — pin pending.** The paired vcf-fleet reconcile lane
+(`backend/tests/test_connectors_vcf_fleet_spec_reconcile.py`) ships **dormant**
+(outcome (b) of #2993): its vRSLCM 1.3.0 LCM REST OpenAPI (the
+`/lcm/lcops/api/v2/*` appliance-served Swagger surface — distinct from the public
+`vmware/vcf-api-specs` `fleet-lcm-openapi.yaml`, which documents the *new* VCF 9
+`/fleet-lcm/v1/*` service and serves none of the connector's paths) is not yet on
+the shelf. Its shelf pin, the `docs/vcf-fleet-9.0` sparse-checkout + verify
+widening, and a **vendor-served** signoff extension here (the nsx-9.0 form, under
+the wave-3 blanket determination above) land together with the operator's
+consumer-shelf PR — this repo change adds only the dormant lane.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

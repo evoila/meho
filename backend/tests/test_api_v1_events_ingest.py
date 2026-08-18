@@ -16,6 +16,7 @@ Acceptance-criteria coverage:
 * broadcast failure is fail-open (the 202 still lands)
 * rate-limit -> 429 with ``Retry-After``
 * authenticated invalid JSON -> 400
+* deeply-nested within-cap body -> parser fails closed (400, never a 500)
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EventOutbox, Tenant
 from meho_backplane.events.ingest.rate_limit import IngestRateLimitError
+from meho_backplane.events.ingest.service import IngestPayloadError, _parse_json_or_fail
 from meho_backplane.middleware import RequestContextMiddleware
 
 from ._event_source_helpers import (
@@ -310,3 +312,27 @@ async def test_authenticated_invalid_json_returns_400(client: TestClient) -> Non
     assert resp.json()["detail"]["error"] == "invalid_payload"
     # Nothing published on a rejected payload.
     assert await _count(EventOutbox) == 0
+
+
+def test_deeply_nested_body_fails_closed_not_500() -> None:
+    """A deeply-nested within-cap body fails closed as 400, never crashes to 500.
+
+    ``json.loads`` raises ``RecursionError`` -- not ``JSONDecodeError`` -- on a
+    120 KB ``[[[...]]]`` body that still fits under the 256 KiB cap.
+    ``_parse_json_or_fail`` must map it to :class:`IngestPayloadError`, which the
+    endpoint turns into its clean 400 (that mapping is covered by
+    :func:`test_authenticated_invalid_json_returns_400`); before the fix the
+    ``RecursionError`` propagated uncaught and the request 500'd.
+
+    Asserted at the parser, not end-to-end: the ``TestClient`` runs the route in
+    an anyio worker thread whose larger C stack does not reach the recursion
+    ceiling at a within-cap depth, so an end-to-end nested body would be
+    harness-dependent. The parser call here runs on the test thread and is
+    deterministic.
+    """
+    body = b"[" * 60_000 + b"]" * 60_000
+    assert len(body) < 256 * 1024  # within the endpoint's body cap
+    with pytest.raises(IngestPayloadError) as exc:
+        _parse_json_or_fail(body)
+    # It is specifically the recursion path that was caught and re-raised.
+    assert isinstance(exc.value.__cause__, RecursionError)

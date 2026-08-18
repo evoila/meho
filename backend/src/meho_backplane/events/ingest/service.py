@@ -195,7 +195,12 @@ def _dedupe_key(source: ResolvedSource, headers: Any, raw_body: bytes, config: I
 
 
 def _parse_json_or_fail(raw_body: bytes) -> object:
-    """Parse the raw body as JSON (normalise-lite). Raise on invalid JSON.
+    """Parse the raw body as JSON (normalise-lite). Raise on unparseable input.
+
+    ``json.loads`` raises ``RecursionError`` -- not ``JSONDecodeError`` -- on a
+    deeply-nested body that still fits under the 256 KiB cap (e.g. a 120 KB
+    ``[[[...]]]``). It is caught here alongside the malformed-JSON errors so a
+    hostile-nesting body fails closed as a clean 400, never a 500.
 
     Runs only after auth + rate-limit have passed, so an unauthenticated
     sender never learns whether its body parsed -- the pre-parse failure it
@@ -203,7 +208,7 @@ def _parse_json_or_fail(raw_body: bytes) -> object:
     """
     try:
         return json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise IngestPayloadError(f"body is not valid JSON: {type(exc).__name__}") from exc
 
 

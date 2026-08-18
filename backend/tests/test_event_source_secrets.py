@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.event_source.secrets import (
     event_source_secret_ref,
+    read_event_source_secret,
     store_event_source_secret,
 )
 
@@ -76,3 +77,33 @@ async def test_store_writes_value_to_vault_kv(monkeypatch: pytest.MonkeyPatch) -
     assert calls[0]["path"] == f"tenants/{_TENANT}/event-sources/prod-am"
     assert calls[0]["secret"] == {"secret": "hmac-signing-key"}
     assert calls[0]["mount_point"] == "secret"
+
+
+@pytest.mark.asyncio
+async def test_read_returns_value_from_vault_kv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read helper double-unwraps the KV-v2 payload to the ``secret`` field."""
+
+    def _read_secret_version(**_kwargs: Any) -> dict[str, Any]:
+        return {"data": {"data": {"secret": "hmac-signing-key"}, "metadata": {}}}
+
+    fake_client = SimpleNamespace(
+        secrets=SimpleNamespace(
+            kv=SimpleNamespace(v2=SimpleNamespace(read_secret_version=_read_secret_version))
+        )
+    )
+
+    @contextlib.asynccontextmanager
+    async def _fake_client_for_operator(_operator: Operator) -> AsyncIterator[Any]:
+        yield fake_client
+
+    monkeypatch.setattr(
+        "meho_backplane.auth.vault.vault_client_for_operator", _fake_client_for_operator
+    )
+
+    ref = event_source_secret_ref(_TENANT, "prod-am")
+    secret = await read_event_source_secret(_operator(), ref)
+
+    assert isinstance(secret, SecretStr)
+    assert secret.get_secret_value() == "hmac-signing-key"
+    # SecretStr masks the value in its repr -- no leakage through logging.
+    assert "hmac-signing-key" not in repr(secret)

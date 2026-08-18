@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
+from pydantic import SecretStr
 
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.secret.endpoints import SecretMaterial
@@ -37,13 +38,12 @@ from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoin
 from meho_backplane.connectors.vault.tenant_paths import TENANT_SECRET_PREFIX
 
 if TYPE_CHECKING:
-    from pydantic import SecretStr
-
     from meho_backplane.auth.operator import Operator
 
 __all__ = [
     "EVENT_SOURCE_SECRET_FIELD",
     "event_source_secret_ref",
+    "read_event_source_secret",
     "store_event_source_secret",
 ]
 
@@ -100,3 +100,34 @@ async def store_event_source_secret(
     )
     _log.info("event_source_secret_write", secret_ref=secret_ref)
     await endpoint.write_secret(operator, SecretMaterial(secret.get_secret_value()))
+
+
+async def read_event_source_secret(operator: Operator, secret_ref: str) -> SecretStr:
+    """Read the source's auth secret from Vault at *secret_ref* under *operator*.
+
+    The read counterpart to :func:`store_event_source_secret`, reusing the
+    same secret-broker vault-kv endpoint so custody is shared, not
+    re-implemented. The ingest path (#2881) calls this with its synthetic
+    ``__ingest__`` operator (a background-dispatch service principal, since
+    the JWT-less webhook carries no operator) to fetch the shared HMAC key /
+    static token / Basic password it verifies the sender against.
+
+    The value is carried by a :class:`~pydantic.SecretStr` from the KV-v2
+    read boundary onward -- it masks itself in every repr / log / traceback,
+    so a fail-closed auth-verification path that logs the rejection never
+    leaks the material. The value is reachable only through
+    :meth:`~pydantic.SecretStr.get_secret_value` at the constant-time
+    comparison site.
+
+    Raises whatever the vault-kv source raises on an I/O / auth failure (an
+    ``hvac`` error, or :class:`~meho_backplane.connectors.secret.vault_endpoint.VaultSecretRefError`
+    when the field is absent); the caller maps it to a fail-closed HTTP
+    status. The value never reaches the raised message -- the source names
+    only the path and field.
+    """
+    endpoint = VaultKvSecretEndpoint(
+        f"{secret_ref}#{EVENT_SOURCE_SECRET_FIELD}", mount=DEFAULT_KV_MOUNT
+    )
+    _log.info("event_source_secret_read", secret_ref=secret_ref)
+    material = await endpoint.read_secret(operator)
+    return SecretStr(material.value.decode("utf-8"))

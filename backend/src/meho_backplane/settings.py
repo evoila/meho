@@ -1098,6 +1098,14 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
+    #: Default per-source fixed-window cap for the inbound event-ingest
+    #: endpoint (#2881), keyed ``meho:ratelimit:ingest:{tenant}:{source}``
+    #: on the same Valkey the broadcast limiter uses. A well-behaved
+    #: webhook sender retries on the ``429`` this produces. ``0`` disables
+    #: the limit entirely (no Valkey round-trip on the ingest hot path);
+    #: a source may override the cap per-source via
+    #: ``event_source.extras["rate_per_minute"]``.
+    events_ingest_rate_per_minute: int = Field(default=60, ge=0)
     #: Look-back window (minutes) for the dispatch-time target-activity
     #: advisory (#2550). A write-class dispatch on a target with peer
     #: activity inside this window carries a compact
@@ -1826,6 +1834,9 @@ def get_settings() -> Settings:
         ),
         broadcast_announce_rate_per_minute=int(
             os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
+        ),
+        events_ingest_rate_per_minute=int(
+            os.environ.get("EVENTS_INGEST_RATE_PER_MINUTE", "60"),
         ),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),

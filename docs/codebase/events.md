@@ -345,6 +345,83 @@ bounded only by the manual kill switch. Two controls contain it:
 Work_ref dedupe does **not** help here — each distinct event has a
 distinct `event_id`, hence a distinct work_ref.
 
+## Inbound external event ingest (#2881)
+
+The producer side above is MEHO-internal (an agent run completing).
+`POST /api/v1/events/ingest/{source_slug}`
+(`api/v1/events_ingest.py` + `events/ingest/`) is the **external**
+producer: a JWT-less webhook a registered `event_source` (#2880)
+delivers to, which lands one `event_outbox` row the same drain + matcher
+route to `kind=event` triggers. It is the only `/api/v1` route with **no
+operator dependency** — the sender is authenticated per-source against
+the source's Vault-custodied secret, not by a Keycloak JWT.
+
+### Request path (the order is load-bearing)
+
+1. **Resolve** the source by slug via
+   `resolve_event_source_by_slug` (global — the webhook carries no
+   tenant). A missing *or* paused source returns the identical uniform
+   `404`, so the two are indistinguishable (no paused-vs-missing oracle).
+2. **Body cap** (`413`) is enforced *before* the whole body is buffered:
+   a `Content-Length` fast-reject plus a streaming running-total guard
+   (`_read_capped_body`) so an absent/understated length header cannot
+   smuggle an oversize body past it (the `ui/csrf.py` DoS lesson). The
+   cap defaults to 256 KiB; a source's `extras["max_body_bytes"]` can
+   only *lower* it, never raise it above the ceiling.
+3. **Auth** (`401`) per the source's `auth_strategy`, **constant-time**
+   (`events/ingest/auth.py`, every secret comparison through
+   `hmac.compare_digest`): `hmac-sha256` over the raw body (with an
+   optional timestamp bound into the signature and gated by a replay
+   window), `static-header`, or `basic` (username from `extras`,
+   password is the secret). Header names are `extras`-configurable, so a
+   vendor whose headers differ (Grafana's `X-Grafana-Alerting-Signature`)
+   is config, not a code branch — richer per-vendor normalisation is
+   #2882. The failure reason is logged server-side, never returned, so
+   every rejection is the same uniform `401`.
+4. **Rate limit** (`429` + `Retry-After`) — the broadcast fixed-window
+   `INCR`/`EXPIRE` pattern under a new key namespace
+   `meho:ratelimit:ingest:{tenant}:{source}` (`events/ingest/rate_limit.py`).
+   Fail-loud on a Valkey outage (`503`; a webhook sender retries).
+5. **Dedupe** — the sender's delivery id where one exists, else a SHA-256
+   of the raw body, namespaced by source id, written as `event_outbox.dedupe_key`
+   (#2879). A `(tenant_id, dedupe_key)` collision (the partial unique
+   index) is caught as an `IntegrityError` and mapped to an idempotent
+   `200` — never a second outbox row, never a second audit row, so a
+   retry-storming sender never double-fires a subscriber.
+6. **Publish + audit in one transaction.** `events.publish()` (now
+   carrying `origin` = source id and the `dedupe_key`) inserts the
+   outbox row in the **same** `session.begin()` block as a synchronous
+   audit row under the synthetic `__ingest__` identity (the `__sensor__`
+   / `__scheduler__` sentinel precedent; `audit_log.operator_sub` is
+   plain `Text`). No success without a committed audit row (postulate 7).
+   A **fail-open** broadcast follows the commit.
+
+### The `__ingest__` audit + Vault-read identities
+
+Ingest is authenticated per-source, not per-operator, so there is no JWT
+to derive an `operator_sub` from — the chassis `AuditMiddleware` (which
+keys on the JWT-bound contextvar) writes no row for it, and the ingest
+service writes its own `__ingest__` row instead. Reading the source's
+secret still needs a Vault client, which needs an operator: the
+`__ingest__` operator reuses the backplane's existing
+background-dispatch service-principal token (`check_runner_jwt`, the
+same "MEHO's own in-process dispatch, outward" identity the sensor
+check-runner uses) with `check_runner_dispatch=False` so the Vault login
+uses the standard `vault_oidc_role`. When that principal is unconfigured
+the token is empty, the Vault read fails, and ingest fails closed — the
+correct posture. A dedicated ingest principal (separately bounded Vault
+role) is a future refinement.
+
+### Reconciliation note (404 vs 401)
+
+The #2880 resolver docstring suggests mapping a missing slug to the
+*same* response as an auth failure. This endpoint instead follows the
+#2881 contract: missing/paused → `404`, bad signature → `401`. The
+residual "a 404 vs 401 distinguishes a real slug" oracle is acceptable
+because a slug is a high-entropy routing token (not enumerable), while
+the uniform 404 still hides the operationally sensitive paused-vs-missing
+distinction.
+
 ## Deferred work
 
 ### Reconnect-with-backoff for the `LISTEN` connection
@@ -376,6 +453,10 @@ Both gated via env vars (defaults shown in parens):
   the actual wake-up shorter than this interval; this bounds the
   *worst-case* poll latency when no producers fire and no listeners
   are connected.
+- `EVENTS_INGEST_RATE_PER_MINUTE` (`60`, `0` disables) — the default
+  per-source fixed-window cap for the inbound ingest endpoint (#2881). A
+  source overrides it via `event_source.extras["rate_per_minute"]`
+  (`0` there disables the limit for that one source).
 
 ## Test coverage
 
@@ -404,6 +485,21 @@ Both gated via env vars (defaults shown in parens):
   — `dedupe_key` / `origin` additive columns + partial unique dedupe
   index (per-tenant uniqueness, NULL-unconstrained, SQLite partial-index
   parity, downgrade round-trip)
+- Inbound ingest (#2881):
+  - [backend/tests/test_events_ingest_auth.py](backend/tests/test_events_ingest_auth.py)
+    — per-strategy constant-time auth: bad signature, replay window,
+    static-header, basic, and the `compare_digest`-for-every-secret guard
+  - [backend/tests/test_events_ingest_rate_limit.py](backend/tests/test_events_ingest_rate_limit.py)
+    — 429 + `Retry-After`, per-source isolation, `0` disables, Valkey
+    fail-loud
+  - [backend/tests/test_events_ingest_config.py](backend/tests/test_events_ingest_config.py)
+    — per-source `extras` config resolution + security clamps
+  - [backend/tests/test_api_v1_events_ingest.py](backend/tests/test_api_v1_events_ingest.py)
+    — endpoint: uniform 404, 413-before-buffer, 401, 202 + outbox
+    `origin`/`dedupe_key` + `__ingest__` audit row, idempotent 200,
+    broadcast fail-open, 429/400 mapping
+  - [backend/tests/test_events_ingest_e2e.py](backend/tests/test_events_ingest_e2e.py)
+    — POSTed event → drain tick → matched `kind=event` trigger → agent run
 
 ## References
 
@@ -415,6 +511,10 @@ Both gated via env vars (defaults shown in parens):
   one-off, merged), T4 #825 (in-flight resume), T5 #826 (admin surface)
 - Task #2878 — the subscription matcher + `kind=event` dispatch
   (`events/matcher.py`); Initiative #2877 (inbound event ingestion)
+- Task #2879 — `event_outbox.dedupe_key` / `origin` columns the ingest
+  path populates; Task #2880 — the `event_source` registry + Vault
+  secret custody the ingest path resolves against; Task #2881 — this
+  inbound ingest endpoint (`api/v1/events_ingest.py`, `events/ingest/`)
 - Companion: [scheduler.md](scheduler.md) — the cron + one-off
   substrate this layer joins on
 - PG `LISTEN`/`NOTIFY` durability:

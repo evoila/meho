@@ -99,6 +99,7 @@ from meho_backplane.ui.routes.connectors import build_router as build_connectors
 from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
+from meho_backplane.ui.routes.event_source import build_event_source_router
 from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
@@ -194,6 +195,12 @@ def build_router() -> APIRouter:
     # without binding a literal as a slug; included before the stubs
     # aggregate so its concrete paths win the first-match-wins lookup.
     router.include_router(build_conventions_router())
+    # Event-source registry admin console (#2880): ``/ui/event-sources``
+    # list + create/edit forms + soft-delete. Static-prefix routes
+    # (``/new``) register before the ``{slug}`` routes inside the router so
+    # a literal is never bound as a slug; included before the stubs
+    # aggregate so its concrete paths win the first-match-wins lookup.
+    router.include_router(build_event_source_router())
     # Agent-grants surface ahead of the agents surface: the literal
     # ``/ui/agents/grants`` path must win the first-match-wins lookup
     # against the agents surface's ``/ui/agents/{name}`` (which would

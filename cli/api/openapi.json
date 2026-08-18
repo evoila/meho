@@ -1361,6 +1361,292 @@
         }
       }
     },
+    "/api/v1/event-sources": {
+      "get": {
+        "tags": [
+          "event-sources"
+        ],
+        "summary": "List Event Sources",
+        "description": "List the tenant's live event sources, keyset-paginated by ``name``.\n\nOptional ``?status=active|paused`` filter. ``?cursor=<name>`` continues\nafter a previous page's ``next_cursor``. Soft-deleted sources are\nexcluded.",
+        "operationId": "list_event_sources_api_v1_event_sources_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EventSourceStatus",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSourceListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "event-sources"
+        ],
+        "summary": "Create Event Source",
+        "description": "Register a new event source in the requesting tenant.\n\nReturns 409 when the ``name`` (per tenant) or ``slug`` (global) is\nalready in use by a live source. When ``secret`` is supplied it is\nwritten to Vault at the derived per-tenant ``secret_ref`` after the\nrow flushes (so a duplicate name/slug 409s before any Vault write) and\nbefore the transaction commits (so a Vault failure rolls the row back).\nOmitting ``secret`` registers the source with no credential\n(``secret_ref`` NULL); the ingest path (#2881) fails closed until a\nlater PATCH sets one.",
+        "operationId": "create_event_source_api_v1_event_sources_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventSourceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSource"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/event-sources/{slug}": {
+      "get": {
+        "tags": [
+          "event-sources"
+        ],
+        "summary": "Describe Event Source",
+        "description": "Describe one event source by slug. 404 (uniform) when it does not\nresolve in the tenant.",
+        "operationId": "describe_event_source_api_v1_event_sources__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSource"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "event-sources"
+        ],
+        "summary": "Update Event Source",
+        "description": "Partially update an event source.\n\nOnly fields present in the body are changed; ``name`` and ``slug`` are\nimmutable (re-create to change them, since ``slug`` is a live routing\nkey). A PATCH to ``status='paused'`` takes effect on the ingest path's\nnext lookup -- nothing caches the row. Sending ``secret`` rotates the\nVault secret at the source's existing ``secret_ref`` (a new KV-v2\nversion at the same derived path, so no downtime); it is also how an\noperator sets the first secret on a source created without one.",
+        "operationId": "update_event_source_api_v1_event_sources__slug__patch",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventSourceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventSource"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "event-sources"
+        ],
+        "summary": "Delete Event Source",
+        "description": "Soft-delete an event source by slug.\n\nStamps ``deleted_at`` so the row stays for audit history while every\nread path (and the ingest resolver) filters it out; the partial unique\nindexes free the ``name`` and ``slug`` for re-use immediately. The\nVault secret is intentionally left in place (RDC owns the Vault\nlifecycle; a re-created source with the same slug derives the same ref\nand overwrites it on its next secret write). A second DELETE collapses\nto the uniform 404 -- the row no longer resolves.",
+        "operationId": "delete_event_source_api_v1_event_sources__slug__delete",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/topology/dependents/{name}": {
       "get": {
         "tags": [
@@ -13052,6 +13338,215 @@
         }
       }
     },
+    "/ui/event-sources": {
+      "get": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " List",
+        "operationId": "_list_ui_event_sources_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " Create",
+        "operationId": "_create_ui_event_sources_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__create_ui_event_sources_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/event-sources/new": {
+      "get": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " New Form",
+        "operationId": "_new_form_ui_event_sources_new_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/event-sources/{slug}/edit": {
+      "get": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " Edit Form",
+        "operationId": "_edit_form_ui_event_sources__slug__edit_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " Edit",
+        "operationId": "_edit_ui_event_sources__slug__edit_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body__edit_ui_event_sources__slug__edit_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/event-sources/{slug}/delete": {
+      "post": {
+        "tags": [
+          "ui-event-source"
+        ],
+        "summary": " Delete",
+        "operationId": "_delete_ui_event_sources__slug__delete_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/agents/grants": {
       "get": {
         "tags": [
@@ -20756,6 +21251,82 @@
         "title": "BaselineMetricsOverride",
         "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
       },
+      "Body__create_ui_event_sources_post": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "auth_strategy": {
+            "type": "string",
+            "title": "Auth Strategy"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "active"
+          },
+          "extras": {
+            "type": "string",
+            "title": "Extras",
+            "default": ""
+          },
+          "secret": {
+            "type": "string",
+            "title": "Secret",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "slug",
+          "kind",
+          "auth_strategy"
+        ],
+        "title": "Body__create_ui_event_sources_post"
+      },
+      "Body__edit_ui_event_sources__slug__edit_post": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "auth_strategy": {
+            "type": "string",
+            "title": "Auth Strategy"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "extras": {
+            "type": "string",
+            "title": "Extras",
+            "default": ""
+          },
+          "secret": {
+            "type": "string",
+            "title": "Secret",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "auth_strategy",
+          "status"
+        ],
+        "title": "Body__edit_ui_event_sources__slug__edit_post"
+      },
       "Body_annotate_ui_topology_edges_post": {
         "properties": {
           "from_name": {
@@ -24732,6 +25303,291 @@
         ],
         "title": "EvalResult",
         "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
+      },
+      "EventSource": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventSourceKind"
+          },
+          "auth_strategy": {
+            "$ref": "#/components/schemas/EventSourceAuthStrategy"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EventSourceStatus"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "slug",
+          "kind",
+          "auth_strategy",
+          "secret_ref",
+          "status",
+          "extras",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "EventSource",
+        "description": "Full read shape. Maps 1:1 to the live ``event_source`` columns.\n\nFrozen. Carries ``secret_ref`` (the Vault *path*) but never the secret\nvalue -- there is no ``secret`` field on any read model."
+      },
+      "EventSourceAuthStrategy": {
+        "type": "string",
+        "enum": [
+          "hmac-sha256",
+          "static-header",
+          "basic"
+        ],
+        "title": "EventSourceAuthStrategy",
+        "description": "How the ingest endpoint (#2881) authenticates the sender.\n\nAll three verify against the source's Vault secret. Values mirror the\n``ck_event_source_auth_strategy`` CHECK constraint.\n\n* ``hmac-sha256`` -- the sender signs the body with a shared key.\n* ``static-header`` -- a fixed bearer / API-key header value.\n* ``basic`` -- HTTP Basic (the non-secret username lives in ``extras``;\n  the password is the Vault secret)."
+      },
+      "EventSourceCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+            "title": "Slug"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventSourceKind"
+          },
+          "auth_strategy": {
+            "$ref": "#/components/schemas/EventSourceAuthStrategy"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EventSourceStatus",
+            "default": "active"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          },
+          "secret": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "nullable": true,
+            "title": "Secret"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "slug",
+          "kind",
+          "auth_strategy"
+        ],
+        "title": "EventSourceCreate",
+        "description": "POST body. ``name`` and ``slug`` are immutable after creation.\n\n``secret`` is the optional auth secret to custody in Vault. When\npresent the create handler writes it to the derived per-tenant Vault\npath and persists that path as ``secret_ref``; when absent the source\nis registered with no secret (``secret_ref`` NULL) and the ingest path\n(#2881) fails closed until a later PATCH sets one. The value is a\nwrite-only :class:`~pydantic.SecretStr` -- it never appears on a read\nmodel, in a log line, or in an audit row."
+      },
+      "EventSourceKind": {
+        "type": "string",
+        "enum": [
+          "alertmanager",
+          "grafana",
+          "vcf-operations",
+          "harbor",
+          "generic-json"
+        ],
+        "title": "EventSourceKind",
+        "description": "Producer family. Selects the payload normaliser (#2882) at ingest.\n\nA closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s\nfree text) because each kind needs hand-written normaliser code, so\nadding one is a code change regardless. Values mirror the\n``ck_event_source_kind`` CHECK constraint."
+      },
+      "EventSourceListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EventSourceSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "EventSourceListResponse",
+        "description": "``{items, next_cursor}`` list envelope (api-shape-conventions \u00a72).\n\n``next_cursor`` is the last row's ``name`` when a further page exists,\n``None`` when this page exhausted the tenant's live sources."
+      },
+      "EventSourceStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused"
+        ],
+        "title": "EventSourceStatus",
+        "description": "Registry status. Values mirror the ``ck_event_source_status`` CHECK.\n\n``paused`` makes the ingest path reject the sender; because nothing\ncaches the row, a PATCH to ``paused`` takes effect on the ingest\npath's very next lookup (#2880 acceptance criterion 1)."
+      },
+      "EventSourceSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EventSourceKind"
+          },
+          "auth_strategy": {
+            "$ref": "#/components/schemas/EventSourceAuthStrategy"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EventSourceStatus"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Deleted At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "slug",
+          "kind",
+          "auth_strategy",
+          "status",
+          "secret_ref",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "EventSourceSummary",
+        "description": "Narrow list-row shape. Frozen; omits ``extras`` to keep lists small."
+      },
+      "EventSourceUpdate": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/EventSourceKind",
+            "nullable": true
+          },
+          "auth_strategy": {
+            "$ref": "#/components/schemas/EventSourceAuthStrategy",
+            "nullable": true
+          },
+          "status": {
+            "$ref": "#/components/schemas/EventSourceStatus",
+            "nullable": true
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Extras"
+          },
+          "secret": {
+            "type": "string",
+            "format": "password",
+            "writeOnly": true,
+            "nullable": true,
+            "title": "Secret"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EventSourceUpdate",
+        "description": "PATCH body. Every field optional; ``name`` / ``slug`` are absent.\n\n``name`` and ``slug`` are immutable (rename or re-slug = delete +\nre-create) because ``slug`` is a live routing key external senders are\nalready pointed at. Sending ``secret`` rotates the Vault secret in\nplace at the source's existing ``secret_ref`` -- a new KV-v2 version at\nthe same path, so the ingest path reads the new value on its next\nlookup with no downtime (#2880 acceptance criterion 2). Omitting\n``secret`` leaves the stored secret untouched."
       },
       "FingerprintResult": {
         "properties": {

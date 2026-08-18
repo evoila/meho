@@ -314,25 +314,28 @@ async def test_authenticated_invalid_json_returns_400(client: TestClient) -> Non
     assert await _count(EventOutbox) == 0
 
 
-def test_deeply_nested_body_fails_closed_not_500() -> None:
-    """A deeply-nested within-cap body fails closed as 400, never crashes to 500.
+def test_deeply_nested_body_fails_closed_not_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body that overflows the JSON parser's recursion guard fails closed (400, never 500).
 
-    ``json.loads`` raises ``RecursionError`` -- not ``JSONDecodeError`` -- on a
-    120 KB ``[[[...]]]`` body that still fits under the 256 KiB cap.
-    ``_parse_json_or_fail`` must map it to :class:`IngestPayloadError`, which the
-    endpoint turns into its clean 400 (that mapping is covered by
-    :func:`test_authenticated_invalid_json_returns_400`); before the fix the
+    ``json.loads`` can raise ``RecursionError`` -- not ``JSONDecodeError`` -- on a
+    deeply-nested body. The exact nesting depth that trips the C-stack ceiling is
+    environment-dependent (interpreter build, C-stack size, worker thread), so rather
+    than rely on a specific depth -- which is flaky across CPython builds -- we force
+    ``json.loads`` to raise ``RecursionError`` and assert ``_parse_json_or_fail`` maps
+    it to :class:`IngestPayloadError`. The endpoint turns that into its clean 400 -- the
+    ``IngestPayloadError`` -> 400 mapping is covered end-to-end by
+    :func:`test_authenticated_invalid_json_returns_400`. Before the fix the
     ``RecursionError`` propagated uncaught and the request 500'd.
-
-    Asserted at the parser, not end-to-end: the ``TestClient`` runs the route in
-    an anyio worker thread whose larger C stack does not reach the recursion
-    ceiling at a within-cap depth, so an end-to-end nested body would be
-    harness-dependent. The parser call here runs on the test thread and is
-    deterministic.
     """
-    body = b"[" * 60_000 + b"]" * 60_000
-    assert len(body) < 256 * 1024  # within the endpoint's body cap
+
+    def _raise_recursion(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded while decoding JSON")
+
+    # ``service`` calls the stdlib ``json.loads``; patch it to raise deterministically.
+    monkeypatch.setattr(json, "loads", _raise_recursion)
     with pytest.raises(IngestPayloadError) as exc:
-        _parse_json_or_fail(body)
+        _parse_json_or_fail(b"[]")
     # It is specifically the recursion path that was caught and re-raised.
     assert isinstance(exc.value.__cause__, RecursionError)

@@ -29169,6 +29169,11 @@
             "nullable": true,
             "title": "Seconds Since Last Tick"
           },
+          "seconds_since_last_claim": {
+            "type": "number",
+            "nullable": true,
+            "title": "Seconds Since Last Claim"
+          },
           "stalled": {
             "type": "boolean",
             "title": "Stalled"
@@ -29181,11 +29186,12 @@
         "type": "object",
         "required": [
           "seconds_since_last_tick",
+          "seconds_since_last_claim",
           "stalled",
           "stall_threshold_seconds"
         ],
         "title": "SensorRunnerStatus",
-        "description": "Liveness of this process's sensor evaluation loop (#2763).\n\nThe queryable half of the checks-runner watchdog: an external prober\n(\"how we monitor the monitoring\") alerts when\n``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` \u2014 or\nsimply on ``stalled``, which is that comparison server-side.\n``stalled`` is derived live from the in-process tick stamp on every\nread (never from the watchdog task's emission latch), so it stays\ntruthful even if the watchdog task itself has died.\n\n``seconds_since_last_tick`` is ``None`` only in the window between\nprocess start and runner start \u2014 once the lifespan is up it is\nalways a number. The value is per-process: each replica reports its\nown loop, which is exactly the failure mode observed (one process's\nloop coroutine going quiet)."
+        "description": "Liveness of this process's sensor evaluation loop (#2763).\n\nThe queryable half of the checks-runner watchdog: an external prober\n(\"how we monitor the monitoring\") alerts when\n``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` \u2014 or\nsimply on ``stalled``, which is that comparison server-side.\n``stalled`` is derived live from the in-process tick stamp on every\nread (never from the watchdog task's emission latch), so it stays\ntruthful even if the watchdog task itself has died.\n\n``seconds_since_last_tick`` is ``None`` only in the window between\nprocess start and runner start \u2014 once the lifespan is up it is\nalways a number. The value is per-process: each replica reports its\nown loop, which is exactly the failure mode observed (one process's\nloop coroutine going quiet).\n\n``seconds_since_last_claim`` (#3010) measures from the last tick\nthat actually **held** the runner's advisory lock. It diverges from\n``seconds_since_last_tick`` when the loop is alive but never winning\nthe lock \u2014 the stranded-lock starvation ``stalled`` is structurally\nblind to (every tick completes; nothing is ever claimed). Per-process\nand informational: on a multi-replica deploy only the lock-winning\nreplica's claim stamp advances, so alert on the minimum across\nreplicas, not per pod."
       },
       "SensorSeverity": {
         "type": "string",

@@ -89,14 +89,16 @@ Two cost classes of shelf-backed test, two CI homes:
 - **Full-ingest canaries** (today: the G0.7 vSphere canary,
   `tests/acceptance/test_g07_vsphere_canary.py`): drive the whole
   ingest pipeline — Postgres testcontainers, real embeddings, the
-  grouping pass — over the full pinned corpus, per test. **Minutes per
-  test** when armed. They run in exactly one armed lane:
-  `python-integration` (its pytest step selects the canary module
-  alongside `tests/integration/`), and the unit sweep opts out via
-  `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored by a collection-time
-  `skipif` marker on every full-ingest test (so an opted-out lane
-  never even spins the module-scoped Postgres container), with a
-  backstop re-check in the canary's `vcenter_spec_path` fixture.
+  grouping pass — over the full pinned corpus. **Minutes per lane**
+  when armed (a full two-spec ingest measures ~164 s on CI runners,
+  amortised once per module — see the shared-corpus pattern below).
+  They run in exactly one armed lane: `python-integration` (its pytest
+  step selects the canary module alongside `tests/integration/`), and
+  the unit sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1`, honored
+  by a collection-time `skipif` marker on every full-ingest test (so
+  an opted-out lane never even spins the module-scoped Postgres
+  container), with backstop re-checks in the canary's shared
+  `_canary_corpus` fixture and its `vcenter_spec_path` fixture.
   Everywhere the var is unset (local dev, the integration lane) the
   armed-shelf contract is unchanged.
 
@@ -109,6 +111,48 @@ discipline (#898/#793/#827) applies: measure and relocate the slow
 path; never just raise `timeout-minutes` or `budget_s`. A future lane
 that performs a full ingest (rather than a parse-only reconcile)
 inherits the canary's placement; a reconcile lane never needs it.
+
+### Shared-corpus amortisation (the pattern for heavy ingest lanes)
+
+Relocation alone is not enough when the heavy work repeats per test.
+The canary's first armed run in `python-integration` (PR #2995) proved
+it: a function-scoped ingest fixture re-ran the ~164 s two-spec ingest
+for each of 25 armed tests — ~68 min of ingest against a 60-min job
+cap, a timeout kill with zero individual test being slow. The fix of
+record is **amortise, never raise `timeout-minutes`**:
+
+1. **One module-scoped corpus fixture** performs the expensive ingest
+   exactly once (`_canary_corpus` in the canary module). It is a
+   *sync* fixture that runs the async pipeline via `asyncio.run` on a
+   private event loop and disposes every DB resource inside that loop
+   — module-scoped *async* fixtures would couple to pytest-asyncio
+   loop-scope config, and an engine's pooled connections must never
+   cross event loops. Because module-scoped fixtures instantiate
+   before function-scoped autouse fixtures, the corpus fixture pins
+   its own env (chassis vars, `DATABASE_URL`, model cache) via a
+   module-lifetime `pytest.MonkeyPatch` and brackets its own log
+   silencing.
+2. **A thin function-scoped binder** (`ingested_canary`) re-pins a
+   fresh per-test engine to the same module-scoped container WITHOUT
+   truncating. This is the piece that makes module scope survivable:
+   the repo's per-test DB fixtures (`pg_engine` in both the
+   integration and acceptance conftests) TRUNCATE every chassis table
+   between tests — exactly what would wipe a shared corpus — and the
+   root conftest's autouse `_default_database_url` disposes/resets the
+   process engine cache after every test, so a per-test re-pin is
+   mandatory regardless.
+3. **Read-only isolation contract.** Every consumer of the shared
+   corpus must be read-only against it. A test that mutates connector
+   state keeps a function-scoped ingest against the truncating
+   `pg_engine` (the canary's env-gated vcsim-dispatch and real-LLM
+   variants are the reference shape).
+
+Measured effect: the full armed canary module dropped from a projected
+~80 min (25 ingests + lane baseline, past the 60-min cap) to ~90 s
+locally / a projected ~15-17 min total integration-lane wall. A future
+heavy lane (full ingest over a large pinned corpus, N > a few tests)
+starts from this pattern; per-test ingest is only acceptable while
+`N × ingest cost` stays trivially inside the lane budget.
 
 ## Extension mechanics (per new vendor lane)
 

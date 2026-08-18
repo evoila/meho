@@ -823,12 +823,17 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
 - Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
-  the unit sweep; the canary's full-ingest tests (minutes per test when
-  armed) run armed only in `python-integration` — its pytest step selects
+  the unit sweep; the canary's full-ingest tests run armed only in
+  `python-integration` — its pytest step selects
   `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
   sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
   `skipif` marker on the canary's full-ingest tests, backstopped in its
-  `vcenter_spec_path` fixture). Rationale + rule:
+  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
+  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
+  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
+  original per-test-ingest shape was 25 ingests and timeout-killed the
+  60-min integration cap on its first armed run). Rationale + rule +
+  the shared-corpus pattern for future heavy lanes:
   [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
   §Lane placement.
 - Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same

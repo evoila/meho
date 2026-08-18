@@ -996,17 +996,20 @@ jobs:
         # scope for the perf change.
         #
         # The canary module is selected here (#2980) because its
-        # armed-shelf full-ingest tests cost minutes per test (full
-        # two-spec ingest per test by design) — they blew the unit
-        # lane's 25-min cap the first day the shelf was armed, so this
-        # job (60-min cap, containers first-class) is their single
-        # armed lane; the unit sweep opts out via
+        # armed-shelf full-ingest tests need the container-heavy
+        # budget: the ~164 s two-spec ingest runs ONCE per module
+        # (module-scoped _canary_corpus fixture, amortised in PR #2995
+        # after per-test ingests — 25 x ~164 s — timeout-killed this
+        # job's 60-min cap on the first armed run; per-test ingests
+        # had already blown the unit lane's 25-min cap the day the
+        # shelf was armed). This job is the canary's single armed
+        # lane; the unit sweep opts out via
         # MEHO_SKIP_SPEC_INGEST_TESTS (see its Pytest step's env
         # comment). Shelf absent (fork/Dependabot/unprovisioned) → the
         # canary skips exactly as it always did; its fixture-less
         # self-checks also run (again) here — seconds, harmless. Lane
-        # placement rule: docs/decisions/spec-reconcile-guards-
-        # standard.md.
+        # placement rule + amortisation pattern:
+        # docs/decisions/spec-reconcile-guards-standard.md.
         run: uv run pytest -x tests/integration/ tests/acceptance/test_g07_vsphere_canary.py
 
   python-migration-tests:

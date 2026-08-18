@@ -252,8 +252,12 @@ The CI gate at
 [`backend/tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py)
 runs the same procedure non-interactively against a
 testcontainers Postgres + a deterministic LLM stub that classifies
-ops by URL path prefix. The stub keeps the test reproducible and
-fast (~5 s ingest + ~1-2 s per benchmark query); a live-LLM variant
+ops by URL path prefix. With the CI spec shelf armed, the full
+two-spec ingest (~164 s on CI runners) runs ONCE per module via the
+module-scoped ``_canary_corpus`` fixture and is shared read-only by
+every armed test (amortised in PR #2995 — the original per-test
+ingest shape, 25 ingests, timeout-killed the 60-min integration
+lane on its first armed run); a live-LLM variant
 gated on ``MEHO_G07_CANARY_LIVE_LLM=1`` exercises the real grouping
 pass. As of #1386 a production Anthropic ``LlmClient``
 (``build_anthropic_ingest_llm_client``) is wired at FastAPI lifespan
@@ -282,7 +286,8 @@ The acceptance test asserts:
   the first ingest and ``False`` on the second (auto-shim idempotency
   branch).
 - ``operations_unassigned / inserted_count < 50%`` across the
-  combined corpus.
+  combined corpus (xfail-documented: measured 81.6% unassigned
+  two-spec against the real corpus — see *Known gaps* #4).
 - One vi-json ``{moId}`` path substitutes cleanly via
   :func:`meho_backplane.operations._branches._substitute_path`
   without special-casing.
@@ -492,6 +497,27 @@ ships a parallel ``pg_engine`` fixture with the full TRUNCATE list
 so the canary works locally without modifying the integration
 conftest. The integration suite gap itself is a separate
 follow-up.
+
+### 4. Stub-taxonomy coverage vs the `< 50%` unassigned bar
+
+Measured 2026-08-18 against the real corpus (first time the case was
+reachable in a full armed run — the integration lane's ``pytest -x``
+had died on `list clusters` in both prior armed runs): 2,831 of 3,470
+ops end up unassigned two-spec (81.6%; per-spec: vcenter 949/1,275,
+vi-json 1,882/2,195), far past the canary's ``< 50%`` acceptance bar,
+which was authored from the stub taxonomy's coverage claim without an
+armed measurement. The identical failure reproduces on the
+pre-amortisation test shape, so this is a latent canary-calibration
+gap, not a regression. The cause is structural: the deterministic
+stub maps only 14 path families by design, and the real specs' long
+tail (vcenter ``appliance/``/``esx/``/``hvc/``/``content/`` subtrees;
+~100 vi-json ManagedObject types beyond the six mapped) classifies to
+``none``. The assignment substrate itself is proven — 639 ops
+populate all 14 groups and group-scoped search works against them.
+``test_canary_two_spec_grouping_unassigned_ratio`` is xfail-marked
+(non-strict) with the measured numbers; the fix is either a broader
+stub taxonomy or a re-derived bar, both belonging to the T3
+grouping-quality follow-up rather than this harness PR.
 
 ## Rollback
 

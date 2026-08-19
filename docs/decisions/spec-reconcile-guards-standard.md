@@ -387,6 +387,57 @@ is proven on every run, with no served-op-id compare.
   service being evidenced. The activating task runs the full extension
   mechanics and reconciles the four op_ids on first run.
 
+### vcfa-vra8 — manifest-pin, Swagger-2.0 spec exists but OA3-only ingest (#3058)
+
+The `vcfa-vra8` (vRealize Automation 8.x) connector is the **legacy
+dual-impl** of `product="vcfa"` (initiative
+[#3056](https://github.com/evoila/meho/issues/3056), task #3058; the
+modern `vcfa-rest` provider/tenant lane is `vcf-automation-9.0` above).
+Its lane (`backend/tests/test_connectors_vra8_spec_reconcile.py`) is a
+**manifest pin only** — it sweeps the eight hand-coded op_ids
+unconditionally so the enumeration is proven on every run, with no
+served-op-id compare. **This exclusion differs from `vcd` above: a
+committable spec _does_ exist — it just isn't ingestable.**
+
+- **Excluded (8 op_ids: `POST:/csp/gateway/am/api/login`,
+  `POST:/iaas/api/login`, `GET:/iaas/api/about`, `GET:/iaas/api/projects`,
+  `GET:/deployment/api/deployments`,
+  `GET:/deployment/api/deployments/{deployment_id}`,
+  `GET:/blueprint/api/blueprints`, `GET:/catalog/api/admin/items`).**
+  What was checked: (1) **the five `/iaas` + `/deployment` + `/blueprint`
+  + `/catalog` read paths** are served by the Apache-2.0
+  [`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) swaggers
+  (`vra-iaas.json`, `vra-catalog-deployment.json`, `vra-blueprint.json`,
+  tag `v0.6.5`) — but those are **Swagger 2.0**, which the ingest parser
+  rejects by decision (#2090), so they are not operator-ingestable (hence
+  the typed read core) and there is no OA3 artifact to route through
+  `openapi_served_op_ids`. (2) **The two login endpoints** are outside
+  vra-sdk-go entirely: `POST /iaas/api/login` is the IaaS token exchange
+  (present in `vra-iaas.json`, but a POST the read-lane doesn't reconcile),
+  and `POST /csp/gateway/am/api/login` is the **CSP identity service**,
+  which no vra-sdk-go spec covers (CSP identity is a separate vIDM
+  surface). So no single artifact can serve a reconcile authority for the
+  full eight without false reds. **Residual risk, named** (the nsx
+  lesson): this task ran no live probe of a vRA 8 appliance — live
+  end-to-end verification against a vRA 8.x source appliance is the
+  deferred tail (the same unit-tested-first posture `vcd` / `fleet-lcm`
+  shipped with).
+- **Strengthening (available, deferred):** unlike `vcd`, the read paths
+  here _are_ served by a vendored Swagger 2.0 artifact, so the sibling
+  `vcf-automation-9.0` lane's shelf-armed pattern applies — a
+  `_swagger2_served_op_ids` extractor (the non-OpenAPI-artifact clause,
+  already used for the VCFA tenant plane against `vra-iaas.json`) crossing
+  the `/iaas` + `/deployment` + `/blueprint` + `/catalog` op_ids against
+  the three vra-sdk-go swaggers, shelved under `vcfa-vra8-8.0/`. That layer
+  skips when the shelf is unconfigured (the default sweep), so it was
+  deferred in favour of the tested always-on manifest pin; the CSP + IaaS
+  login POSTs stay excluded regardless.
+- **Activation:** shelving the three vra-sdk-go swaggers under
+  `vcfa-vra8-8.0/` and adding the served-set compare for the read paths
+  (the login POSTs remain evidenced exclusions), or MEHO gaining a
+  Swagger-2.0→OA3 ingest path (#2090) that makes the surface
+  operator-ingestable as a generic connector.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

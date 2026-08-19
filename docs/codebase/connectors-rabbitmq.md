@@ -157,6 +157,24 @@ never an exception. `probe` delegates to `fingerprint`.
   is validated to `http`/`https` at dispatch and is orthogonal to
   `verify_tls` (certificate trust vs. transport selection).
 
+## Spec-reconcile lane (#2989)
+
+- `backend/tests/test_connectors_rabbitmq_spec_reconcile.py` asserts every
+  hand-coded request path the connector emits against the pinned
+  `rabbitmq-4.3` shelf artifacts (consumer spec-shelf; MPL-2.0 sources from
+  `rabbitmq/rabbitmq-server@v4.3.5`). RabbitMQ publishes no OpenAPI, so the
+  served set is the management plugin's own `/api/index.html` route table
+  (converted to markdown) unioned with the vendored
+  `rabbit_shovel_mgmt_shovels.erl` dispatcher routes — the core table does
+  not document the shovel plugin's `/api/shovels[/{vhost}]` surface.
+- The declared set is captured from live handler execution (a recording
+  subclass at the `_get_json` seam — the path literals live inline in the
+  handler bodies, so source introspection has nothing durable to
+  enumerate), each vhost-scoped op run once bare and once with
+  `vhost="/"` so the percent-encoded `%2F` variant is reconciled as a
+  single `{vhost}` template segment. First armed run (2026-08-18): green —
+  all 21 captured op_ids served (19 route table, 2 shovel dispatcher).
+
 ## References
 
 - Task #2233 (this connector); Initiative #2228.

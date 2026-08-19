@@ -199,7 +199,8 @@ layers and pinned together by a test rather than shared as a constant.
   a test pins both tables to the enum.
 - **No event-outbox routing and no durable event table.** The Valkey
   stream plus its retention window is the carrier, exactly as for
-  `approval.*` (the outbox matcher is a no-op pending #826).
+  `approval.*` (the outbox matcher, #2878, fires `kind=event` agent
+  triggers, not checks-broadcast events).
 
 ## References
 

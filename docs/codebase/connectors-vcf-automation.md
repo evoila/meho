@@ -13,7 +13,8 @@ G3.6-T11 (#836) added the dual-plane spec ingestion + operator-review
 curation. G3.6-T12 (#840) shipped the recorded-fixture E2E. The operator
 runbook lives at `docs/cross-repo/g36-vcfa-canary.md`.
 
-**Typed reads (T5 #2305; deployment list #2839).** VCFA ships **no
+**Typed reads (T5 #2305; deployment list #2839; deployment get
+#2960).** VCFA ships **no
 vendor OpenAPI spec** (the provider plane publishes none; the tenant
 plane ships only Swagger 2.0 fragments the ingest parser rejects by
 decision #2090), so there is nothing to ingest — the hand-curated
@@ -21,28 +22,45 @@ decision #2090), so there is nothing to ingest — the hand-curated
 dispatch-inert on a real deploy and was **retired in #2362**. The
 **audited read set** (evoila/meho#2294: org/region list, provider
 health, `/iaas/api/projects` + tenant `about`), plus the tenant
-**deployment list** (#2839), is served by `source_kind="typed"` ops
+**deployment list** (#2839) and per-id **deployment detail** (#2960),
+is served by `source_kind="typed"` ops
 (`typed_ops.py`) that dispatch through the connector's own dual-plane
-session with **zero catalog state**. Six ops:
+session with **zero catalog state**. Seven ops:
 
 | op_id | plane | path |
 |---|---|---|
 | `vcfa.provider.org.list` | provider | `GET /cloudapi/1.0.0/orgs` |
-| `vcfa.provider.region.list` | provider | `GET /cloudapi/1.0.0/regions` |
+| `vcfa.provider.region.list` | provider | `GET /cloudapi/vcf/regions` |
 | `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/site` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
 | `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
+| `vcfa.tenant.deployment.get` | tenant | `GET /iaas/api/deployments/{id}` |
 | `vcfa.tenant.about` | tenant | `GET /iaas/api/about` |
+
+The region list rides the `vcf/` cloudapi prefix, not the classic
+`1.0.0/` one — VCFA 9.0 moved Region there and 404s the classic form
+(repointed by the #2983 reconcile; rationale on the
+`PROVIDER_REGIONS_PATH` constant). Every hand-coded `METHOD:/path` in
+the connector is swept by the spec-reconcile lane
+(`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`,
+#2983): the tenant-plane half asserts against the pinned Apache-2.0
+`vra-iaas.json` on the spec shelf; the provider-plane half is an
+evidenced exclusion (no pinnable wire spec exists — see the
+`vcf-automation-9.0` entry in
+`docs/decisions/spec-reconcile-guards-standard.md`).
 
 Each op **declares the plane it rides**; `typed_ops._validate_typed_op_planes`
 asserts at import time that the declared `plane` matches
 `plane_for_path(op.path)`, so a drift fails the import rather than
-surfacing as a misrouted HTTP 401. The `org create` write
+surfacing as a misrouted HTTP 401. The detail read's `{id}` path
+template is percent-encoded (empty safe set) by the handler at
+substitution time — OpenAPI `style: simple` semantics, matching the
+ingested dispatch path's `{var}` expansion. The `org create` write
 (`POST /cloudapi/1.0.0/orgs`) is deliberately out of scope — a first
 write on a read-only connector belongs in a G3.x-mold approval-gated
-write-surface initiative. Per-id deployment detail
-(`vcfa.tenant.deployment.get`), blueprint listing, and the provider
-users list remain unconverted — a natural fast-follow, not part of the
+write-surface initiative. Blueprint listing and the provider
+users list remain unconverted (initiative #2833 ranks them low tier) —
+not part of the
 "which deployments exist / which failed" answer this surface delivers.
 The hand-curated ingested-enable apparatus (`core_ops.py` / `_core_data`)
 those once lived under was retired in #2362; the wider ingested catalog
@@ -52,7 +70,7 @@ it does not.
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the six descriptors on startup — the same
+`__init__.py`) upserts the seven descriptors on startup — the same
 argocd / bind9 / Kubernetes typed-registrar shape.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
@@ -101,8 +119,9 @@ domains.
   and `load_session_credentials_from_vault` in `connectors/nsx/` /
   `connectors/vmware_rest/`.
 - **`VCFA_TYPED_OPS` / `VcfaTypedOp` / `VCFA_TYPED_WHEN_TO_USE_BY_GROUP`**
-  (`typed_ops.py`) — the six typed read ops (T5 #2305; tenant deployment
-  list #2839) and their two per-plane groups (`vcfa-provider-reads`,
+  (`typed_ops.py`) — the seven typed read ops (T5 #2305; tenant
+  deployment list #2839; tenant deployment get #2960) and their two
+  per-plane groups (`vcfa-provider-reads`,
   `vcfa-tenant-reads`). Each `VcfaTypedOp` carries a `plane` + `path`;
   the module's `_validate_typed_op_planes()` cross-checks them at import
   so a declared-plane / path drift fails the import rather than
@@ -132,28 +151,44 @@ domains.
    idempotency check (in `ensure_connector_class_registered`) no-ops on
    subsequent ingests against the same triple.
 4. `run_typed_op_registrars()` (lifespan) invokes the registrar, which
-   upserts the five `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
+   upserts the seven `typed_ops.VCFA_TYPED_OPS` descriptors — no ingest
    needed, so the audited read surface works on a fresh boot.
 
-### Vhost routing (load-bearing)
+### Vhost routing (load-bearing, #2863)
 
 VCFA 9.x enforces strict `Host:` header matching — the consumer wrapper
-(`scripts/vcf-automation.sh`) uses `curl --resolve fqdn:443:<ip>` to override
-DNS while keeping the FQDN in the request line. In httpx terms, the
-connector's per-target `AsyncClient` is built with
-`base_url=https://<fqdn-or-host>`; the cleanest equivalent of `--resolve` is
-to use the FQDN as the URL host and rely on operator-side DNS resolution.
+(`scripts/vcf-automation.sh`) uses `curl --resolve fqdn:443:<ip>` to keep
+the FQDN in the request line while dialling a specific IP. The connector
+implements the same "connect by IP, route by vhost" posture in httpx
+terms: the per-target `AsyncClient` **always** dials `target.host`
+(`base_url=https://<host>[:port]` — the reachable NAT-alias IP, or an
+FQDN), and `target.fqdn` is applied **per-request** as:
 
-The decision tree in `VcfAutomationConnector._base_url`:
+- the `Host:` header — via `_routing.vhost_header(fqdn, port)`, merged
+  onto the auth headers on the data path, both plane logins, and both
+  fingerprint probes; and
+- the TLS SNI + certificate-verify name — via the `sni_hostname`
+  request extension (the #2002 seam), so under `verify_tls=true` the
+  presented cert is still verified against the FQDN, not the dialled IP.
+  `VcfAutomationConnector._request_extensions` sets it with precedence
+  `tls_server_name` > `fqdn` > derive-from-host.
 
-1. `target.fqdn` is set → base URL host is the FQDN.
-2. `target.fqdn` is unset and `target.host` is an IP literal (IPv4 or IPv6,
-   bracket-wrapped accepted) → raise `VcfAutomationConfigurationError` with
-   a clear message naming the target and pointing operators at the `--fqdn`
-   / `fqdn:` configuration knob. Without this guard every path returns 404
-   with empty body post-login.
-3. `target.fqdn` is unset and `target.host` is itself an FQDN → use
-   `target.host` as the URL host (the right vhost is already on the wire).
+Nothing FQDN-derived is baked into the pooled `AsyncClient`, so this is
+compatible with the client-pool key (a per-request `fqdn` override never
+serves a stale client), and the SSRF guard — which screens `target.host`
+— now screens the address actually dialled. Before #2863 the FQDN was
+put into `base_url`, which (a) made an appliance reachable only by a
+NAT-alias IP structurally undialable, (b) could not disambiguate several
+appliances sharing one vhost FQDN behind distinct aliases, and (c) let
+the transport dial a host the SSRF guard never screened.
+
+`compose_base_url` returns `https://{host}[:port]` for every valid shape
+and refuses exactly one: an IP-literal `host` (IPv4 / IPv6, bracket-wrapped
+accepted) with no `fqdn` — there is no vhost to present, so it raises
+`VcfAutomationConfigurationError` naming the target + IP and pointing at
+the `--fqdn` / `fqdn:` knob rather than emitting a post-login 404 storm.
+An FQDN `host` with no `fqdn` is fine — httpx derives `Host:` from the
+host, which already carries the right vhost.
 
 `fingerprint()` catches the configuration error and reports a structured
 `reachable=False` with `extras["error"]` rather than bubbling the exception
@@ -236,7 +271,9 @@ the consumer repo, validated 2026-05-17):
 ### Fingerprint + probe
 
 - `fingerprint(target)` issues both unauthenticated version probes in series
-  through the per-target httpx client:
+  through the per-target httpx client. Each probe carries the vhost `Host:`
+  header and TLS SNI the same way the data path does (#2863 closed the
+  #2398 gap where the SNI seam reached only the two login POSTs):
   - Provider: `GET /api/versions` — returns vCD-API version XML. The
     connector reads the status only; XML parsing for the "latest
     non-deprecated" string lives in the consumer wrapper, which the
@@ -295,7 +332,12 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   headers without rerouting through `_request_json`'s tenacity decorator.
   The connection-error / 5xx retry layer lives on the base method and
   applies to callers that use the base `_get_json` / `_post_json` paths
-  (the dispatcher always uses the overridden ones here).
+  (the dispatcher always uses the overridden ones here). Verified against
+  the pinned httpx 0.28.1 / httpcore 1.0.9: an explicit `Host` header
+  survives onto the built request (httpx does not overwrite it from
+  `base_url`) and the `sni_hostname` request extension drives httpcore's
+  `server_hostname` for both TLS SNI and cert CN/SAN verification — the two
+  facts the per-request vhost routing (#2863) relies on.
 - **tenacity 9.x** — installed dependency; not in direct use on this
   connector's overrides (the per-plane 401 retry-once is the only retry
   layer). Inherited use of tenacity persists on the base `_request_json`.
@@ -338,13 +380,17 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   `typed_ops.py` dispatch with zero catalog state, so they never touch
   the vra-sdk-go 2.0 fragments — converting those would only *widen* the
   ingested browse breadth, not change the typed reads.
-- `--resolve`-style DNS override (consumer-wrapper-only) has no direct
-  httpx equivalent in the connector — operators are expected to make the
-  appliance's FQDN resolvable on the meho-backplane host (typical: split-DNS
-  for the management network) when the target uses the IP-host-plus-FQDN
-  shape. A future enhancement could use httpx's transport-level resolver
-  hook, but the v0.2 posture matches MEHO's standard "operator-owned DNS"
-  assumption.
+- `--resolve`-style DNS override no longer needs split-DNS (#2863). The
+  connector dials `target.host` directly and presents `target.fqdn` as the
+  `Host:` header + TLS SNI per request, so the IP-host-plus-FQDN shape works
+  without making the appliance's FQDN resolvable on the meho-backplane host.
+  This is the `curl --resolve fqdn:443:<ip>` behaviour the consumer wrapper
+  uses, done at the request layer rather than the transport resolver — and
+  it is **required** (not merely convenient) when several appliances share
+  one vhost FQDN behind distinct NAT aliases, since a single DNS name cannot
+  map to N alias IPs. Operator note: a vcfa target must set `host` to the
+  dialable address; a target whose `host` held a stale value while split-DNS
+  carried the FQDN fails loud at first dispatch with the host named.
 
 ## References
 
@@ -352,6 +398,13 @@ for ingested breadth on connectors that *do* publish a convertible spec.
   (skeleton — this Task); [G3.6-T11 #836](https://github.com/evoila/meho/issues/836)
   (dual-plane spec ingestion + read ops); [G3.6-T12 #840](https://github.com/evoila/meho/issues/840)
   (CLI verbs + E2E + onboarding doc).
+- Connect-by-IP / route-by-vhost: [#2863](https://github.com/evoila/meho/issues/2863)
+  (dial `target.host`, present `target.fqdn` per-request as `Host:` + TLS
+  SNI; closes the #2398 probe/data-path SNI-seam gap) — builds on the
+  `tls_server_name` SNI seam [#2002](https://github.com/evoila/meho/issues/2002)
+  / [#2398](https://github.com/evoila/meho/issues/2398). The generic
+  `net.http_probe` counterpart is split out as
+  [#2896](https://github.com/evoila/meho/issues/2896).
 - Swagger-2.0 on-ramp decision: [#2090](https://github.com/evoila/meho/issues/2090)
   (parser stays OpenAPI-3.x-only; convert vra-sdk-go fragments
   out-of-band — see Known issues above).

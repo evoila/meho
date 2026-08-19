@@ -240,6 +240,21 @@ The remaining 6 ingested-browse ops (resource list/get, alert definitions,
 symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
 
+**Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
+four typed-read paths plus the session mint
+(`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
+`vcf-operations-9.0` shelf spec by
+[`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)
+(the #2980 harness; parse-only, runs in the required unit sweep, uniform skip
+when the shelf is unconfigured). The lane parses
+`vcf-operations-openapi.ingestable.json` — a deterministic derivative of the
+vendor core spec pinned on the shelf, because the vendor document itself
+fails `parse_openapi`'s OpenAPI 3.0 metaschema gate (three
+`components.schemas` entries carry `"required": []`; the derivative drops
+them, a semantic no-op — recipe + sha256 in the shelf's `MANIFEST.md`). An
+operator ingesting the core spec needs the same remediation. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
 ### Shutdown
 
 `aclose()` clears the in-memory session-token cache and the shared

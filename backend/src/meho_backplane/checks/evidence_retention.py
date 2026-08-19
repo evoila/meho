@@ -61,6 +61,7 @@ from meho_backplane.memory.audit import (
     INTERNAL_METHOD,
     write_internal_audit_row,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -219,6 +220,7 @@ async def _prune_loop() -> None:
                 "checks_evidence_retention_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("evidence_retention", get_settings().checks_evidence_prune_interval_seconds)
 
 
 def start_evidence_retention_sweeper() -> asyncio.Task[None]:

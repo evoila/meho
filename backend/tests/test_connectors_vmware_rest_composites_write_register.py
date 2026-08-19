@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the 18 vmware-rest write composites.
+"""Registration tests for the 19 vmware-rest write composites.
 
 Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
 ``vm.power`` / #2301, the vim writes ``vm.disk.grow`` / #2893 +
@@ -10,7 +10,7 @@ hardware writes ``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``,
 and the GOSC composites ``guest.customization_spec.create`` /
 ``vm.customize`` / #2892):
 
-* All 18 expected write ``op_id`` rows land in ``endpoint_descriptor``
+* All 19 expected write ``op_id`` rows land in ``endpoint_descriptor``
   with ``source_kind="composite"``, ``safety_level="dangerous"``,
   ``requires_approval=True`` (T4's defaults intentionally inherited).
 * Each row's ``handler_ref`` resolves to the module-level dotted path
@@ -53,6 +53,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     vm_clone_from_template_composite,
     vm_create_composite,
     vm_customize_composite,
+    vm_deploy_from_library_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -67,7 +68,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 18 write composites (T6 / #509, single-VM vm.power / #2301, the
+# 19 write composites (T6 / #509, single-VM vm.power / #2301, the
 # mutating VI-JSON vm.disk.grow / #2893, the folder-template
 # vm.clone_from_template / #2894, the vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895, the #2891
@@ -76,6 +77,7 @@ from meho_backplane.settings import get_settings
 _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.create",
     "vmware.composite.vm.clone",
+    "vmware.composite.vm.deploy_from_library",
     "vmware.composite.vm.clone_from_template",
     "vmware.composite.vm.snapshot.revert",
     "vmware.composite.vm.migrate",
@@ -106,7 +108,7 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.network.portgroup.audit",
 )
 
-# 23 total -- 5 read (T5 / #508) + 18 write (T6 / #509 + vm.power / #2301 +
+# 24 total -- 5 read (T5 / #508) + 19 write (T6 / #509 + vm.power / #2301 +
 # vm.disk.grow / #2893 + vm.clone_from_template / #2894 + vim cluster/inventory
 # writes cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
 # writes vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC create/apply / #2892).
@@ -119,6 +121,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.vm.clone": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_composite"
+    ),
+    "vmware.composite.vm.deploy_from_library": (
+        "meho_backplane.connectors.vmware_rest.composites._write.vm_deploy_from_library_composite"
     ),
     "vmware.composite.vm.clone_from_template": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_from_template_composite"
@@ -175,6 +180,7 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.create": "vm",
     "vmware.composite.vm.clone": "vm",
+    "vmware.composite.vm.deploy_from_library": "vm",
     "vmware.composite.vm.clone_from_template": "vm",
     "vmware.composite.vm.snapshot.revert": "vm",
     "vmware.composite.vm.migrate": "vm",
@@ -234,15 +240,15 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 # ---------------------------------------------------------------------------
-# 18 write composites land alongside the 5 reads (23 total)
+# 19 write composites land alongside the 5 reads (24 total)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_inserts_eighteen_write_rows(
+async def test_register_vmware_composite_operations_inserts_nineteen_write_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar lands all 18 write op_ids in ``endpoint_descriptor``."""
+    """Running the registrar lands all 19 write op_ids in ``endpoint_descriptor``."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -259,13 +265,13 @@ async def test_register_vmware_composite_operations_inserts_eighteen_write_rows(
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_twenty_three_composite_rows(
+async def test_full_registration_produces_twenty_four_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """5 reads (#508) + 18 writes (#509 + vm.power #2301 + vm.disk.grow #2893 +
+    """5 reads (#508) + 19 writes (#509 + vm.power #2301 + vm.disk.grow #2893 +
     vm.clone_from_template #2894 + cluster.drs_rule.create + folder.create #2895 +
     #2891 hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom +
-    GOSC create/apply #2892) = 23 rows. DoD bar."""
+    GOSC create/apply #2892 + OVF deploy #2909) = 24 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -279,7 +285,7 @@ async def test_full_registration_produces_twenty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 23
+    assert len(rows) == 24
 
 
 @pytest.mark.asyncio
@@ -496,13 +502,29 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
     # Every row has a non-empty response_schema with a status enum.
     expected_status_values: dict[str, set[str]] = {
         "vmware.composite.vm.create": {"created", "rolled_back"},
-        "vmware.composite.vm.clone": {"completed", "pending", "timeout"},
-        "vmware.composite.vm.snapshot.revert": {"reverted", "ambiguous", "not_found"},
+        # #2970: the pinned deploy operation is synchronous, so the
+        # pending/timeout task-wait statuses are gone.
+        "vmware.composite.vm.clone": {"completed"},
+        # #2909: OVF/OVA content-library deploy — resolution + deploy-report statuses.
+        "vmware.composite.vm.deploy_from_library": {
+            "deployed",
+            "deploy_failed",
+            "deploy_error",
+            "invalid_reference",
+            "library_not_found",
+            "ambiguous_library",
+            "item_not_found",
+            "ambiguous_item",
+        },
+        # #2970: the revert is a polled vim *_Task -> a poll timeout is a
+        # legible status.
+        "vmware.composite.vm.snapshot.revert": {"reverted", "ambiguous", "not_found", "timeout"},
         "vmware.composite.vm.migrate": {"migrated", "no_recommendation"},
         "vmware.composite.vm.power": {"ok", "error", "tools_unavailable"},
         "vmware.composite.vm.disk.grow": {"grown", "invalid_shrink", "disk_not_found", "timeout"},
         "vmware.composite.host.evacuate": {"evacuated", "partial", "aborted"},
-        "vmware.composite.host.detach_from_vds": {"detached", "incomplete"},
+        # #2970: the DVS detach is a polled vim ReconfigureDvs_Task.
+        "vmware.composite.host.detach_from_vds": {"detached", "incomplete", "timeout"},
         "vmware.composite.cluster.patch": {"completed", "stopped"},
         "vmware.composite.vm.resize": {"resized", "requires_power_off", "no_change", "partial"},
         "vmware.composite.vm.nic.repoint": {"repointed", "not_found", "ambiguous"},
@@ -555,17 +577,17 @@ async def test_write_composite_tags_include_composite_and_write(
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_twenty_three(
+async def test_register_vmware_composite_operations_is_idempotent_across_twenty_four(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 23 rows total, embedding called 23x once."""
+    """Running the registrar twice -> 24 rows total, embedding called 24x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 23
+    assert first_count == 24
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 23.
+    # pipeline; the row count stays at 24.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -579,7 +601,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_twenty_
             .scalars()
             .all()
         )
-    assert len(rows) == 23
+    assert len(rows) == 24
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +622,7 @@ def test_all_write_handlers_are_module_level_coroutine_functions() -> None:
     for handler in (
         vm_create_composite,
         vm_clone_composite,
+        vm_deploy_from_library_composite,
         vm_clone_from_template_composite,
         vm_snapshot_revert_composite,
         vm_migrate_composite,

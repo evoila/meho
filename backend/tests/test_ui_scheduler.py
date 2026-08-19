@@ -809,8 +809,12 @@ def test_create_submit_input_less_cron_rerenders_modal_with_error() -> None:
     assert _trigger_count(_TENANT_A) == 0
 
 
-def test_create_submit_event_rerenders_modal_with_error() -> None:
-    """A kind=event create surfaces the 422 as a banner naming #826 (#2325)."""
+def test_create_submit_event_persists_and_redirects() -> None:
+    """A kind=event create persists the trigger and HX-Redirects to the list (#2878).
+
+    Event triggers carry no ``inputs`` (the matcher synthesises a prompt from
+    the matched event), so the create omits the inputs field and still succeeds.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_agent(tenant_id=_TENANT_A)
     client, mock, csrf = _client_with_role(
@@ -830,10 +834,9 @@ def test_create_submit_event_rerenders_modal_with_error() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 200, response.text
-    assert "alert-error" in response.text
-    assert "#826" in response.text
-    assert _trigger_count(_TENANT_A) == 0
+    assert response.status_code == 204, response.text
+    assert response.headers["HX-Redirect"] == "/ui/scheduler"
+    assert _trigger_count(_TENANT_A) == 1
 
 
 def test_create_submit_rejects_operator_with_403() -> None:

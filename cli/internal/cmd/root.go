@@ -26,6 +26,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/conventions"
 	"github.com/evoila/meho/cli/internal/cmd/dashboard"
 	"github.com/evoila/meho/cli/internal/cmd/docs"
+	eventsource "github.com/evoila/meho/cli/internal/cmd/event-source"
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
@@ -141,6 +142,9 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `targets` parent.
 	root.AddCommand(targets.NewRootCmd())
+	// T3 (#2880) -- event_source registry admin verbs (add / list /
+	// describe / update / delete). Wraps /api/v1/event-sources/*.
+	root.AddCommand(eventsource.NewRootCmd())
 
 	// G8.1-T3 (#467) -- audit-query verbs (query / recent / show /
 	// who-touched / my-recent) for Initiative #334. Wraps the four

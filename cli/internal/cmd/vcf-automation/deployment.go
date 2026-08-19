@@ -40,7 +40,7 @@ func newDeploymentListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runTenantListVerb(cmd,
-				"GET:/iaas/api/deployments",
+				"vcfa.tenant.deployment.list",
 				targetName, jsonOut, backplaneOverride,
 				printDeploymentList,
 			)
@@ -65,7 +65,7 @@ func newDeploymentGetCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTenantGetVerb(cmd,
-				"GET:/iaas/api/deployments/{id}",
+				"vcfa.tenant.deployment.get",
 				"id", args[0],
 				targetName, jsonOut, backplaneOverride,
 				printDeploymentGet,
@@ -77,7 +77,7 @@ func newDeploymentGetCmd() *cobra.Command {
 }
 
 func printDeploymentList(w io.Writer, r *CallResult) {
-	const opID = "GET:/iaas/api/deployments"
+	const opID = "vcfa.tenant.deployment.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
@@ -108,7 +108,7 @@ func printDeploymentList(w io.Writer, r *CallResult) {
 }
 
 func printDeploymentGet(w io.Writer, r *CallResult) {
-	const opID = "GET:/iaas/api/deployments/{id}"
+	const opID = "vcfa.tenant.deployment.get"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

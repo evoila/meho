@@ -15,7 +15,9 @@ verbs + MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
 **Audited reads are typed ops (#2302).** The audited operational read
 set -- node/cluster status+version, backup config+status,
 transport-zones list, tier-1 list, segment list (`nsx.segment.list`,
-#2835), and alarms -- is registered as
+#2835), transport-node list + per-node state
+(`nsx.transport_node.list` + `nsx.transport_node.state`, #2836), and
+alarms -- is registered as
 **typed** ops (`source_kind="typed"`, `typed_ops.py` metadata +
 `typed_reads.py` bodies + bound-method shims on `NsxConnector`), so it
 dispatches on a fresh boot with **zero catalog ingest** (avoiding the
@@ -23,8 +25,13 @@ dispatches on a fresh boot with **zero catalog ingest** (avoiding the
 (`GET /policy/api/v1/infra/segments`) passes the vendor
 `{results, result_count}` envelope through unmodified so the operator can
 read each segment's `subnets[].gateway_address` (subnet/CIDR occupancy)
-before carving a new segment. The remaining reads
-(transport-node listing, tier-0 gateways, distributed-firewall
+before carving a new segment. `nsx.transport_node.list`
+(`GET /api/v1/transport-nodes`) carries no live health -- state lives on
+the separate `.../state` sub-resource -- so `nsx.transport_node.state`
+(`GET /api/v1/transport-nodes/{id}/state`) reads one node's realization +
+`maintenance_mode_state` + tunnel/host-switch state, the edge-health
+pre-flight before a maintenance-mode or failover action. The remaining reads
+(tier-0 gateways, distributed-firewall
 policies + rules) stay as ordinary `source_kind="ingested"` breadth, enabled
 generically via `ReviewService.enable_reads`, so the wider ingested breadth
 remains browsable. `nsx.backup.config` is
@@ -92,7 +99,7 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
   typed-read / VCF-9-ingest tests one importable source of truth. Relocated
   here from the retired `core_ops` module in #2358.
 - **Ingested browse breadth** -- the reads outside the typed set
-  (transport-node listing, tier-0 gateways, distributed-firewall
+  (tier-0 gateways, distributed-firewall
   policies + rules, and the wider NSX catalog) land as ordinary
   `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec ingestion
   and are enabled through the generic review flow
@@ -233,8 +240,8 @@ concern, same posture vSphere takes for proactive refresh.
 ## Ingested breadth + read enablement
 
 The audited operational reads are typed ops (see the Overview) and dispatch on
-a fresh boot with zero catalog state. The remaining reads (transport-node
-listing, tier-0 gateways, distributed-firewall policies + rules) and
+a fresh boot with zero catalog state. The remaining reads (tier-0
+gateways, distributed-firewall policies + rules) and
 the wider NSX catalog land as ordinary `source_kind="ingested"`
 `endpoint_descriptor` rows after a G0.7 ingest of the NSX `policy.yaml` +
 `manager.yaml` corpus (every row `is_enabled=False` until enabled).
@@ -299,13 +306,30 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
 - Acceptance tests:
   - `backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py` —
     dispatch the ingested NSX core ops against a respx-mocked NSX REST
-    surface (one parametrised case per op), plus a typed-op case that
-    registers `nsx.segment.list` (#2835) and dispatches it over the same
-    mocked `/policy/api/v1/infra/segments` route.
+    surface (one parametrised case per op), plus typed-op cases that
+    register `nsx.segment.list` (#2835) over the mocked
+    `/policy/api/v1/infra/segments` route and `nsx.transport_node.list` +
+    `nsx.transport_node.state` (#2836) over the mocked
+    `/api/v1/transport-nodes(/state)` routes.
   - `backend/tests/acceptance/test_g35_nsx_jsonflux_force_handle.py`
     — install a test-only `ForceHandleReducer`, dispatch the
     segment-list op, assert `OperationResult.handle` is populated
     by the dispatcher seam.
+- Spec-reconcile lane: `backend/tests/test_connectors_nsx_spec_reconcile.py`
+  (#2981) — asserts the 11 hand-coded `METHOD:/path` literals against
+  the pinned `nsx-9.0` shelf specs through the #2980 harness,
+  **armed 2026-08-18** (PR #3007): NSX serves its own specs from every
+  live manager (`GET /api/v1/spec/openapi/nsx_api.{json,yaml}` /
+  `nsx_policy_api.{json,yaml}`); the shelf pins the fetched JSON pair
+  plus OpenAPI 3.0 conversions (`nsx_api.openapi3.json` +
+  `nsx_policy_api.openapi3.json` — the files the lane parses and
+  unions). Template constants carry the vendor's parameter names
+  (`{transport-node-id}`, `{site-id}`/`{enforcementpoint-id}` —
+  call sites instantiate `default`/`default`); the session-establish
+  op is translated to the spec's under-basePath modeling via the
+  lane's `_SPEC_MODELED_OP_IDS` map. Activation record + first-run
+  findings: the `nsx-9.0` entry of
+  `docs/decisions/spec-reconcile-guards-standard.md`.
 - Precedent: `connectors/vmware_rest/connector.py` (session auth +
   fingerprint + probe + dispatch shim);
   `connectors/vmware_rest/__init__.py` (registration);

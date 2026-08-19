@@ -36,6 +36,7 @@ from meho_backplane.checks import (
     evaluate_assertion,
 )
 from meho_backplane.checks.assertions import PathSegment, parse_path
+from meho_backplane.checks.evaluate import _EVIDENCE_SAMPLE_LIMIT
 
 #: A fixed, timezone-aware instant so freshness cases are deterministic.
 NOW = datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC)
@@ -268,6 +269,133 @@ def test_boolean_aggregate_rejects_non_bool() -> None:
     out = _eval({"path": "$.xs[*]", "aggregate": "all"}, {"type": "bool"}, {"xs": [True, 1]})
     assert out.state == "unknown"
     assert "requires booleans" in out.evidence["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Aggregate offender sample (#2976)
+# --------------------------------------------------------------------------- #
+
+
+#: A prometheus-shaped instant-vector result: two datastores over threshold. The
+#: motivating shape from the issue -- ``count($.data.result) gt 0`` fires, but
+#: the aggregate alone cannot say which two datastores breached.
+_PROM_TWO_SERIES: dict[str, Any] = {
+    "status": "success",
+    "data": {
+        "resultType": "vector",
+        "result": [
+            {"metric": {"__name__": "ds_used_pct", "datastore": "ds-01"}, "value": [1.7e9, "91.2"]},
+            {"metric": {"__name__": "ds_used_pct", "datastore": "ds-02"}, "value": [1.7e9, "94.5"]},
+        ],
+    },
+}
+
+
+def test_count_breach_samples_offending_series() -> None:
+    # The evidence now names WHICH series breached, not merely that two did.
+    out = _eval(
+        {"path": "$.data.result", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        _PROM_TWO_SERIES,
+    )
+    assert out.state == "critical"
+    assert out.evidence["observed"] == 2
+    assert out.evidence["sample"] == _PROM_TWO_SERIES["data"]["result"]
+    assert "sample_truncated" not in out.evidence
+    json.dumps(out.evidence)  # evidence stays JSON-serializable end to end
+
+
+def test_sample_is_bounded_and_flags_truncation() -> None:
+    rows = [{"id": i} for i in range(_EVIDENCE_SAMPLE_LIMIT + 2)]
+    out = _eval(
+        {"path": "$.xs", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"xs": rows},
+    )
+    assert out.state == "critical"
+    assert out.evidence["observed"] == len(rows)  # the true count survives
+    assert out.evidence["sample"] == rows[:_EVIDENCE_SAMPLE_LIMIT]
+    assert out.evidence["sample_truncated"] is True
+
+
+def test_healthy_tick_carries_no_sample() -> None:
+    # count gt 0 over an empty result -> ok, evidence byte-for-byte as before.
+    ok_empty = _eval(
+        {"path": "$.data.result", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"data": {"result": []}},
+    )
+    assert ok_empty.state == "ok"
+    assert "sample" not in ok_empty.evidence
+    # A non-empty but healthy aggregate (count lt 3, five present) stays clean.
+    ok_full = _eval(
+        {"path": "$.xs", "aggregate": "count"},
+        {"type": "threshold", "op": "lt", "critical": 3},
+        {"xs": [{"id": i} for i in range(5)]},
+    )
+    assert ok_full.state == "ok"
+    assert "sample" not in ok_full.evidence
+
+
+def test_degraded_tick_samples_too() -> None:
+    out = _eval(
+        {"path": "$.xs", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "degraded": 1, "critical": 10},
+        {"xs": [{"id": 1}, {"id": 2}]},
+    )
+    assert out.state == "degraded"
+    assert out.evidence["sample"] == [{"id": 1}, {"id": 2}]
+
+
+def test_lt_breach_samples_rows_present() -> None:
+    # For lt the breach is what is *missing*; the sample is the rows present, so
+    # triage can diff against the expected set.
+    out = _eval(
+        {"path": "$.ready", "aggregate": "count"},
+        {"type": "threshold", "op": "lt", "critical": 3},
+        {"ready": [{"pod": "web-0"}]},
+    )
+    assert out.state == "critical"
+    assert out.evidence["sample"] == [{"pod": "web-0"}]
+
+
+def test_wildcard_projection_samples_projected_identities() -> None:
+    out = _eval(
+        {"path": "$.data.result[*].metric.datastore", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        _PROM_TWO_SERIES,
+    )
+    assert out.state == "critical"
+    assert out.evidence["sample"] == ["ds-01", "ds-02"]
+
+
+@pytest.mark.parametrize("aggregate", ["sum", "max", "min"])
+def test_numeric_aggregate_breach_samples_rows(aggregate: str) -> None:
+    # The sample is attached uniformly across aggregates, not only count.
+    out = _eval(
+        {"path": "$.xs", "aggregate": aggregate},
+        {"type": "threshold", "op": "gt", "critical": 100},
+        {"xs": [150.0, 200.0]},
+    )
+    assert out.state == "critical"
+    assert out.evidence["sample"] == [150.0, 200.0]
+
+
+def test_scalar_assertion_never_samples() -> None:
+    out = _eval({"path": "$.v"}, {"type": "threshold", "op": "gt", "critical": 0}, {"v": 5})
+    assert out.state == "critical"
+    assert "sample" not in out.evidence
+
+
+def test_unknown_aggregate_tick_never_samples() -> None:
+    # A non-list under an aggregate is unknown -> no sample (there is no set).
+    out = _eval(
+        {"path": "$.n", "aggregate": "count"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"n": 7},
+    )
+    assert out.state == "unknown"
+    assert "sample" not in out.evidence
 
 
 # --------------------------------------------------------------------------- #

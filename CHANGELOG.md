@@ -90,6 +90,367 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connectors — Grafana Tempo read-only connector (#2903)
+
+- **Grafana Tempo typed connector — 6 read-only ops, dispatches on a fresh boot** (#2903 / PR #3042): `TempoConnector` (`backend/src/meho_backplane/connectors/tempo/`), a hand-rolled `HttpConnector` subclass registered via `register_connector_v2` under `(product="tempo", version="2.x", impl_id="tempo-api")` plus the `("tempo", "", "")` wildcard fallback. Six typed operations upsert into `endpoint_descriptor` at lifespan via `register_typed_operation`, grouped `tempo-search` / `tempo-metadata` / `tempo-metrics`: `tempo.search` (`GET /api/search`, TraceQL or tag filters), `tempo.trace` (`GET /api/traces/{id}`), `tempo.search_tags` (`GET /api/v2/search/tags`), `tempo.search_tag_values` (`GET /api/v2/search/tag/{tag}/values`), `tempo.metrics_query_range` (`GET /api/metrics/query_range`, requires the target's metrics-generator local-blocks processor), and the gated `tempo.get` passthrough — all `safety_level="safe"`, `requires_approval=False`. Read-only by construction: every op issues a GET, and the passthrough runs through `assert_tempo_read_only` (`read_only.py`), a GET-only `/api`-scoped gate; Tempo exposes no operator-facing write API (ingest is an OTLP push from collectors), so no write op — and no DB migration — ships. Closes the tracing pillar alongside loki-api (#2235) and prometheus-api (#2234).
+- **Optional auth live, per-call multi-tenancy** (#2903 / PR #3042): the credential path is wired, not stubbed — `auth_headers` performs the live operator-context Vault KV-v2 read via `load_vault_secret_data`, so `operations/call` executes end-to-end on a freshly booted backplane. `secret_ref=None` sends no `Authorization` header (the port-forward case on `:3200`); a `token` field yields Bearer, `username`+`password` yields Basic, and any other secret shape fails closed with `VaultCredentialsReadError`. Every op accepts an optional `tenant` selector rendered into Tempo's `X-Scope-OrgID` header; a tenant-less `401` against a multi-tenant Tempo surfaces `TempoTenantRequiredError` instead of a bare 401. `fingerprint()`/`probe()` stay unauthenticated and tenant-free (`GET /api/status/buildinfo`, `/ready`, best-effort `/api/echo`; `vendor="grafana"`). The new `tempo` product token enters the `TargetCreate.product` enum; CLI OpenAPI snapshot (`cli/api/openapi.json`) and generated Go client (`cli/internal/api/client.gen.go`) regenerated. A wire-path-pinning unit guard ships now; the shelf-backed spec-reconcile lane (a pinned `tempo-2.x` reference) is a follow-up, per the loki #2991 : #2235 split. Doc: `docs/codebase/connectors-tempo.md`.
+
+### Fixed — coverage-job pytest hang no longer cancels the CI run (#2865)
+
+- The push-only `python-coverage` job (the SonarCloud coverage producer)
+  could hang in its pytest step and flip the whole CI run conclusion to
+  `cancelled` — twice on the v0.28.0 cut (run 31199593016) — because a
+  wedged runner never reached the #2806 step `timeout-minutes`, and a
+  `cancelled` conclusion leaks past the job's `continue-on-error` and
+  suppresses the downstream SonarCloud `workflow_run`. The step now runs
+  under pytest-timeout (`--timeout=300 --timeout-method=signal
+  --max-worker-restart=0`), an in-process per-test guard: a hang dies as a
+  pytest-timeout *failure* carrying the offending test's traceback — which
+  `continue-on-error` absorbs, so the run stays `success` — fast, with no
+  xdist worker-crash re-run multiplication. The pytest output is uploaded
+  as a `coverage-pytest-log` artifact so the next hang says *where* it
+  hung, and the step/job `timeout-minutes` are re-documented as the
+  layer-2/3 backstops behind the new in-process guard. No operator-facing
+  behaviour changes; this only hardens release-cut CI.
+
+### Added — keycloak real-spec reconcile lane (#2988)
+
+- Every hand-coded `METHOD:/path` the keycloak connector dispatches —
+  18 reconciled op_ids across the 8 read ops, 9 write ops, the
+  fingerprint probe, and the name→UUID resolver reads — is now
+  asserted against the pinned `keycloak-26.3` shelf spec
+  (`keycloak-admin-openapi.json`, the vendor's Admin REST API OpenAPI
+  at the lab's deployed Keycloak 26.3.3; Apache-2.0, from Maven
+  Central `org.keycloak:keycloak-api-docs-dist:26.3.3`) on every PR
+  via the #2980 harness
+  (`backend/tests/test_connectors_keycloak_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). To make the enumeration introspectable, every request
+  path moved out of inline f-strings into the `_*_PATH` template
+  constants of `connectors/keycloak/_paths.py` (placeholders carry the
+  spec's own parameter names; handlers fill them via the fail-loud
+  `fill_path`) — wire requests are byte-identical. Two dispatched
+  paths are pinned as evidenced exclusions (the OIDC token mint and
+  `GET /admin/serverinfo` — both outside the Admin REST OpenAPI's
+  scope by construction), with an armed tripwire that forces their
+  promotion the day a newer pinned spec serves them. First armed run:
+  all 18 served, no repoints needed. CI's secret-gated spec-shelf
+  checkout is widened to `docs/keycloak-26.3` in both Python jobs.
+
+### Breaking changes — hetzner-robot `about` op + CLI verb removed (#2985 / #3014)
+
+- `hetzner-robot.about` (`GET:/query`) and the `meho hetzner-robot
+  about` CLI verb are removed. The op dispatched `GET /query` — an
+  endpoint the Hetzner Robot Webservice does not serve, so every live
+  call 404s — and the vendor documents no identity/version-class
+  endpoint anywhere in the API, so there is no path to repoint it to
+  (removal per the #2970 never-invent-a-path protocol; the op only
+  ever "worked" against mocks). Migration: for a
+  cheapest-authenticated-probe / first-call check, use
+  `meho hetzner-robot server list` (`GET:/server` — the connector's
+  actual fingerprint/first-probe op); the G3.7 canary's audit-row
+  carrier re-anchors to `GET:/key`. Re-ingesting
+  `hetzner_robot_minimal.yaml` also renames the vswitch op_ids
+  `…/{id}` → `…/{vswitch-id}` to match the vendor doc's path
+  templates — wire requests are byte-identical, only the op_id
+  strings agents and operators reference change.
+
+### Added — argocd real-spec reconcile lane (#2987)
+
+- Every hand-coded `METHOD:/path` the argocd connector dispatches (the
+  seven curated reads, the seven approval-gated writes, the
+  unauthenticated `GET /api/version` fingerprint/probe) is now asserted
+  against the pinned `argocd-3.3` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_argocd_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). The connector's path literals are hoisted into a
+  single route table (`connectors/argocd/routes.py`, fourteen
+  `"METHOD:/path"` constants) that both dispatch and the lane derive
+  from, so the reconcile introspects live constants rather than a
+  mirror. The pinned spec is ArgoCD's own `assets/swagger.json`
+  (Apache-2.0, tag `v3.3.9` — the newer of the lab's two deployed
+  3.3.x instances); it is Swagger 2.0, so the lane supplies its own
+  extraction per the standard's non-OpenAPI clause (ingest rejects
+  Swagger 2.0 by decision #2090). CI's secret-gated spec-shelf
+  checkout is widened to `docs/argocd-3.3` in both Python jobs. First
+  reconcile surfaced three findings, all vendor template-segment
+  renames adopted in the same PR per the #2970 protocol
+  (`{applicationName}` on `managed-resources` / `resource-tree`,
+  `{project.metadata.name}` on the project-update PUT) — wire requests
+  are byte-identical; no endpoint fictions, no repoints.
+
+### Added — hetzner-robot real-spec reconcile lane (#2985 / #3014)
+
+- Every hand-coded `METHOD:/path` the hetzner-robot connector
+  dispatches (the 10 curated core ops, the `hetzner_robot_minimal.yaml`
+  ingest verbs, the inline `GET /server` fingerprint probe) is now
+  asserted against the pinned `hetzner-robot-2026-04` vendor doc on
+  every PR via the #2980 harness
+  (`backend/tests/test_connectors_hetzner_robot_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). Hetzner publishes no machine-readable spec for the
+  Robot Webservice, so the lane extracts the documented route list
+  from the shelf's markdown-converted API reference (105 routes in
+  the 2026-04 snapshot, plus `@deprecated` alternative rows) and pins
+  the exact three deprecated-only `{server-ip}` routes the connector
+  still serves as a bidirectional tripwire. CI's secret-gated
+  spec-shelf checkout is widened to `docs/hetzner-robot-2026-04` in
+  both Python jobs. First armed run surfaced the `GET:/query` fiction
+  and the `{vswitch-id}` template drift, both fixed in the same PR
+  per the #2970 protocol — see the Breaking-changes entry above.
+
+### Added — vcf-automation real-spec reconcile lane + region-list repoint (#2983)
+
+- Every hand-coded `METHOD:/path` the vcf-automation connector
+  dispatches (the seven typed-op paths, the two per-plane login POSTs,
+  the two fingerprint probes) is now swept by the #2980-harness lane
+  (`backend/tests/test_connectors_vcf_automation_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). VCFA's shelf is a mosaic, so the lane splits by
+  plane: the tenant half asserts against the pinned Apache-2.0
+  `vra-iaas.json` (Swagger 2.0; lane-supplied extraction per the
+  standard's non-OpenAPI clause), the provider half is an evidenced
+  exclusion (no pinnable wire spec exists — recorded in
+  `docs/decisions/spec-reconcile-guards-standard.md`). CI's
+  secret-gated spec-shelf checkout is widened to
+  `docs/vcf-automation-9.0` in both Python jobs. First run surfaced
+  one real finding, fixed per the #2970 protocol:
+  `vcfa.provider.region.list` targeted `GET /cloudapi/1.0.0/regions`,
+  which VCFA 9.0 404s (Region moved to the `vcf/` cloudapi prefix) —
+  repointed to `GET /cloudapi/vcf/regions` per the pinned
+  go-vcloud-director v3.0.0 endpoint map and the shelf's live-probe
+  record.
+### Added — vcf-operations real-spec reconcile lane (#2984)
+
+- Every hand-coded `METHOD:/path` the vcf-operations connector dispatches
+  (the four typed-read paths from #2303/#2838 and the
+  `POST /suite-api/api/auth/token/acquire` session mint) is now asserted
+  against the pinned `vcf-operations-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/vcf-operations-9.0` in both Python jobs. First armed run surfaced
+  one real finding — the vendor-published core spec itself fails the ingest
+  metaschema gate (three `"required": []` schema entries, illegal per
+  OpenAPI 3.0), so an operator ingest fails identically; the shelf now pins
+  a deterministic ingest-consumable derivative
+  (`vcf-operations-openapi.ingestable.json`, recipe + sha256 in the shelf
+  MANIFEST) that the lane parses. All five op_ids are served; no path
+  repoints were needed.
+
+### Fixed — sensor-runner advisory lock leaked onto idle pooled connections, silently starving evaluations (#3010)
+
+- Every background tick loop (sensor runner, agent scheduler, event
+  drain, agent-run reaper, gateway dead-man sweeper) took its
+  `pg_try_advisory_lock` on the tick's pooled work session and committed
+  inside the locked region — each commit returns the session's
+  connection, so the `finally` unlock landed on a *different* connection
+  (PG warns `you don't own a lock`, returns `false`, nothing raises) and
+  the lock stranded on an idle pooled connection. Every later tick that
+  drew any other connection silently claimed nothing: a 300 s sensor
+  recorded 75–118 evaluations/day (expected 288) while the #2763
+  watchdog read healthy. Locks now live on a dedicated pinned connection
+  (`meho_backplane/db/advisory.py::advisory_lock`) so work-session
+  commits can never move them; the invariant — advisory lock and unlock
+  must run on the same connection — is documented on the runner and
+  scheduler pages and regression-tested against real PG (`pg_locks`
+  probes, cross-connection-commit shape).
+- Lock-miss ticks are visible: structured skip logs per subsystem
+  (`sensor_tick_lock_busy`, `scheduler_tick_lock_busy`, …), a new
+  `advisory_lock_busy_total{subsystem}` Prometheus counter, and the
+  `sensor_runner` health facet gains `seconds_since_last_claim` — a
+  claim-based liveness number that keeps growing when the loop ticks
+  without ever winning the lock, the signature `seconds_since_last_tick`
+  was structurally blind to.
+
+### Added — sddc-manager real-spec reconcile lane (#2982)
+
+- Every hand-coded `METHOD:/path` the sddc-manager connector dispatches
+  (the 14 typed-read paths, the `POST /v1/tokens` session mint, the
+  profile fingerprint's `GET /v1/releases/system`) is now asserted
+  against the pinned `sddc-manager-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/sddc-manager-9.0` in both Python jobs. First armed run surfaced
+  one real finding, fixed in the same PR per the #2970 protocol:
+  `sddc.domain.status` targeted `GET /v1/domains/{id}/status`, which the
+  pinned 9.0 spec does not serve — repointed to `GET /v1/domains/{id}`,
+  whose domain object carries the top-level `status` lifecycle field the
+  op documents (the op now returns the full domain object; `status`
+  stays top-level).
+
+### Added — holodeck deploy-lifecycle typed ops: `config.apply` / `instance.start` / `instance.status` / `router.patch` (#2908)
+
+- The `holodeck` connector gains four typed ops that make the consumer's
+  hand-run fresh-deploy procedure dispatchable as governed steps (17 ops total):
+  - `holodeck.config.apply` — `New-HoloDeckConfig` (never `-Default`) +
+    `Import-HoloDeckConfig`. Refuses depot params for a VCF 5.2.x version
+    (5.2 uses Cloud Builder, no offline depot) in `validate_params`.
+    `dangerous`, approval-gated, with a param-echo preview.
+  - `holodeck.instance.start` — a single-shot fail-fast `Connect-VIServer`
+    precheck (so a stale/locked deploy-target credential can't storm-lock the
+    SSO account) then a detached `New-HoloDeckInstance` launch. `dangerous`,
+    approval-gated.
+  - `holodeck.instance.status` — `Get-HoloDeckInstance` → a flat status
+    envelope (running/completed/failed) usable as a runbook
+    `OperationCallVerify` target and a deploy-in-progress Sensor op. Tolerates
+    the benign VCF 5.2.x `Sync-HolodeckComponents` "No route to host" terminal
+    quirk as a structured note, not a failure. `safe`, no approval.
+  - `holodeck.router.patch` — idempotent verify-then-apply of the three
+    per-appliance HoloRouter patches (C1/C2/C3), verify-only on a 9.1
+    HoloRouter. `dangerous`, approval-gated; the Broadcom build token and any
+    credential material never reach an approval / audit / broadcast surface
+    (#1503).
+
+### Added — `vmware.composite.vm.deploy_from_library` OVF/OVA content-library deploy (#2909)
+
+- Add `vmware.composite.vm.deploy_from_library` — a curated OVF/OVA
+  content-library deploy composite on the vmware-rest connector,
+  retiring the `govc library.deploy` pivot in the consumer's
+  deploy/clone procedures (#2909). Resolves the OVF item by id
+  (passthrough) or by name (`POST:/content/library/item?action=find`,
+  filtered to `type=ovf`, optionally scoped by a library name), refusing
+  ambiguity before any deploy; issues the synchronous
+  `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`
+  through the governed direct-session seam (zero-ingest, `#2247`); and
+  maps the `DeploymentResult` to a structured envelope — `deployed`,
+  `deploy_failed` (OVF/network/placement validation, with the report's
+  per-issue messages), or `deploy_error` (HTTP 400/404) — so a
+  placement/mapping error is never a raw vendor error. Params cover
+  placement (resource pool / host / folder / datastore), OVF-network →
+  portgroup mappings, storage/provisioning options, additional OVF
+  properties, and optional power-on. `safety_level=dangerous`,
+  `requires_approval=True`, with a secret-hygienic param-echo preview.
+
+### Breaking changes — vmware composite param schemas tightened by the #2970 repoint
+
+- `vmware.composite.vm.clone` no longer accepts `wait_for_completion` /
+  `timeout_seconds` (the pinned deploy operation is synchronous — there
+  is no task to wait on). Migration: drop both keys from the params;
+  the response is always `status="completed"` with `vm_id` set and
+  `task_id` null.
+- `vmware.composite.cluster.patch` no longer accepts `patch_method` (it
+  fed a body field of the fictional `POST:/vcenter/host/{host}?action=patch`;
+  the real per-host vLCM apply takes an `ApplySpec`, sent empty =
+  latest desired-state commit). Migration: drop the key.
+- `vmware.composite.vm.create`'s `nics` entries gain an optional
+  `backing_type` (default `STANDARD_PORTGROUP`); entries with only
+  `network` keep working.
+
+### Fixed — vmware composites repointed at paths the real vcenter.yaml serves (#2970)
+
+- Running the #2944/#2949 real-spec reconcile lanes against the pinned
+  vendor shelf surfaced 11 composite op_ids the canonical `vcenter.yaml`
+  does not serve (shape-correct-but-nonexistent REST paths — every one
+  would 404 on a live vCenter 9.0). REST repoints: `vm.clone`'s deploy →
+  the per-item
+  `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy`
+  (synchronous — the 200 body is the new VM id, so the cis-task poll and
+  the `wait_for_completion`/`timeout_seconds` params went away),
+  cluster-host listing → `GET:/vcenter/host` + `clusters` filter,
+  `vm.create` NIC attach → `POST:/vcenter/vm/{vm}/hardware/ethernet`,
+  `host.detach_from_vds` NIC migration → per-adapter
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, and
+  `cluster.patch`'s patch step → the vLCM
+  `POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true`
+  with its cis task polled before maintenance-exit. Surfaces with no
+  REST path in the pinned spec switched to the governed vim seam
+  (snapshot list/revert, host maintenance enter/exit, DRS
+  recommendations, DVS host removal), each `*_Task` polled to terminal;
+  the portgroup audit's DVS-list step was dropped with a documented
+  degradation (`dvs_name` always null; `filter_dvs` inert). All five
+  spec lanes are green against the real shelf — the gate for arming
+  `SPEC_SHELF_TOKEN` (#2949 ADR).
+
+### Added — vcfa tenant deployment detail read + `deployment get` repoint (#2960)
+
+- `vcfa.tenant.deployment.get` (`GET /iaas/api/deployments/{id}`,
+  tenant plane) joins the typed VCFA read surface — the per-id
+  drill-down after `vcfa.tenant.deployment.list` surfaced a failed or
+  stuck deployment. `meho vcf-automation deployment get <id>` now
+  dispatches the typed op_id instead of the ingested
+  `GET:/iaas/api/deployments/{id}`, which does not resolve on a
+  zero-catalog boot (the same stranding class #2942 closed for
+  `deployment list`); the verb moved from the pinned-ingested table to
+  the typed table in the `typed_opid_dispatch_test.go` guard.
+
+### Fixed — vcf-automation connector dials `target.host` and presents `target.fqdn` per-request as the vhost `Host:` + TLS SNI (#2863)
+
+- The vcf-automation connector baked `target.fqdn` into the pooled
+  client's `base_url`, so httpx derived the TCP connect address, the
+  `Host:` header, and the TLS SNI / cert-verify name all from the FQDN.
+  That made "connect by IP, route by vhost" — the shape a VCFA appliance
+  behind a NAT alias (reachable only by IP) needs — structurally
+  unreachable, could not disambiguate several appliances that share one
+  vhost FQDN behind distinct NAT aliases, and let the transport dial an
+  address the SSRF guard (which screens `target.host`) never screened.
+  The connector now always dials `target.host` (`https://{host}[:port]`,
+  the reachable address the guard screens) and applies `target.fqdn`
+  per-request as the `Host:` header and as TLS SNI (precedence
+  `tls_server_name` > `fqdn` > derive-from-host), threaded through the
+  data path, both plane logins, and both fingerprint probes. Under
+  `verify_tls=true` the certificate is still verified against the FQDN
+  (httpcore uses `sni_hostname` for both SNI and cert CN/SAN
+  verification, confirmed against pinned httpx 0.28.1 / httpcore 1.0.9).
+- **Operator migration:** a vcf-automation `target.host` must now be the
+  *dialable* address (an IP, or a name that resolves where the backplane
+  runs), with the vhost in `target.fqdn`. Previously the FQDN was baked
+  into `base_url`, so a target that carried a **stale** `host` still
+  worked as long as split-DNS resolved the FQDN — the stale `host` was
+  screened by the SSRF guard but never actually dialled. Now that `host`
+  is the dial address, such a target fails loud at its first dispatch
+  against that host instead of silently reaching whatever the baked-in
+  FQDN resolved to. Move the vhost into `fqdn` (CLI `--fqdn`;
+  `targets.yaml: fqdn:`) and set `host` to the reachable address. An
+  IP-literal `host` with no `fqdn` is refused at construction with a
+  message naming the host and the `--fqdn` knob — there is no vhost to
+  present.
+
+### Fixed — pooled HTTP client keyed on the resolved base URL so a scheme/host/port PATCH rotates the pool (#2873)
+
+- The per-target `httpx.AsyncClient` pool is now keyed on the resolved
+  `base_url` alongside the existing tenant / `verify_tls` /
+  `ca_pin_digest` slots. Previously a PATCH changing `extras.scheme`,
+  host, port, or fqdn left the pool key unchanged, so a warm pool kept
+  serving a client bound to the old URL — a target flipped to plain
+  `http` stayed wedged behind the warm `https` client
+  (`SSL: WRONG_VERSION_NUMBER`) until a process restart. The pooled
+  client now rotates on the first post-deploy dispatch instead, and an
+  invalid `extras.scheme` fails loud at key derivation rather than
+  silently serving the stale client.
+
+### Fixed — target names free for re-registration after a soft-delete (#2874)
+
+- `targets_tenant_name_idx` is now a **partial** unique index —
+  `(tenant_id, name) WHERE deleted_at IS NULL` (migration 0072) — so a
+  soft-deleted target no longer 409-blocks re-using its name: `DELETE` +
+  re-`POST` of the same name now succeeds with a fresh UUID, while a *live*
+  duplicate still 409s. Names already wedged by an existing tombstone free
+  the moment the migration lands (no manual purge). The three unfiltered
+  console / keycloak target reads that previously surfaced tombstones now
+  exclude them, so the operator UI matches the re-registration semantics.
+
+### Fixed — CLI verbs stranded on retired ingested op_ids + exhaustive typed-dispatch guards (#2942)
+
+- `meho vcf-automation deployment list` now dispatches the typed
+  `vcfa.tenant.deployment.list` (#2839) instead of the ingested
+  `GET:/iaas/api/deployments`, which no longer resolves on a
+  zero-catalog boot — the operator verb was a dead end even though the
+  agent/backend path worked. The wave-2 cross-check found the same
+  stranding on `meho nsx segment list` (→ `nsx.segment.list`, #2835)
+  and `meho nsx node list` (→ `nsx.transport_node.list`, #2836); both
+  repointed. `deployment get` stayed on `GET:/iaas/api/deployments/{id}`
+  until #2960 shipped the typed detail op (see Added above).
+- The five per-connector `typed_opid_dispatch_test.go` guards (nsx,
+  sddc-manager, vcf-automation, vcf-fleet, vcf-operations) are now
+  exhaustive: every verb is pinned to the exact op_id it dispatches
+  (typed or deliberately ingested, with the reason in a comment), and a
+  new `TestBackendTypedOpsAreClassified` reconciles each guard against
+  the backend's typed-op registry — a typed read op shipped without a
+  CLI-repoint decision fails CI instead of silently stranding the verb.
+  Contract recorded in `docs/codebase/cli.md`.
+
 ### Added — vmware `vm.disk.grow` + the governed mutating VI-JSON write substrate (#2893)
 
 - `vmware.composite.vm.disk.grow` grows a virtual disk's capacity — the
@@ -234,6 +595,24 @@ connector-related release-notes line.
   domain-join credentials), and the durable audit row stores only a params
   hash. A dedicated end-to-end test proves no secret material reaches the
   approval, broadcast, or audit surface.
+### Added — `nsx.transport_node.list` + `nsx.transport_node.state` typed reads for edge health before maintenance/failover (#2836)
+
+- Two new `source_kind="typed"` ops dispatch on a fresh boot with zero
+  catalog ingest, in the `nsx-inventory` group. `nsx.transport_node.list`
+  (`GET /api/v1/transport-nodes`) lists the edge/host transport-node
+  fabric, but the list row carries no live health — NSX keeps per-node
+  state on a separate sub-resource — so `nsx.transport_node.state`
+  (`GET /api/v1/transport-nodes/{id}/state`, required `id`) reads one
+  node's realization result, `maintenance_mode_state`,
+  `node_deployment_state`, `deployment_progress_state`, and per-host-switch
+  tunnel/connectivity state. Together they answer "are both edges up, in
+  sync, and tunnel-healthy" before an operator drains an edge into
+  maintenance mode or relies on a tier-1 HA failover — instead of falling
+  back to the NSX Manager UI or `nsx.sh`, which bypass
+  policy/audit/broadcast/JSONFlux. The vendor payloads pass through
+  unmodified; `safety_level="safe"`, no approval. Transport-node
+  create/delete/maintenance-mode toggle (writes) stay out of scope
+  (a future approval-gated write-surface initiative).
 
 ## [0.28.0] - 2026-08-07
 

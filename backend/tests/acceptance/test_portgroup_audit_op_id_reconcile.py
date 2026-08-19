@@ -15,11 +15,15 @@ on a miss.
 
 The original constants (``GET:/vcenter/network/distributed-switch`` +
 ``GET:/vcenter/network/distributed-portgroup``, both singular) never
-resolved against a real ``vmware/9.0`` ingest:
+resolved against a real ``vmware/9.0`` ingest (#1602), and the plural
+``distributed-switches`` respelling #1602 shipped did not survive the
+first run against the canonical pinned spec either (#2970):
 
-* The vSphere Automation REST distributed-switch resource is **plural** --
-  ``GET:/vcenter/network/distributed-switches`` (a preview feature). The
-  singular spelling exists in no spec revision.
+* The pinned ``vcenter.yaml`` serves **no** distributed-switch list
+  resource at all -- the plural path exists only under the NSX-scoped
+  ``/vcenter/namespace-management/networks/nsx/`` tree. The audit's
+  DVS-list step was therefore dropped (parent-DVS name enrichment
+  degraded; see the handler's degradation note).
 * There is **no** dedicated distributed-portgroup list resource at all;
   distributed portgroups are enumerated via the generic
   ``GET:/vcenter/network`` resource filtered to the
@@ -65,17 +69,21 @@ def test_portgroup_audit_sub_op_constants_are_the_reconciled_rest_keys() -> None
     The spec-backed guard below skips when the vendor specs are not
     configured; this test runs everywhere and freezes the exact
     ``METHOD:/path`` keys the REST Automation ingest produces, so a
-    regression to the singular ``distributed-switch`` /
-    ``distributed-portgroup`` spelling (the #1602 defect) is caught
-    even without the spec shelf.
+    regression to the dropped ``distributed-switch(es)`` /
+    ``distributed-portgroup`` spellings (the #1602 defect, re-litigated
+    against the real shelf in #2970) is caught even without the spec
+    shelf.
     """
-    assert _read._OP_LIST_DVS == "GET:/vcenter/network/distributed-switches"
     assert _read._OP_LIST_NETWORK == "GET:/vcenter/network"
     assert _read._SUB_OPS_NETWORK_PORTGROUP_AUDIT == (
-        "GET:/vcenter/network/distributed-switches",
         "GET:/vcenter/network",
         "GET:/vcenter/vm",
     )
+    # #2970: no DVS-list constant exists any more -- the pinned spec serves
+    # no distributed-switch list resource (the plural path #1602 repointed
+    # to lives only under /vcenter/namespace-management/, NSX-scoped), so
+    # the audit's DVS enrichment step was dropped rather than repointed.
+    assert not hasattr(_read, "_OP_LIST_DVS")
 
 
 def test_portgroup_audit_sub_ops_resolve_against_pinned_vcenter_spec() -> None:

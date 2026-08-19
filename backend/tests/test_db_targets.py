@@ -889,3 +889,158 @@ def test_migration_0045_adds_tls_ca_pin_nullable_and_is_reversible(
             assert "tls_ca_pin" in cols_reupgraded
     finally:
         sync_eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Partial unique index — soft-delete tombstones free the name (0072 / #2874)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_partial_unique_index_allows_reinsert_over_soft_deleted_row() -> None:
+    """A soft-deleted row no longer blocks re-inserting the same (tenant, name).
+
+    Regression for #2874. ``targets_tenant_name_idx`` is a *partial*
+    unique index (``WHERE deleted_at IS NULL``, migration ``0072``), so
+    once a row is soft-deleted its ``(tenant_id, name)`` slot is free: a
+    fresh live row with the same name inserts cleanly and the two
+    incarnations coexist (one tombstone, one live). Before the fix the
+    full unique index kept the tombstone in the slot forever and this
+    second insert raised ``IntegrityError``.
+    """
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    first_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            Target(
+                id=first_id,
+                tenant_id=tenant_id,
+                name="reused",
+                product="ssh",
+                host="10.0.0.1",
+            )
+        )
+        await session.commit()
+
+    # Soft-delete it — the effect DELETE /api/v1/targets/{name} has.
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Target).where(Target.id == first_id))).scalar_one()
+        row.deleted_at = datetime.now(UTC)
+        await session.commit()
+
+    # Same (tenant_id, name), fresh id — must not raise.
+    second_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        session.add(
+            Target(
+                id=second_id,
+                tenant_id=tenant_id,
+                name="reused",
+                product="kubernetes",
+                host="10.0.0.2",
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Target).where(
+                        Target.tenant_id == tenant_id,
+                        Target.name == "reused",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert {r.id for r in rows} == {first_id, second_id}
+    live = [r for r in rows if r.deleted_at is None]
+    assert len(live) == 1
+    assert live[0].id == second_id
+
+
+def _name_index_sql(conn: object) -> str:
+    """Return the stored ``CREATE INDEX`` DDL for ``targets_tenant_name_idx``.
+
+    SQLite records the full index definition — including any partial
+    ``WHERE`` predicate — in ``sqlite_master.sql``, which is the
+    dialect-portable way to prove the index is (or is not) partial.
+    """
+    return conn.execute(  # type: ignore[attr-defined]
+        text(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' AND name = 'targets_tenant_name_idx'"
+        )
+    ).scalar_one()
+
+
+def test_migration_0072_installs_partial_unique_name_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``alembic upgrade head`` leaves ``targets_tenant_name_idx`` partial.
+
+    The index stays present and unique, and its stored DDL carries the
+    ``WHERE deleted_at IS NULL`` predicate (migration ``0072`` / #2874).
+    """
+    sync_url, _ = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "partial.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.connect() as conn:
+            indexes = {idx["name"] for idx in sa_inspect(conn).get_indexes("targets")}
+            assert "targets_tenant_name_idx" in indexes
+
+            # The stored DDL proves uniqueness, column set, and the partial
+            # predicate in one shot (SQLite's inspector reports ``unique``
+            # as an int, so the DDL string is the robust source of truth).
+            idx_sql = _name_index_sql(conn).lower()
+            assert "unique" in idx_sql
+            assert "(tenant_id, name)" in idx_sql
+            assert "where" in idx_sql, f"index must be partial, got: {idx_sql!r}"
+            assert "deleted_at" in idx_sql
+    finally:
+        sync_eng.dispose()
+
+
+def test_migration_0072_upgrade_then_downgrade_is_reversible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``0072`` is reversible on clean data: partial → full → partial.
+
+    Downgrading to ``0071`` restores the original full unique index (no
+    ``WHERE`` predicate); re-upgrading restores the partial one. Run
+    against a fresh DB with no re-used names, so the downgrade's
+    full-index rebuild cannot hit the documented reused-name caveat.
+    """
+    from alembic import command
+
+    sync_url, cfg = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "rev0072.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.connect() as conn:
+            assert "where" in _name_index_sql(conn).lower()
+
+        # Downgrade exactly one revision (head -> 0071): full index returns.
+        command.downgrade(cfg, "0071")
+        with sync_eng.connect() as conn:
+            indexes = {idx["name"] for idx in sa_inspect(conn).get_indexes("targets")}
+            assert "targets_tenant_name_idx" in indexes
+            full_sql = _name_index_sql(conn).lower()
+            assert "unique" in full_sql
+            assert "where" not in full_sql, (
+                "downgrade must restore the full (non-partial) unique index"
+            )
+
+        # Re-upgrade is idempotent and restores the partial index.
+        command.upgrade(cfg, "head")
+        with sync_eng.connect() as conn:
+            assert "where" in _name_index_sql(conn).lower()
+    finally:
+        sync_eng.dispose()

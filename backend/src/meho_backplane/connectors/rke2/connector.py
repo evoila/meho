@@ -356,6 +356,28 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_service_status(self, target, params, operator)
 
+    async def config_get(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.config.get`` (#2854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_read.rke2_config_get`,
+        which ``cat``s the RKE2 server ``config.yaml`` (or a ``config.yaml.d``
+        drop-in) over SSH and
+        returns its parsed content with the join tokens + etcd S3 credentials
+        redacted. Read-only / safe -- the write-side reader lives in
+        ``config_update``.
+        """
+        from meho_backplane.connectors.rke2.ops_read import (
+            rke2_config_get as _rke2_config_get,
+        )
+
+        return await _rke2_config_get(self, target, params, operator)
+
     async def token_rotate(
         self,
         target: Target,
@@ -639,6 +661,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "cannot answer 'is rke2-server actually up, and is it crash-looping?'. "
         "Read-only -- the restart itself is the approval-gated "
         "``rke2.node.service.restart``. Transport: plain SSH."
+    ),
+    "rke2-config-read": (
+        "Use to read an RKE2 node's ``config.yaml`` CONTENT (not just its "
+        "permission modes) before or after an ``rke2.node.config.update`` "
+        "patch: ``rke2.node.config.get`` ``cat``s the server ``config.yaml`` "
+        "(or a ``config.yaml.d/*.yaml`` drop-in) and returns the parsed "
+        "top-level "
+        "mapping so an operator can verify ``tls-san`` / ``datastore-endpoint`` "
+        "/ ``node-taint``. The join tokens and etcd S3 credentials are "
+        "redacted (names surfaced in ``redacted_keys``, values never), so it "
+        "replaces the untracked ``ssh cat`` that would leak the token. "
+        "Read-only / safe. Transport: plain SSH."
     ),
     "rke2-etcd-snapshot": (
         "Use for managed-etcd snapshots on an RKE2 server node. "

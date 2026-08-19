@@ -9,9 +9,10 @@ G3.7-T7 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
 read-only v0.2 core: the Robot Webservice OpenAPI spec is ingested via G0.7
 into the `endpoint_descriptor` table, and the curated read core is staged
 for operator review in `core_ops.py`. G3.7-T9 (#852) ships the read-only CLI
-verbs (`hetzner-robot about`, `server list`/`server info`, `ip list`,
+verbs (`server list`/`server info`, `ip list`,
 `subnet list`, `vswitch list`/`vswitch info`, `failover list`, `rdns list`,
-`ssh-key list`, and the generic `operation search`/`operation call`), the
+`ssh-key list`, and the generic `operation search`/`operation call`; the
+former `about` verb was removed by #2985 — see the reconcile note below), the
 dispatch smoke test suite (AC1–AC5 covering all curated read ops, JSONFlux
 handle path, audit-row assertions, and sandbox empty-array tolerance), and the
 operator onboarding doc. Task #2848 (Initiative #2833) curates the per-server
@@ -43,18 +44,19 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
   read under the operator's Vault identity; a system-initiated call
   (`raw_jwt=""`) fails closed with `VaultCredentialsReadError` rather than
   falling back.
-- **`ROBOT_CORE_GROUPS`** (`core_ops.py`) — 4 curated `RobotCoreGroup`
+- **`ROBOT_CORE_GROUPS`** (`core_ops.py`) — 3 curated `RobotCoreGroup`
   entries with operator-reviewed `when_to_use` hints spanning the read-only
-  core: `robot-about`, `robot-servers`, `robot-networking`, `robot-ssh-keys`.
-- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 11 curated `RobotCoreOp` entries
+  core: `robot-servers`, `robot-networking`, `robot-ssh-keys`. (The former
+  `robot-about` group fell with the #2985 `GET:/query` removal.)
+- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 10 curated `RobotCoreOp` entries
   (the read-only v0.2 core), each with `op_id` (`GET:/path` form), `group_key`,
   and `llm_instructions` blob (`when_to_call` / `output_shape` / `next_step`).
-  The 11th, `GET:/firewall/{server-ip}` (#2848), reads one dedicated server's
+  The 10th, `GET:/firewall/{server-ip}` (#2848), reads one dedicated server's
   packet-filter firewall (status, allowlist flag, ordered input/output rules)
   for the onboarding firewall-verify step and classifies into `robot-networking`.
 - **`apply_robot_core_curation`** (`core_ops.py`) — async function that
   drives `ReviewService.edit_group` + `enable_group` + `edit_op` to flip the
-  11 curated ops to `is_enabled=True` and land `llm_instructions`.
+  10 curated ops to `is_enabled=True` and land `llm_instructions`.
 - **`classify_robot_op`** (`core_ops.py`) — path-prefix classifier mapping
   a `GET:/path` op_id to its curated `group_key` via `ROBOT_PATH_RULES`.
 
@@ -147,14 +149,28 @@ no OpenAPI document, MEHO ships a hand-authored minimal spec as package data:
   covering list/get servers, vSwitch get + membership, per-server firewall
   get/set, reverse DNS, and the `server_addon` order. Each of these spec GET
   op_ids (`GET:/server`, `GET:/server/{server-ip}`, `GET:/vswitch`,
-  `GET:/vswitch/{id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) is curated in
-  `ROBOT_CORE_OPS`, so the ingested rows and the curated read core agree on the
-  same strings. `GET:/firewall/{server-ip}` was ingested from this spec from the
-  start but only joined the curated core in #2848; before that it was
-  ingested-but-uncurated (`is_enabled=False`, no `llm_instructions`) and
+  `GET:/vswitch/{vswitch-id}`, `GET:/firewall/{server-ip}`, `GET:/rdns`) is
+  curated in `ROBOT_CORE_OPS`, so the ingested rows and the curated read core
+  agree on the same strings. `GET:/firewall/{server-ip}` was ingested from this
+  spec from the start but only joined the curated core in #2848; before that it
+  was ingested-but-uncurated (`is_enabled=False`, no `llm_instructions`) and
   unreachable through `search_operations` / `call_operation`. (`GET:/rdns/{ip}`
   is the one spec GET the core deliberately leaves uncurated — the account-wide
   `GET:/rdns` list covers the read need.)
+- **Spec-reconcile lane (#2985)** —
+  `backend/tests/test_connectors_hetzner_robot_spec_reconcile.py` asserts
+  every hand-coded `METHOD:/path` (the curated `ROBOT_CORE_OPS` strings plus
+  the minimal spec's op_ids, parsed through the real ingest parser) against
+  the pinned `hetzner-robot-2026-04/webservice-en.md` documented-route list
+  on the consumer spec-shelf (Hetzner publishes no machine-readable spec).
+  First run caught two findings, fixed in the same PR: `GET:/query`
+  (`hetzner-robot.about` + the CLI `about` verb + the `robot-about` group)
+  referenced an endpoint the Robot Webservice does not serve and was
+  removed; the `/vswitch/{id}` template family was renamed to the vendor's
+  `{vswitch-id}` (runtime request path unchanged — only the template/param
+  name). The `{server-ip}` paths ride the vendor's *documented deprecated*
+  IP-addressed alternatives to the `{server-number}` routes; the lane pins
+  that reliance explicitly.
 - Ingest via `meho connector ingest --product hetzner --version 2026.04
   --impl hetzner-rest --spec <this-file>`. The ingest guard defers to the
   registered `HetznerRobotConnector` for the triple rather than scaffolding a

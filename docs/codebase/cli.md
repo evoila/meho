@@ -1088,13 +1088,34 @@ verb. The verbs are the operator-side surface for the per-tenant
 operator manages (vCenter hosts, Vault instances, k8s clusters, …)
 that the G0.6 dispatcher resolves at `call` time. Registration and
 updates flow through `meho targets import` (POST for new rows, PATCH
-under `--update`); a standalone `create` verb was explicitly ruled out
-in favour of file-based import (#1574 / #1559). No standalone `delete`
-verb is surfaced yet, though the API supports `DELETE
-/api/v1/targets/{name}` (`tenant_admin`).
+under `--update`) for bulk reconciliation, or through `meho targets
+add` (Task #2862) for a single target without authoring a YAML file —
+the earlier blanket deferral of a standalone `create` verb (#1574 /
+#1559) is lifted for the single-target create case only. No standalone
+`update` / `delete` verb is surfaced yet, though the API supports
+`PATCH` / `DELETE /api/v1/targets/{name}` (`tenant_admin`).
 
 ### Subcommands
 
+- `meho targets add <name> --product P --host H [optional flags]`
+  (alias `create`) — calls `POST /api/v1/targets` to register one
+  target, the single-target counterpart to `import`. `--product` and
+  `--host` are required; `<name>` is the positional canonical name.
+  The optional flags mirror the `TargetCreate` fields one-for-one
+  (`--alias` repeatable, `--version`, `--port`, `--fqdn`,
+  `--secret-ref`, `--auth-model`, `--verify-tls`, `--tls-ca-pin`,
+  `--tls-server-name`, `--preferred-impl`, `--note`) and are sent only
+  when set, so the server's defaults apply to the rest — notably an
+  omitted `--secret-ref` derives the per-tenant default credential path
+  (#1723) rather than persisting "no credential". `tenant_id` is never
+  sent; the backplane binds it from the operator's JWT. All validation
+  stays server-side: an unknown product, an out-of-tenant `secret_ref`,
+  or an SSRF-guarded host come back as a 422 whose body the CLI prints
+  verbatim. On 201 the created row renders in the same shape as
+  `describe` (`--json` for the raw `Target`). The verb reuses
+  `import.go`'s `doAuthedRequest` POST plumbing, so a static-bearer
+  escape hatch is deliberately **not** offered — auth stays interactive
+  `meho login` only.
 - `meho targets list [--product P] [--limit N] [--cursor C]` — calls
   `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
   as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
@@ -1137,7 +1158,8 @@ verb is surfaced yet, though the API supports `DELETE
 ### Reserved flags (same shape across the verbs)
 
 - `--json` — emit the raw JSON envelope to stdout instead of the human
-  render. Stable schemas: `list` → `[]TargetSummary`; `describe` →
+  render. Stable schemas: `add` → full `Target` (the created row);
+  `list` → `[]TargetSummary`; `describe` →
   full `Target` (including `fingerprint` + `preferred_impl_id`);
   `probe` → `FingerprintResult`; `discover` →
   `DiscoverResult` (`discovered` + `skipped`).
@@ -1159,11 +1181,18 @@ structured `{"error": "no_target", "query": "...", "matches": [...]}`
 envelope, 409 carries `ambiguous_target` with colliding names, and
 501 carries the "no connector registered" detail.
 
-`import` keeps its own untyped HTTP plumbing
-(`doAuthedRequest` / `httpDoer` / local `httpError`) in `import.go`
-because the YAML-to-API mapping emits a sparse `map[string]any`
-body to preserve the partial-PATCH + extras-spill semantics — see
-the comment block on `httpDoer` for the rationale.
+`import` and `add` keep the untyped HTTP plumbing
+(`doAuthedRequest` / `httpDoer` / local `httpError`) in `import.go`.
+`import` needs it because the YAML-to-API mapping emits a sparse
+`map[string]any` body to preserve the partial-PATCH + extras-spill
+semantics — see the comment block on `httpDoer` for the rationale.
+`add` reuses the same `doAuthedRequest` POST path and builds its body
+as a `map[string]any` holding only the flags the operator set, so an
+unset optional is omitted rather than sent as JSON null (load-bearing
+for `secret_ref`, whose omitted-vs-null distinction the server keys on
+via `model_fields_set`). Both route non-2xx responses through the
+shared `renderHTTPStatus` ladder, so a 422 body reaches the operator
+verbatim.
 
 ### Exit codes
 
@@ -1180,11 +1209,11 @@ the comment block on `httpDoer` for the rationale.
 
 ### Out of scope (v0.2)
 
-- Standalone `delete` verb. The API supports `DELETE
-  /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it in a
-  follow-up task when operators ask. Create and update are already
-  covered by `meho targets import` (POST for new rows, PATCH under
-  `--update`), so no separate `create` / `update` verb is planned.
+- Standalone `update` / `delete` verbs. The API supports `PATCH` /
+  `DELETE /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces
+  them in a follow-up task when operators ask. Single-target **create**
+  now ships as `meho targets add` (Task #2862); bulk reconciliation of
+  updates stays with `meho targets import --update`.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
@@ -1270,6 +1299,35 @@ instead of byte-near-identical `doAuthedRequest` / `sendRequest` /
 (via the `errOpError` sentinel re-exported from
 `dispatch.ErrOpError`), `2` auth_expired, `3` unreachable,
 `4` unexpected_response.
+
+### Typed op_id repoint contract (typed connectors, #2942)
+
+Typed connectors (nsx, sddc-manager, vcf-automation, vcf-fleet,
+vcf-operations, …) resolve only their dotted typed op_ids on a
+zero-catalog boot — a vendor verb left dispatching a legacy ingested
+`METHOD:/path` op_id after its backend read went typed is a dead end
+for operators even though the agent/backend path works (#2355 did the
+initial 19-verb sweep; #2942 closed the residual gap and added the
+recurrence guard). The contract for every future typed read op:
+
+1. **Repoint the CLI verb** that covers the read to the dotted typed
+   op_id (dispatch call + printer constant), aligning params to the
+   typed op's `parameter_schema`.
+2. **Pin it** in the connector's
+   `cli/internal/cmd/<vendor>/typed_opid_dispatch_test.go`:
+   - `typedDispatchCases` — every verb whose backend read is typed,
+     asserted to put the dotted op_id on the wire;
+   - `ingestedDispatchCases` — every verb that legitimately stays on
+     an ingested op_id (no typed counterpart), with the reason in a
+     comment;
+   - `typedOpCLICoverage` — classifies **every** backend typed op_id
+     (CLI verb or agent-surface-only).
+3. The guard's `TestBackendTypedOpsAreClassified` reconciles
+   `typedOpCLICoverage` against the backend registry
+   (`backend/src/meho_backplane/connectors/<name>/`, parsed by
+   `cli/internal/typedops`), so a typed op shipped without a CLI
+   repoint decision **fails CI** instead of silently stranding the
+   verb.
 
 ## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 

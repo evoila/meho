@@ -110,12 +110,12 @@ func newVswitchInfoCmd() *cobra.Command {
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
-		Use:   "info <id>",
+		Use:   "info <vswitch-id>",
 		Short: "Show full detail for one vSwitch by its numeric ID",
-		Long: "info dispatches GET:/vswitch/{id} against\n" +
+		Long: "info dispatches GET:/vswitch/{vswitch-id} against\n" +
 			"connector_id=\"hetzner-rest-2026.04\" and renders the vSwitch's\n" +
 			"name, VLAN, and full member server list.\n" +
-			"<id> is the numeric ID from 'meho hetzner-robot vswitch list'.\n" +
+			"<vswitch-id> is the numeric ID from 'meho hetzner-robot vswitch list'.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho hetzner-robot vswitch info 4321 --target rdc-robot\n" +
@@ -139,8 +139,8 @@ func runVswitchInfo(cmd *cobra.Command, vswitchID, targetName string, jsonOut bo
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	opID := "GET:/vswitch/{id}"
-	params := map[string]any{"id": vswitchID}
+	opID := "GET:/vswitch/{vswitch-id}"
+	params := map[string]any{"vswitch-id": vswitchID}
 	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -149,7 +149,7 @@ func runVswitchInfo(cmd *cobra.Command, vswitchID, targetName string, jsonOut bo
 }
 
 func printVswitchInfo(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/vswitch/{id} — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s GET:/vswitch/{vswitch-id} — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

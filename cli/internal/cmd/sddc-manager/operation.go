@@ -117,8 +117,8 @@ func newOperationCallCmd() *cobra.Command {
 			"\"sddc-rest-9.0\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho sddc-manager operation call GET:/v1/domains --target rdc-sddc-manager\n" +
-			"  meho sddc-manager operation call GET:/v1/hosts --target rdc-sddc-manager --json",
+		Example: "  meho sddc-manager operation call GET:/v1/bundles --target rdc-sddc-manager\n" +
+			"  meho sddc-manager operation call GET:/v1/releases/system --target rdc-sddc-manager --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -38,14 +38,14 @@ ops stay in the wrapper until v0.2.next ships policy + approval flow:
 | Group | CLI verb | `op_id` | Path |
 | --- | --- | --- | --- |
 | sddc-releases | `meho sddc-manager about` | `GET:/v1/releases/system` | VCF release info + BOM |
-| sddc-managers | `meho sddc-manager manager list` | `GET:/v1/sddc-managers` | SDDC Manager appliance inventory |
-| sddc-domains | `meho sddc-manager domain list` | `GET:/v1/domains` | All VCF workload domain listing |
+| sddc-managers | `meho sddc-manager manager list` | `sddc.manager.list` | SDDC Manager appliance inventory |
+| sddc-domains | `meho sddc-manager domain list` | `sddc.domain.list` | All VCF workload domain listing |
 | sddc-domains | `meho sddc-manager domain info <id>` | `GET:/v1/domains/{id}` | Per-domain detail (vCenters, NSX, clusters, SSO) |
-| sddc-clusters | `meho sddc-manager cluster list [--domain <id>]` | `GET:/v1/clusters` | Cluster listing (optionally scoped to a domain) |
-| sddc-hosts | `meho sddc-manager host list [--domain <id>] [--cluster <id>]` | `GET:/v1/hosts` | Host inventory (optionally scoped to domain or cluster) |
-| sddc-network-pools | `meho sddc-manager network-pool list` | `GET:/v1/network-pools` | Network pool listing |
+| sddc-clusters | `meho sddc-manager cluster list [--domain <id>]` | `sddc.cluster.list` | Cluster listing (optionally scoped to a domain) |
+| sddc-hosts | `meho sddc-manager host list [--domain <id>] [--cluster <id>]` | `sddc.host.list` | Host inventory (optionally scoped to domain or cluster) |
+| sddc-network-pools | `meho sddc-manager network-pool list` | `sddc.network_pool.list` | Network pool listing |
 | sddc-bundles | `meho sddc-manager bundle list` | `GET:/v1/bundles` | LCM bundle listing |
-| sddc-tasks | `meho sddc-manager workflow list [--status <state>]` | `GET:/v1/tasks` | VCF workflow task listing |
+| sddc-tasks | `meho sddc-manager workflow list [--status <state>]` | `sddc.task.list` | VCF workflow task listing |
 
 Every op dispatches through the same `POST /api/v1/operations/call`
 route the agent surface uses — auth, policy, audit, broadcast, and
@@ -206,7 +206,7 @@ meho sddc-manager workflow list --status In_Progress --target rdc-sddc-manager
 meho sddc-manager host list --target rdc-sddc-manager --json | jq '.result.elements[] | .fqdn'
 
 # Escape hatch: run any sddc-rest-9.0 op by op_id
-meho sddc-manager operation call GET:/v1/domains --target rdc-sddc-manager
+meho sddc-manager operation call GET:/v1/bundles --target rdc-sddc-manager
 meho sddc-manager operation search "host inventory"
 ```
 
@@ -230,13 +230,18 @@ sddc-rest-9.0 — VCF 9.0.0.0-24000000 (2026-01-15)
 
 ### `meho sddc-manager manager list`
 
-Dispatches `GET:/v1/sddc-managers`. Renders `id` / `fqdn` / `version` /
-`management_domain` from the `elements[]` pagination envelope. Production
+Dispatches `sddc.manager.list` (the typed read; repointed off the
+ingested `GET:/v1/sddc-managers` op_id by #2355 — the legacy op_id no
+longer resolves on a zero-catalog boot). Renders `id` / `fqdn` /
+`version` / `management_domain` from the `elements[]` pagination
+envelope. Production
 VCF deployments have exactly one appliance per management domain.
 
 ### `meho sddc-manager domain list`
 
-Dispatches `GET:/v1/domains`. Renders `id` / `name` / `type`
+Dispatches `sddc.domain.list` (the typed read; repointed off the
+ingested `GET:/v1/domains` op_id by #2355 — the legacy op_id no longer
+resolves on a zero-catalog boot). Renders `id` / `name` / `type`
 (`MANAGEMENT` or `WORKLOAD`). The management domain is always present;
 each `meho sddc-manager domain deploy` (out of scope for v0.2) adds a
 workload domain row.
@@ -254,14 +259,18 @@ meho sddc-manager domain info domain-wld01 --target rdc-sddc-manager
 
 ### `meho sddc-manager cluster list [--domain <id>]`
 
-Dispatches `GET:/v1/clusters`. Without `--domain`, lists every cluster
+Dispatches `sddc.cluster.list` (the typed read; repointed off the
+ingested `GET:/v1/clusters` op_id by #2355 — the legacy op_id no
+longer resolves on a zero-catalog boot). Without `--domain`, lists every cluster
 across all domains. With `--domain <domain-id>`, passes `domainId` as a
 query param to scope the response. Renders `id` / `name` /
 `primaryDatastoreType` / `domainId`.
 
 ### `meho sddc-manager host list [--domain <id>] [--cluster <id>]`
 
-Dispatches `GET:/v1/hosts`. Optional `--domain` and `--cluster` flags
+Dispatches `sddc.host.list` (the typed read; repointed off the
+ingested `GET:/v1/hosts` op_id by #2355 — the legacy op_id no longer
+resolves on a zero-catalog boot). Optional `--domain` and `--cluster` flags
 filter the listing. Both flags can be combined. Renders `id` / `fqdn` /
 `esxiVersion` / `status`. The host list is the largest SDDC Manager read
 surface in production (dozens to hundreds of rows); use `--json | jq` to
@@ -269,7 +278,9 @@ filter by cluster or status.
 
 ### `meho sddc-manager network-pool list`
 
-Dispatches `GET:/v1/network-pools`. Renders `id` / `name` for each pool.
+Dispatches `sddc.network_pool.list` (the typed read; repointed off the
+ingested `GET:/v1/network-pools` op_id by #2837 — the legacy op_id no
+longer resolves on a zero-catalog boot). Renders `id` / `name` for each pool.
 Network pools are referenced in cluster expand and workload domain deploy
 workflows — this listing is the prerequisite lookup.
 
@@ -282,7 +293,9 @@ current VCF version.
 
 ### `meho sddc-manager workflow list [--status <state>]`
 
-Dispatches `GET:/v1/tasks`. Optional `--status` filters by task status.
+Dispatches `sddc.task.list` (the typed read; repointed off the
+ingested `GET:/v1/tasks` op_id by #2355 — the legacy op_id no longer
+resolves on a zero-catalog boot). Optional `--status` filters by task status.
 Valid values: `Successful`, `Failed`, `In_Progress`, `Pending`, `Cancelled`.
 Renders `id` / `status` / `name` / `type`. Use this after a cluster expand
 or domain deploy to track async task progress.
@@ -307,7 +320,7 @@ aliases.
 
 ```bash
 meho sddc-manager operation search "host inventory" --group sddc-hosts
-meho sddc-manager operation call GET:/v1/domains --target rdc-sddc-manager
+meho sddc-manager operation call GET:/v1/bundles --target rdc-sddc-manager
 meho sddc-manager operation call GET:/v1/domains/{id} \
   --target rdc-sddc-manager --params '{"id": "domain-wld01"}'
 ```

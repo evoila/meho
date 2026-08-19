@@ -131,8 +131,8 @@ func newOperationCallCmd() *cobra.Command {
 			"via its path prefix; the --plane flag is ignored on this verb.\n" +
 			"The persistent --fqdn flag still threads into the body.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-automation operation call GET:/cloudapi/1.0.0/site --target rdc-vcfa\n" +
-			"  meho vcf-automation operation call GET:/iaas/api/about --target rdc-vcfa --json",
+		Example: "  meho vcf-automation operation call GET:/cloudapi/1.0.0/users --target rdc-vcfa\n" +
+			"  meho vcf-automation operation call GET:/iaas/api/blueprints --target rdc-vcfa --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

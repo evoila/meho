@@ -93,6 +93,29 @@ on a freshly registered target before any secret exists — the argocd
 `/api/version` precedent. `probe()` uses the tenant-free `GET /ready`
 (`200 "ready"` → ok; `503`/transport error → not ok with a reason).
 
+### Spec-reconcile lane (#2991)
+
+`backend/tests/test_connectors_loki_spec_reconcile.py` asserts every
+hand-coded `METHOD:/path` the connector puts on the wire is served by a
+pinned vendor artifact, per the spec-reconcile-guard standard
+(`docs/decisions/spec-reconcile-guards-standard.md`, initiative #2979).
+Loki publishes no OpenAPI for its HTTP API (the only `openapi`-named
+artifacts in `grafana/loki` are the Loki-Operator CRD schemas and Go
+module names), so the shelf pins the vendor's documented HTTP API
+reference (`loki-http-api.md`, AGPL-3.0, `grafana/loki@v3.7.6`) on the
+`loki-3.7` shelf dir, and the lane extracts its `## Endpoints` route list.
+Because the connector's read paths live inline in the handler bodies (and
+`LOKI_OPS` carries the logical op ids, not the HTTP paths), the declared
+set is **captured from live handler execution** via a `_loki_get`-recording
+subclass (the rabbitmq precedent), unioned with the fingerprint/probe
+module constants (`_BUILDINFO_PATH` / `_READY_PATH` / `_LABELS_PATH`, which
+travel the separate `_unauth_get` seam). The `label_values` literal
+instantiates the `{name}` template segment-wise; `loki.get` is excluded (it
+hand-codes no vendor path). The lane skips cleanly without
+`MEHO_CONSUMER_DOCS_ROOT` and arms in CI (both Python jobs' spec-shelf
+sparse-checkout widened to `docs/loki-3.7`). First armed run: green — all 7
+declared op_ids served, no repoints.
+
 ## Dependencies
 
 - `HttpConnector` (`connectors/adapters/http.py`) — pooled `httpx.AsyncClient`,
@@ -125,4 +148,8 @@ base `Target` model does not carry as a column, held in the forward-compat
 - Multi-tenancy (`X-Scope-OrgID`):
   <https://grafana.com/docs/loki/latest/operations/multi-tenancy/>
 - Sibling read-only connector: `docs/codebase/connectors-argocd.md`.
+- Spec-reconcile lane: `backend/tests/test_connectors_loki_spec_reconcile.py`;
+  standard `docs/decisions/spec-reconcile-guards-standard.md`; shelf
+  provisioning `docs/decisions/vendor-spec-ci-provisioning.md` (Loki extension).
 - Task #2235; Initiative #2228 (data-tier + hypervisor connector coverage).
+- Reconcile lane: Task #2991; Initiative #2979 (spec-reconcile-guard rollout).

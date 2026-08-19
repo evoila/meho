@@ -305,8 +305,11 @@ class AssertionOutcome(BaseModel):
     result when an aggregate was applied), or ``None`` when the outcome is
     ``unknown``. :attr:`evidence` is a JSON-serializable dict carrying at least
     ``path``, ``aggregate``, ``comparator``, ``observed``, the comparator's
-    expected bounds/values, and ``reason`` when ``state == "unknown"``. #2505
-    persists the evidence; #2506 renders it.
+    expected bounds/values, and ``reason`` when ``state == "unknown"``. A
+    breaching aggregate outcome additionally carries a bounded ``sample`` of the
+    selected rows (plus ``sample_truncated`` when clipped) so the offending
+    series' identity survives on the retained tick (#2976). #2505 persists the
+    evidence; #2506 renders it.
     """
 
     model_config = ConfigDict(frozen=True)

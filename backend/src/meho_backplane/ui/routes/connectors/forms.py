@@ -325,18 +325,30 @@ async def submit_create(
         "aliases": aliases_raw or "",
         "notes": notes or "",
     }
+    # #2872: pass ``secret_ref`` only when the operator actually typed one.
+    # A blank field must stay *omitted* so ``create_target`` derives the
+    # #1723 per-tenant default; passing ``secret_ref=None`` explicitly would
+    # now land in ``model_fields_set`` and register as a deliberate "no
+    # credential" (persisted NULL), which is not what a blank create form
+    # means. (``submit_edit`` keeps ``secret_ref or None`` on purpose:
+    # blanking a populated field there *is* an intentional clear.)
+    # Building the input as a dict + ``model_validate`` (mirroring the import
+    # path's ``_build_create_body``) keeps ``model_fields_set`` key-accurate:
+    # ``secret_ref`` is present only when the operator typed one.
     try:
-        body = TargetCreate(
-            name=name,
-            product=product,
-            host=host,
-            port=_coerce_port(port),
-            auth_model=AuthModel(auth_model),
-            secret_ref=secret_ref or None,
-            vpn_required=vpn_required,
-            aliases=parse_aliases(aliases_raw),
-            notes=notes or None,
-        )
+        create_data: dict[str, object] = {
+            "name": name,
+            "product": product,
+            "host": host,
+            "port": _coerce_port(port),
+            "auth_model": AuthModel(auth_model),
+            "vpn_required": vpn_required,
+            "aliases": parse_aliases(aliases_raw),
+            "notes": notes or None,
+        }
+        if secret_ref and secret_ref.strip():
+            create_data["secret_ref"] = secret_ref
+        body = TargetCreate.model_validate(create_data)
     except (ValidationError, ValueError) as exc:
         return _render_form_with_errors(
             request,

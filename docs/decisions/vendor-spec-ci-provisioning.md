@@ -518,6 +518,37 @@ widening, and a **vendor-served** signoff extension here (the nsx-9.0 form, unde
 the wave-3 blanket determination above) land together with the operator's
 consumer-shelf PR — this repo change adds only the dormant lane.
 
+### Extension: fleet-lcm (VCF 9 Fleet LCM Service, `fleet-lcm-9.0/fleet-lcm-openapi.yaml`, #3036)
+
+The **modern** `fleet-lcm` reconcile lane
+(`backend/tests/test_connectors_fleet_lcm_spec_reconcile.py`, initiative #3033)
+reads the VCF 9 Fleet LCM Service OpenAPI document — the *new* `/fleet-lcm` →
+`/v1/*` service, distinct from the legacy vRSLCM `/lcm/*` surface the dormant
+vcf-fleet lane covers. No vendor-license attestation is needed: the spec is
+vendored by VMware in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo (pinned at
+`c3f3b52c`, retrieved 2026-08-19, `sha256 = b565666a…819d41d7`, verified
+byte-identical to the upstream blob) — the provenance note of record is the
+shelf's `fleet-lcm-9.0/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics (the vcf-operations / vcf-logs OSS precedent, **not** the
+nsx-9.0 vendor-served form the paired legacy lane will use). No
+`.ingestable.json` derivative is pinned: the document is a clean OpenAPI 3.0.4
+whose `securitySchemes` (`bearerToken` http Bearer + `basicAuth` http basic) are
+well-formed, so `parse_openapi` accepts it as-is (unlike the vcf-logs Logs spec)
+and the lane uses the standard `openapi_served_op_ids`.
+
+Unlike the vcf-logs extension, this spec lands in a **new** shelf directory
+`docs/fleet-lcm-9.0/`, so the sparse-checkout **is** widened:
+`docs/fleet-lcm-9.0` is added to both Python jobs' sparse-checkout list, and
+`fleet-lcm-9.0/fleet-lcm-openapi.yaml` to their fail-loud verify step + echo
+confirmation. The lane and this CI wiring land in the evoila/meho PR; the shelf
+pin lands via the operator's consumer-shelf PR (`claude-rdc-hetzner-dc#2560`).
+**Until that shelf PR merges, the fail-loud verify step reports the file
+missing and the Python jobs fail** — the intended fail-closed behaviour (a
+layout/pin regression must fail CI, not silently skip the lane); the entry is
+**not** removed to force green.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;

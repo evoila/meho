@@ -325,7 +325,7 @@ jobs:
         # dropped this upload on every red scan; the explicit `!cancelled()`
         # opts out of that default and the outcome check restores the PR skip.
         if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38  # v4.37.4
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd  # v4.37.7
         with:
           sarif_file: trivy-results.sarif
           # Category disambiguates this run when other SARIF sources (e.g.

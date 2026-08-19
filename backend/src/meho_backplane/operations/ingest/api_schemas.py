@@ -128,6 +128,27 @@ class SpecSource(BaseModel):
     content: str | None = Field(default=None, max_length=20 * 1024 * 1024)
 
 
+#: Minimum digit count for a ``version`` to be treated as a Unix-epoch
+#: timestamp rather than a product-line label. Unix-epoch **seconds**
+#: have been 10 digits since 2001-09 (crossed 1e9) and stay 10 until
+#: 2286; a 9-digit floor catches any epoch while never matching a real
+#: version (which always carries dots / letters / dashes — ``9.0`` /
+#: ``2.x`` / ``2026-04``). See :meth:`IngestRequest._reject_epoch_version`.
+_EPOCH_VERSION_MIN_DIGITS = 9
+
+
+def _version_looks_like_epoch(version: str) -> bool:
+    """Return whether *version* is a bare Unix-epoch-magnitude integer.
+
+    ``True`` only for an all-ASCII-digit string of at least
+    :data:`_EPOCH_VERSION_MIN_DIGITS` characters — the shape a
+    consumer-side probe-then-ingest loop stamps when it uses the probe
+    run's epoch as the connector ``version`` (#2977). A legitimate
+    connector version never matches (they carry ``.`` / letters / ``-``).
+    """
+    return version.isascii() and version.isdigit() and len(version) >= _EPOCH_VERSION_MIN_DIGITS
+
+
 class IngestRequest(BaseModel):
     """POST body for ``/api/v1/connectors/ingest``.
 
@@ -465,6 +486,43 @@ class IngestRequest(BaseModel):
             _compatibility_pattern_to_specifier(pattern)
             normalized.append(pattern)
         return normalized
+
+    @field_validator("version")
+    @classmethod
+    def _reject_epoch_version(cls, value: str | None) -> str | None:
+        """Reject a ``version`` that is a bare Unix-epoch integer (#2977).
+
+        A connector version is a stable product-line label (``9.0`` /
+        ``2.x`` / ``2026-04``), never a per-run timestamp. The
+        consumer-side probe-then-ingest loop that filed #2977 stamped the
+        probe run's epoch as ``version`` (rendering ``fleet-rest-probe-<epoch>``),
+        so every run produced a fresh ``(product, version, impl_id)``
+        triple — a new catalog row per probe, accumulating without bound
+        because nothing reaps them (the dedup upsert is keyed on that
+        triple, so a changed ``version`` never matches an existing row).
+        Rejecting the epoch shape here — on the one :class:`IngestRequest`
+        both the REST route and the ``meho_connector_ingest`` MCP tool
+        construct through — stops the growth at the source on every
+        surface; the ``0075`` data migration reaps the rows already
+        leaked in.
+
+        ``None`` (the catalog-driven shape, where ``version`` is resolved
+        server-side from the packaged — and therefore never epoch —
+        catalog entry) passes untouched. The ``snake_case`` classifier
+        follows the T11 error-message-shape convention so callers branch
+        without re-parsing the prose.
+        """
+        if value is not None and _version_looks_like_epoch(value):
+            raise ValueError(
+                "connector_version_epoch_rejected: version "
+                f"{value!r} is a Unix-epoch-like integer, not a stable "
+                "connector version (e.g. '9.0', '2.x', '2026-04'). An "
+                "epoch version renders a fresh connector_id on every "
+                "ingest, minting the unbounded '<impl>-probe-<epoch>' "
+                "catalog rows #2977 fixes. Re-ingest under a stable "
+                "product-line version. See docs/codebase/error-message-shape.md."
+            )
+        return value
 
 
 class AffectedSensorModel(BaseModel):

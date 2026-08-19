@@ -1211,6 +1211,53 @@ backstop), the boundary 422 in
 and the verb round-trip in
 `tests/test_operations_ingest_catalog.py::test_registered_next_step_verb_round_trips_to_dispatchable_ingest`.
 
+#### Version integrity at the ingest boundary — epoch rejection + reaper (#2977)
+
+A connector `version` is a stable product-line label (`9.0` / `2.x` /
+`2026-04`), never a per-run timestamp. A consumer-side probe-then-ingest
+loop stamped each probe run's Unix epoch as the `version`, so every run
+rendered a fresh `(product, version, impl_id)` triple. The ingest upsert
+dedups on that exact triple (`_upsert.upsert_one_operation`), so a
+changed `version` never matched an existing row — it INSERTed a new
+connector each time, and no reaper exists for `endpoint_descriptor` /
+`operation_group` rows, so the `fleet-rest-probe-<epoch>` catalog rows
+grew without bound (one per probe run).
+
+Two guards close it — the same prevention-plus-cleanup shape the product
+divergence above took:
+
+- **Prevention, at the source.** `IngestRequest._reject_epoch_version`
+  (`ingest/api_schemas.py`) rejects a `version` that is a bare integer of
+  ≥ 9 digits — the epoch shape — with a `422
+  connector_version_epoch_rejected`. It is a field validator on the one
+  `IngestRequest` both the REST route and the `meho_connector_ingest` MCP
+  tool construct through, so every surface fails closed identically (the
+  same all-surfaces posture #1817 took for the product round-trip). The
+  catalog-driven shape (`version` resolved server-side from the
+  packaged — and therefore never epoch — catalog) is unaffected. A
+  9-digit floor catches any Unix epoch (10 digits since 2001) while never
+  matching a real version, which always carries dots / letters / dashes.
+
+- **Cleanup, one-time.** Migration
+  `0075_reap_epoch_versioned_connector_registrations` deletes the
+  epoch-versioned rows that leaked in before the guard, from
+  `endpoint_descriptor` (guarded on `source_kind = 'ingested'`) and
+  `operation_group`. Unlike the `0049` / `0052` twin-retire migrations it
+  is **tenant-scope-inclusive** — the epoch debris is a consumer-side
+  tenant ingest — and keys on the epoch-version shape (dialect-branched:
+  PG POSIX regex, SQLite `length` + `NOT GLOB`), not a product/impl_id
+  allowlist. `downgrade()` is a documented no-op.
+
+Regression coverage:
+`tests/test_api_v1_connectors_ingest.py::test_ingest_request_epoch_version_boundary`
+(plus the REST 422 and schema cases),
+`tests/test_mcp_tools_connector_ingest.py::test_inline_epoch_version_rejected_before_service`,
+`tests/migrations/test_migration_0075_reap_epoch_versioned_connector_registrations.py`,
+and the scope-isolation invariant the "counts bleed across duplicates"
+symptom was mistaken for (documented semantics — `total` counts only
+rendered-group ops) in
+`tests/test_operations_ingest_review.py::test_review_counts_do_not_bleed_across_duplicate_scope_registrations`.
+
 #### Dispatchability postcondition on async jobs (claude-rdc-hetzner-dc#1136)
 
 A background pipeline coroutine that returns without raising is **not**

@@ -3824,6 +3824,114 @@ paths:
 
 
 # ---------------------------------------------------------------------------
+# #2977 — reject epoch-versioned (non-idempotent probe) registrations
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_request_rejects_epoch_version() -> None:
+    """``IngestRequest`` rejects a bare Unix-epoch ``version`` (#2977).
+
+    The one validator both the REST route and the MCP tool construct
+    through — so the guard fires on every surface. A 10-digit epoch is
+    the signature of the consumer probe-then-ingest loop that minted the
+    unbounded ``fleet-rest-probe-<epoch>`` catalog rows.
+    """
+    from pydantic import ValidationError
+
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    with pytest.raises(ValidationError) as exc_info:
+        IngestRequest(
+            product="fleet",
+            version="1699999999",
+            impl_id="fleet-rest-probe",
+            specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+        )
+    assert "connector_version_epoch_rejected" in str(exc_info.value)
+
+
+def test_ingest_request_accepts_stable_version() -> None:
+    """A legitimate product-line ``version`` passes untouched."""
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    req = IngestRequest(
+        product="fleet",
+        version="9.0",
+        impl_id="fleet-rest",
+        specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+    )
+    assert req.version == "9.0"
+
+
+def test_ingest_request_catalog_shape_unaffected_by_epoch_guard() -> None:
+    """The catalog-driven shape (``version`` unset) is not touched.
+
+    ``version`` is resolved server-side from the packaged catalog after
+    validation, so the epoch guard has nothing to check here.
+    """
+    from meho_backplane.operations.ingest import IngestRequest
+
+    req = IngestRequest(catalog_entry="vmware/9.0")
+    assert req.version is None
+
+
+@pytest.mark.parametrize(
+    ("version", "rejected"),
+    [
+        ("1699999999", True),  # 10-digit epoch seconds
+        ("169999999", True),  # 9-digit — at the floor, still an epoch
+        ("16999999", False),  # 8-digit — below the floor
+        ("2026", False),  # calendar-year-ish short integer
+        ("9.0", False),  # dotted product-line version
+        ("2026-04", False),  # date-style version with a dash
+        ("2.x", False),  # glob-style version
+    ],
+)
+def test_ingest_request_epoch_version_boundary(version: str, rejected: bool) -> None:
+    """Lock the 9-digit epoch floor: >= 9 bare digits rejected, else accepted."""
+    from pydantic import ValidationError
+
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    def _build() -> IngestRequest:
+        return IngestRequest(
+            product="widget",
+            version=version,
+            impl_id="widget-rest",
+            specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+        )
+
+    if rejected:
+        with pytest.raises(ValidationError, match="connector_version_epoch_rejected"):
+            _build()
+    else:
+        assert _build().version == version
+
+
+def test_ingest_returns_422_on_epoch_version(client: TestClient) -> None:
+    """End-to-end: POST with an epoch ``version`` → 422 with the classifier.
+
+    Validation fails at body-parse (before the handler, so no spec is
+    fetched); the ``snake_case`` classifier surfaces in the 422 body.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "fleet",
+                "version": "1699999999",
+                "impl_id": "fleet-rest-probe",
+                "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    assert "connector_version_epoch_rejected" in response.text
+
+
+# ---------------------------------------------------------------------------
 # G0.14-T9 (#1150) — catalog-driven REST ingest shape
 # ---------------------------------------------------------------------------
 

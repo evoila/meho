@@ -696,6 +696,33 @@ async def test_inline_uncovered_version_maps_to_invalid_params(
     assert data["version"] == "7.0"
 
 
+async def test_inline_epoch_version_rejected_before_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP ingest tool rejects an epoch ``version`` (#2977).
+
+    The rejection fires in ``_build_ingest_request`` — the same
+    ``IngestRequest`` validator the REST route constructs through — so
+    the MCP surface fails closed identically, before any service work.
+    The dispatcher renders the resulting ``ValidationError`` as a
+    ``-32602`` invalid_params, the same path the closed-set
+    ``auth_scheme`` rejection takes.
+    """
+    from pydantic import ValidationError
+
+    op = build_operator(TenantRole.TENANT_ADMIN)
+    with pytest.raises(ValidationError, match="connector_version_epoch_rejected"):
+        await ci_mod._ingest_handler(
+            op,
+            {
+                "product": "fleet",
+                "version": "1699999999",
+                "impl_id": "fleet-rest-probe",
+                "specs": [{"uri": "docs:fleet/probe.yaml"}],
+            },
+        )
+
+
 async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> None:
     """The MCP ingest tool rejects a divergent product whose impl_id is hand-coded.
 

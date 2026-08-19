@@ -476,6 +476,64 @@ committable spec exists for the modern generation, but not for 5.x.**
   `sddc-manager-openapi.json` served set, or Broadcom publishing a 5.x OA3
   artifact (or MEHO gaining a Swagger-2.0→OA3 ingest path, #2090).
 
+### vrops-vrops8 / vrli-vrli8 — subclass reuse, op-set drift guard (no new paths) (#3067/#3068)
+
+The `vrops-vrops8` (vROps 8.x) and `vrli-vrli8` (vRLI 8.x) connectors are
+**legacy dual-impls** of `product="vrops"` / `product="vrli"` (initiative
+[#3056](https://github.com/evoila/meho/issues/3056), tasks #3067/#3068) —
+but unlike the standalone legacy connectors above (`vcd`, `vcfa-vra8`,
+`sddc-vcf5`), they are **thin subclasses** of their modern siblings
+(`vrops-rest` / `vrli-rest`). The 8.x REST surface is identical to 9.x (the
+vROps Suite API `/suite-api/api/*` is stable since 6.6/7.0; the vRLI
+`/api/v2/*` surface shipped in vRLI 8.0), so the subclass **inherits every
+hand-coded path from the modern connector and adds none of its own.**
+
+The consequence for this standard: **there is nothing new to pin.** The
+paths these impls dispatch are the modern connectors' constants, already
+covered by the modern lanes —
+`test_connectors_vcf_operations_spec_reconcile.py` **arms** them against the
+pinned `vcf-operations-9.0` OpenAPI 3.0 served set (`vmware/vcf-api-specs`),
+and `test_connectors_vcf_logs_spec_reconcile.py` covers the vRLI surface.
+Path existence is version-stable across the 8.x↔9.x boundary, so the modern
+9.x served-set assertion transitively arms the 8.x impls' paths.
+
+- **The subclass lane is an op-set drift guard, not a path pin.**
+  `test_connectors_vrops8_spec_reconcile.py` /
+  `test_connectors_vrli8_spec_reconcile.py` (parse-only, always-on) assert
+  (a) the 8.x impl reuses **exactly** the modern typed op-set verbatim —
+  vROps `{liveness, alert.list, resource.query, resource.stats}`, vRLI
+  `{event.query}` — so a future 9.x-only typed op cannot silently inherit
+  into the 8.x surface (the registrar reuses the modern tuple) without a
+  conscious 8.x-applicability review; and (b) the subclass introduces **no**
+  `_*_PATH` constants of its own, so nothing un-reconciled can slip in
+  behind the "no new paths" claim.
+- **Evidenced exclusion (moot for path coverage).** Neither product
+  publishes a committable 8.x spec — vROps 8.x serves only a **per-instance
+  Swagger 2.0** document (`/suite-api/doc/v2/api-docs`); vRLI 8.x publishes
+  no downloadable spec at all (a per-appliance runtime Swagger UI at
+  `/rest-api`, VMware's own archived client hand-coded). MEHO's ingest is
+  OA3-only (#2090), so neither 8.x surface is operator-ingestable — hence
+  the reuse of the modern **typed** cores. But because the shared paths are
+  already armed against the modern 9.x served sets, the absence of an
+  8.x-specific spec costs no path coverage here.
+- **Residual risk, named:** no live 8.x appliance was dialled — the 8.x
+  scheme delta (vROps presents the pre-9.x `vRealizeOpsToken`) and the
+  inherited handlers are unit-tested end-to-end (respx), and live
+  verification is the deferred tail, the same posture `vcd` / `vcfa-vra8` /
+  `sddc-vcf5` shipped with. One vROps-specific edge (the #3067 review's top
+  finding): the inherited fingerprint stores `versions/current`'s
+  `releaseName` raw, so `vrops-vrops8` resolution depends on it being PEP
+  440-parseable — a non-parseable value falls back *open* to the modern
+  wildcard (wrong `OpsToken` scheme). Observed `releaseName` is always
+  dotted-numeric; the open-fallback limitation + the operator escape hatch
+  (pin `version` / `preferred_impl_id`) are pinned in
+  `test_connectors_vrops8_dual_impl_resolution.py`, and confirming the live
+  format is folded into the deferred live-verify.
+- **Activation:** if the two impls ever *diverge* from their siblings
+  (an 8.x-only path or a forked op-set), that new hand-coded surface must
+  ship its own served-set (or manifest-pin) lane at that point — the op-set
+  drift guard is what surfaces the divergence.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

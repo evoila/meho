@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — coverage-job pytest hang no longer cancels the CI run (#2865)
+
+- The push-only `python-coverage` job (the SonarCloud coverage producer)
+  could hang in its pytest step and flip the whole CI run conclusion to
+  `cancelled` — twice on the v0.28.0 cut (run 31199593016) — because a
+  wedged runner never reached the #2806 step `timeout-minutes`, and a
+  `cancelled` conclusion leaks past the job's `continue-on-error` and
+  suppresses the downstream SonarCloud `workflow_run`. The step now runs
+  under pytest-timeout (`--timeout=300 --timeout-method=signal
+  --max-worker-restart=0`), an in-process per-test guard: a hang dies as a
+  pytest-timeout *failure* carrying the offending test's traceback — which
+  `continue-on-error` absorbs, so the run stays `success` — fast, with no
+  xdist worker-crash re-run multiplication. The pytest output is uploaded
+  as a `coverage-pytest-log` artifact so the next hang says *where* it
+  hung, and the step/job `timeout-minutes` are re-documented as the
+  layer-2/3 backstops behind the new in-process guard. No operator-facing
+  behaviour changes; this only hardens release-cut CI.
+
 ### Added — keycloak real-spec reconcile lane (#2988)
 
 - Every hand-coded `METHOD:/path` the keycloak connector dispatches —

@@ -118,15 +118,15 @@
     onsubmit="return false;"
   >
     <div class="card-body grid gap-3 md:grid-cols-3">
-      <label class="form-control md:col-span-2">
-        <span class="label-text">Filter by tag</span>
+      <label class="flex flex-col gap-1 max-w-xs">
+        <span class="text-sm font-medium">Filter by tag</span>
         <input
           type="search"
           name="tag"
           value="{{ active_tag }}"
           list="memory-tag-options"
           placeholder="Equal-match against the row's tags list"
-          class="input input-bordered input-sm"
+          class="input input-bordered input-sm w-full"
           aria-label="Filter memories by tag"
         />
         <datalist

@@ -158,6 +158,7 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `vcf-fleet-9.0` | 2 | Shared [`_shared/vcf_auth.load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py) — live operator-context Vault read (G3.10-T2 [#946](https://github.com/evoila/meho/issues/946)) | ✅ (`shared_service_account`) |
 | `nsx-4.2` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/nsx/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
 | `sddc-manager-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/sddc_manager/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
+| `installer-rest-9.1` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vcf_installer/session.py) — live operator-context Vault read (delegates to shared [`_shared/vcf_auth.load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py)) | ✅ (`shared_service_account`) |
 | `harbor-2.x` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/harbor/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
 | `kubernetes-asyncio-1.x` | 2 (shadow) | Same as `k8s-1.x` | ✅ (`shared_service_account`) |
 

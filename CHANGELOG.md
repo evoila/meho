@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — VCF Installer 9.1 bring-up connector skeleton (Initiative #2907, task #3065)
+
+- New `vcf-installer` connector (`installer-rest-9.1`) — the governed dispatch
+  surface for VCF 9.x management-domain bring-up (the automation add-on generates
+  the `SddcSpec`, meho governs the POST). This increment ships the **skeleton**:
+  `session_login_token` auth (`POST /v1/tokens` → cached Bearer, reusing the SDDC
+  Manager scheme), fingerprint / probe via `GET /v1/system/appliance-info`, and
+  the `installer.sddc.status` bring-up status poll (`GET /v1/sddcs/{id}`; typed,
+  `safe`). Ships at rubric State 2 (`shared_service_account`, live operator-context
+  Vault read). A spec-reconcile lane pins every hand-coded path against the pinned
+  `vcf-installer-9.1` shelf spec. The governed bring-up **write** (validate →
+  deploy → poll — a `dangerous` + `requires_approval` composite) lands in a
+  following increment. Docs:
+  [`connectors-vcf-installer.md`](docs/codebase/connectors-vcf-installer.md).
+
 ## [0.29.0] - 2026-08-19
 
 ### Security — base image util-linux family patched for CVE-2026-53615 (PR #3053)

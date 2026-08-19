@@ -31,7 +31,12 @@
   ``insufficient_promotion_authority``.
 -#}
 <dialog id="memory-promote-modal" class="modal">
-  <div class="modal-box">
+  {#- ``max-w-md`` keeps the dialog compact and centred. A narrow, short
+      modal keeps the native ``Promote to`` <select> high in the viewport
+      so the browser has room to open its option list downward rather than
+      upward over the heading (#219). Native <select> popup direction is
+      browser-controlled and can't be forced via CSS. -#}
+  <div class="modal-box max-w-md">
     <h3 class="font-semibold text-lg" id="memory-promote-modal-title">
       Promote memory to broader scope
     </h3>
@@ -53,11 +58,11 @@
       class="space-y-3"
       aria-labelledby="memory-promote-modal-title"
     >
-      <label class="form-control">
-        <span class="label-text">Promote to</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Promote to</span>
         <select
           name="to"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           required
           data-action="promote-target-select"
         >
@@ -68,21 +73,21 @@
       </label>
 
       <label
-        class="form-control"
+        class="flex flex-col gap-1"
         data-target-name-row
         style="display: none;"
       >
-        <span class="label-text">Target name</span>
+        <span class="text-sm font-medium">Target name</span>
         <input
           type="text"
           name="target_name"
           value="{{ entry.target_name or '' }}"
           maxlength="{{ target_name_max_length }}"
-          class="input input-bordered input-sm"
+          class="input input-bordered input-sm w-full"
           placeholder="Required for user-target and target promotions"
           aria-describedby="memory-promote-target-name-hint"
         />
-        <span id="memory-promote-target-name-hint" class="text-xs opacity-60 mt-1">
+        <span id="memory-promote-target-name-hint" class="text-xs opacity-60">
           The connector / target the broadened memory should bind to.
           Inherited from the source row when promoting along the target
           ladder; editable here for the user-to-user-target step.

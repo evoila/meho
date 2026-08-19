@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SHELF_ENV_VAR",
     "assert_op_ids_served",
+    "openapi_request_body_props",
     "openapi_served_op_ids",
     "require_shelf_spec",
     "resolve_shelf_file",
@@ -112,6 +113,44 @@ def openapi_served_op_ids(spec_path: Path, *, spec_source: str | None = None) ->
         content=spec_text,
     )
     return {row.op_id for row in rows}
+
+
+def openapi_request_body_props(
+    spec_path: Path, *, spec_source: str | None = None
+) -> dict[str, set[str]]:
+    """Map every op_id with a JSON request body to its top-level body properties.
+
+    Runs the same ingest parser as :func:`openapi_served_op_ids`, then reads
+    each row's request body off the flattened parameter schema the parser
+    emits: :func:`~meho_backplane.operations.ingest.parse_openapi` folds the
+    resolved ``requestBody`` schema in under
+    ``parameter_schema["properties"]["body"]`` (tagged
+    ``x-meho-param-loc: "body"``), so ``…["body"]["properties"]`` holds the
+    request body's **top-level** property names -- the ``*Spec`` fields the
+    ``/api`` surface expects at the top of the JSON body. Rows without a
+    structured body (``GET`` reads, bodyless ``?action=`` verbs) are omitted.
+
+    A body-shape reconcile lane uses this to assert an ``/api`` write op's
+    request body is the flat ``*Spec`` the pinned spec declares, never the
+    legacy ``/rest``-style single-``spec`` wrapper -- the envelope regression
+    the path-only lanes (:func:`openapi_served_op_ids`) cannot see (#2973).
+    """
+    spec_text = spec_path.read_text(encoding="utf-8")
+    rows = parse_openapi(
+        f"file://{spec_path}",
+        spec_source=spec_source or f"spec:{spec_path.name}",
+        content=spec_text,
+    )
+    result: dict[str, set[str]] = {}
+    for row in rows:
+        param_schema = row.parameter_schema if isinstance(row.parameter_schema, dict) else {}
+        body = param_schema.get("properties", {}).get("body")
+        if not isinstance(body, dict):
+            continue
+        props = body.get("properties")
+        if isinstance(props, dict) and props:
+            result[row.op_id] = set(props)
+    return result
 
 
 def _near_misses(op_id: str, served: Collection[str]) -> list[str]:

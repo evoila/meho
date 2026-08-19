@@ -769,13 +769,13 @@ async def test_vm_create_composite_over_modern_mount(
     assert create_route.called
     assert nic_route.called
     assert power_route.called
-    # The create body carries the spec wrapper the vCenter POST expects.
+    # The create body is the VM.CreateSpec at the top level of the /api body (#2973).
     create_body = json.loads(create_route.calls.last.request.content)
-    assert create_body["spec"]["name"] == "web-01"
-    assert create_body["spec"]["placement"]["folder"] == "group-1"
-    # The NIC create body is the Ethernet.CreateSpec backing shape (#2970).
+    assert create_body["name"] == "web-01"
+    assert create_body["placement"]["folder"] == "group-1"
+    # The NIC create body is the Ethernet.CreateSpec backing shape (#2970), top-level (#2973).
     nic_body = json.loads(nic_route.calls.last.request.content)
-    assert nic_body["spec"]["backing"] == {"type": "STANDARD_PORTGROUP", "network": "net-1"}
+    assert nic_body["backing"] == {"type": "STANDARD_PORTGROUP", "network": "net-1"}
 
 
 @pytest.mark.asyncio
@@ -965,7 +965,7 @@ async def test_host_evacuate_recursion_over_modern_mount(
     assert relocate_route.called
     assert maintenance_route.called
     relocate_body = json.loads(relocate_route.calls.last.request.content)
-    assert relocate_body["spec"]["placement"]["host"] == "host-target"
+    assert relocate_body["placement"]["host"] == "host-target"
     enter_body = json.loads(maintenance_route.calls.last.request.content)
     assert enter_body == {"timeout": 0}
 
@@ -1196,8 +1196,8 @@ async def test_vm_customize_puts_named_spec_over_respx(
 
     Exercises the real connector transport (respx-intercepted): the resolve
     listing mounts onto ``/api/vcenter/vm``, and the customization set mounts
-    onto ``PUT /api/vcenter/vm/{vm}/guest/customization`` with the
-    ``{"spec": {"name": <spec>}}`` body. The #2254 governance seam is stubbed
+    onto ``PUT /api/vcenter/vm/{vm}/guest/customization`` with the top-level
+    ``{"name": <spec>}`` SetSpec body (#2973). The #2254 governance seam is stubbed
     to auto-execute so the write reaches the wire (the seam itself is proven
     end-to-end in the write-gate lane).
     """
@@ -1238,4 +1238,4 @@ async def test_vm_customize_puts_named_spec_over_respx(
     assert result["status"] == "customization_set"
     assert put_route.called
     sent_body = json.loads(put_route.calls.last.request.content)
-    assert sent_body == {"spec": {"name": "gosc-lin"}}
+    assert sent_body == {"name": "gosc-lin"}

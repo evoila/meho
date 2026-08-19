@@ -473,10 +473,12 @@ _VIM_SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
 
 # Hardware write ops (#2891). Post-clone reconfigure of a VM's virtual
 # hardware, straight vSphere Automation REST. CPU/memory update and the
-# ethernet/cdrom device sub-resources take the update spec wrapped in the
-# ``{"spec": {...}}`` envelope this connector's write sub-ops author (see
-# ``_write_sub_op``); the CD-ROM ``disconnect`` rides an ``?action=``
-# suffix like the other action endpoints (power / relocate / maintenance).
+# ethernet/cdrom device sub-resources send the update spec's fields at the
+# **top level** of the request body -- the modern ``/api`` surface takes the
+# ``*Spec`` directly (``Cpu.UpdateSpec`` / ``Ethernet.UpdateSpec`` / ...),
+# not the legacy ``/rest`` ``{"spec": {...}}`` envelope (#2973); the CD-ROM
+# ``disconnect`` rides an ``?action=`` suffix like the other action
+# endpoints (power / relocate / maintenance).
 _OP_UPDATE_VM_CPU = "PATCH:/vcenter/vm/{vm}/hardware/cpu"
 _OP_UPDATE_VM_MEMORY = "PATCH:/vcenter/vm/{vm}/hardware/memory"
 _OP_GET_VM_NIC = "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
@@ -968,13 +970,11 @@ async def vm_create_composite(
     steps.append("folder_lookup")
 
     create_spec = {
-        "spec": {
-            "name": name,
-            "guest_OS": guest_os,
-            "placement": {"folder": folder_moid},
-            "cpu": {"count": cpu_count},
-            "memory": {"size_MiB": memory_mib},
-        },
+        "name": name,
+        "guest_OS": guest_os,
+        "placement": {"folder": folder_moid},
+        "cpu": {"count": cpu_count},
+        "memory": {"size_MiB": memory_mib},
     }
     try:
         gate, create_payload = await _write_sub_op(
@@ -1006,7 +1006,7 @@ async def vm_create_composite(
         }
         try:
             gate, _ = await _write_sub_op(
-                connector, target, operator, _OP_CREATE_VM_NIC, {"vm": vm_id, "spec": nic_spec}
+                connector, target, operator, _OP_CREATE_VM_NIC, {"vm": vm_id, **nic_spec}
             )
         except httpx.HTTPError as exc:
             await _rollback_created_vm(
@@ -1759,7 +1759,7 @@ async def vm_migrate_composite(
         target,
         operator,
         _OP_RELOCATE_VM,
-        {"vm": vm_moid, "spec": {"placement": {"host": target_host}}},
+        {"vm": vm_moid, "placement": {"host": target_host}},
     )
     if gate is not None:
         return gate
@@ -2131,11 +2131,9 @@ async def _repoint_vm_nics_to_fallback(
             {
                 "vm": vm_moid,
                 "nic": nic_id,
-                "spec": {
-                    "backing": {
-                        "type": _NIC_BACKING_STANDARD_PORTGROUP,
-                        "network": fallback_network,
-                    }
+                "backing": {
+                    "type": _NIC_BACKING_STANDARD_PORTGROUP,
+                    "network": fallback_network,
                 },
             },
         )
@@ -3723,7 +3721,7 @@ async def vm_resize_composite(
         if req_cores is not None:
             cpu_spec["cores_per_socket"] = req_cores
         gate, _ = await _write_sub_op(
-            connector, target, operator, _OP_UPDATE_VM_CPU, {"vm": vm_moid, "spec": cpu_spec}
+            connector, target, operator, _OP_UPDATE_VM_CPU, {"vm": vm_moid, **cpu_spec}
         )
         if gate is not None:
             return gate
@@ -3736,7 +3734,7 @@ async def vm_resize_composite(
                 target,
                 operator,
                 _OP_UPDATE_VM_MEMORY,
-                {"vm": vm_moid, "spec": {"size_MiB": req_mem}},
+                {"vm": vm_moid, "size_MiB": req_mem},
             )
         except httpx.HTTPError as exc:
             if applied_cpu:
@@ -3824,9 +3822,7 @@ async def vm_nic_repoint_composite(
         {
             "vm": vm_moid,
             "nic": nic_id,
-            "spec": {
-                "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid}
-            },
+            "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid},
         },
     )
     if gate is not None:
@@ -3896,7 +3892,7 @@ async def vm_device_cdrom_composite(
         target,
         operator,
         _OP_UPDATE_VM_CDROM,
-        {"vm": vm_moid, "cdrom": cdrom_id, "spec": {"backing": backing}},
+        {"vm": vm_moid, "cdrom": cdrom_id, "backing": backing},
     )
     if gate is not None:
         return gate
@@ -4030,10 +4026,12 @@ def _build_customization_create_body(params: dict[str, Any]) -> dict[str, Any]:
     """Assemble the ``POST:/vcenter/guest/customization-specs`` request body.
 
     Maps the agent-facing GOSC subset onto the vCenter ``CreateSpec``
-    (``{name, description, spec}``) whose ``spec`` is a
+    (``{name, description, spec}``) whose ``spec`` field is a
     ``CustomizationSpec`` (``{configuration_spec, interfaces,
-    global_dns_settings}``), wrapped in the operation's ``spec``
-    parameter per the connector's REST convention.
+    global_dns_settings}``). The ``CreateSpec`` fields sit at the **top
+    level** of the ``/api`` request body -- the modern surface takes the
+    ``CreateSpec`` directly (#2973), so the only ``spec`` key here is the
+    legitimate ``CustomizationSpec`` field, not a ``/rest``-style envelope.
     """
     if params["os_type"] == "linux":
         configuration_spec = {"linux_config": _build_linux_config(params)}
@@ -4062,7 +4060,7 @@ def _build_customization_create_body(params: dict[str, Any]) -> dict[str, Any]:
         "description": params.get("description") or "",
         "spec": customization_spec,
     }
-    return {"spec": create_spec}
+    return create_spec
 
 
 async def guest_customization_spec_create_composite(
@@ -4201,7 +4199,7 @@ async def vm_customize_composite(
         target,
         operator,
         _OP_SET_VM_CUSTOMIZATION,
-        {"vm": vm_moid, "spec": {"name": spec_name}},
+        {"vm": vm_moid, "name": spec_name},
     )
     if gate is not None:
         return gate

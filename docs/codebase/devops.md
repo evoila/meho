@@ -367,6 +367,57 @@ kubectl create secret generic meho-postgres \
   --namespace meho
 ```
 
+### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
+
+The backplane serves Prometheus exposition at an unauthenticated
+`/metrics` route (`backend/src/meho_backplane/metrics.py`, legacy
+`0.0.4` content type for universal scraper support), but nothing scrapes
+it out of the box. Two **optional, disabled-by-default** Prometheus
+Operator resources close that gap (Initiative #2884, #2885):
+
+- `serviceMonitor` (`serviceMonitor.enabled`, default `false`) renders a
+  `ServiceMonitor` (`monitoring.coreos.com/v1`) that selects **this
+  release's** backplane `Service` by its `app.kubernetes.io/name` +
+  `app.kubernetes.io/instance` labels and scrapes the named
+  `service.portName` port at `serviceMonitor.path` (default `/metrics`).
+  The broadcast subchart's Service carries a different
+  `app.kubernetes.io/name`, so it is not matched.
+- `prometheusRule` (`prometheusRule.enabled`, default `false`) renders a
+  starter `PrometheusRule` with two conservative alerts:
+  - `MehoMetricsScrapeAbsent` — `absent(up{job=<fullname>, namespace=<ns>})`;
+    fires when Prometheus has **no** target series for this release at
+    all (the ServiceMonitor was never picked up, the selector drifted, or
+    the Service was removed). A known-but-failing target surfaces as
+    `up == 0`, a separate signal the starter set does not cover.
+  - `MehoBroadcastPublishErrors` — `rate(broadcast_publish_errors_total[5m]) > 0`;
+    the fail-open broadcast publisher swallows dropped events by design
+    (`broadcast/publisher.py`), so a sustained nonzero rate is the only
+    signal that the activity feed is silently losing events.
+
+  The rules are split into groups **by concern** (`meho.scrape`,
+  `meho.broadcast`) so follow-up tasks extend them cleanly — the
+  background-loop liveness alert (#2888) lands as a new `meho.loops`
+  group, not an edit to an existing group.
+
+Both resources require the Prometheus Operator CRDs
+(`monitoring.coreos.com/v1`) to be installed in the cluster; a default
+install renders neither and is unaffected. **The `labels` knob on each is
+the discovery contract, not cosmetic**: a Prometheus custom resource only
+picks up ServiceMonitors / PrometheusRules whose labels match its
+`serviceMonitorSelector` / `ruleSelector`. On a kube-prometheus-stack
+install that selector defaults to `release: <prometheus-release>`, so
+`serviceMonitor.labels` / `prometheusRule.labels` must carry
+`release: kube-prometheus-stack` (or the site's equivalent) or the scrape
+config / rules are silently never generated. The alert `for` durations
+and `severity` labels are operator-tunable under
+`prometheusRule.scrapeAbsent` / `prometheusRule.broadcastPublishErrors`.
+
+Render assertions live in `backend/tests/test_chart_observability_scrape.py`
+(unit layer, skips where `helm` is absent) and in the `chart.yml`
+`validate` job (the authoritative CI gate: renders with both opt-ins on
+and greps the load-bearing fields, and re-checks the default render
+carries neither resource).
+
 ### Safe-by-default values
 
 `values.yaml` deliberately ships **blank** for every field the backplane
@@ -1264,8 +1315,9 @@ when application code is the only delta.
 
 ## Known gaps (filled by sibling tasks)
 
-- HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
-  — deferred to v0.2. v0.1 is single-replica per Goal #11 scope.
+- HPA / PDB / topologySpreadConstraints — deferred to v0.2. v0.1 is
+  single-replica per Goal #11 scope. (ServiceMonitor + PrometheusRule
+  shipped in #2885 — see "Metrics scrape wiring" under Chart contract.)
 - Broadcast subchart HA (Sentinel/Cluster), persistence, auth —
   deferred to v0.2 per ADR 0005.
 - `broadcast.externalEndpoint` opt-out for operators with a managed

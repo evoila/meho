@@ -154,6 +154,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     resolve_agent_credentials,
@@ -959,6 +960,7 @@ async def _scheduler_loop() -> None:
         if time.monotonic() - last_token_renew >= _TOKEN_RENEW_INTERVAL_SECONDS:
             last_token_renew = time.monotonic()
             await _renew_scheduler_vault_token(reason="periodic")
+        note_loop_tick("scheduler", get_settings().scheduler_tick_interval_seconds)
 
 
 def start_scheduler() -> asyncio.Task[None]:

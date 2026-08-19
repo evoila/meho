@@ -148,6 +148,7 @@ from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_s
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.scheduler.cron import (
@@ -652,6 +653,7 @@ async def _runner_loop() -> None:
             raise
         except Exception:
             _log().warning("sensor_runner_tick_failed", exc_info=True)
+        note_loop_tick("sensor_runner", get_settings().sensor_runner_tick_interval_seconds)
 
 
 def start_sensor_runner() -> asyncio.Task[None]:

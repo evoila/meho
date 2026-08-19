@@ -121,6 +121,7 @@ from meho_backplane.db.models import (
     AuditLog,
     ScheduledTriggerInFlightPolicy,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     release_lease,
@@ -445,6 +446,7 @@ async def _reaper_loop() -> None:
                 "agent_run_reaper_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("agent_run_reaper", get_settings().agent_run_reaper_tick_interval_seconds)
 
 
 def start_agent_run_reaper() -> asyncio.Task[None]:

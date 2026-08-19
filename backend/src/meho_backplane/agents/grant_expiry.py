@@ -60,6 +60,7 @@ from meho_backplane.memory.audit import (
     SYSTEM_OPERATOR_SUB,
     write_internal_audit_row,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -172,6 +173,7 @@ async def _sweeper_loop() -> None:
                 "grant_expiry_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("grant_expiry", get_settings().grant_expiry_tick_interval_seconds)
 
 
 def start_grant_expiry_sweeper() -> asyncio.Task[None]:

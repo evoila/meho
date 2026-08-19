@@ -107,6 +107,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import EVENT_OUTBOX_NOTIFY_CHANNEL, EventOutbox
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -471,6 +472,7 @@ async def _drain_loop() -> None:
                 raise
             except Exception:
                 _log.warning("event_drain_tick_failed", exc_info=True)
+            note_loop_tick("event_drain", interval)
     finally:
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

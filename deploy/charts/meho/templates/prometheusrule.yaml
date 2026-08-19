@@ -6,10 +6,12 @@ Optional and disabled by default: rendered only when
 `prometheusRule.enabled` is true, and requires the Prometheus Operator
 CRDs (`monitoring.coreos.com/v1`).
 
-Rules are split into groups BY CONCERN (`meho.scrape`, `meho.broadcast`)
-so sibling tasks can extend the rule without restructuring: the
-background-loop liveness alert lands with #2888 as a new `meho.loops`
-group rather than an edit to an existing group. Keep this shape.
+Rules are split into groups BY CONCERN (`meho.scrape`, `meho.broadcast`,
+`meho.loops`) so sibling tasks can extend the rule without restructuring:
+a new alert lands as a new group rather than an edit to an existing one.
+Keep this shape. `meho.loops` (#2888) carries the background-loop liveness
+alert, thresholding the `background_loop_last_tick_timestamp_seconds` and
+`background_loop_interval_seconds` gauges every lifespan loop stamps.
 */ -}}
 {{- if .Values.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
@@ -64,4 +66,32 @@ spec:
               the activity-broadcast publisher is failing to XADD events to
               Valkey (unreachable / XADD error / teardown race) and events
               are being lost. Check the broadcast subchart (Valkey) health.
+    - name: meho.loops
+      rules:
+        - alert: MehoBackgroundLoopStalled
+          # Every lifespan background loop stamps
+          # background_loop_last_tick_timestamp_seconds{loop} each completed
+          # tick; a wedged or dead loop stops advancing its stamp. The
+          # threshold is per-loop -- N x that loop's own published tick
+          # interval -- so one rule covers the 10s sensor runner and the
+          # weekly retention sweepers alike without enumerating loop names:
+          # the companion background_loop_interval_seconds{loop} gauge carries
+          # each loop's cadence and the comparison matches element-wise on the
+          # loop label. Per process, so a single wedged replica fires without
+          # healthy siblings masking it.
+          expr: '(time() - background_loop_last_tick_timestamp_seconds) > ({{ .Values.prometheusRule.loopLiveness.missedTicks }} * background_loop_interval_seconds)'
+          for: {{ .Values.prometheusRule.loopLiveness.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.loopLiveness.severity }}
+          annotations:
+            summary: MEHO background loop {{`{{ $labels.loop }}`}} has stalled
+            description: >-
+              The {{`{{ $labels.loop }}`}} lifespan background loop has not
+              completed a tick in over {{ .Values.prometheusRule.loopLiveness.missedTicks }}x
+              its configured interval: its
+              background_loop_last_tick_timestamp_seconds stamp has gone stale
+              while healthy loops keep advancing. The loop coroutine is wedged
+              or dead, so the sweeps / drains it owns are silently not running.
+              Check the pod logs for that loop's task and restart the replica
+              if it does not recover.
 {{- end }}

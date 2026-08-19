@@ -87,6 +87,7 @@ from meho_backplane.memory.audit import (
     SYSTEM_OPERATOR_SUB,
     write_internal_audit_row,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -324,6 +325,7 @@ async def _sweeper_loop() -> None:
                 "gateway_deadman_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("gateway_deadman", get_settings().gateway_deadman_tick_interval_seconds)
 
 
 def start_gateway_deadman_sweeper() -> asyncio.Task[None]:

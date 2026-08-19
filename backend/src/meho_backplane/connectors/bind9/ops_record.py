@@ -783,11 +783,15 @@ def _zonestatus_serial_verify(zone_name: str, view: str, serial: int) -> str:
     # Anchored, whitespace-tolerant so ``serial: <N>`` matches whatever
     # indentation the rndc build emits and never a ``signed serial:`` line.
     serial_re = f"^[[:space:]]*serial: {serial}[[:space:]]*$"
+    # ``if ... then exit 0; fi`` rather than ``... && exit 0`` so the
+    # predicate is unambiguously safe under the pipeline's ``set -e``:
+    # a grep miss must fall through to the next poll and, after the
+    # loop, to the diagnostic -- never abort the script early.
     return (
         "STATUS=''; "
         "for _ in 1 2 3 4 5; do "
         f"STATUS=$({zonestatus} 2>&1) || true; "
-        f'printf "%s\\n" "$STATUS" | grep -qE "{serial_re}" && exit 0; '
+        f'if printf "%s\\n" "$STATUS" | grep -qE "{serial_re}"; then exit 0; fi; '
         "sleep 0.3; "
         "done; "
         'printf "zone %s view %s not at staged serial '
@@ -809,9 +813,11 @@ def _dig_add_verify(fqdn: str, ip: str, record_type: str) -> str:
     """
     quoted_fqdn = shlex.quote(fqdn)
     quoted_ip = shlex.quote(ip)
+    # ``if ... then exit 0; fi`` so a grep miss falls through to the
+    # diagnostic under the pipeline's ``set -e`` (not an early abort).
     return (
         f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true; "
-        f'printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip} && exit 0; '
+        f'if printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip}; then exit 0; fi; '
         f'printf "expected {record_type} %s in the answer for %s; dig +short returned:'
         f'\\n%s\\n" {quoted_ip} {quoted_fqdn} "$ANSWER"; '
         "exit 1"

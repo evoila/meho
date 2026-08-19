@@ -729,19 +729,34 @@ jobs:
     # Move this `runs-on:` to the new pool once provisioned. Until then an OOM
     # skips one coverage upload; quality-gate.yml now makes that skip
     # fail-visible via an error annotation (#2513).
-    # Two-layer timeout (#2800). The hang backstop is the pytest step's own
-    # `timeout-minutes: 45` (~36-min serial wall + creep headroom): a step
-    # timeout is a step FAILURE (the runner kills the process and annotates
-    # "timed out after 45 minutes"), which the whole-job continue-on-error
-    # absorbs — run conclusion stays `success`. This job-level cap is
-    # strictly the OUTER backstop for a wedged non-pytest step (checkout /
-    # uv sync / model warm — never observed; both 2026-08-04 hangs were in
-    # pytest). It must stay comfortably above step cap + pre-pytest setup
-    # (35–75 s observed) + combine/upload (~15 s) so the step timeout
-    # always fires first for a pytest hang — a job-level expiry CANCELS
-    # the job, and `cancelled` leaks past continue-on-error into the run
-    # conclusion. Neither cap is a perf budget: the job is push-only and
-    # non-blocking, so a long wall never gates a PR.
+    # THREE-LAYER hang defense (#2800 → #2806 → #2865). Ordered inner→outer;
+    # each layer catches what the one inside it structurally cannot:
+    #   1. IN-PROCESS, per test — pytest-timeout `--timeout=300` (signal) on
+    #      the Pytest step. A wedged test dies as a Failed carrying its own
+    #      traceback, from INSIDE the pytest process, so it does NOT depend on
+    #      the runner agent being healthy. This is the PRIMARY guard: #2865
+    #      showed a pytest hang can outlive the step `timeout-minutes` when the
+    #      runner itself is wedged — step 9 still `in_progress` at the ~60-min
+    #      job kill on the v0.28.0 cut (run 31199593016, cancelled 2×) — so a
+    #      runner-enforced timeout is not a reliable backstop for a pytest hang.
+    #   2. STEP `timeout-minutes: 45` (~36-min serial wall + creep headroom) —
+    #      runner-enforced backstop for a hang the per-test SIGALRM cannot reach
+    #      (a stall during COLLECTION before any test item starts, or a
+    #      GIL-locked C call that never returns to the main thread). A step
+    #      timeout is a step FAILURE, absorbed by whole-job continue-on-error →
+    #      run conclusion stays `success`. Kept at 45 (NOT the 35 floated in
+    #      #2865): the legit -n 1 serial wall is 35:32, so a 35-min step cap
+    #      would kill honest runs.
+    #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
+    #      step (checkout / uv sync / model warm — never observed). It must stay
+    #      comfortably above step cap + pre-pytest setup (35–75 s observed) +
+    #      combine/upload (~15 s) so layer 2 always fires first for anything
+    #      under pytest — a job-level expiry CANCELS the job, and `cancelled`
+    #      leaks past continue-on-error into the run conclusion (the exact
+    #      #2800/#2865 failure). 55 also sits below the ~60-min external pod
+    #      reap seen on the heavy pool, so GitHub's job timeout wins that race.
+    # Neither runner cap is a perf budget: the job is push-only and non-blocking,
+    # so a long wall never gates a PR.
     timeout-minutes: 55
     continue-on-error: true
     env:
@@ -807,11 +822,12 @@ jobs:
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
       - name: Pytest (unit) with offline coverage data
-        # Hang backstop ON THE STEP (#2800): a step timeout kills the
-        # process and marks the step FAILED, which the job's
-        # continue-on-error absorbs. A job-level timeout would instead
-        # cancel the job and flip the whole run conclusion to `cancelled`
-        # (see the job-level timeout-minutes comment above).
+        # Runner-enforced STEP backstop (#2800/#2806) — layer 2 of the
+        # three-layer defense documented on the job's `timeout-minutes`. A step
+        # timeout is a step FAILURE (absorbed by whole-job continue-on-error),
+        # never a cancellation. But #2865 proved a pytest hang can outlive it
+        # when the runner is wedged, so the PRIMARY guard is the in-process
+        # `--timeout` on the run below, not this cap.
         timeout-minutes: 45
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
@@ -842,9 +858,27 @@ jobs:
         # module's tests on one worker so session-scoped fixtures instantiate
         # once. No --maxfail: a coverage run wants the whole suite measured even
         # if one test is flaky; redness here is non-blocking anyway.
+        #
+        # PRIMARY hang guard (#2865): --timeout=300 arms a per-test SIGALRM, so a
+        # wedged test dies IN-PROCESS as a pytest-timeout Failed carrying the
+        # offending test's traceback (the "where it hung" diagnostic) after 300 s
+        # — independent of runner health, unlike the step/job `timeout-minutes`
+        # a wedged runner never reached on the v0.28.0 cut (run 31199593016).
+        # --timeout-method=signal (NOT thread) is load-bearing under -n 1 xdist:
+        # thread's os._exit() reads to xdist as a worker CRASH, which it re-runs
+        # up to --max-worker-restart times (~5×: one 300 s hang balloons to
+        # ~25 min → job-cap CANCEL) and whose stack dump xdist swallows. signal
+        # raises in the worker's main thread → one clean Failed, traceback kept,
+        # no re-run. --max-worker-restart=0 then caps ANY other worker death
+        # (segfault / OOM-kill) at zero retries, so a single failure can never
+        # multiply into a job-cap overrun. 300 s sits well above the slowest
+        # honest test yet far below the 45-min step cap. tee preserves the full
+        # log for the hang-diagnostic artifact below; the runner's default
+        # `bash -eo pipefail` shell propagates pytest's exit code through tee.
         run: |
           uv run pytest -n 1 --dist loadscope -p no:cov \
-            --ignore=tests/integration tests/
+            --timeout=300 --timeout-method=signal --max-worker-restart=0 \
+            --ignore=tests/integration tests/ 2>&1 | tee pytest-coverage.log
 
       - name: Combine coverage + write XML (offline, workers exited)
         # Runs AFTER the pytest step above fully returned — every xdist worker
@@ -889,6 +923,21 @@ jobs:
         with:
           name: python-coverage
           path: backend/coverage.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload coverage-job pytest log (hang diagnostic)
+        # #2865: a coverage-job hang now dies as a pytest-timeout FAILURE with
+        # the offending test's traceback in this log (see the Pytest step's
+        # --timeout). Uploaded whenever the log exists so the NEXT hang says
+        # WHERE it hung, not just that the job ran long. continue-on-error is
+        # belt-and-suspenders on top of the whole-job continue-on-error.
+        if: always() && hashFiles('backend/pytest-coverage.log') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage-pytest-log
+          path: backend/pytest-coverage.log
           retention-days: 7
           if-no-files-found: warn
 

@@ -157,6 +157,23 @@ def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 
+# Under the "modern default" dual-impl split (#3033 / #3037), a fleet target
+# fingerprinted at 9.0 resolves to the modern ``fleet-lcm`` impl by
+# most-specific-version. This E2E exercises the legacy ``fleet-rest`` ``/lcm/*``
+# dispatch surface with the full connector registry present (fleet-lcm is
+# eagerly imported), so it seeds an **8.x** fingerprint — ``fleet-rest``'s
+# domain (``>=8.0,<10.0``) — so the dispatcher's target-fingerprint resolution
+# (``dispatcher.py`` ``_resolve_executing_connector``) binds ``fleet-rest``
+# (whose stub credentials loader is injected in ``_resolve_connector``), not
+# ``fleet-lcm`` (whose default loader would hit Vault → ``VaultUnreachableError``).
+# The shared ``FLEET_CANARY_FINGERPRINT`` (9.0) is unchanged — other tests key
+# on it; only this dispatch target's ``version`` is overridden.
+_FLEET_REST_TARGET_FINGERPRINT: dict[str, object] = {
+    **FLEET_CANARY_FINGERPRINT,
+    "version": "8.14",
+}
+
+
 async def _seed_target() -> Any:
     """Insert the E2E target row and return it (expunged from the session)."""
     sessionmaker = get_sessionmaker()
@@ -173,7 +190,7 @@ async def _seed_target() -> Any:
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},
-            fingerprint=FLEET_CANARY_FINGERPRINT,
+            fingerprint=_FLEET_REST_TARGET_FINGERPRINT,
             notes="seeded by test_connectors_vcf_fleet_e2e._seed_target",
         )
         session.add(target)
@@ -223,8 +240,10 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
     1. Insert the ingested browse-breadth Fleet descriptors (from
        :data:`~tests.acceptance._vcf_fleet_canary_fixtures._FLEET_SEED_OPS`)
        descriptors + groups into the per-test SQLite DB.
-    2. Seed a :class:`Target` row carrying :data:`FLEET_CANARY_FINGERPRINT`
-       so the resolver binds :class:`VcfFleetConnector`.
+    2. Seed a :class:`Target` row carrying an **8.x** fingerprint (the
+       ``fleet-rest`` version domain under the modern-default split, #3037)
+       so the resolver binds the legacy :class:`VcfFleetConnector`, not the
+       modern ``fleet-lcm`` impl.
     3. Resolve + cache the connector instance; replace its
        :class:`CredentialsCache` so no Vault read fires.
     4. Activate a respx router for :data:`FLEET_CANARY_BASE_URL` and

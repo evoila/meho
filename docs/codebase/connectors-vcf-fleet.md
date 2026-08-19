@@ -21,12 +21,51 @@ VCF Fleet is the rebrand of vRealize Suite Lifecycle Manager (vRSLCM) under
 the VCF 9 umbrella; the appliance still identifies as vRSLCM in its internal
 config and every response carries an `Lcm-API-Version` header.
 
+## Dual implementation (fleet-rest + fleet-lcm)
+
+`product=fleet` is the codebase's **first real two-implementation case**
+(initiative [#3033](https://github.com/evoila/meho/issues/3033), decision of
+record `versioned-connector-dual-impl`). Two hand-rolled `HttpConnector`
+subclasses coexist, resolved **per target by fingerprint** — the agent never
+sees the difference:
+
+| impl | connector | surface | `supported_version_range` |
+|---|---|---|---|
+| `fleet-rest` (legacy, typed) | `VcfFleetConnector` (this doc) | vRSLCM `/lcm/lcops/api/v2/*` | `>=8.0,<10.0` |
+| `fleet-lcm` (modern, generic/ingested) | [`FleetLcmConnector`](connectors-fleet-lcm.md) | VCF 9 Fleet LCM Service `/v1/*` | `>=9.0,<10.0` |
+
+Both register under `product="fleet"` with distinct `impl_id`s, so the v2
+registry keys `("fleet","9.0","fleet-rest")` and `("fleet","9.0","fleet-lcm")`
+never collide. The `("fleet","","")` **wildcard** fallback is registered once,
+by this legacy package only (a second class on that key would raise at import);
+`fleet-lcm` registers the versioned triple alone.
+
+The [resolver](../../backend/src/meho_backplane/connectors/resolver.py) picks
+the impl per target:
+
+- **8.x target → `fleet-rest`** — the only candidate whose range contains the
+  version (`fleet-lcm`'s `>=9.0,<10.0` excludes 8.x).
+- **9.0 target → `fleet-lcm`** — both ranges contain 9.0, but `fleet-lcm`'s
+  narrower `>=9.0,<10.0` (span 1.0) beats `fleet-rest`'s `>=8.0,<10.0`
+  (span 2.0) at the resolver's **most-specific-version** tie-break (step 2),
+  *before* operator preference (step 3) is consulted. The split is by
+  version-specificity, not `priority` — both impls keep `priority=1`.
+
+The split is proven by
+[`backend/tests/test_connectors_fleet_dual_impl_resolution.py`](../../backend/tests/test_connectors_fleet_dual_impl_resolution.py).
+Because specificity precedes operator preference in the ladder, an operator
+**cannot** pin the legacy `/lcm/*` surface on a *9.0* target via
+`preferred_impl_id="fleet-rest"` — the more-specific `fleet-lcm` still wins
+(the resolver's documented, tested ordering; see that test's
+`preferred_impl_id` case).
+
 ## Key types
 
 - **`VcfFleetConnector`** (`connector.py`) — `HttpConnector` subclass.
-  Class attributes: `product="vcf-fleet"`, `version="9.0"`,
-  `impl_id="fleet-rest"`, `supported_version_range=">=9.0,<10.0"`,
-  `priority=1`. The priority outranks a future `GenericRestConnector`
+  Class attributes: `product="fleet"`, `version="9.0"`,
+  `impl_id="fleet-rest"`, `supported_version_range=">=8.0,<10.0"`
+  (re-banded from `">=9.0,<10.0"` in #3037 — see "Dual implementation"
+  below), `priority=1`. The priority outranks a future `GenericRestConnector`
   auto-shim defensively if both somehow register for the same triple.
 - **`VcfFleetTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`, `host`,

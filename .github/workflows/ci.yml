@@ -886,7 +886,7 @@ jobs:
         run: |
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
-            tests/test_zz_hang_canary_2865.py 2>&1 | tee pytest-coverage.log
+            --ignore=tests/integration tests/ 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
 
       - name: Combine coverage + write XML (offline, workers exited)

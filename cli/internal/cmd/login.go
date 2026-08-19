@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -33,6 +34,7 @@ func newLoginCmd() *cobra.Command {
 		issuerOverride    string
 		clientIDOverride  string
 		scopes            []string
+		offline           bool
 		insecureAllowHTTP bool
 		resolveEntries    []string
 		printToken        bool
@@ -56,6 +58,13 @@ func newLoginCmd() *cobra.Command {
 			"that backend. Set MEHO_KEYRING_DISABLE=1 to force the file " +
 			"backend unconditionally (useful on shared dev hosts where the " +
 			"keyring belongs to another session, or in CI).\n\n" +
+			"Staying logged in across idle timeouts: by default the " +
+			"device-code token dies at the realm's SSO idle timeout, forcing " +
+			"a fresh device dance. Pass --offline to request a long-lived " +
+			"offline refresh token (OIDC offline_access) so the CLI silently " +
+			"renews across idle gaps; the backplane's meho-cli client must be " +
+			"provisioned to allow it (see `meho admin keycloak " +
+			"bootstrap-clients --cli-offline-access`).\n\n" +
 			"Discovery: by default the CLI fetches the backplane's auth-config " +
 			"endpoint at <backplane-url>/api/v1/auth-config to learn the realm " +
 			"issuer and the public device-code client_id. Pass --issuer and/or " +
@@ -162,6 +171,22 @@ func newLoginCmd() *cobra.Command {
 			flowCtx, cancelFlow := auth.NewDeviceFlowContext(parentCtx)
 			defer cancelFlow()
 
+			// --offline requests a long-lived offline refresh token (OIDC
+			// offline_access) so the session survives the realm's SSO
+			// idle timeout. Sugar over `--scope offline_access`; openid
+			// is ensured alongside so the offline session stays a proper
+			// OIDC session (mirrors RunDeviceFlow's default-scope
+			// injection). The backplane's meho-cli client must allow
+			// offline_access (provision with `meho admin keycloak
+			// bootstrap-clients --cli-offline-access`), else Keycloak
+			// rejects the device request with invalid_scope.
+			if offline && !slices.Contains(scopes, "offline_access") {
+				if len(scopes) == 0 {
+					scopes = []string{"openid"}
+				}
+				scopes = append(scopes, "offline_access")
+			}
+
 			result, err := auth.RunDeviceFlow(flowCtx, doc, cfg.ClientID, auth.DeviceFlowOptions{
 				HTTPClient:    httpClient,
 				Scopes:        scopes,
@@ -214,6 +239,14 @@ func newLoginCmd() *cobra.Command {
 		"OAuth client_id to use for the device-code flow (auto-discovered when blank)")
 	cmd.Flags().StringSliceVar(&scopes, "scope", nil,
 		"OAuth scopes to request (default: openid). Repeat or comma-separate for multiple.")
+	cmd.Flags().BoolVar(&offline, "offline", false,
+		"request a long-lived offline refresh token (adds the OIDC "+
+			"`offline_access` scope) so you stay logged in across SSO idle "+
+			"timeouts instead of re-running the device dance. Requires the "+
+			"backplane's meho-cli client to allow offline_access (provision "+
+			"via `meho admin keycloak bootstrap-clients --cli-offline-access`). "+
+			"The refresh token is stored like any credential (OS keyring "+
+			"first, 0600 file fallback) — treat it as a long-lived secret")
 	cmd.Flags().BoolVar(&insecureAllowHTTP, "insecure-allow-http", false,
 		"permit a plaintext http:// backplane URL for a localhost backplane only "+
 			"(local-dev convenience; the bearer token is sent in the clear — never use against a remote host)")

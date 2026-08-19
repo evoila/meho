@@ -81,10 +81,18 @@ func (b *tokenBox) refresh(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("meho: refresh discovery: %w", err)
 	}
+	// No Scopes on the refresh: golang.org/x/oauth2's refresh_token
+	// grant (tokenRefresher.Token) sends only grant_type + refresh_token
+	// and never forwards Config.Scopes, so an explicit scope here would
+	// be inert. Omitting scope is also the correct behaviour — per RFC
+	// 6749 §6 an omitted scope preserves the originally-granted scope,
+	// which is exactly what keeps a `meho login --offline` token offline
+	// across rotations. Narrowing the scope on refresh (e.g. back to
+	// ["openid"]) is what Keycloak rejects with invalid_scope for
+	// offline sessions (#2902).
 	cfg := oauth2.Config{
 		ClientID: b.current.ClientID,
 		Endpoint: oauth2.Endpoint{TokenURL: doc.TokenEndpoint},
-		Scopes:   []string{"openid"},
 	}
 
 	// Push httpClient into the oauth2 ctx so the refresh POST uses

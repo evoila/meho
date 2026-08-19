@@ -6,8 +6,10 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,5 +181,61 @@ func TestAuthedClient_GetHealth_RefreshDiscoveryFailure(t *testing.T) {
 	}
 	if !errors.Is(err, discoErr) {
 		t.Errorf("expected wrapped %v, got %v", discoErr, err)
+	}
+}
+
+// TestTokenBox_Refresh_OmitsScopeToPreserveGrant pins the offline-token
+// invariant for #2902: the refresh exchange must NOT send a `scope`
+// parameter. Narrowing scope on refresh is what makes Keycloak drop an
+// offline token's offline character (invalid_scope), so omitting scope
+// — which preserves the originally-granted scope per RFC 6749 §6 — is
+// what keeps `meho login --offline` tokens alive across rotations.
+func TestTokenBox_Refresh_OmitsScopeToPreserveGrant(t *testing.T) {
+	var gotBody string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"fresh-access",` +
+			`"refresh_token":"fresh-refresh","token_type":"Bearer",` +
+			`"expires_in":300}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	box := &tokenBox{
+		current: auth.StoredToken{
+			AccessToken:  "stale-access",
+			RefreshToken: "stale-refresh",
+			TokenType:    "Bearer",
+			ClientID:     "meho-cli",
+			Issuer:       "https://kc.example/realms/evba",
+			// Past expiry so the oauth2 TokenSource actually performs the
+			// refresh exchange rather than returning the cached token.
+			Expiry: time.Now().Add(-time.Hour),
+		},
+		httpClient: srv.Client(),
+		refreshDiscoverer: func(_ context.Context, _ *http.Client, _ string) (*auth.DiscoveryDocument, error) {
+			return &auth.DiscoveryDocument{TokenEndpoint: srv.URL + "/token"}, nil
+		},
+	}
+
+	if err := box.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	// The refresh POST must carry grant_type=refresh_token and NO scope:
+	// a narrowing scope is exactly what drops the offline grant.
+	if !strings.Contains(gotBody, "grant_type=refresh_token") {
+		t.Errorf("refresh body missing grant_type=refresh_token: %q", gotBody)
+	}
+	if strings.Contains(gotBody, "scope=") {
+		t.Errorf("refresh must not send a scope param (narrowing scope "+
+			"drops the offline grant); body=%q", gotBody)
+	}
+	// The refreshed bearer replaced the stale one.
+	if got := box.snapshot(); got != "fresh-access" {
+		t.Errorf("access token after refresh = %q, want fresh-access", got)
 	}
 }

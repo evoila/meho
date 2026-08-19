@@ -479,6 +479,12 @@ Authorization Grant (RFC 8628). End-to-end shape:
    `Config.DeviceAuth`, the CLI POSTs `client_id` + `scope` (default
    `openid`) to the device-authorization endpoint and receives a
    `device_code`, `user_code`, `verification_uri`, and `interval`.
+   `--offline` appends the OIDC `offline_access` scope (ensuring
+   `openid` alongside) so Keycloak mints a long-lived refresh token
+   that survives the SSO idle timeout — requires the `meho-cli` client
+   to allow `offline_access` (see `bootstrap-clients
+   --cli-offline-access`), else the request fails with `invalid_scope`
+   (#2902).
 4. **Prompt.** The CLI prints the verification URL and `user_code` to
    stdout. The operator opens the URL on any device with a browser,
    signs in, and approves the request. (Browser auto-launch is
@@ -588,6 +594,14 @@ message prints — names the credentials file the operator can
 actually inspect. Every other keyring failure (locked Keychain,
 D-Bus unreachable, Wincred ACL denial) is left to surface unchanged
 so unrelated outages don't silently route tokens to disk.
+
+An `offline_access` refresh token (from `meho login --offline`, #2902)
+is not time-boxed and rides in the same bundle, so on macOS it makes
+the ~4 KiB Keychain cap — and therefore the 0600 credentials-file
+fallback above — the likely storage backend; the CLI's on-disk posture
+then converges with gcloud's long-lived-refresh-token model. Keep the
+credentials file 0600 and the per-client offline-session idle bound
+tight.
 
 `Load` bridges to the secondary only on `ErrTokenNotFound` from the
 primary — the case where a previous invocation hit the size-fallback
@@ -1947,15 +1961,16 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      the access token (RFC 9068 §2.2.1 requires it).
   5. The `meho-admins` top-level group + an admin user joined to
      it, with a password set via `/users/{id}/reset-password`.
-  6. Optional client scope `offline_access` on the MCP client only —
-     the realm's built-in `offline_access` scope is attached to
-     `meho-mcp` as **optional** (not default — only flows that
-     ask for a refresh token mint one). The CLI device-code client
-     (`meho-cli`) deliberately does **not** get it: RFC 8628
-     device-code clients re-run the device dance rather than hold a
-     long-lived refresh token, and a stolen device-code refresh token
-     has worse blast-radius than re-prompting the operator. Closes
-     the W7 wall of `deploy/values-examples/README.md` (#912).
+  6. Optional client scope `offline_access`. Attached to the MCP
+     client (`meho-mcp`) as **optional** (not default — only flows
+     that ask for a refresh token mint one); this closes the W7 wall
+     of `deploy/values-examples/README.md` (#912). The CLI device-code
+     client (`meho-cli`) gets the same optional scope only when a
+     deployment opts in via `--cli-offline-access` (off by default,
+     #2902): the flag assigns `offline_access` as optional AND sets the
+     per-client `client.offline.session.idle.timeout` attribute
+     (default 48h = 172800s) so an idle offline token expires fast.
+     Operators then request it per-login with `meho login --offline`.
 
 ### Idempotency
 

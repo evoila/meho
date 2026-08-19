@@ -829,6 +829,12 @@ jobs:
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
         timeout-minutes: 45
+        # Force bash so the run below gets pipefail + PIPESTATUS: the
+        # self-hosted pool's default shell does NOT enable `pipefail`, which
+        # let `pytest | tee` mask a hang's non-zero exit as step SUCCESS
+        # (#2865 CI validation, run 32230484451). A masked hang still can't
+        # cancel the run, but it must read as a step FAILURE, not a false green.
+        shell: bash
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Same lane-placement opt-out as the required unit lane's
@@ -873,12 +879,15 @@ jobs:
         # (segfault / OOM-kill) at zero retries, so a single failure can never
         # multiply into a job-cap overrun. 300 s sits well above the slowest
         # honest test yet far below the 45-min step cap. tee preserves the full
-        # log for the hang-diagnostic artifact below; the runner's default
-        # `bash -eo pipefail` shell propagates pytest's exit code through tee.
+        # log for the hang-diagnostic artifact below; `exit ${PIPESTATUS[0]}`
+        # propagates pytest's OWN exit (not tee's) so a hang reads as a step
+        # FAILURE the job's continue-on-error absorbs — `shell: bash` above
+        # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
             tests/test_zz_hang_canary_2865.py 2>&1 | tee pytest-coverage.log
+          exit "${PIPESTATUS[0]}"
 
       - name: Combine coverage + write XML (offline, workers exited)
         # Runs AFTER the pytest step above fully returned — every xdist worker

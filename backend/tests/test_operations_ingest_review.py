@@ -311,6 +311,49 @@ async def test_get_review_payload_returns_groups_with_counts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_counts_do_not_bleed_across_duplicate_scope_registrations() -> None:
+    """A duplicate ``connector_id`` under two scopes keeps counts isolated (#2977).
+
+    The catalog can legitimately hold the same ``connector_id``
+    (``vmware-rest-9.0``) once per scope — the
+    ``(product, version, impl_id, tenant_id)`` partial-unique split makes
+    builtin+tenant and cross-tenant twins legal by design. The review's
+    ``load_groups`` / ``load_ops_in_groups`` / ``count_ops_in_scope``
+    helpers all key on that same scoped triple, so one scope's review
+    counts only its own rows and never bleeds a twin's operations in.
+
+    (The #2977 report read ``ungrouped_op_count > total_op_count`` as
+    cross-duplicate bleed; that is documented semantics — ``total``
+    counts only rendered-group ops, and ``total + ungrouped`` reconciles
+    to the listing's ``operation_count`` — so this test pins the real
+    scope-isolation invariant the symptom was mistaken for.)
+    """
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    # The same connector_id under two tenants, with different op counts.
+    await _seed_connector(tenant_id=tenant_a, group_count=2, ops_per_group=3)  # 6 ops
+    await _seed_connector(tenant_id=tenant_b, group_count=1, ops_per_group=4)  # 4 ops
+
+    payload_a = await ReviewService(_make_operator(tenant_id=tenant_a)).get_review_payload(
+        "vmware-rest-9.0",
+        tenant_a,
+    )
+    payload_b = await ReviewService(_make_operator(tenant_id=tenant_b)).get_review_payload(
+        "vmware-rest-9.0",
+        tenant_b,
+    )
+
+    # Each scope counts only its own operations — never the 10-op sum a
+    # bleed across the two registrations would produce.
+    assert payload_a.tenant_id == tenant_a
+    assert payload_a.total_op_count == 6
+    assert payload_a.ungrouped_op_count == 0
+    assert payload_b.tenant_id == tenant_b
+    assert payload_b.total_op_count == 4
+    assert payload_b.ungrouped_op_count == 0
+
+
+@pytest.mark.asyncio
 async def test_get_review_payload_raises_when_no_rows() -> None:
     """A connector triple with no rows yields :class:`ConnectorNotFoundError`."""
     tenant_id = uuid.uuid4()

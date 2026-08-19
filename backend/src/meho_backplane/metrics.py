@@ -7,16 +7,38 @@ The default ``prometheus_client`` registry already auto-registers the
 process collector (``process_resident_memory_bytes``,
 ``process_open_fds``, ``process_cpu_seconds_total``, …) and the GC
 collector (``python_gc_objects_collected_total``, …). On top of those
-we expose a single application metric in v0.1: ``http_requests_total``,
-labelled by method, path, and HTTP status.
+this module defines the request-facing application metrics, all
+observed at the :class:`~meho_backplane.middleware.RequestContextMiddleware`
+seam or by the background schedulers:
 
-Path cardinality is bounded by the FastAPI router — every request is
-matched to a registered route template before the middleware records
-the metric, so a flood of distinct ``/foo/bar/<random>`` URLs from a
-hostile client cannot explode label cardinality (FastAPI returns 404
-without ever populating ``request.scope["route"].path``; the middleware
-falls back to the literal request path for unmatched routes, which is
-the documented Prometheus pattern for 404 buckets).
+* ``http_requests_total`` (Counter) — requests served, labelled by
+  ``method`` / ``path`` / ``status``.
+* ``http_request_duration_seconds`` (Histogram) — request handling
+  latency in seconds, same label set, so p50/p90/p99 latency is
+  answerable directly from Prometheus (``histogram_quantile``) instead
+  of SQL over ``audit_log.duration_ms``.
+* ``topology_refresh_total`` (Counter) — scheduled topology-refresh
+  attempts, by ``outcome``.
+* ``advisory_lock_busy_total`` (Counter) — background-loop ticks
+  skipped because a PG advisory lock was already held, by ``subsystem``.
+
+Further application counters — the ``broadcast_*_total`` family — live
+next to the code they measure in :mod:`meho_backplane.broadcast`.
+
+Cardinality contract
+--------------------
+The ``path`` label on ``http_requests_total`` and
+``http_request_duration_seconds`` is bounded. The middleware labels by
+the matched FastAPI route template (``/items/{id}`` — never the literal
+``/items/42`` / ``/items/43`` / …), and collapses every request that
+matched no route to a single constant value
+(:data:`meho_backplane.middleware.UNMATCHED_ROUTE_LABEL`,
+``path="__unmatched__"``). That fold is what stops an unauthenticated
+404 scan spraying distinct URLs from exploding label cardinality on the
+unauthenticated ``/metrics`` endpoint. The literal request path is
+never used as a metric label; it is recorded only on the structured
+``request_completed`` / ``request_failed`` log line — not a bounded
+label set — where it stays available for forensics.
 
 The exposition format intentionally pins the legacy
 ``text/plain; version=0.0.4; charset=utf-8`` content type via
@@ -33,6 +55,7 @@ from prometheus_client import (
     CONTENT_TYPE_PLAIN_0_0_4,
     REGISTRY,
     Counter,
+    Histogram,
     generate_latest,
 )
 
@@ -47,6 +70,26 @@ from prometheus_client import (
 HTTP_REQUESTS_TOTAL: Counter = Counter(
     "http_requests_total",
     "Total HTTP requests served by the backplane.",
+    labelnames=("method", "path", "status"),
+)
+
+#: Histogram of HTTP request handling latency in **seconds**, labelled by
+#: ``method`` / ``path`` / ``status`` — the same label set and the same
+#: middleware seam as :data:`HTTP_REQUESTS_TOTAL`
+#: (:class:`meho_backplane.middleware.RequestContextMiddleware`). Lets
+#: p50/p90/p99 request latency be read from Prometheus directly via
+#: ``histogram_quantile`` instead of SQL over ``audit_log.duration_ms``
+#: (#2886). No explicit ``buckets`` argument, so it inherits
+#: ``prometheus_client``'s default latency buckets (5 ms … 10 s plus the
+#: implicit ``+Inf``) — the canonical range for web request-duration
+#: seconds. The ``path`` label is bounded exactly as the counter's
+#: (matched route template, else the
+#: :data:`meho_backplane.middleware.UNMATCHED_ROUTE_LABEL` constant), so
+#: the histogram's per-bucket series cannot be fanned out by a 404 scan.
+#: Same module-level-singleton rationale as :data:`HTTP_REQUESTS_TOTAL`.
+HTTP_REQUEST_DURATION_SECONDS: Histogram = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request handling latency in seconds.",
     labelnames=("method", "path", "status"),
 )
 

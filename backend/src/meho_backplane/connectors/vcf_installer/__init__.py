@@ -13,13 +13,18 @@ before any dispatch can occur.
 The bring-up status poll (``installer.sddc.status``) ships as a typed op
 (``source_kind="typed"``) via :mod:`.typed_ops` / :mod:`.typed_reads`,
 dispatchable on a fresh boot with zero catalog ingest. The governed bring-up
-write (validate → deploy → poll) arrives as a ``dangerous`` + ``requires_approval``
-composite in a following increment.
+write (``installer.composite.sddc.bringup`` — validate → deploy) ships as a
+``dangerous`` + ``requires_approval`` composite via :mod:`.bringup`; importing
+that module also registers its park-time approval preview builder.
 """
 
 from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcf_installer.bringup import (
+    INSTALLER_BRINGUP_OP_ID,
+    register_installer_composite_operations,
+)
 from meho_backplane.connectors.vcf_installer.connector import InstallerConnector
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_installer.session import (
@@ -61,10 +66,14 @@ register_connector_v2(
     cls=InstallerConnector,
 )
 
-# Queue the typed-op upsert onto the lifespan-driven registrar list.
+# Queue the typed-op + composite-op upserts onto the lifespan-driven registrar
+# list. Importing ``.bringup`` above also registered the composite's park-time
+# approval preview builder as an import side-effect (#1608).
 register_typed_op_registrar(register_installer_typed_operations)
+register_typed_op_registrar(register_installer_composite_operations)
 
 __all__ = [
+    "INSTALLER_BRINGUP_OP_ID",
     "INSTALLER_CONNECTOR_ID",
     "INSTALLER_EXECUTION_PROFILE",
     "INSTALLER_IMPL_ID",
@@ -77,5 +86,6 @@ __all__ = [
     "InstallerTypedOp",
     "SessionCredentials",
     "load_credentials_from_vault",
+    "register_installer_composite_operations",
     "register_installer_typed_operations",
 ]

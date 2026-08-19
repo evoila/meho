@@ -4,8 +4,10 @@
 """InstallerConnector — hand-rolled HttpConnector subclass for VCF Installer 9.1.
 
 Auth + fingerprint + probe + the G0.6 dispatch shim + the bring-up status poll.
-The governed bring-up *write* (validate → deploy → poll) is a separate
-``dangerous`` + ``requires_approval`` composite (a following increment).
+The governed bring-up *write* (validate → deploy) is a separate ``dangerous`` +
+``requires_approval`` composite in :mod:`.bringup`; this connector supplies the
+session-auth POST twin (:meth:`_post_json_with_session_retry`) it dispatches
+through.
 
 Registered against the v2 registry at import time in
 :mod:`meho_backplane.connectors.vcf_installer.__init__` under
@@ -232,6 +234,41 @@ class InstallerConnector(HttpConnector):
                 raise RuntimeError(
                     f"vcf-installer session re-login failed for target {target.name!r}: "
                     f"GET {path} returned HTTP {status_code} after refresh"
+                ) from exc
+            raise
+
+    async def _post_json_with_session_retry(
+        self,
+        target: InstallerTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+        verb: str = "POST",
+    ) -> dict[str, Any]:
+        """POST *path* with single session-expiry → re-login → retry-once recovery.
+
+        The write-path twin of :meth:`_get_json_with_session_retry`, used by the
+        governed bring-up composite. Retrying a non-idempotent verb is safe *only*
+        for a session-expiry status: a ``401`` means the request was rejected at
+        auth **before** the server processed it, so the first attempt had no
+        effect and re-issuing once after a re-login cannot double-apply the write.
+        Any other status propagates unretried.
+        """
+        try:
+            return await self._post_json(target, path, operator=operator, verb=verb, json=json)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _SESSION_EXPIRED_STATUSES:
+                raise
+            await self._invalidate_session(target)
+        try:
+            return await self._post_json(target, path, operator=operator, verb=verb, json=json)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in _SESSION_EXPIRED_STATUSES:
+                raise RuntimeError(
+                    f"vcf-installer session re-login failed for target {target.name!r}: "
+                    f"{verb} {path} returned HTTP {status_code} after refresh"
                 ) from exc
             raise
 

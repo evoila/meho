@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — VCF Installer 9.1 governed bring-up write (Initiative #2907, task #3065)
+
+- `installer.composite.sddc.bringup` — the governed VCF management-domain bring-up
+  write, a `dangerous` + `requires_approval` composite. Orchestrates as one
+  approved unit: `POST /v1/sddcs/validations` (non-mutating dry-run, polled to
+  terminal) *gates* `POST /v1/sddcs` (the deploy). Validation failures abort
+  **before** any mutation with the failed checks summarised; the deploy runs for
+  hours so the composite returns the `SddcTask` id the moment it is accepted and
+  the caller polls `installer.sddc.status` to terminal. The park-time approval
+  preview and the sub-op policy params echo SDDC identity + network blast-radius
+  only — **never a password** (redaction by construction, covered by the
+  whole-suite secret-leak guard). Direct-session dispatch (Goal #2247) — every
+  sub-call goes through the connector's own session (new
+  `_post_json_with_session_retry` write-path twin, safe single 401-retry), never
+  an ingested primitive. The composite's write/validate paths join the
+  spec-reconcile lane against the pinned `vcf-installer-9.1` shelf spec. Docs:
+  [`connectors-vcf-installer.md`](docs/codebase/connectors-vcf-installer.md).
+
 ### Added — VCF Installer 9.1 bring-up connector skeleton (Initiative #2907, task #3065)
 
 - New `vcf-installer` connector (`installer-rest-9.1`) — the governed dispatch

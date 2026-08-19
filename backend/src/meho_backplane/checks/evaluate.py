@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from meho_backplane.checks.assertions import (
     AssertionOutcome,
@@ -52,6 +52,12 @@ __all__ = ["evaluate_assertion"]
 #: in :func:`_unknown`.
 _UNSET: Any = object()
 
+#: Upper bound on selected rows sampled into a *breaching* aggregate's evidence
+#: (#2976). Deliberately small: the sample names the offenders for triage yet
+#: must ride every retained per-tick ``sensor_results`` row without bloating it.
+#: ``observed`` keeps the true aggregate; ``sample_truncated`` flags a clip.
+_EVIDENCE_SAMPLE_LIMIT: Final[int] = 5
+
 
 def evaluate_assertion(spec: AssertionSpec, payload: object, *, now: datetime) -> AssertionOutcome:
     """Evaluate *spec* against *payload* at instant *now*.
@@ -67,7 +73,8 @@ def evaluate_assertion(spec: AssertionSpec, payload: object, *, now: datetime) -
     Returns:
         An :class:`AssertionOutcome` with ``state`` in
         ``{ok, degraded, critical, unknown}`` (never ``skip``), the observed
-        ``value``, and JSON-serializable ``evidence``.
+        ``value``, and JSON-serializable ``evidence`` (a breaching aggregate
+        also samples the offending rows -- see :func:`_with_offender_sample`).
 
     Raises:
         ValueError: *now* is naive (missing timezone). This is the only
@@ -109,7 +116,8 @@ def evaluate_assertion(spec: AssertionSpec, payload: object, *, now: datetime) -
             return _unknown(evidence, agg_err)
 
     evidence["observed"] = value
-    return _compare(compare, value, now, evidence)
+    outcome = _compare(compare, value, now, evidence)
+    return _with_offender_sample(outcome, spec.select.aggregate, selected)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +352,32 @@ def _expected_evidence(compare: Compare) -> dict[str, Any]:
         "max_age_seconds": compare.max_age_seconds,
         "degraded_age_seconds": compare.degraded_age_seconds,
     }
+
+
+def _with_offender_sample(
+    outcome: AssertionOutcome, aggregate: str | None, selected: Any
+) -> AssertionOutcome:
+    """Attach a bounded sample of the selected rows to a breaching aggregate.
+
+    An aggregate collapses the selected rows to one ``observed`` number, losing
+    *which* series breached; the identity is then unrecoverable once the
+    condition clears (#2976). On a ``degraded`` / ``critical`` aggregate tick
+    this adds ``sample`` (at most :data:`_EVIDENCE_SAMPLE_LIMIT` selected rows
+    verbatim -- prometheus series labels+value, or the selected objects/keys of
+    a JSON select) plus ``sample_truncated`` when rows were dropped. For
+    ``gt`` / ``gte`` the sample *is* the offending set; for ``lt`` / ``lte`` it is
+    the rows present. A no-op for scalar assertions, ``ok`` / ``unknown`` ticks,
+    or an empty selection, so a healthy tick's evidence is unchanged.
+    """
+    if aggregate is None or outcome.state not in ("degraded", "critical"):
+        return outcome
+    if not isinstance(selected, list) or not selected:
+        return outcome
+    evidence = dict(outcome.evidence)
+    evidence["sample"] = selected[:_EVIDENCE_SAMPLE_LIMIT]
+    if len(selected) > _EVIDENCE_SAMPLE_LIMIT:
+        evidence["sample_truncated"] = True
+    return outcome.model_copy(update={"evidence": evidence})
 
 
 def _unknown(evidence: dict[str, Any], reason: str, observed: Any = _UNSET) -> AssertionOutcome:

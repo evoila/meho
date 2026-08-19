@@ -1,0 +1,2210 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.29/guides/first-operations/">
+      
+      
+        <link rel="prev" href="../targets-and-secrets/">
+      
+      
+        <link rel="next" href="../sensors-quickstart/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Run your first operations - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#run-your-first-operations" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Run your first operations
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../.." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment-shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-ladder-at-a-glance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The ladder at a glance
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-0-find-your-connector-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 0 — find your connector id
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-list-the-operation-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — list the operation groups
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-search-for-the-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — search for the operation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-preview-when-you-want-the-wire-truth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — preview (when you want the wire truth)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — call
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#large-results-handles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Large results: handles
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-flags-at-first-contact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety flags at first contact
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-can-go-wrong-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What can go wrong here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-ladder-at-a-glance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The ladder at a glance
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-0-find-your-connector-id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 0 — find your connector id
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-1-list-the-operation-groups" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 1 — list the operation groups
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-2-search-for-the-operation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 2 — search for the operation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-3-preview-when-you-want-the-wire-truth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 3 — preview (when you want the wire truth)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#step-4-call" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Step 4 — call
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#large-results-handles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Large results: handles
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-flags-at-first-contact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety flags at first contact
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-can-go-wrong-here" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What can go wrong here
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/guides/first-operations.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="run-your-first-operations">Run your first operations<a class="headerlink" href="#run-your-first-operations" title="Permanent link">&para;</a></h1>
+<p>MEHO does not expose one tool per vendor operation — a vCenter alone
+would be thousands. Instead, every connector publishes its operations
+into one searchable catalog, and you (or your agent) reach them
+through a small, stable set of meta-tools: <strong>discover the connector,
+list its operation groups, search for the operation, preview it,
+call it</strong>. This guide walks that ladder once, end to end, against a
+typed Kubernetes connector — the same flow applies to every connector,
+including ones ingested from an OpenAPI spec.</p>
+<p>Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
+(for operators) — preview and <code>result_query</code> are MCP/REST-only, as the
+table below shows. Where both surfaces exist they share one backplane
+rather than two implementations. The rung that <em>dispatches</em> — <code>call</code> —
+runs the full path: policy gate, credential resolution, result
+reduction, audit. Preview deliberately stops short of it: it resolves
+the request and hands it back, skipping the policy gate, sending
+nothing, and writing no audit row.</p>
+<div class="admonition note">
+<p class="admonition-title">Prerequisites</p>
+<ul>
+<li>A registered, probe-green target —
+  <a href="../targets-and-secrets/">Register targets and secrets</a>. The
+  examples below use the <code>lab-rke2</code> Kubernetes target from that
+  guide. On a GSM deployment with per-operator Workload Identity
+  Federation, credentialed probes report <code>reachable: false</code> or
+  <code>auth_failed</code> even when the target is fine — work the ladder
+  anyway and let a successful call (Step 4) stand in as the proof.</li>
+<li>An <strong>operator</strong>-role session. Nothing in this guide needs
+  tenant_admin.</li>
+</ul>
+</div>
+<h2 id="the-ladder-at-a-glance">The ladder at a glance<a class="headerlink" href="#the-ladder-at-a-glance" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Step</th>
+<th>MCP tool</th>
+<th>CLI</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Find the connector</td>
+<td><code>meho_connector_list</code></td>
+<td><code>meho connector list</code></td>
+</tr>
+<tr>
+<td>List operation groups</td>
+<td><code>list_operation_groups</code></td>
+<td><code>meho operation groups &lt;connector_id&gt;</code></td>
+</tr>
+<tr>
+<td>Search operations</td>
+<td><code>search_operations</code></td>
+<td><code>meho operation search &lt;connector_id&gt; "&lt;query&gt;"</code></td>
+</tr>
+<tr>
+<td>Preview the request</td>
+<td><code>preview_operation</code></td>
+<td>— (REST/MCP only)</td>
+</tr>
+<tr>
+<td>Call</td>
+<td><code>call_operation</code></td>
+<td><code>meho operation call &lt;connector_id&gt; &lt;op_id&gt;</code></td>
+</tr>
+<tr>
+<td>Page a large result</td>
+<td><code>result_query</code></td>
+<td>— (MCP; agents drill in)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="step-0-find-your-connector-id">Step 0 — find your connector id<a class="headerlink" href="#step-0-find-your-connector-id" title="Permanent link">&para;</a></h2>
+<p>Operations are addressed by <strong><code>connector_id</code></strong>, which has the form
+<code>&lt;impl_id&gt;-&lt;version&gt;</code> — for example <code>k8s-1.x</code>, <code>vault-1.x</code>,
+<code>vmware-rest-9.0</code>. It is <em>not</em> the bare product name; a product can
+have several connector implementations, and the resolver picks one
+per target.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>connector<span class="w"> </span>list
+</code></pre></div>
+<p>Pick the connector whose product matches your target. For the
+<code>lab-rke2</code> target (<code>product: k8s</code>), that is <code>k8s-1.x</code>.</p>
+<h2 id="step-1-list-the-operation-groups">Step 1 — list the operation groups<a class="headerlink" href="#step-1-list-the-operation-groups" title="Permanent link">&para;</a></h2>
+<p>Groups are the map of a connector's surface. Each carries a
+<code>when_to_use</code> hint, so you narrow hundreds of operations to a handful
+before searching.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>groups<span class="w"> </span>k8s-1.x
+</code></pre></div>
+<p>Typical output shape: <code>inventory</code> (nodes, namespaces, versions),
+<code>workload</code> (pods, deployments, services), <code>logs</code>, <code>events</code>, <code>write</code>
+(mutating ops), each with an operation count.</p>
+<p>A group flagged <code>partial: true</code> is only partly enabled — an operator
+enabled specific operations rather than the whole group. Only the
+<code>enabled_op_count</code> operations in it are live; search will find exactly
+those.</p>
+<h2 id="step-2-search-for-the-operation">Step 2 — search for the operation<a class="headerlink" href="#step-2-search-for-the-operation" title="Permanent link">&para;</a></h2>
+<p>Search is hybrid lexical + semantic over the connector's <em>enabled</em>
+operations. Scope it to a group when you know one:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>search<span class="w"> </span>k8s-1.x<span class="w"> </span><span class="s2">&quot;pods that are not running&quot;</span><span class="w"> </span>--group<span class="w"> </span>workload
+</code></pre></div>
+<p>Each hit carries the fields that matter before you call anything:</p>
+<ul>
+<li><strong><code>op_id</code></strong> — the handle you pass to call, e.g. <code>k8s.pod.list</code>.</li>
+<li><strong><code>safety_level</code></strong> — <code>safe</code>, <code>caution</code>, or <code>dangerous</code>.</li>
+<li><strong><code>requires_approval</code></strong> — whether a call parks for a second pair of
+  eyes instead of executing.</li>
+</ul>
+<p>Read those two flags on every hit <strong>before</strong> calling — see
+<a href="#safety-flags-at-first-contact">Safety flags at first contact</a>.</p>
+<h2 id="step-3-preview-when-you-want-the-wire-truth">Step 3 — preview (when you want the wire truth)<a class="headerlink" href="#step-3-preview-when-you-want-the-wire-truth" title="Permanent link">&para;</a></h2>
+<p><code>preview_operation</code> resolves the exact operation + target + params a
+call would use and returns the literal would-be HTTP request —
+method, resolved path, query, and a redacted body — <strong>without sending
+it</strong>. It is the fastest way to diagnose a rejected write: re-issue the
+same arguments to preview and read back exactly what would go on the
+wire.</p>
+<p>Two honest limits:</p>
+<ul>
+<li>It covers <strong>spec-ingested HTTP operations</strong>. A typed or composite
+  operation (like the Kubernetes ops here) has no single literal HTTP
+  request, so preview returns <code>status: "unavailable"</code> — that is the
+  expected answer, not a failure.</li>
+<li>It is available over MCP and REST (<code>POST
+  /api/v1/operations/preview</code>); there is no CLI verb for it today.</li>
+</ul>
+<h2 id="step-4-call">Step 4 — call<a class="headerlink" href="#step-4-call" title="Permanent link">&para;</a></h2>
+<p>The worked example: find every pod in the cluster that is not
+<code>Running</code>.</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>k8s-1.x<span class="w"> </span>k8s.pod.list<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>lab-rke2<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--params<span class="w"> </span><span class="s1">&#39;{&quot;all_namespaces&quot;: true, &quot;field_selector&quot;: &quot;status.phase!=Running&quot;}&#39;</span>
+</code></pre></div>
+<p>The result envelope always has the same shape — <code>status</code>, <code>op_id</code>,
+<code>result</code>, <code>error</code>, <code>duration_ms</code>, <code>extras</code>. On success
+(<code>status: "ok"</code>), the payload here is rows of
+<code>{name, namespace, status, ready, restarts, age_seconds, node, ip}</code>
+plus a <code>total</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;op_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;k8s.pod.list&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;result&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;rows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;web-6f7d4b&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;namespace&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;demo&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CrashLoopBackOff&quot;</span><span class="p">,</span>
+<span class="w">       </span><span class="nt">&quot;ready&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0/1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;restarts&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">17</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;age_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5520</span><span class="p">,</span>
+<span class="w">       </span><span class="nt">&quot;node&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;rke2-w1&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ip&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;10.42.0.31&quot;</span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Drill into the offender with the sibling read ops — same ladder, no
+new concepts:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>k8s-1.x<span class="w"> </span>k8s.pod.info<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>lab-rke2<span class="w"> </span>--params<span class="w"> </span><span class="s1">&#39;{&quot;pod_name&quot;: &quot;web-6f7d4b&quot;, &quot;namespace&quot;: &quot;demo&quot;}&#39;</span>
+
+meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>k8s-1.x<span class="w"> </span>k8s.logs<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>lab-rke2<span class="w"> </span>--params<span class="w"> </span><span class="s1">&#39;{&quot;pod_name&quot;: &quot;web-6f7d4b&quot;, &quot;namespace&quot;: &quot;demo&quot;}&#39;</span>
+
+meho<span class="w"> </span>operation<span class="w"> </span>call<span class="w"> </span>k8s-1.x<span class="w"> </span>k8s.event.list<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--target<span class="w"> </span>lab-rke2<span class="w"> </span>--params<span class="w"> </span><span class="s1">&#39;{&quot;namespace&quot;: &quot;demo&quot;}&#39;</span>
+</code></pre></div>
+<p>Two conveniences worth knowing:</p>
+<ul>
+<li>Frequently-used connectors also ship <strong>shortcut verbs</strong> that pre-bake
+  the connector id — <code>meho k8s pod list --target lab-rke2 --namespace
+  demo</code> dispatches the identical operation through the identical
+  governed path. Sugar only.</li>
+<li><code>--params</code> accepts inline JSON or <code>@&lt;file&gt;</code>; pass <code>work_ref</code> (MCP)
+  to stamp a change-ticket reference onto the audit row.</li>
+</ul>
+<h2 id="large-results-handles">Large results: handles<a class="headerlink" href="#large-results-handles" title="Permanent link">&para;</a></h2>
+<p>Set-shaped results are <strong>automatically reduced server-side</strong> above a
+threshold (more than 50 rows, or more than 4 KB serialized). You get
+a representative sample inline plus a <strong>result handle</strong> — never a
+multi-megabyte payload in your context. This is not opt-in and cannot
+be opted out of per call.</p>
+<p>When a result was reduced, its <code>fetch_more.drill_in</code> block tells you
+so — <code>available: true</code>, an <code>example_call</code>, and the handle's
+<code>expires_at</code>. Page through the full set with <code>result_query</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;handle_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;uuid from the result&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;offset&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;limit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">}</span>
+</code></pre></div>
+<p>The envelope returns <code>rows</code>, <code>offset</code>, <code>limit</code>, <code>returned_rows</code>,
+<code>total_rows</code>, <code>stored_rows</code>, <code>truncated</code>. Notes that save you a
+confused hour:</p>
+<ul>
+<li>Handles are <strong>scoped to you</strong> (operator + tenant) and expire. A
+  cross-operator read, an expired handle, and a nonexistent one are
+  indistinguishable: <em>"handle … is not readable: it does not exist,
+  has expired, or belongs to a different operator. Re-run the
+  operation to get a fresh handle."</em> That is isolation working, not a
+  bug.</li>
+<li><code>result_query</code> is the drill-in tool that ships today; aggregation
+  and export tools are on the roadmap but do not exist yet.</li>
+<li>When <code>drill_in.available</code> is <code>false</code>, the full set was <em>not</em>
+  spilled (the <code>reason</code> field says why) — re-run the operation with
+  narrower params instead of hunting for a handle.</li>
+</ul>
+<h2 id="safety-flags-at-first-contact">Safety flags at first contact<a class="headerlink" href="#safety-flags-at-first-contact" title="Permanent link">&para;</a></h2>
+<p>Every operation carries two independent markers, set per-op when the
+connector is registered or reviewed:</p>
+<ul>
+<li><strong><code>safety_level</code></strong> — <code>safe</code> (read-class, executes under
+  default-allow), <code>caution</code>, or <code>dangerous</code> (write/destructive class,
+  subject to policy).</li>
+<li><strong><code>requires_approval</code></strong> — when <code>true</code>, calling the operation does
+  <strong>not</strong> execute it. The dispatcher durably parks it and returns:</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;awaiting_approval&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;op_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;k8s.delete&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;awaiting_approval: &#39;k8s.delete&#39; requires approval before execution&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;extras&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;error_code&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;awaiting_approval&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;approval_request_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;&lt;uuid&gt;&quot;</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>awaiting_approval</code> is a first-class outcome, not an error. The gate
+is <strong>server-side</strong> — neither you nor an agent can opt out of it, and
+the classification keys on the operation, not on who is calling. The
+parked request is resolved on the operator surfaces:</p>
+<div class="highlight"><pre><span></span><code>meho<span class="w"> </span>approvals<span class="w"> </span>list
+meho<span class="w"> </span>approvals<span class="w"> </span>show<span class="w"> </span>&lt;approval_request_id&gt;
+meho<span class="w"> </span>approvals<span class="w"> </span>approve<span class="w"> </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">&quot;verified blast radius&quot;</span>
+meho<span class="w"> </span>approvals<span class="w"> </span>reject<span class="w">  </span>&lt;approval_request_id&gt;<span class="w"> </span>--reason<span class="w"> </span><span class="s2">&quot;wrong target&quot;</span>
+</code></pre></div>
+<p>By default you cannot approve your own request (the four-eyes rule),
+and parked requests expire on a TTL. The full story — including the
+audited single-operator break-glass — is the
+<a href="../approvals-and-break-glass/">approvals &amp; break-glass guide</a>.</p>
+<p>Before approving <em>any</em> fan-out write: open the approval payload and
+verify the resolved object list first. An unconstrained filter is how
+a one-VM drill becomes a cluster-wide incident.</p>
+<h2 id="what-can-go-wrong-here">What can go wrong here<a class="headerlink" href="#what-can-go-wrong-here" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>What it means</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-32602</code> with <code>data.reason: unknown_connector</code></td>
+<td>The <code>connector_id</code> names nothing registered — usually a bare product name (<code>k8s</code>) where <code>&lt;impl_id&gt;-&lt;version&gt;</code> (<code>k8s-1.x</code>) belongs.</td>
+<td><code>meho connector list</code>, copy the id verbatim.</td>
+</tr>
+<tr>
+<td><code>-32602</code> with <code>data.reason: connector_not_ingested</code></td>
+<td>The connector is registered but its spec has not been ingested, so it has no operations yet. Recoverable: the error's <code>data.next_step.verb</code> carries the exact <code>meho connector ingest …</code> command to run.</td>
+<td>Run the named command, then retry.</td>
+</tr>
+<tr>
+<td><code>meho operation groups</code> returns an empty list</td>
+<td>The connector exists but nothing is enabled yet — operations ship default-deny until reviewed/enabled.</td>
+<td><code>meho connector review &lt;id&gt;</code>, then enable groups or single ops (<code>meho connector enable-reads &lt;id&gt;</code> bulk-enables the read class).</td>
+</tr>
+<tr>
+<td>Search cannot find an operation you know exists</td>
+<td>Search only indexes <strong>enabled</strong> operations; a disabled op is invisible by design. An unknown <code>--group</code> also silently narrows to zero hits (that is not an error).</td>
+<td>Check enablement via <code>meho connector review</code>; drop the group filter.</td>
+</tr>
+<tr>
+<td><code>status: "error"</code> with <code>invalid_params</code></td>
+<td>The params failed the operation's schema. <strong>Do not retry the same arguments verbatim.</strong></td>
+<td>Read <code>extras.validation_errors</code>, fix the shape (e.g. <code>k8s.pod.list</code> requires exactly one of <code>namespace</code> / <code>all_namespaces: true</code>), re-call.</td>
+</tr>
+<tr>
+<td><code>status: "error"</code> with a <code>connector_error</code> / credential message</td>
+<td>Dispatch reached the connector but the target's credential failed to resolve or was rejected.</td>
+<td>Work the <a href="../targets-and-secrets/#what-can-go-wrong-here">targets &amp; secrets failure table</a> — the error strings there map one-to-one.</td>
+</tr>
+<tr>
+<td><code>status: "denied"</code></td>
+<td>Policy refused the call for this principal — distinct from a missing approval.</td>
+<td>Inspect the reason in <code>extras</code>; this is a grants/policy conversation, not a retry.</td>
+</tr>
+<tr>
+<td><code>status: "awaiting_approval"</code> on what you expected to just run</td>
+<td>The op carries <code>requires_approval</code> — working as designed.</td>
+<td>See <a href="#safety-flags-at-first-contact">Safety flags</a>.</td>
+</tr>
+<tr>
+<td><code>handle_not_found</code> from <code>result_query</code></td>
+<td>Handle expired, or it belongs to another operator/tenant.</td>
+<td>Re-run the producing operation; page promptly.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Next:</strong> <a href="../sensors-quickstart/">Watch your estate with sensors</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../targets-and-secrets/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Register targets and secrets">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Register targets and secrets
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../sensors-quickstart/" class="md-footer__link md-footer__link--next" aria-label="Next: Watch your estate with sensors">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Watch your estate with sensors
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

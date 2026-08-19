@@ -52,10 +52,15 @@ from meho_backplane.connectors.bind9.ops_record import (
     RemoteCommandError,
     ZoneResolutionError,
     _add_record_to_zonefile,
+    _dig_add_verify,
+    _dig_remove_verify,
     _remove_record_from_zonefile,
+    _soa_serial_from_text,
+    _zonestatus_serial_verify,
     bind9_record_add,
     bind9_record_remove,
     resolve_zone_for_fqdn,
+    resolve_zone_target,
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -140,6 +145,51 @@ mail IN AAAA 2001:db8::1
 _CHECKCONF_OUTPUT = 'zone "evba.lab" {\n\ttype master;\n\tfile "/etc/bind/db.evba.lab";\n};\n'
 
 
+# Split-horizon `named-checkconf -p`: the same zone declared once per
+# view (#2897). Parses to two `evba.lab` rows attributed internal /
+# external.
+_MULTIVIEW_CHECKCONF_OUTPUT = (
+    'view "internal" {\n'
+    "\tmatch-clients { 10.0.0.0/8; localhost; };\n"
+    '\tzone "evba.lab" {\n'
+    "\t\ttype master;\n"
+    '\t\tfile "/etc/bind/internal/db.evba.lab";\n'
+    "\t};\n"
+    "};\n"
+    'view "external" {\n'
+    "\tmatch-clients { any; };\n"
+    '\tzone "evba.lab" {\n'
+    "\t\ttype master;\n"
+    '\t\tfile "/etc/bind/external/db.evba.lab";\n'
+    "\t};\n"
+    "};\n"
+)
+
+# Parsed-row shapes for the pure `resolve_zone_target` tests -- the
+# `{name, file, type, view}` shape T2's `parse_named_checkconf_zones`
+# emits.
+_MULTIVIEW_ROWS: list[dict[str, Any]] = [
+    {
+        "name": "evba.lab",
+        "file": "/etc/bind/internal/db.evba.lab",
+        "type": "master",
+        "view": "internal",
+    },
+    {
+        "name": "evba.lab",
+        "file": "/etc/bind/external/db.evba.lab",
+        "type": "master",
+        "view": "external",
+    },
+]
+_SINGLE_EXPLICIT_VIEW_ROWS: list[dict[str, Any]] = [
+    {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": "default"},
+]
+_NO_VIEW_ROWS: list[dict[str, Any]] = [
+    {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": None},
+]
+
+
 # ---------------------------------------------------------------------------
 # resolve_zone_for_fqdn (pure)
 # ---------------------------------------------------------------------------
@@ -191,6 +241,139 @@ class TestResolveZoneForFqdn:
         assert resolve_zone_for_fqdn(["EVBA.LAB"], "api.evba.lab") == "evba.lab"
         # Mixed case on both sides.
         assert resolve_zone_for_fqdn(["EvBa.LaB"], "Api.EvBa.lAb") == "evba.lab"
+
+
+# ---------------------------------------------------------------------------
+# resolve_zone_target (pure) -- split-horizon / multi-view resolution (#2897)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveZoneTarget:
+    """Pure-function tests for the view-aware write-target resolver."""
+
+    def test_no_view_deployment_resolves_with_null_view(self) -> None:
+        zone, path, view = resolve_zone_target(
+            _NO_VIEW_ROWS, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None
+        )
+        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", None)
+
+    def test_single_view_resolves_and_returns_view(self) -> None:
+        zone, path, view = resolve_zone_target(
+            _SINGLE_EXPLICIT_VIEW_ROWS,
+            fqdn="api.evba.lab",
+            explicit_zone=None,
+            explicit_view=None,
+        )
+        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", "default")
+
+    def test_multi_view_without_view_raises_ambiguous_view(self) -> None:
+        """The #2897 first failure: same zone in two views, no view given."""
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                _MULTIVIEW_ROWS, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None
+            )
+        assert exc_info.value.reason == "ambiguous_view"
+        assert exc_info.value.candidates == ["external", "internal"]
+        # The rendered message is actionable, not the bare reason code.
+        assert "pass ``view``" in str(exc_info.value)
+
+    def test_multi_view_with_view_selects_that_views_file(self) -> None:
+        zone, path, view = resolve_zone_target(
+            _MULTIVIEW_ROWS,
+            fqdn="api.evba.lab",
+            explicit_zone=None,
+            explicit_view="internal",
+        )
+        assert (zone, path, view) == ("evba.lab", "/etc/bind/internal/db.evba.lab", "internal")
+
+    def test_explicit_zone_multi_view_without_view_raises_ambiguous_view(self) -> None:
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                _MULTIVIEW_ROWS,
+                fqdn="api.evba.lab",
+                explicit_zone="evba.lab",
+                explicit_view=None,
+            )
+        assert exc_info.value.reason == "ambiguous_view"
+
+    def test_view_not_declared_raises_view_not_found(self) -> None:
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                _MULTIVIEW_ROWS,
+                fqdn="api.evba.lab",
+                explicit_zone=None,
+                explicit_view="dmz",
+            )
+        assert exc_info.value.reason == "view_not_found"
+        assert exc_info.value.candidates == ["external", "internal"]
+
+    def test_unresolvable_when_no_zone_suffixes_fqdn(self) -> None:
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                _NO_VIEW_ROWS,
+                fqdn="host.other.example",
+                explicit_zone=None,
+                explicit_view=None,
+            )
+        assert exc_info.value.reason == "unresolvable"
+
+    def test_zone_without_file_is_unresolvable(self) -> None:
+        """A hint / forward zone (no ``file``) is not a writable target."""
+        rows = [{"name": "evba.lab", "file": None, "type": "forward", "view": None}]
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(rows, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None)
+        assert exc_info.value.reason == "unresolvable"
+
+
+# ---------------------------------------------------------------------------
+# View-aware verify predicate builders (#2897)
+# ---------------------------------------------------------------------------
+
+
+class TestViewAwareVerifyBuilders:
+    """The handler-built verify commands: view-precise vs record-level."""
+
+    def test_soa_serial_round_trips_from_rendered_text(self) -> None:
+        # _SAMPLE_ZONEFILE carries SOA serial 2026051801; after an add it
+        # bumps to 2026051802.
+        assert _soa_serial_from_text(_SAMPLE_ZONEFILE, "evba.lab") == 2026051801
+        bumped = _add_record_to_zonefile(
+            _SAMPLE_ZONEFILE,
+            zone_name="evba.lab",
+            fqdn="api.evba.lab",
+            ip="10.5.50.99",
+            record_type="A",
+        )
+        assert _soa_serial_from_text(bumped, "evba.lab") == 2026051802
+
+    def test_zonestatus_verify_names_view_and_asserts_serial(self) -> None:
+        cmd = _zonestatus_serial_verify("evba.lab", "internal", 2026051802)
+        # Names the view explicitly (class token before the view).
+        assert "rndc zonestatus evba.lab IN internal" in cmd
+        # Anchored serial match avoids a substring false-positive; the
+        # optional leading whitespace tolerates any rndc indentation.
+        assert "^[[:space:]]*serial: 2026051802[[:space:]]*$" in cmd
+        # Echoes diagnostics on failure (fixes the #2897 empty detail).
+        assert "last rndc zonestatus" in cmd
+
+    def test_zonestatus_verify_quotes_metacharacters(self) -> None:
+        cmd = _zonestatus_serial_verify("evba.lab", "in;rm -rf", 1)
+        # The view is shlex-quoted so a metachar cannot break out.
+        assert "'in;rm -rf'" in cmd
+        assert "; rm -rf" not in cmd.replace("'in;rm -rf'", "")
+
+    def test_dig_add_verify_is_record_level_with_diagnostics(self) -> None:
+        cmd = _dig_add_verify("api.evba.lab", "10.5.50.99", "A")
+        assert "dig @localhost api.evba.lab A +short" in cmd
+        assert "grep -qxF 10.5.50.99" in cmd
+        assert "expected A" in cmd  # failure diagnostic
+
+    def test_dig_remove_verify_asserts_both_families_absent(self) -> None:
+        cmd = _dig_remove_verify("api.evba.lab")
+        assert "dig @localhost api.evba.lab A +short" in cmd
+        assert "dig @localhost api.evba.lab AAAA +short" in cmd
+        assert '[ -z "$A" ] && [ -z "$AAAA" ]' in cmd
+        assert "still resolves after remove" in cmd  # failure diagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -1389,7 +1572,7 @@ class TestRecordAddHandler:
         ):
             # api.other.lab matches other.lab; api.evba.lab matches evba.lab.
             # No ambiguity; this assertion proves a non-ambiguous resolve works.
-            result_zone, _ = await _resolve_helper(connector, _TARGET, "api.other.lab")
+            result_zone, _, _ = await _resolve_helper(connector, _TARGET, "api.other.lab")
         assert result_zone == "other.lab"
         assert sudo_mock.await_count == 0
 
@@ -1537,6 +1720,139 @@ class TestRecordRemoveHandler:
 
 
 # ---------------------------------------------------------------------------
+# Split-horizon handler behaviour (#2897)
+# ---------------------------------------------------------------------------
+
+
+_SUDO_SUCCESS = (
+    "===STATE_BEFORE_BEGIN===\nold\n===STATE_BEFORE_END===\n"
+    "===STATE_AFTER_BEGIN===\nnew\n===STATE_AFTER_END===\n"
+    "===SUCCESS===\n"
+)
+
+
+class TestRecordViewHandling:
+    """`view` param end-to-end through the add / remove handlers (#2897)."""
+
+    async def test_add_multi_view_without_view_raises_ambiguous_view(self) -> None:
+        """The zone in two views + no ``view`` -> rejected pre-staging."""
+        connector = Bind9Connector()
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock()
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
+            pytest.raises(ZoneResolutionError) as exc_info,
+        ):
+            await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "host.evba.lab", "ip": "10.5.50.9"},
+            )
+        assert exc_info.value.reason == "ambiguous_view"
+        assert exc_info.value.candidates == ["external", "internal"]
+        assert sudo_mock.await_count == 0
+
+    async def test_add_view_not_found_rejects_pre_staging(self) -> None:
+        connector = Bind9Connector()
+        run_mock = AsyncMock(return_value=_completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT))
+        sudo_mock = AsyncMock()
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
+            pytest.raises(ZoneResolutionError) as exc_info,
+        ):
+            await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "host.evba.lab", "ip": "10.5.50.9", "view": "dmz"},
+            )
+        assert exc_info.value.reason == "view_not_found"
+        assert sudo_mock.await_count == 0
+
+    async def test_add_with_view_selects_file_and_uses_zonestatus_verify(self) -> None:
+        connector = Bind9Connector()
+        run_mock = AsyncMock(
+            side_effect=[
+                _completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT),
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+            ]
+        )
+        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
+        ):
+            result = await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "host.evba.lab", "ip": "10.5.50.9", "view": "internal"},
+            )
+        # The internal view's zonefile was the staging target.
+        assert result["view"] == "internal"
+        assert result["file"] == "/etc/bind/internal/db.evba.lab"
+        # The verify predicate baked into the sudo script is the
+        # view-precise zonestatus serial check (not a view-blind dig),
+        # asserting the staged serial (2026051801 + 1).
+        staged_script = sudo_mock.await_args.args[1]
+        assert "rndc zonestatus host.evba.lab IN internal" not in staged_script
+        assert "rndc zonestatus evba.lab IN internal" in staged_script
+        assert "2026051802" in staged_script
+        # The record-level dig predicate for this FQDN is NOT used (the
+        # bare ``dig @localhost <zone> SOA`` in the rollback comment is a
+        # different, literal-``<zone>`` string).
+        assert "dig @localhost host.evba.lab" not in staged_script
+
+    async def test_add_no_view_deployment_uses_dig_verify(self) -> None:
+        connector = Bind9Connector()
+        run_mock = AsyncMock(
+            side_effect=[
+                _completed_process(stdout=_CHECKCONF_OUTPUT),
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+            ]
+        )
+        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
+        ):
+            result = await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "api.evba.lab", "ip": "10.5.50.99"},
+            )
+        assert result["view"] is None
+        staged_script = sudo_mock.await_args.args[1]
+        assert "dig @localhost api.evba.lab A +short" in staged_script
+        assert "rndc zonestatus" not in staged_script
+
+    async def test_remove_with_view_uses_zonestatus_verify(self) -> None:
+        connector = Bind9Connector()
+        run_mock = AsyncMock(
+            side_effect=[
+                _completed_process(stdout=_MULTIVIEW_CHECKCONF_OUTPUT),
+                _completed_process(stdout=_SAMPLE_ZONEFILE),
+            ]
+        )
+        sudo_mock = AsyncMock(return_value=_completed_process(stdout=_SUDO_SUCCESS))
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", sudo_mock),
+        ):
+            result = await bind9_record_remove(
+                connector,
+                _TARGET,
+                {"fqdn": "mail.evba.lab", "view": "external"},
+            )
+        assert result["view"] == "external"
+        assert result["file"] == "/etc/bind/external/db.evba.lab"
+        staged_script = sudo_mock.await_args.args[1]
+        assert "rndc zonestatus evba.lab IN external" in staged_script
+        # The record-level dig predicate for this FQDN is NOT used.
+        assert "dig @localhost mail.evba.lab" not in staged_script
+
+
+# ---------------------------------------------------------------------------
 # Registration shape -- AC: ops carry the warning + caution + requires_approval
 # ---------------------------------------------------------------------------
 
@@ -1662,12 +1978,11 @@ class TestRemoteCommandExitStatus:
         assert "Permission denied" in exc_info.value.stderr
 
     async def test_explicit_zone_checkconf_failure_raises_remote_command_error(self) -> None:
-        """``_resolve_zonefile_path_for_zone`` (explicit --zone branch) checks exit too."""
+        """The explicit --zone branch checks the ``named-checkconf`` exit too."""
         connector = Bind9Connector()
-        # The explicit-zone path goes through
-        # ``_resolve_zonefile_path_for_zone`` which also runs
-        # named-checkconf -p. A non-zero exit must surface the typed
-        # error.
+        # The explicit-zone path goes through the unified
+        # ``_resolve_zone_and_path`` which runs named-checkconf -p. A
+        # non-zero exit must surface the typed error.
         run_mock = AsyncMock(
             return_value=_completed_process(
                 stdout="",
@@ -1702,9 +2017,9 @@ async def _resolve_helper(
     connector: Bind9Connector,
     target: Any,
     fqdn: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str | None]:
     from meho_backplane.connectors.bind9.ops_record import (
-        _resolve_zone_via_checkconf,
+        _resolve_zone_and_path,
     )
 
-    return await _resolve_zone_via_checkconf(connector, target, fqdn)
+    return await _resolve_zone_and_path(connector, target, fqdn=fqdn, explicit_zone=None)

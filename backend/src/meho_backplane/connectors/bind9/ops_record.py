@@ -14,20 +14,33 @@
 G3.4-T2 (#588) of Initiative #367 landed the read op (``dig @localhost
 <fqdn> [<type>]``). G3.4-T3 (#589) adds the symmetric write ops:
 
-* ``bind9.record.add <fqdn> <ip> [--zone <name>] [--type A|AAAA]`` --
-  atomic stage-validate-commit-reload-verify-rollback against the
-  affected zonefile via :mod:`._atomic`. Verify predicate runs ``dig
-  @localhost <fqdn>`` and asserts the new IP appears in the answer.
-  ``safety_level=caution`` (mutation; the production-path gate is
-  G7/G10 policy territory).
-* ``bind9.record.remove <fqdn> [--zone <name>]`` -- symmetric remove
-  with verify predicate = ``dig`` no longer resolves the FQDN.
+* ``bind9.record.add <fqdn> <ip> [--zone <name>] [--type A|AAAA]
+  [--view <name>]`` -- atomic stage-validate-commit-reload-verify-
+  rollback against the affected zonefile via :mod:`._atomic`. Verify
+  predicate runs ``dig @localhost <fqdn>`` and asserts the new IP
+  appears in the answer. ``safety_level=caution`` (mutation; the
+  production-path gate is G7/G10 policy territory).
+* ``bind9.record.remove <fqdn> [--zone <name>] [--view <name>]`` --
+  symmetric remove with verify predicate = ``dig`` no longer resolves
+  the FQDN.
 
 ``--zone`` is optional. When omitted, the handler resolves the owning
 zone from ``named-checkconf -p`` (the T2 zone parser) by longest-suffix
 match against the FQDN; ambiguous (the FQDN matches two zones equally
 deep) or unresolvable (no zone is a suffix of the FQDN) inputs raise
 :class:`ZoneResolutionError` **before** any staging.
+
+Split-horizon (#2897)
+---------------------
+
+On a nameserver that declares the same zone in more than one ``view``,
+:func:`resolve_zone_target` disambiguates on the optional ``--view``
+param: without it a multi-view zone is rejected ``ambiguous_view`` (the
+error names the candidate views); with it the matching view's zonefile
+is edited. A caller-supplied ``view`` also switches the verify predicate
+from ``dig @localhost`` (view-blind -- answered by whichever view the
+loopback source matches) to ``rndc zonestatus <zone> IN <view>``, which
+confirms the staged serial loaded into *that* view.
 
 Why ``dig @localhost`` rather than zonefile lookup
 --------------------------------------------------
@@ -96,6 +109,7 @@ __all__ = [
     "bind9_record_remove",
     "parse_dig_answer",
     "resolve_zone_for_fqdn",
+    "resolve_zone_target",
 ]
 
 
@@ -402,27 +416,53 @@ BIND9_RECORD_GET_LLM_INSTRUCTIONS: dict[str, Any] = {
 class ZoneResolutionError(ValueError):
     """Owning zone could not be resolved for the requested FQDN.
 
-    Two flavours:
+    Four flavours:
 
-    * **unresolvable** -- no configured zone is a suffix of the FQDN.
-      The operator named a record outside any zone bind9 serves.
-    * **ambiguous** -- two (or more) configured zones tie for the
-      longest-suffix match. Should never happen with a real bind9
-      config (zones are unique within a view), but the parser handles
-      arbitrary input and the check is cheap defence-in-depth.
+    * **unresolvable** -- no configured zone is a suffix of the FQDN
+      (or the matched zone carries no ``file`` directive). The operator
+      named a record outside any writable zone bind9 serves.
+    * **ambiguous** -- two (or more) *distinct* configured zone names
+      tie for the longest-suffix match. Should never happen with a real
+      bind9 config, but the parser handles arbitrary input and the
+      check is cheap defence-in-depth.
+    * **ambiguous_view** -- the FQDN resolves to a single zone name,
+      but that zone is declared in more than one ``view`` (split-horizon
+      DNS) and no ``view`` was supplied to disambiguate. ``candidates``
+      carries the view names. The caller passes ``view`` to pick one.
+    * **view_not_found** -- a ``view`` was supplied but the zone is not
+      declared in it. ``candidates`` carries the views the zone *is*
+      declared in.
 
     The handler raises this **before** any staging, so the dispatcher's
     ``invalid_params`` envelope reports the rejection with zero side
     effects on the remote tree. The :class:`ValueError` base lets the
     dispatcher's ``connector_error`` branch use its standard exception-
-    class extras path without a custom shim.
+    class extras path without a custom shim. ``str(exc)`` is a
+    human-actionable sentence (not the bare reason code) so the
+    surfaced ``exception_message`` tells the operator what to do next.
     """
 
     def __init__(self, reason: str, fqdn: str, candidates: list[str] | None = None) -> None:
-        super().__init__(reason)
         self.reason: str = reason
         self.fqdn: str = fqdn
         self.candidates: list[str] = candidates or []
+        super().__init__(self._describe())
+
+    def _describe(self) -> str:
+        joined = ", ".join(self.candidates)
+        if self.reason == "ambiguous_view":
+            return (
+                f"the zone owning {self.fqdn!r} is declared in multiple views "
+                f"({joined}); pass ``view`` to pick the split-horizon copy to edit"
+            )
+        if self.reason == "view_not_found":
+            return (
+                f"no zone owning {self.fqdn!r} is declared in the requested view; "
+                f"the zone is declared in view(s): {joined or '<none>'}"
+            )
+        if self.reason == "ambiguous":
+            return f"multiple configured zones tie as the longest suffix of {self.fqdn!r}: {joined}"
+        return f"no writable bind9 zone resolves for {self.fqdn!r}"
 
 
 def resolve_zone_for_fqdn(zones: list[str], fqdn: str) -> str:
@@ -485,44 +525,73 @@ def resolve_zone_for_fqdn(zones: list[str], fqdn: str) -> str:
     return best_match
 
 
-async def _resolve_zone_via_checkconf(
-    connector: Bind9Connector,
-    target: Any,
+def resolve_zone_target(
+    rows: list[dict[str, Any]],
+    *,
     fqdn: str,
-    operator: Operator | None = None,
-) -> tuple[str, str]:
-    """Locate (zone_name, zonefile_path) for *fqdn* via ``named-checkconf -p``.
+    explicit_zone: str | None,
+    explicit_view: str | None,
+) -> tuple[str, str, str | None]:
+    """Resolve ``(zone_name, zonefile_path, view)`` for a write target.
 
-    Lazy-imports the zone parser to avoid a circular import (T2's
-    ``ops_zone`` imports from ``ops`` which (transitively) imports
-    from this module). The lazy-import shape mirrors the registration
-    walk in the connector class.
+    Pure function over the parsed ``named-checkconf -p`` rows (T2's
+    :func:`~meho_backplane.connectors.bind9.ops_zone.parse_named_checkconf_zones`
+    shape ``{name, file, type, view}``). Split-horizon aware: the same
+    zone name may appear once per ``view``.
 
-    Raises :class:`ZoneResolutionError` if the FQDN doesn't resolve to
-    a unique zone, or if the matched zone has no ``file`` directive.
+    Zone selection:
+
+    * ``explicit_zone`` set -> that zone name (trailing-dot / case
+      normalised).
+    * otherwise -> longest-suffix match via :func:`resolve_zone_for_fqdn`
+      over the **distinct** zone names, so a zone declared in N views no
+      longer ties with itself and spuriously reports ``ambiguous`` (the
+      #2897 failure mode).
+
+    View disambiguation, over the rows whose name matches the zone and
+    that carry a ``file`` directive:
+
+    * ``explicit_view`` set -> restrict to that view; no match raises
+      ``view_not_found``.
+    * ``explicit_view`` unset and the zone lives in exactly one view
+      (or none) -> that row.
+    * ``explicit_view`` unset and the zone lives in >1 view -> raise
+      ``ambiguous_view`` (the caller must pass ``view``).
+
+    ``view`` in the returned tuple is the enclosing view name, or
+    ``None`` for a zone declared outside any view (a no-views
+    deployment). It drives the view-aware verify predicate the handlers
+    build.
     """
-    from meho_backplane.connectors.bind9.ops_zone import (
-        parse_named_checkconf_zones,
-    )
 
-    cmd = "named-checkconf -p"
-    proc = await connector._run_command(target, cmd, operator=operator)
-    output = _require_zero_exit(proc, command=cmd)
-    rows = parse_named_checkconf_zones(output)
-    zone_names = [row["name"] for row in rows]
-    zone_name = resolve_zone_for_fqdn(zone_names, fqdn)
-    # Pull the zonefile path back out of the parsed rows.
-    matching_row = next(
-        (row for row in rows if row["name"].rstrip(".") == zone_name),
-        None,
-    )
-    if matching_row is None or not matching_row.get("file"):
-        # Best-suffix matched a zone with no ``file`` directive (a
-        # hint or forward zone, typically). The write ops only operate
-        # on master zonefiles; treat as unresolvable so the
-        # ``invalid_params`` envelope carries a coherent message.
+    def _name(row: dict[str, Any]) -> str:
+        return str(row["name"]).rstrip(".").lower()
+
+    if explicit_zone is not None:
+        zone_name = explicit_zone.rstrip(".").lower()
+    else:
+        zone_name = resolve_zone_for_fqdn(sorted({_name(row) for row in rows}), fqdn)
+
+    candidates = [row for row in rows if _name(row) == zone_name and row.get("file")]
+    if not candidates:
+        # No matching zone with a writable ``file`` directive -- a hint /
+        # forward zone, an unconfigured explicit ``zone``, or an FQDN
+        # outside every served zone.
         raise ZoneResolutionError("unresolvable", fqdn=fqdn)
-    return zone_name, str(matching_row["file"])
+
+    declared_views = sorted({str(r["view"]) for r in candidates if r.get("view")})
+    if explicit_view is not None:
+        matched = [row for row in candidates if row.get("view") == explicit_view]
+        if not matched:
+            raise ZoneResolutionError("view_not_found", fqdn=fqdn, candidates=declared_views)
+        chosen = matched[0]
+    elif len({row.get("view") for row in candidates}) > 1:
+        raise ZoneResolutionError("ambiguous_view", fqdn=fqdn, candidates=declared_views)
+    else:
+        chosen = candidates[0]
+
+    view = chosen.get("view")
+    return zone_name, str(chosen["file"]), (str(view) if view is not None else None)
 
 
 # ---------------------------------------------------------------------------
@@ -669,28 +738,144 @@ def _validate_ip_for_type(ip: str, record_type: str) -> None:
         raise ValueError(f"record type AAAA expects an IPv6 address; got {ip!r}")
 
 
+# bind9 master zonefiles the write ops edit are Internet (IN) class.
+# ``rndc`` requires the class token *before* a view name
+# (``rndc reload <zone> IN <view>`` / ``rndc zonestatus <zone> IN <view>``);
+# CH / HS zones are exotic and out of scope for record writes.
+_ZONE_CLASS = "IN"
+
+
+def _soa_serial_from_text(zonefile_text: str, zone_name: str) -> int:
+    """Return the SOA serial of the rendered *zonefile_text*.
+
+    The write transforms bump the serial in place; the view-aware verify
+    predicate asserts the running daemon loaded *this* revision into the
+    target view. Re-parsing with dnspython (rather than a regex over the
+    multi-form SOA grammar) reuses the same round-trip the transform
+    used, so the serial we assert on is exactly the one named reports.
+    """
+    origin = zone_name if zone_name.endswith(".") else zone_name + "."
+    zone = dns.zone.from_text(zonefile_text, origin=origin, relativize=False, check_origin=False)
+    zone_origin = zone.origin
+    assert zone_origin is not None, "zone parsed from text must carry an origin"
+    return int(zone.find_rdataset(zone_origin, dns.rdatatype.SOA)[0].serial)
+
+
+def _zonestatus_serial_verify(zone_name: str, view: str, serial: int) -> str:
+    """View-precise verify predicate for a write into a named ``view``.
+
+    ``dig @localhost`` is view-*blind*: on a split-horizon server it is
+    answered by whichever ``view`` matches the loopback source address,
+    which need not be the view whose zonefile we staged -- the #2897
+    verify-rollback failure. ``rndc zonestatus <zone> IN <view>`` names
+    the view explicitly and reports the serial it currently serves, so
+    asserting it equals the staged serial confirms named loaded our
+    revision into *that* view (``named-checkzone`` in the validate step
+    already proved the record is in the file). A bounded poll absorbs
+    the small window between ``rndc reload`` returning and the zone
+    being live. On failure the last ``zonestatus`` output is echoed so
+    the surfaced ``AtomicApplyError`` detail is diagnosable -- the
+    silent ``grep -q`` predicate is why #2897 saw an empty detail.
+    """
+    quoted_zone = shlex.quote(zone_name)
+    quoted_view = shlex.quote(view)
+    zonestatus = f"rndc zonestatus {quoted_zone} {_ZONE_CLASS} {quoted_view}"
+    # Anchored, whitespace-tolerant so ``serial: <N>`` matches whatever
+    # indentation the rndc build emits and never a ``signed serial:`` line.
+    serial_re = f"^[[:space:]]*serial: {serial}[[:space:]]*$"
+    # ``if ... then exit 0; fi`` rather than ``... && exit 0`` so the
+    # predicate is unambiguously safe under the pipeline's ``set -e``:
+    # a grep miss must fall through to the next poll and, after the
+    # loop, to the diagnostic -- never abort the script early.
+    return (
+        "STATUS=''; "
+        "for _ in 1 2 3 4 5; do "
+        f"STATUS=$({zonestatus} 2>&1) || true; "
+        f'if printf "%s\\n" "$STATUS" | grep -qE "{serial_re}"; then exit 0; fi; '
+        "sleep 0.3; "
+        "done; "
+        'printf "zone %s view %s not at staged serial '
+        f'{serial} after reload; last rndc zonestatus:\\n%s\\n" '
+        f'{quoted_zone} {quoted_view} "$STATUS"; '
+        "exit 1"
+    )
+
+
+def _dig_add_verify(fqdn: str, ip: str, record_type: str) -> str:
+    """Record-level verify predicate for a no-views / single-view add.
+
+    ``dig @localhost <fqdn> <type> +short`` emits one rdata per line;
+    ``grep -qxF`` (literal, whole-line) asserts the new IP is present
+    without false-matching a substring. On mismatch the observed
+    ``dig`` output is echoed so the ``AtomicApplyError`` detail carries
+    the real reason (#2897 -- the prior silent predicate surfaced an
+    empty detail).
+    """
+    quoted_fqdn = shlex.quote(fqdn)
+    quoted_ip = shlex.quote(ip)
+    # ``if ... then exit 0; fi`` so a grep miss falls through to the
+    # diagnostic under the pipeline's ``set -e`` (not an early abort).
+    return (
+        f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true; "
+        f'if printf "%s\\n" "$ANSWER" | grep -qxF {quoted_ip}; then exit 0; fi; '
+        f'printf "expected {record_type} %s in the answer for %s; dig +short returned:'
+        f'\\n%s\\n" {quoted_ip} {quoted_fqdn} "$ANSWER"; '
+        "exit 1"
+    )
+
+
+def _dig_remove_verify(fqdn: str) -> str:
+    """Record-level verify predicate for a no-views / single-view remove.
+
+    The FQDN must resolve to neither an A nor an AAAA answer. ``+short``
+    exits 0 on empty output, so emptiness is asserted explicitly. On
+    failure the residual answers are echoed for a diagnosable detail
+    (#2897).
+    """
+    quoted_fqdn = shlex.quote(fqdn)
+    return (
+        f"A=$(dig @localhost {quoted_fqdn} A +short 2>&1) || true; "
+        f"AAAA=$(dig @localhost {quoted_fqdn} AAAA +short 2>&1) || true; "
+        'if [ -z "$A" ] && [ -z "$AAAA" ]; then exit 0; fi; '
+        'printf "%s still resolves after remove (A: %s AAAA: %s)\\n" '
+        f'{quoted_fqdn} "$A" "$AAAA"; '
+        "exit 1"
+    )
+
+
 async def _resolve_zone_and_path(
     connector: Bind9Connector,
     target: Any,
     *,
     fqdn: str,
     explicit_zone: str | None,
+    explicit_view: str | None = None,
     operator: Operator | None = None,
-) -> tuple[str, str]:
-    """Return ``(zone_name, zonefile_path)`` for *fqdn*.
+) -> tuple[str, str, str | None]:
+    """Return ``(zone_name, zonefile_path, view)`` for *fqdn*.
 
-    Branches on ``explicit_zone``: when provided, looks up the
-    zonefile path directly; otherwise resolves via longest-suffix
-    match against ``named-checkconf -p``. Shared by the add / remove
-    handlers so the two paths cannot drift.
+    Runs ``named-checkconf -p`` once, parses the zone rows with T2's
+    view-attributing parser, and delegates the split-horizon-aware
+    selection to the pure :func:`resolve_zone_target`. Shared by the
+    add / remove handlers so the two paths cannot drift. ``view`` is
+    the enclosing view name (``None`` on a no-views deployment) and is
+    what the handlers thread into the view-aware verify predicate.
+
+    Lazy-imports the zone parser to avoid a circular import (T2's
+    ``ops_zone`` imports from ``ops`` which transitively imports this
+    module); the lazy shape mirrors the connector's registration walk.
     """
-    if explicit_zone is not None:
-        zone_name = explicit_zone.rstrip(".")
-        zonefile_path = await _resolve_zonefile_path_for_zone(
-            connector, target, zone_name, operator
-        )
-        return zone_name, zonefile_path
-    return await _resolve_zone_via_checkconf(connector, target, fqdn, operator)
+    from meho_backplane.connectors.bind9.ops_zone import (
+        parse_named_checkconf_zones,
+    )
+
+    cmd = "named-checkconf -p"
+    proc = await connector._run_command(target, cmd, operator=operator)
+    output = _require_zero_exit(proc, command=cmd)
+    rows = parse_named_checkconf_zones(output)
+    return resolve_zone_target(
+        rows, fqdn=fqdn, explicit_zone=explicit_zone, explicit_view=explicit_view
+    )
 
 
 async def _read_zonefile_text(
@@ -727,32 +912,37 @@ async def bind9_record_add(
 
     Sequence:
 
-    1. Resolve owning zone (via ``--zone`` param, or longest-suffix
-       match against ``named-checkconf -p``).
+    1. Resolve owning zone (via ``zone`` param, or longest-suffix
+       match against ``named-checkconf -p``) and its ``view`` --
+       split-horizon aware, so a zone declared in multiple views is
+       disambiguated by the optional ``view`` param.
     2. Validate the IP matches the requested record type.
     3. Read the current zonefile (``cat <path>``).
     4. Transform via :func:`_add_record_to_zonefile` (dnspython
        parse + add + SOA bump + render).
     5. :func:`atomic_apply` stages the new zonefile, runs
        ``named-checkzone <zone> <path>``, ``rndc reload``, and the
-       dig-verify predicate; rolls back on any failure.
+       view-aware verify predicate; rolls back on any failure.
 
-    Returns ``{fqdn, ip, type, zone, file, op_class, result_state_before,
-    result_state_after}``. ``op_class="write"`` is set explicitly even
-    though :func:`~meho_backplane.broadcast.events.classify_op`
-    derives the same value from the op-id suffix -- the dual signal
-    is what the audit-replay path (G8.2) reads to reconstruct the
-    change without re-parsing the op-id namespace.
+    Returns ``{fqdn, ip, type, zone, file, view, op_class,
+    result_state_before, result_state_after}``. ``op_class="write"`` is
+    set explicitly even though
+    :func:`~meho_backplane.broadcast.events.classify_op` derives the
+    same value from the op-id suffix -- the dual signal is what the
+    audit-replay path (G8.2) reads to reconstruct the change without
+    re-parsing the op-id namespace.
 
-    Raises :class:`ZoneResolutionError` if ``--zone`` is omitted and
-    the FQDN can't be uniquely resolved (pre-stage; no remote IO past
-    the ``named-checkconf -p`` lookup itself). Raises
+    Raises :class:`ZoneResolutionError` when the FQDN can't be uniquely
+    resolved -- including ``ambiguous_view`` when the zone is declared in
+    multiple views and no ``view`` was supplied (pre-stage; no remote IO
+    past the ``named-checkconf -p`` lookup). Raises
     :class:`AtomicApplyError` on any rollback path.
     """
     fqdn: str = params["fqdn"]
     ip: str = params["ip"]
     record_type: str = params.get("type", "A").upper()
     explicit_zone: str | None = params.get("zone")
+    explicit_view: str | None = params.get("view")
 
     if record_type not in _WRITE_SUPPORTED_TYPES:
         raise ValueError(
@@ -762,8 +952,13 @@ async def bind9_record_add(
     _validate_ip_for_type(ip, record_type)
 
     sudo_password = await _sudo_password_from_target(connector, target, operator)
-    zone_name, zonefile_path = await _resolve_zone_and_path(
-        connector, target, fqdn=fqdn, explicit_zone=explicit_zone, operator=operator
+    zone_name, zonefile_path, view = await _resolve_zone_and_path(
+        connector,
+        target,
+        fqdn=fqdn,
+        explicit_zone=explicit_zone,
+        explicit_view=explicit_view,
+        operator=operator,
     )
     current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
@@ -780,14 +975,17 @@ async def bind9_record_add(
             f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
         ) from exc
 
-    # Dig-verify predicate: the new IP must appear in the answer.
-    # ``dig +short`` emits one rdata per line with no decoration, so
-    # ``grep -qxF`` (literal, full-line, quiet) is the right shape for
-    # an exact-match assertion that doesn't false-match a substring of
-    # another row.
-    quoted_fqdn = shlex.quote(fqdn)
-    quoted_ip = shlex.quote(ip)
-    verify_cmd = f"dig @localhost {quoted_fqdn} {record_type} +short | grep -qxF {quoted_ip}"
+    # A caller-supplied ``view`` means split-horizon disambiguation:
+    # ``dig @localhost`` may be answered by a different view than the one
+    # we edited (#2897), so assert the staged serial loaded into the
+    # named view via ``rndc zonestatus``. On a no-views / single-view
+    # target keep the stronger record-level dig check.
+    if explicit_view is not None:
+        verify_cmd = _zonestatus_serial_verify(
+            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+        )
+    else:
+        verify_cmd = _dig_add_verify(fqdn, ip, record_type)
 
     apply_result = await atomic_apply(
         connector,
@@ -816,6 +1014,7 @@ async def bind9_record_add(
         "type": record_type,
         "zone": zone_name,
         "file": zonefile_path,
+        "view": view,
         "op_class": "write",
         "result_state_before": apply_result.state_before,
         "result_state_after": apply_result.state_after,
@@ -831,18 +1030,28 @@ async def bind9_record_remove(
     """Handler for ``bind9.record.remove`` -- atomic A/AAAA record remove.
 
     Sequence: same as :func:`bind9_record_add` but the zonefile
-    transform deletes the FQDN's A and AAAA rdatasets, and the
-    verify predicate asserts the FQDN no longer resolves
-    (``dig @localhost <fqdn> +short`` returns empty stdout).
+    transform deletes the FQDN's A and AAAA rdatasets, and the verify
+    predicate asserts the FQDN no longer resolves. Split-horizon aware:
+    the optional ``view`` param disambiguates a zone declared in
+    multiple views, and a caller-supplied ``view`` switches verify to
+    the view-precise ``rndc zonestatus`` serial check (``dig @localhost``
+    is view-blind -- #2897).
 
-    Returns the same envelope shape as ``record.add``.
+    Returns the same envelope shape as ``record.add`` (minus ``ip`` /
+    ``type``), including the resolved ``view``.
     """
     fqdn: str = params["fqdn"]
     explicit_zone: str | None = params.get("zone")
+    explicit_view: str | None = params.get("view")
 
     sudo_password = await _sudo_password_from_target(connector, target, operator)
-    zone_name, zonefile_path = await _resolve_zone_and_path(
-        connector, target, fqdn=fqdn, explicit_zone=explicit_zone, operator=operator
+    zone_name, zonefile_path, view = await _resolve_zone_and_path(
+        connector,
+        target,
+        fqdn=fqdn,
+        explicit_zone=explicit_zone,
+        explicit_view=explicit_view,
+        operator=operator,
     )
     current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
 
@@ -857,14 +1066,16 @@ async def bind9_record_remove(
             f"failed to parse / transform zonefile for zone {zone_name!r}: {exc}"
         ) from exc
 
-    # Verify: dig must return no answer rows for either A or AAAA.
-    # ``+short`` exits 0 even on empty output, so we explicitly assert
-    # zero lines via ``[ -z "$(dig ...)" ]``.
-    quoted_fqdn = shlex.quote(fqdn)
-    verify_cmd = (
-        f'[ -z "$(dig @localhost {quoted_fqdn} A +short)" ] '
-        f'&& [ -z "$(dig @localhost {quoted_fqdn} AAAA +short)" ]'
-    )
+    # View-aware verify -- see bind9_record_add for the rationale. For a
+    # targeted view the removal is confirmed by the staged serial being
+    # loaded into that view; otherwise the FQDN must resolve to neither
+    # an A nor an AAAA answer via the local resolver.
+    if explicit_view is not None:
+        verify_cmd = _zonestatus_serial_verify(
+            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+        )
+    else:
+        verify_cmd = _dig_remove_verify(fqdn)
 
     apply_result = await atomic_apply(
         connector,
@@ -886,38 +1097,11 @@ async def bind9_record_remove(
         "fqdn": fqdn,
         "zone": zone_name,
         "file": zonefile_path,
+        "view": view,
         "op_class": "write",
         "result_state_before": apply_result.state_before,
         "result_state_after": apply_result.state_after,
     }
-
-
-async def _resolve_zonefile_path_for_zone(
-    connector: Bind9Connector,
-    target: Any,
-    zone_name: str,
-    operator: Operator | None = None,
-) -> str:
-    """Look up the zonefile path for an explicit ``--zone`` arg.
-
-    Lazy-imports T2's ``_resolve_zonefile_path`` to avoid a cycle
-    (T2's ``ops_zone`` imports the shared ``ops`` module that imports
-    this module). Same shape as the longest-suffix path.
-    """
-    from meho_backplane.connectors.bind9.ops_zone import (
-        ZonefileReadError,
-        _resolve_zonefile_path,
-    )
-
-    cmd = "named-checkconf -p"
-    proc = await connector._run_command(target, cmd, operator=operator)
-    output = _require_zero_exit(proc, command=cmd)
-    try:
-        return _resolve_zonefile_path(output, zone_name)
-    except ZonefileReadError as exc:
-        # Map the missing-zone case to the same structured error the
-        # auto-resolve path uses, so callers see a uniform shape.
-        raise ZoneResolutionError("unresolvable", fqdn=zone_name) from exc
 
 
 async def _sudo_password_from_target(
@@ -956,12 +1140,13 @@ async def _sudo_password_from_target(
 _WRITE_WARNING = (
     "WARNING: this change is global and atomic. The atomic-apply "
     "primitive stages the new zonefile, runs ``named-checkzone``, "
-    "``rndc reload``, and a dig-verify predicate; on any failure "
-    "the pre-op ``/etc/bind/`` tree is restored byte-identical. On "
-    "success the change is live for every consumer of this "
-    "nameserver -- DNS has no per-caller scoping. ``safety_level`` "
-    "is ``caution`` (the production-path gate is G7/G10 policy "
-    "territory keyed on this value)."
+    "``rndc reload``, and a verify predicate (a ``dig`` record check, "
+    "or a view-precise ``rndc zonestatus`` serial check when a ``view`` "
+    "is given); on any failure the pre-op ``/etc/bind/`` tree is "
+    "restored byte-identical. On success the change is live for every "
+    "consumer of this nameserver -- DNS has no per-caller scoping. "
+    "``safety_level`` is ``caution`` (the production-path gate is "
+    "G7/G10 policy territory keyed on this value)."
 )
 
 
@@ -1012,6 +1197,21 @@ BIND9_RECORD_ADD_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``invalid_params``."
             ),
         },
+        "view": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional. The ``view`` block that owns the zone on a "
+                "split-horizon nameserver, e.g. ``internal``. Required "
+                "only when the zone is declared in more than one view "
+                "(otherwise the resolve step rejects it with "
+                "``ambiguous_view`` and lists the candidate views). "
+                "Selects which view's zonefile is edited and switches "
+                "verification to a view-precise ``rndc zonestatus`` "
+                "check, since ``dig @localhost`` cannot target a view."
+            ),
+        },
     },
     "required": ["fqdn", "ip"],
     "additionalProperties": False,
@@ -1022,6 +1222,7 @@ _WRITE_RESPONSE_SCHEMA_PROPERTIES: dict[str, Any] = {
     "fqdn": {"type": "string"},
     "zone": {"type": "string"},
     "file": {"type": "string"},
+    "view": {"type": ["string", "null"]},
     "op_class": {"type": "string", "enum": ["write"]},
     "result_state_before": {"type": "string"},
     "result_state_after": {"type": "string"},
@@ -1041,6 +1242,7 @@ _BIND9_RECORD_ADD_RESPONSE_SCHEMA: dict[str, Any] = {
         "type",
         "zone",
         "file",
+        "view",
         "op_class",
         "result_state_before",
         "result_state_after",
@@ -1066,11 +1268,20 @@ BIND9_RECORD_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
             "Optional. Owning zone. Omit to let the handler pick "
             "the longest-suffix-matching zone automatically."
         ),
+        "view": (
+            "Optional. Split-horizon view that owns the zone. Needed "
+            "only when the zone is declared in multiple views; the "
+            "resolve step rejects a multi-view zone with "
+            "``ambiguous_view`` and names the candidate views to pass "
+            "here."
+        ),
     },
     "output_shape": (
-        "{'fqdn', 'ip', 'type', 'zone', 'file', 'op_class': 'write', "
+        "{'fqdn', 'ip', 'type', 'zone', 'file', 'view', "
+        "'op_class': 'write', "
         "'result_state_before': <prior-zonefile-text>, "
         "'result_state_after': <post-write-zonefile-text>}. "
+        "``view`` is the resolved view (``null`` outside any view). "
         "``result_state_*`` is the full zonefile content for audit "
         "replay; the staged change is the diff between the two."
     ),
@@ -1100,6 +1311,16 @@ BIND9_RECORD_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "does."
             ),
         },
+        "view": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional. Split-horizon view that owns the zone, the "
+                "same way ``record.add`` uses it. Required only when the "
+                "zone is declared in more than one view."
+            ),
+        },
     },
     "required": ["fqdn"],
     "additionalProperties": False,
@@ -1113,6 +1334,7 @@ _BIND9_RECORD_REMOVE_RESPONSE_SCHEMA: dict[str, Any] = {
         "fqdn",
         "zone",
         "file",
+        "view",
         "op_class",
         "result_state_before",
         "result_state_after",
@@ -1136,11 +1358,16 @@ BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
             "Optional. Owning zone. Omit to let the handler pick "
             "the longest-suffix-matching zone automatically."
         ),
+        "view": (
+            "Optional. Split-horizon view that owns the zone. Needed "
+            "only when the zone is declared in multiple views."
+        ),
     },
     "output_shape": (
-        "{'fqdn', 'zone', 'file', 'op_class': 'write', "
+        "{'fqdn', 'zone', 'file', 'view', 'op_class': 'write', "
         "'result_state_before': <prior-zonefile-text>, "
-        "'result_state_after': <post-remove-zonefile-text>}."
+        "'result_state_after': <post-remove-zonefile-text>}. "
+        "``view`` is the resolved view (``null`` outside any view)."
     ),
 }
 
@@ -1183,7 +1410,10 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
             "write of a forward A/AAAA record. Resolves the owning "
             "zone via ``named-checkconf -p`` longest-suffix match "
             "when ``zone`` is omitted; ambiguous or unresolvable "
-            "FQDNs are rejected pre-staging. " + _WRITE_WARNING
+            "FQDNs are rejected pre-staging. Split-horizon aware: on a "
+            "zone declared in multiple views, pass ``view`` to pick the "
+            "copy to edit (verification then targets that view via "
+            "``rndc zonestatus``). " + _WRITE_WARNING
         ),
         parameter_schema=BIND9_RECORD_ADD_PARAMETER_SCHEMA,
         response_schema=_BIND9_RECORD_ADD_RESPONSE_SCHEMA,
@@ -1201,7 +1431,9 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
             "Atomic stage-validate-commit-reload-verify-rollback "
             "remove of every A and AAAA record at the given FQDN. "
             "Idempotent when the records are already absent (verify "
-            "passes -- the FQDN doesn't resolve before or after). " + _WRITE_WARNING
+            "passes -- the FQDN doesn't resolve before or after). "
+            "Split-horizon aware: pass ``view`` to disambiguate a zone "
+            "declared in multiple views. " + _WRITE_WARNING
         ),
         parameter_schema=BIND9_RECORD_REMOVE_PARAMETER_SCHEMA,
         response_schema=_BIND9_RECORD_REMOVE_RESPONSE_SCHEMA,

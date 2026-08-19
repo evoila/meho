@@ -144,6 +144,7 @@ func newRecordAddCmd() *cobra.Command {
 	var (
 		targetName        string
 		zone              string
+		view              string
 		recordType        string
 		jsonOut           bool
 		backplaneOverride string
@@ -162,21 +163,29 @@ func newRecordAddCmd() *cobra.Command {
 			"`named-checkconf -p` output. --type accepts A or AAAA only\n" +
 			"(CNAME / MX / TXT writes are out of scope for v0.2; the\n" +
 			"consumer wrapper never wrote them either).\n\n" +
+			"--view disambiguates a split-horizon nameserver where the\n" +
+			"same zone is declared in more than one view; pass it when the\n" +
+			"handler rejects the write as `ambiguous_view` (the error\n" +
+			"names the candidate views). It also makes verification\n" +
+			"view-precise via `rndc zonestatus`.\n\n" +
 			"This verb is the 1:1 replacement for the consumer's\n" +
 			"`bind9-dns.sh --add-a-record <fqdn> <ip> --zone <zone>`.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho bind9 record add esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target vcf-router-bind9\n" +
-			"  meho bind9 record add v6.evba.lab 2001:db8::25 --type AAAA --target vcf-router-bind9",
+			"  meho bind9 record add v6.evba.lab 2001:db8::25 --type AAAA --target vcf-router-bind9\n" +
+			"  meho bind9 record add host.evba.lab 10.5.50.9 --view internal --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRecordAdd(cmd, args[0], args[1], zone, recordType, targetName, jsonOut, backplaneOverride)
+			return runRecordAdd(cmd, args[0], args[1], zone, view, recordType, targetName, jsonOut, backplaneOverride)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "target slug to dispatch against")
 	cmd.Flags().StringVar(&zone, "zone", "",
 		"owning zone (e.g. evba.lab). Omitted → handler resolves via longest-suffix match.")
+	cmd.Flags().StringVar(&view, "view", "",
+		"split-horizon view owning the zone. Required only when the zone is in multiple views.")
 	cmd.Flags().StringVar(&recordType, "type", "",
 		"record type (A / AAAA). Omitted → handler default (A).")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full OperationResult envelope as JSON")
@@ -185,7 +194,7 @@ func newRecordAddCmd() *cobra.Command {
 	return cmd
 }
 
-func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
+func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, view, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -196,6 +205,9 @@ func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, recordType, targetName str
 	}
 	if zone != "" {
 		params["zone"] = zone
+	}
+	if view != "" {
+		params["view"] = view
 	}
 	if recordType != "" {
 		params["type"] = recordType
@@ -214,6 +226,7 @@ func newRecordRemoveCmd() *cobra.Command {
 	var (
 		targetName        string
 		zone              string
+		view              string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -228,25 +241,31 @@ func newRecordRemoveCmd() *cobra.Command {
 			"consumer wrapper never removed them either; use\n" +
 			"`meho bind9 config apply-file` for fine-grained zonefile\n" +
 			"edits in the meantime).\n\n" +
+			"--view disambiguates a split-horizon nameserver where the\n" +
+			"same zone is declared in more than one view (same semantics\n" +
+			"as `record add`).\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example:       "  meho bind9 record remove esx-dc6.evba.lab --zone evba.lab --target vcf-router-bind9",
+		Example: "  meho bind9 record remove esx-dc6.evba.lab --zone evba.lab --target vcf-router-bind9\n" +
+			"  meho bind9 record remove host.evba.lab --view internal --target vcf-router-bind9",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRecordRemove(cmd, args[0], zone, targetName, jsonOut, backplaneOverride)
+			return runRecordRemove(cmd, args[0], zone, view, targetName, jsonOut, backplaneOverride)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "target slug to dispatch against")
 	cmd.Flags().StringVar(&zone, "zone", "",
 		"owning zone (e.g. evba.lab). Omitted → handler resolves via longest-suffix match.")
+	cmd.Flags().StringVar(&view, "view", "",
+		"split-horizon view owning the zone. Required only when the zone is in multiple views.")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full OperationResult envelope as JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
 }
 
-func runRecordRemove(cmd *cobra.Command, fqdn, zone, targetName string, jsonOut bool, backplaneOverride string) error {
+func runRecordRemove(cmd *cobra.Command, fqdn, zone, view, targetName string, jsonOut bool, backplaneOverride string) error {
 	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
@@ -254,6 +273,9 @@ func runRecordRemove(cmd *cobra.Command, fqdn, zone, targetName string, jsonOut 
 	params := map[string]any{"fqdn": fqdn}
 	if zone != "" {
 		params["zone"] = zone
+	}
+	if view != "" {
+		params["view"] = view
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.record.remove", targetName, params)
 	if err != nil {
@@ -283,7 +305,7 @@ func printWriteResult(w io.Writer, r *CallResult) {
 	if opClass, ok := body["op_class"].(string); ok && opClass != "" {
 		fmt.Fprintf(w, "  op_class: %s\n", opClass)
 	}
-	for _, key := range []string{"fqdn", "zone", "file", "type", "ip"} {
+	for _, key := range []string{"fqdn", "zone", "view", "file", "type", "ip"} {
 		if v, ok := body[key]; ok && v != nil {
 			fmt.Fprintf(w, "  %-9s %v\n", key+":", v)
 		}

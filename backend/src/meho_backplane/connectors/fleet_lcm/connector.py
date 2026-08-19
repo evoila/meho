@@ -107,13 +107,29 @@ is not assumed from any single ``/v1/*`` field; ``version`` is left
 Operations
 ----------
 
-This module ships zero hand-coded operations — :meth:`execute` exists for
-ABC compatibility and delegates to the G0.6 dispatcher. The 51 ``/v1/*``
-ops land in ``endpoint_descriptor`` via spec ingestion; until an operator
-ingests the spec, the connector is registered and discoverable but
-``execute`` against any ``op_id`` resolves to "unknown operation" at the
-dispatcher — the correct behaviour for a registered-but-empty connector
-at this Task's stage.
+A curated **13-op typed read core** ships here (#3047): health, system,
+config, SDDC-LCM list/detail, component list/detail/status, task
+list/detail, and upgrade-plan list/detail + release-versions. They are
+registered as ``source_kind="typed"`` (:mod:`.typed_ops` /
+:mod:`.typed_reads`, per-op ``llm_instructions`` in
+:mod:`._llm_instructions`), enabled at register time, so a VCF Fleet 9.x
+target — which resolves to this impl by most-specific-version — dispatches
+a modern read op on a **fresh boot with zero catalog ingest**. This is what
+restores 9.0 fleet dispatch after the "modern default now" resolver
+decision (initiative #3033); the two typed ops the legacy ``fleet-rest``
+impl carries are its ``/lcm/*`` back-compat surface, distinct from these
+``/v1/*`` reads.
+
+The handler bodies build their ``/v1/*`` request paths from the templates
+in :mod:`._paths` (reconcile-lane-introspectable) and dispatch on this
+class's authenticated client, so the reads ride :meth:`auth_headers`
+(Bearer primary, Basic fallback) exactly as an ingested op would. The
+wider surface — the full 51-op spec as ``source_kind="ingested"`` breadth
+plus the component / upgrade / task **writes** — is a follow-up enabled
+operationally through the generic review flow
+(``ReviewService.enable_reads`` over ``meho connector ingest`` of the
+pinned ``fleet-lcm-openapi.yaml``); :meth:`execute` remains the G0.6
+dispatch shim for any such ingested ``op_id``.
 """
 
 from __future__ import annotations
@@ -360,6 +376,126 @@ class FleetLcmConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    # ------------------------------------------------------------------
+    # Typed read ops (#3047, initiative #3033)
+    #
+    # Thin bound-method shims for the modern ``/v1/*`` read core. Each
+    # delegates to the module-level ``_impl`` body in ``.typed_reads`` (lazy
+    # import so pure fingerprint/probe unit tests don't pay the operations
+    # package's embedding-pipeline import). The dispatcher resolves each
+    # persisted ``module.ClassName.method`` handler_ref back to the bound
+    # method and threads ``operator`` / ``target`` / ``params`` by name (see
+    # ``dispatch_typed``); ``operator`` reaches ``_get_json`` so the
+    # credential loader reads under the operator's identity. All read-only —
+    # no write op ships here (writes are a follow-up).
+    # ------------------------------------------------------------------
+
+    async def health(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.health`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_health_impl
+
+        return await fleet_lcm_health_impl(self, operator, target, params)
+
+    async def system_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.system.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_system_info_impl
+
+        return await fleet_lcm_system_info_impl(self, operator, target, params)
+
+    async def config_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.config.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_config_info_impl
+
+        return await fleet_lcm_config_info_impl(self, operator, target, params)
+
+    async def sddc_lcm_list(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.sddc-lcm.list`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_sddc_lcm_list_impl
+
+        return await fleet_lcm_sddc_lcm_list_impl(self, operator, target, params)
+
+    async def sddc_lcm_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.sddc-lcm.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_sddc_lcm_info_impl
+
+        return await fleet_lcm_sddc_lcm_info_impl(self, operator, target, params)
+
+    async def component_list(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.component.list`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_component_list_impl
+
+        return await fleet_lcm_component_list_impl(self, operator, target, params)
+
+    async def component_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.component.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_component_info_impl
+
+        return await fleet_lcm_component_info_impl(self, operator, target, params)
+
+    async def component_status(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.component.status`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_component_status_impl
+
+        return await fleet_lcm_component_status_impl(self, operator, target, params)
+
+    async def task_list(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.task.list`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_task_list_impl
+
+        return await fleet_lcm_task_list_impl(self, operator, target, params)
+
+    async def task_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.task.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_task_info_impl
+
+        return await fleet_lcm_task_info_impl(self, operator, target, params)
+
+    async def upgrade_plan_list(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.upgrade-plan.list`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_upgrade_plan_list_impl
+
+        return await fleet_lcm_upgrade_plan_list_impl(self, operator, target, params)
+
+    async def upgrade_plan_info(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.upgrade-plan.info`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import fleet_lcm_upgrade_plan_info_impl
+
+        return await fleet_lcm_upgrade_plan_info_impl(self, operator, target, params)
+
+    async def release_version_list(
+        self, operator: Operator, target: FleetLcmTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``fleet-lcm.release-version.list`` shim (#3047)."""
+        from meho_backplane.connectors.fleet_lcm.typed_reads import (
+            fleet_lcm_release_version_list_impl,
+        )
+
+        return await fleet_lcm_release_version_list_impl(self, operator, target, params)
 
     async def invalidate_credentials(self, target: FleetLcmTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).

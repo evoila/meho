@@ -811,6 +811,106 @@ async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() ->
 
 
 @pytest.mark.asyncio
+async def test_datastore_usage_identical_vm_sets_across_rows_trip_guard() -> None:
+    """Identical VM sets on every row = the upstream per-datastore filter was
+    ignored (whole-inventory list returned per row); the guard nulls
+    vm_count/vm_names and records why on every enriched row (#2975)."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+        {"datastore": "datastore-3", "name": "ds-3", "type": "vSAN"},
+    ]
+    # Every per-datastore VM leg returns the SAME whole-inventory list.
+    global_vms = [{"name": "vm-a"}, {"name": "vm-b"}, {"name": "vm-c"}]
+    sequence: list[Any] = [listing]
+    for _ in listing:
+        sequence.append({"capacity": 100, "free_space": 40})
+        sequence.append(global_vms)
+    conn = _RecordingConnector(sequence)
+
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    rows = out["datastores"]
+    assert len(rows) == 3
+    for row in rows:
+        # Core capacity data is preserved; only the wrong enrichment is dropped.
+        assert row["capacity"] == 100
+        assert row["free_space"] == 40
+        assert row["vm_count"] is None
+        assert row["vm_names"] is None
+        note = row["enrichment_note"]
+        assert "identical" in note
+        assert "3 enriched datastores" in note
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_distinct_vm_sets_across_rows_left_populated() -> None:
+    """Genuinely-distinct per-datastore VM sets are real placement data: the
+    identical-sets guard does not fire and the rows stay populated (#2975)."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+        {"datastore": "datastore-3", "name": "ds-3", "type": "vSAN"},
+    ]
+    vms_by_ds: dict[str, list[dict[str, Any]]] = {
+        "datastore-1": [{"name": "vm-a"}, {"name": "vm-b"}],
+        "datastore-2": [{"name": "vm-c"}],
+        "datastore-3": [{"name": "vm-d"}, {"name": "vm-e"}],
+    }
+    sequence: list[Any] = [listing]
+    for entry in listing:
+        sequence.append({"capacity": 100, "free_space": 40})
+        sequence.append(vms_by_ds[entry["datastore"]])
+    conn = _RecordingConnector(sequence)
+
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    rows = out["datastores"]
+    assert [r["vm_count"] for r in rows] == [2, 1, 2]
+    assert rows[0]["vm_names"] == ["vm-a", "vm-b"]
+    assert rows[1]["vm_names"] == ["vm-c"]
+    assert rows[2]["vm_names"] == ["vm-d", "vm-e"]
+    assert all("enrichment_note" not in r for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_all_empty_vm_sets_do_not_trip_guard() -> None:
+    """Every datastore legitimately having zero VMs is real data, not the
+    global-list symptom; the guard's non-empty check excludes it (#2975)."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+    ]
+    sequence: list[Any] = [listing]
+    for _ in listing:
+        sequence.append({"capacity": 100, "free_space": 40})
+        sequence.append([])  # no VMs on this datastore
+    conn = _RecordingConnector(sequence)
+
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    rows = out["datastores"]
+    assert [r["vm_count"] for r in rows] == [0, 0]
+    assert [r["vm_names"] for r in rows] == [[], []]
+    assert all("enrichment_note" not in r for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_datastore_usage_listing_error_propagates() -> None:
     """A load-bearing listing failure propagates; no per-DS calls fire."""
     conn = _RecordingConnector(

@@ -609,7 +609,13 @@ async def datastore_usage_composite(
         VM-placement enrichment errors, ``vm_count`` and ``vm_names``
         are ``None`` and the row carries an ``enrichment_note`` string
         describing the skipped enrichment; on success the row has no
-        ``enrichment_note`` key.
+        ``enrichment_note`` key. The same null + ``enrichment_note``
+        treatment is applied to every enriched row when the per-row VM
+        sets come back identical across all datastores -- the symptom of
+        an upstream per-datastore filter that was silently ignored and
+        returned the whole-inventory VM list on each row (#2975) -- so a
+        populated-but-wrong global list is never emitted as per-datastore
+        placement.
 
         ``vm_count`` is the exact VM total; ``vm_names`` is bounded to a
         sample of at most
@@ -635,6 +641,9 @@ async def datastore_usage_composite(
         )
 
     aggregated: list[dict[str, Any]] = []
+    # Each successfully-enriched row paired with the full (pre-cap) set of VM
+    # names on it, for the cross-row identical-sets guard after the loop (#2975).
+    enriched: list[tuple[dict[str, Any], frozenset[str]]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -707,7 +716,35 @@ async def datastore_usage_composite(
             # vm_count > len(vm_names) is the truncation signal.
             row["vm_count"] = len(vm_names)
             row["vm_names"] = vm_names[:DATASTORE_USAGE_MAX_VM_NAMES]
+            enriched.append((row, frozenset(vm_names)))
         aggregated.append(row)
+
+    # Cross-row identical-sets guard (#2975). A VM's working directory lives on
+    # exactly one datastore, so genuinely-distinct datastores never share a
+    # non-empty VM set. An identical non-empty set across *every* enriched row
+    # is therefore not real placement data -- it is the global-list symptom of
+    # an upstream per-datastore filter that was silently ignored, returning the
+    # whole-inventory VM list on every row. Emitting that populated-but-wrong
+    # answer is worse than emitting none, so treat it as failed enrichment:
+    # null vm_count/vm_names and record why, the same best-effort contract used
+    # for a transport error above (#1908). The all-empty case (every datastore
+    # legitimately has zero VMs) is excluded by the non-empty check.
+    if len(enriched) > 1:
+        vm_sets = [vm_set for _, vm_set in enriched]
+        shared = vm_sets[0]
+        if shared and all(vm_set == shared for vm_set in vm_sets[1:]):
+            note = (
+                "vm-placement enrichment discarded: the VM set was identical "
+                f"across all {len(enriched)} enriched datastores, so the "
+                "upstream per-datastore filter was not applied (the "
+                "whole-inventory VM list was returned on every row); "
+                "vm_count/vm_names are unreliable and have been nulled."
+            )
+            for row, _ in enriched:
+                row["vm_count"] = None
+                row["vm_names"] = None
+                row["enrichment_note"] = note
+
     return {"datastores": aggregated}
 
 

@@ -489,8 +489,8 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                         "minimum": 0,
                         "description": (
                             "Number of VMs placed on this datastore; ``null`` when "
-                            "the best-effort VM-placement enrichment was skipped "
-                            "because its sub-call errored (see ``enrichment_note``)."
+                            "the best-effort VM-placement enrichment was skipped or "
+                            "discarded (see ``enrichment_note``)."
                         ),
                     },
                     "vm_names": {
@@ -511,9 +511,12 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": (
                             "Present only when the VM-placement enrichment was "
-                            "skipped; records the failing sub-op, its status, and "
-                            "the underlying error (status code + URL where the "
-                            "sub-op carried them)."
+                            "skipped or discarded. For a failing sub-op it records "
+                            "the sub-op, its status, and the underlying error "
+                            "(status code + URL where the sub-op carried them); for "
+                            "the identical-sets guard it records that the VM set was "
+                            "identical across every datastore, so the upstream "
+                            "per-datastore filter was not applied (#2975)."
                         ),
                     },
                 },

@@ -391,6 +391,16 @@ _DATASTORE_DETAIL: dict[str, dict[str, Any]] = {
     "datastore-22": {"capacity": 5000, "free_space": 2500, "type": "NFS"},
 }
 
+#: Per-datastore ``GET /vcenter/vm`` placement bodies. Distinct per datastore
+#: (a VM's working directory lives on exactly one datastore), so the composite's
+#: cross-row identical-sets guard (#2975) sees real placement rather than the
+#: global-list symptom it discards -- a single VM shared across every datastore
+#: would trip that guard.
+_DATASTORE_VMS: dict[str, list[dict[str, str]]] = {
+    "datastore-11": [{"name": "vm-x"}],
+    "datastore-22": [{"name": "vm-y"}],
+}
+
 
 def _register_datastore_composite_routes(
     mock: respx.MockRouter, *, mount: str, reject_prefixed_filter: bool = False
@@ -413,6 +423,16 @@ def _register_datastore_composite_routes(
     mock.get(f"{mount}/vcenter/datastore").respond(200, json=_DATASTORE_LISTING)
     for ds_id, detail in _DATASTORE_DETAIL.items():
         mock.get(f"{mount}/vcenter/datastore/{ds_id}").respond(200, json=detail)
+
+    def _vms_for(request: httpx.Request) -> list[dict[str, str]]:
+        # Serve this datastore's own VMs, keyed off the placement filter the
+        # composite sends (bare ``datastores`` on /api, ``filter.datastores``
+        # on legacy /rest). Distinct per-datastore sets keep the cross-row
+        # identical-sets guard (#2975) from tripping on the fixture.
+        params = request.url.params
+        ds_id = params.get("datastores") or params.get("filter.datastores") or ""
+        return _DATASTORE_VMS.get(ds_id, [])
+
     if reject_prefixed_filter:
 
         def _vm_route(request: httpx.Request) -> httpx.Response:
@@ -420,13 +440,15 @@ def _register_datastore_composite_routes(
             # and 400s the legacy ``filter.``-prefixed form.
             if "filter." in request.url.query.decode():
                 return httpx.Response(400, json={"messages": ["unknown query parameter"]})
-            return httpx.Response(200, json=[{"name": "vm-x"}])
+            return httpx.Response(200, json=_vms_for(request))
 
         mock.get(f"{mount}/vcenter/vm").mock(side_effect=_vm_route)
     else:
-        # A single VM-placement stub serves every per-datastore query; the
-        # composite only counts names, so one VM per datastore is enough.
-        mock.get(f"{mount}/vcenter/vm").respond(200, json=[{"name": "vm-x"}])
+
+        def _vm_route_legacy(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_vms_for(request))
+
+        mock.get(f"{mount}/vcenter/vm").mock(side_effect=_vm_route_legacy)
 
 
 @pytest.mark.asyncio

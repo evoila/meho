@@ -851,6 +851,12 @@ def test_edit_form_for_own_user_scoped_renders_textarea() -> None:
     # The form is the swap target (id=memory-body) so the cancel/save
     # roundtrip swaps in place.
     assert 'id="memory-body"' in body
+    # #221: the edit form is migrated off dead daisyUI-v4 classes (removed
+    # in v5 — zero compiled rules — which collapsed the label-over-input
+    # column). The edit form renders as a standalone fragment, so a
+    # fragment-wide assertion is safe here.
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_edit_form_tenant_scoped_as_operator_returns_403() -> None:

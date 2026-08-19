@@ -29,16 +29,16 @@
   hx-disinherit="hx-disabled-elt"
   aria-label="Edit memory body"
 >
-  <label class="form-control">
-    <span class="label-text">Body (Markdown)</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Body (Markdown)</span>
     <textarea
       name="body"
-      class="textarea textarea-bordered min-h-[16rem] font-mono text-sm"
+      class="textarea textarea-bordered min-h-[16rem] w-full font-mono text-sm"
       required
       maxlength="{{ max_body_length }}"
       aria-label="Memory body in Markdown"
     >{{ entry.body_raw }}</textarea>
-    <div class="text-xs opacity-60 mt-1">
+    <div class="text-xs opacity-60">
       Up to {{ max_body_length }} characters. Tags + expiry are preserved across save.
     </div>
   </label>

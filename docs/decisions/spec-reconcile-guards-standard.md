@@ -438,6 +438,44 @@ committable spec _does_ exist — it just isn't ingestable.**
   Swagger-2.0→OA3 ingest path (#2090) that makes the surface
   operator-ingestable as a generic connector.
 
+### sddc-vcf5 — manifest-pin, Swagger-2.0-only (OA3 is VCF-9.0-net-new) (#3059)
+
+The `sddc-vcf5` (VCF 5.x SDDC Manager) connector is the **legacy dual-impl**
+of `product="sddc"` (initiative
+[#3056](https://github.com/evoila/meho/issues/3056), task #3059; the modern
+`sddc-rest` 9.x lane reconciles against the vendored OA3
+`vmware/vcf-api-specs` `sddc-manager-openapi.json`). Its lane
+(`backend/tests/test_connectors_sddc_vcf5_spec_reconcile.py`) is a
+**manifest pin only** — it sweeps the eight hand-coded op_ids
+unconditionally, no served-op-id compare. **Same shape as `vcfa-vra8`: a
+committable spec exists for the modern generation, but not for 5.x.**
+
+- **Excluded (8 op_ids: `POST:/v1/tokens` + `GET:/v1/{domains, clusters,
+  hosts, vcenters, nsxt-clusters, tasks, sddc-managers}`).** What was
+  checked: SDDC Manager 5.x publishes **only a Swagger 2.0** definition
+  (appliance-served at `/ui/assets/spec/external/swagger.json`,
+  non-conformant — missing `info.version`); **OpenAPI 3.x is a
+  VCF-9.0-net-new deliverable** — `vmware/vcf-api-specs` is tagged
+  `9.0.0.0` / `9.1.0.0` only (verified via the GitHub tags API), with **no
+  5.x branch, tag, or file**. MEHO's ingest parser is OA3-only (#2090), so
+  the 5.x surface is not operator-ingestable — hence the typed read core.
+  There is no pinnable 5.x artifact (the only 5.x spec lives on each
+  appliance, Swagger 2.0), so a served-op-id compare would have nothing to
+  reconcile against. **Residual risk, named** (the nsx lesson): this task
+  ran no live probe of a VCF 5.x appliance — live end-to-end verification
+  (incl. the 5.2 `ipAddress`→`fqdn` schema drift) is the deferred tail, the
+  same unit-tested-first posture `vcd` / `vcfa-vra8` shipped with.
+- **Strengthening (available, deferred):** SDDC Manager's `/v1/*` **path**
+  surface is stable since VCF 4.0, so these 5.x paths are the same shapes
+  the modern `sddc_manager` (9.x) connector reads. A served-set check could
+  arm the 5.x *paths* against the modern connector's already-vendored 9.x
+  OA3 (`sddc-manager-openapi.json`) — path existence is version-stable even
+  though the response *schemas* drift by point release. Deferred in favour
+  of the tested always-on manifest pin.
+- **Activation:** arming the shared `/v1/*` paths against the 9.x
+  `sddc-manager-openapi.json` served set, or Broadcom publishing a 5.x OA3
+  artifact (or MEHO gaining a Swagger-2.0→OA3 ingest path, #2090).
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

@@ -475,6 +475,13 @@ def test_list_60s_refresh_attribute_present() -> None:
     body = response.text
     assert 'hx-trigger="every 60s"' in body
     assert 'id="memory-cards"' in body
+    # #222: the bulk-action "extend duration" select is migrated off the
+    # stray dead daisyUI-v4 `form-control` wrapper. Scoped to the bulk
+    # control's markup window (the full page still includes index.html's
+    # tag filter, whose `form-control` migration lands in sibling #220).
+    assert 'name="extend_duration"' in body
+    _select_at = body.index('name="extend_duration"')
+    assert "form-control" not in body[_select_at - 200 : _select_at]
 
 
 def test_list_htmx_60s_refresh_returns_partial() -> None:

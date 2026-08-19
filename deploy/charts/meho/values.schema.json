@@ -180,6 +180,28 @@
               "description": "`severity` label attached to the alert."
             }
           }
+        },
+        "loopLiveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tuning for the `MehoBackgroundLoopStalled` alert (a lifespan background loop stopped stamping background_loop_last_tick_timestamp_seconds for longer than missedTicks x its background_loop_interval_seconds).",
+          "properties": {
+            "missedTicks": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Stall threshold as a multiple of each loop's tick interval: the alert trips when a loop has not completed a tick for missedTicks x its interval. Keep conservative; the sensor runner also has a faster in-process watchdog."
+            },
+            "for": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+              "description": "How long the staleness must persist before firing (Prometheus duration); an anti-flap debounce on top of the missedTicks threshold."
+            },
+            "severity": {
+              "type": "string",
+              "minLength": 1,
+              "description": "`severity` label attached to the alert."
+            }
+          }
         }
       }
     },

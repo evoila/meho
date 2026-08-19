@@ -501,3 +501,60 @@ def test_unmatched_routes_collapse_to_single_metric_label() -> None:
         assert (
             REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=literal) is None
         )
+
+
+# ---------------------------------------------------------------------------
+# background-loop liveness gauges (#2888)
+# ---------------------------------------------------------------------------
+
+
+def test_background_loop_last_tick_goes_stale_while_others_advance() -> None:
+    """A wedged loop's stamp stays behind while a healthy loop advances.
+
+    The load-bearing liveness property: a loop that stops ticking keeps its
+    old ``background_loop_last_tick_timestamp_seconds`` value while loops
+    that keep ticking move theirs forward, so ``time() - stamp`` crosses the
+    ``MehoBackgroundLoopStalled`` threshold for the stalled loop only. The
+    injectable clock (``now=``) makes the assertion deterministic — no
+    sleeps, no wall-clock flake.
+    """
+    from meho_backplane.metrics import note_loop_tick
+
+    # Test-only loop labels so the shared process registry cannot leak real
+    # loop series into (or out of) this test.
+    t0 = 1_000_000.0
+    note_loop_tick("test_loop_stalled", 10.0, now=t0)
+    note_loop_tick("test_loop_healthy", 10.0, now=t0)
+
+    # The healthy loop keeps ticking; the stalled one wedges after t0.
+    note_loop_tick("test_loop_healthy", 10.0, now=t0 + 30.0)
+
+    stalled = REGISTRY.get_sample_value(
+        "background_loop_last_tick_timestamp_seconds", labels={"loop": "test_loop_stalled"}
+    )
+    healthy = REGISTRY.get_sample_value(
+        "background_loop_last_tick_timestamp_seconds", labels={"loop": "test_loop_healthy"}
+    )
+    assert stalled == pytest.approx(t0)
+    assert healthy == pytest.approx(t0 + 30.0)
+    # The healthy stamp is 30 s ahead, so the stalled loop's staleness
+    # (``time() - stamp``) is strictly larger — exactly what the alert trips
+    # on while the healthy loop stays clear of the threshold.
+    assert healthy - stalled == pytest.approx(30.0)
+
+
+def test_note_loop_tick_publishes_interval_for_the_alert_threshold() -> None:
+    """``note_loop_tick`` re-publishes the loop's interval on every tick.
+
+    ``MehoBackgroundLoopStalled`` thresholds staleness at
+    ``N x background_loop_interval_seconds{loop}``, so the interval gauge
+    must carry each loop's current cadence for the per-loop threshold to
+    mean anything.
+    """
+    from meho_backplane.metrics import note_loop_tick
+
+    note_loop_tick("test_loop_interval", 42.0, now=1_000_000.0)
+
+    assert REGISTRY.get_sample_value(
+        "background_loop_interval_seconds", labels={"loop": "test_loop_interval"}
+    ) == pytest.approx(42.0)

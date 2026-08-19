@@ -5,7 +5,7 @@
 
 Initiative #2884 ships the first Prometheus Operator resources in the
 chart: an optional ``ServiceMonitor`` that scrapes the backplane
-``/metrics`` endpoint and an optional starter ``PrometheusRule`` with two
+``/metrics`` endpoint and an optional starter ``PrometheusRule`` with three
 alerts. Both are **disabled by default** — a default install carries
 neither, so a cluster without the Prometheus Operator CRDs
 (``monitoring.coreos.com/v1``) is unaffected — and each is gated on its
@@ -19,10 +19,11 @@ These tests pin:
   ``/metrics``, same-namespace discovery);
 * the discovery-``labels`` merge both resources need so a Prometheus
   ``serviceMonitorSelector`` / ``ruleSelector`` actually picks them up;
-* the starter-alert contract (both alert names, the release-scoped
+* the starter-alert contract (the alert names, the release-scoped
   ``absent(up)`` scrape alert, the ``broadcast_publish_errors_total``
-  rate alert, the by-concern group split #2888 extends, and the tunable
-  ``for`` / ``severity`` knobs).
+  rate alert, the #2888 background-loop liveness alert in its own
+  ``meho.loops`` group, the by-concern group split, and the tunable
+  ``for`` / ``severity`` / ``missedTicks`` knobs).
 
 The authoritative chart gate is ``.github/workflows/chart.yml`` (lint +
 ``helm template`` + kubeconform + these render assertions). This test
@@ -209,6 +210,52 @@ def test_alert_for_and_severity_are_tunable() -> None:
     alerts = _alerts(pr)
     assert alerts["MehoMetricsScrapeAbsent"]["labels"]["severity"] == "warning"
     assert alerts["MehoBroadcastPublishErrors"]["for"] == "30m"
+
+
+def test_prometheus_rule_renders_loop_liveness_alert() -> None:
+    """The #2888 background-loop liveness alert lands as a NEW group.
+
+    ``meho.loops`` is added alongside ``meho.scrape`` / ``meho.broadcast``,
+    not by editing an existing group. The alert thresholds each loop's
+    staleness against its own published interval gauge (``N x interval``),
+    so the expr references both ``background_loop_last_tick_timestamp_seconds``
+    and ``background_loop_interval_seconds``, and the Prometheus
+    ``$labels.loop`` templating survives Helm rendering (so Alertmanager
+    gets the loop name, not a Helm parse error).
+    """
+    pr = _render_show_only("templates/prometheusrule.yaml", "--set", "prometheusRule.enabled=true")
+    group_names = {g["name"] for g in pr["spec"]["groups"]}
+    # New group, existing groups untouched.
+    assert "meho.loops" in group_names
+    assert {"meho.scrape", "meho.broadcast"} <= group_names
+
+    alert = _alerts(pr)["MehoBackgroundLoopStalled"]
+    expr = alert["expr"]
+    assert "background_loop_last_tick_timestamp_seconds" in expr
+    assert "background_loop_interval_seconds" in expr
+    # Per-loop threshold = default missedTicks (10) x each loop's interval.
+    assert "(10 * background_loop_interval_seconds)" in expr
+    # Backtick-escaped Prometheus templating renders through Helm intact.
+    assert "{{ $labels.loop }}" in alert["annotations"]["summary"]
+
+
+def test_loop_liveness_alert_knobs_are_tunable() -> None:
+    """``missedTicks`` / ``for`` / ``severity`` on loopLiveness flow through."""
+    pr = _render_show_only(
+        "templates/prometheusrule.yaml",
+        "--set",
+        "prometheusRule.enabled=true",
+        "--set",
+        "prometheusRule.loopLiveness.missedTicks=3",
+        "--set",
+        "prometheusRule.loopLiveness.for=1m",
+        "--set",
+        "prometheusRule.loopLiveness.severity=critical",
+    )
+    alert = _alerts(pr)["MehoBackgroundLoopStalled"]
+    assert "(3 * background_loop_interval_seconds)" in alert["expr"]
+    assert alert["for"] == "1m"
+    assert alert["labels"]["severity"] == "critical"
 
 
 def test_service_monitor_and_prometheus_rule_are_independent() -> None:

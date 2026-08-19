@@ -383,7 +383,7 @@ Operator resources close that gap (Initiative #2884, #2885):
   The broadcast subchart's Service carries a different
   `app.kubernetes.io/name`, so it is not matched.
 - `prometheusRule` (`prometheusRule.enabled`, default `false`) renders a
-  starter `PrometheusRule` with two conservative alerts:
+  starter `PrometheusRule` with three conservative alerts:
   - `MehoMetricsScrapeAbsent` — `absent(up{job=<fullname>, namespace=<ns>})`;
     fires when Prometheus has **no** target series for this release at
     all (the ServiceMonitor was never picked up, the selector drifted, or
@@ -393,11 +393,26 @@ Operator resources close that gap (Initiative #2884, #2885):
     the fail-open broadcast publisher swallows dropped events by design
     (`broadcast/publisher.py`), so a sustained nonzero rate is the only
     signal that the activity feed is silently losing events.
+  - `MehoBackgroundLoopStalled` (#2888) —
+    `(time() - background_loop_last_tick_timestamp_seconds) > (N * background_loop_interval_seconds)`;
+    every one of the 13 lifespan background loops stamps
+    `background_loop_last_tick_timestamp_seconds{loop}` on each completed
+    tick (via `metrics.note_loop_tick`, called at the end of every loop
+    body incl. no-op/heartbeat ticks) and re-publishes its cadence as
+    `background_loop_interval_seconds{loop}`. That companion gauge lets one
+    rule threshold each loop at `N x its own interval`
+    (`N = prometheusRule.loopLiveness.missedTicks`) — matched element-wise
+    on the `loop` label — without the chart enumerating loop names or baking
+    in intervals that would drift from settings. A wedged or dead loop stops
+    advancing its stamp while healthy loops move on; the stamp is
+    per-process (scraped per-pod), so a single stalled replica fires without
+    healthy siblings masking it. Complements — does not replace — the
+    sensor-runner watchdog's faster in-process broadcast stall detection
+    (`checks/watchdog.py`), which is unchanged.
 
   The rules are split into groups **by concern** (`meho.scrape`,
-  `meho.broadcast`) so follow-up tasks extend them cleanly — the
-  background-loop liveness alert (#2888) lands as a new `meho.loops`
-  group, not an edit to an existing group.
+  `meho.broadcast`, `meho.loops`) so follow-up tasks extend them cleanly —
+  a new alert lands as a new group, not an edit to an existing group.
 
 Both resources require the Prometheus Operator CRDs
 (`monitoring.coreos.com/v1`) to be installed in the cluster; a default
@@ -410,7 +425,9 @@ install that selector defaults to `release: <prometheus-release>`, so
 `release: kube-prometheus-stack` (or the site's equivalent) or the scrape
 config / rules are silently never generated. The alert `for` durations
 and `severity` labels are operator-tunable under
-`prometheusRule.scrapeAbsent` / `prometheusRule.broadcastPublishErrors`.
+`prometheusRule.scrapeAbsent` / `prometheusRule.broadcastPublishErrors` /
+`prometheusRule.loopLiveness` — the last also exposes `missedTicks`, the
+per-loop staleness multiplier `N`.
 
 Render assertions live in `backend/tests/test_chart_observability_scrape.py`
 (unit layer, skips where `helm` is absent) and in the `chart.yml`

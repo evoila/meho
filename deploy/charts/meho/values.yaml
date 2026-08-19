@@ -209,6 +209,25 @@ prometheusRule:
     for: 15m
     # -- `severity` label attached to the alert.
     severity: warning
+  # `MehoBackgroundLoopStalled`: fires when a lifespan background loop stops
+  # stamping `background_loop_last_tick_timestamp_seconds{loop}` for longer
+  # than `missedTicks` x that loop's own tick interval (published as
+  # `background_loop_interval_seconds{loop}`). One rule covers every loop —
+  # from the 10s sensor runner to the weekly retention sweepers — because the
+  # threshold is relative to each loop's published cadence. Per process, so a
+  # single wedged replica surfaces without healthy siblings masking it.
+  loopLiveness:
+    # -- Stall threshold as a multiple of each loop's tick interval: the alert
+    # trips when a loop has not completed a tick for `missedTicks` x its
+    # interval. This is the fleet-wide backstop for every loop; the sensor
+    # runner additionally has a faster in-process watchdog (broadcast plane),
+    # so keep this conservative to avoid duplicate noise.
+    missedTicks: 10
+    # -- How long the staleness must persist before firing (Prometheus
+    # duration) — an anti-flap debounce on top of the `missedTicks` threshold.
+    for: 5m
+    # -- `severity` label attached to the alert.
+    severity: warning
 
 ingress:
   enabled: true

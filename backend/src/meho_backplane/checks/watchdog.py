@@ -108,6 +108,7 @@ from meho_backplane.checks.broadcast import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorStatus
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -393,6 +394,9 @@ async def _watchdog_loop() -> None:
             raise
         except Exception:
             _log().warning("checks_watchdog_check_failed", exc_info=True)
+        # Liveness gauge for the watchdog loop itself — complements, does not
+        # replace, its broadcast-plane stall detection for the runner.
+        note_loop_tick("sensor_watchdog", get_settings().sensor_runner_tick_interval_seconds)
 
 
 def start_checks_watchdog() -> asyncio.Task[None]:

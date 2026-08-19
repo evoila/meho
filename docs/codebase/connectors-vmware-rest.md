@@ -145,8 +145,11 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `CloneSpec.guest_customization_spec` (consumed by the Task-D clone op) —
   reference. The body builders map the agent subset onto the vCenter
   `CreateSpec {name, description, spec:CustomizationSpec}` /
-  `SetSpec {name}`, wrapped in the operation's `spec` parameter per the
-  connector's REST convention.
+  `SetSpec {name}`, sent at the **top level** of the `/api` request body
+  (#2973). The `CreateSpec`'s own `spec` field (the `CustomizationSpec`) is
+  a legitimate top-level property here — not a `/rest`-style envelope, which
+  the modern `/api` surface rejects (see the request-body envelope note
+  under Control flow).
 
   **GOSC secret hygiene (`#1503`) — the load-bearing property.** A
   customization spec can carry Windows admin passwords, sysprep product
@@ -507,6 +510,69 @@ sub-ops resolve to registrar-guaranteed `source_kind='composite'` rows,
 not ingested primitives, and the invariant skips `*.composite.*` sub-ops
 for that reason.
 
+### Request-body envelope: top-level `*Spec`, not `{"spec": {...}}` (#2973)
+
+The write composites build their `/api` request bodies as the vSphere
+Automation `*Spec` **at the top level** of the JSON body —
+`{"placement": {…}}` for relocate, `{"count": …, "cores_per_socket": …}`
+for the CPU PATCH, and so on. `_split_sub_op` substitutes the
+`{vm}` / `{nic}` / `{cdrom}` path variables into the URL and posts every
+remaining key verbatim as the body, so a handler passes the `*Spec` fields
+alongside the path vars (e.g. `{"vm": vm_moid, "placement": {"host": …}}`).
+
+This is a behavioural contract of the modern `/api` surface, not a style
+choice. The legacy `/rest` surface wrapped each operation's structured
+input under a `{"spec": {...}}` envelope; the `/api` surface flattened it
+and **rejects the envelope** with `400 INVALID_ARGUMENT`
+(`vapi.invoke.invalid.input`). `vmware.composite.vm.migrate`'s first
+real-world dispatch hit exactly this (#2973) — the relocate body still
+carried the `/rest` `{"spec": {"placement": …}}` shape — which also wedged
+`host.evacuate` (it recurses into `vm.migrate` per VM). The same divergent
+envelope was swept off `vm.create`, the NIC create/repoint bodies, the
+CPU / memory / CD-ROM PATCH bodies, and the two guest-customization bodies
+(`guest.customization_spec.create` / `vm.customize`). The pinned
+`vcenter.yaml` declares each of these request bodies as the `*Spec`
+directly (`VM.RelocateSpec` / `VM.CreateSpec` / `Cpu.UpdateSpec` / …), with
+no `spec` property.
+
+Two `spec` shapes are **kept** and must not be confused with the legacy
+envelope:
+
+- The **vmomi (VI-JSON) write bodies** (`ReconfigVM_Task`, `CloneVM_Task`,
+  `ReconfigureDvs_Task`, `ReconfigureComputeResource_Task`) dispatch through
+  `_write_vmomi_sub_op` onto the `/sdk/vim25` mount, where the vim request
+  types genuinely take a `spec` parameter — a real field, not the `/rest`
+  envelope.
+- The **GOSC `CreateSpec`'s own `spec` field** (the inline
+  `CustomizationSpec`): the flattened create body is
+  `{name, description, spec: <CustomizationSpec>}` at the top level, so the
+  only `spec` key is the legitimate `CreateSpec.spec` property, not an outer
+  wrapper.
+
+A body-shape reconcile lane
+(`tests/test_connectors_vmware_rest_composites_write_body_reconcile.py`)
+grounds the flat-body contract against the pinned spec: for every REST write
+sub-op the pinned `vcenter.yaml` serves with a body, the `requestBody` must
+be a flat `*Spec`, never a single-`spec` wrapper. It follows the
+spec-reconcile standard (skips without the shelf, runs where it is wired).
+The byte-for-byte connector-side proof — that the composites emit the flat
+bodies with no envelope — lives in
+`tests/test_connectors_vmware_rest_composites_write.py`, which runs
+everywhere. The path-only reconcile lanes assert *which* endpoints exist;
+this pair asserts *what shape* their bodies take.
+
+**Not-yet-swept (adjacent findings).** The same envelope still rides three
+non-VM write bodies that the pinned spec likewise declares flat, left for a
+follow-up because each carries a wrinkle beyond the mechanical flatten:
+`vm.clone`'s library-item deploy (`DeploySpec`), the content-library `find`
+reads (`FindSpec`, a distinct `_post_json` helper, not `_write_sub_op`), and
+`cluster.patch`'s vLCM software apply (`ApplySpec` — an all-optional spec
+whose empty body raises the `json=body or None` "send `{}` vs no body"
+question). Separately, the create/memory bodies still use vSphere's
+documented mixed-case field names (`guest_OS`, `size_MiB`) while the pinned
+spec keys them lowercase (`guest_os`, `size_mib`); that field-casing gap is
+independent of the envelope and untouched here.
+
 ### Write-composite partial-failure conventions
 
 Write composites return a structured `{"status": ...}` envelope so
@@ -579,9 +645,11 @@ a host-pinning ISO:
 All three register a live-read **from->to** preview builder in
 `_write_preview.py`, so the parked approval row names the current state
 alongside the requested change (the delta is the decision the four-eyes
-reviewer signs off). Update PATCH bodies are wrapped in the
-`{"spec": {...}}` envelope the connector's `_write_sub_op` authors,
-matching the other write composites.
+reviewer signs off). Update PATCH bodies send the `*Spec`'s fields at the
+**top level** of the request body — the modern `/api` surface takes the
+`Cpu.UpdateSpec` / `Ethernet.UpdateSpec` / `Cdrom.UpdateSpec` directly, not
+the legacy `/rest` `{"spec": {...}}` envelope (#2973; see the request-body
+envelope note under Control flow).
 
 **Portgroup resolution — the #1602 lesson.** There is no dedicated
 `distributed-portgroup` list resource in the REST Automation API;

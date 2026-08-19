@@ -46,7 +46,10 @@ from meho_backplane.settings import get_settings
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000024a4")
 _CONNECTOR_ID = "vmware-rest-9.0"
 _SUB_OP_ID = "POST:/vcenter/vm"
-_SUB_PARAMS = {"spec": {"name": "vm-under-test", "guest_OS": "OTHER"}}
+# Flat VM.CreateSpec params, as the write composite now passes them to the gate
+# (top-level /api body shape, #2973) -- the gate records these verbatim onto the
+# ApprovalRequest, so the sample mirrors a real dispatch.
+_SUB_PARAMS = {"name": "vm-under-test", "guest_OS": "OTHER"}
 
 
 @pytest.fixture(autouse=True)

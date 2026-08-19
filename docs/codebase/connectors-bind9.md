@@ -54,8 +54,10 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
 - **`ops_record.py`** -- T2 record-read + T3 record-write op module.
   Pure parser (`parse_dig_answer`), read handler (`bind9_record_get`),
   T3 (#589) write handlers (`bind9_record_add`, `bind9_record_remove`)
-  with longest-suffix zone resolution + pure dnspython zonefile
-  transforms, and the `RECORD_OPS` registration table.
+  with split-horizon-aware zone resolution (`resolve_zone_target`, an
+  optional `view` param disambiguating multi-view zones -- #2897) +
+  pure dnspython zonefile transforms + view-aware verify predicate
+  builders, and the `RECORD_OPS` registration table.
 - **`_atomic.py`** -- T3 (#589) atomic-apply primitive. One async
   `atomic_apply()` helper that runs the seven-step bash pipeline
   (snapshot, capture state_before, stage, validate, rndc reload,
@@ -194,8 +196,8 @@ reason.
 | `bind9.zone.list` | `Bind9Connector.bind9_zone_list` | `safe` | Parse `named-checkconf -p` into zone rows: `{name, file, type, view}` per declared zone (`view` is the enclosing `view "<name>"` block, or `null` outside any view — disambiguates split-horizon) |
 | `bind9.zone.read` | `Bind9Connector.bind9_zone_read` | `safe` | Resolve zonefile via `named-checkconf -p`, read + parse via dnspython; row per rrset member `{name, ttl, class, type, rdata}` |
 | `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
-| `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; verify predicate = `dig` returns the new IP |
-| `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; verify predicate = `dig` no longer resolves the FQDN |
+| `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; optional `view` disambiguates split-horizon zones (#2897); verify predicate = `dig` returns the new IP, or `rndc zonestatus` serial-match when a `view` is given |
+| `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
 | `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
@@ -256,23 +258,66 @@ POV; the bash body is generated entirely by `_atomic.py` (no
 caller-supplied substring lands in shell), so the safe-sudo
 helper's invariants extend uninjured.
 
-### Zone resolution when `--zone` is omitted
+### Zone resolution + split-horizon views (#2897)
 
-`bind9.record.add` / `bind9.record.remove` accept an optional
-`zone` parameter. When omitted, the handler resolves the owning
-zone from `named-checkconf -p` (T2's zone parser) by longest-suffix
-match against the FQDN:
+`bind9.record.add` / `bind9.record.remove` accept optional `zone` and
+`view` parameters. The pure `resolve_zone_target(rows, fqdn,
+explicit_zone, explicit_view)` (in `ops_record.py`) walks the
+`{name, file, type, view}` rows T2's `parse_named_checkconf_zones`
+emits and returns `(zone_name, zonefile_path, view)`:
 
-* The FQDN's label sequence must end with the zone's label sequence
-  -- label boundaries are atomic, so `api.evba.lab` matches
-  `evba.lab` but not `ba.lab`.
-* The root zone (`.`) is excluded from candidates.
-* On a tie at the longest suffix, raises `ZoneResolutionError(reason="ambiguous", candidates=[...])`.
-* On no match, raises `ZoneResolutionError(reason="unresolvable", fqdn=...)`.
+* **Zone name** -- `explicit_zone` when given, else longest-suffix match
+  (`resolve_zone_for_fqdn`) over the **distinct** zone names. The FQDN's
+  label sequence must end with the zone's (`api.evba.lab` matches
+  `evba.lab`, not `ba.lab`); the root zone (`.`) is excluded.
+* **View** -- the candidate rows are the zone's rows that carry a `file`
+  directive:
+  * `view` given -> restrict to that view; no match raises
+    `ZoneResolutionError(reason="view_not_found", candidates=[views])`.
+  * `view` omitted and the zone lives in one view (or none) -> that row;
+    the returned `view` is the enclosing view name, or `None` outside
+    any view.
+  * `view` omitted and the zone lives in **>1 view** -> raises
+    `ZoneResolutionError(reason="ambiguous_view", candidates=[views])`.
+    This is the #2897 fix: pre-#2897 the flat zone-name list made the
+    same zone tie with itself and report the opaque `ambiguous`; now the
+    error names the views and tells the caller to pass `view`.
+* No suffix match / no writable `file` -> `reason="unresolvable"`.
 
-Both errors raise **before** any staging, so the dispatcher's
-`invalid_params` envelope reports the rejection with zero side
-effects on the remote tree.
+`ZoneResolutionError` renders a human-actionable `str(exc)` (not the
+bare reason code) so the surfaced `exception_message` says what to do.
+All flavours raise **before** any staging, so the dispatcher's
+`invalid_params` envelope reports the rejection with zero side effects
+on the remote tree.
+
+### View-aware verify (#2897)
+
+The atomic-apply verify command is built by the handler (§ primitive
+step 6). `dig @localhost` is **view-blind**: on a split-horizon server
+it is answered by whichever `view` matches the loopback source address,
+which need not be the view whose zonefile we staged -- so a targeted
+write into a non-loopback view failed verify and rolled back even though
+the edit was correct. The handler therefore switches predicate on
+whether the caller passed `view`:
+
+* **`view` given** (`_zonestatus_serial_verify`) -- polls
+  `rndc zonestatus <zone> IN <view>` and asserts the served serial
+  equals the staged (SOA-bumped) serial. This names the view explicitly,
+  so it confirms named loaded our revision into *that* view;
+  `named-checkzone` (validate step) already proved the record is in the
+  file.
+* **`view` omitted** (`_dig_add_verify` / `_dig_remove_verify`) -- the
+  record-level `dig @localhost` check, unchanged for no-views /
+  single-view targets.
+
+Both predicates **echo their observed state on failure** so the
+`AtomicApplyError` detail is diagnosable -- the pre-#2897 silent
+`grep -q` / `[ -z … ]` predicates surfaced an empty `exception_message`.
+
+The commit-path reload is a whole-server `rndc reload`, which reloads
+every view from disk and is unchanged by #2897 (a full reload was the
+consumer's working workaround); the multi-view fix is in resolution and
+verify, not the reload.
 
 ### Audit integration
 

@@ -355,8 +355,10 @@ async def installer_sddc_bringup_composite(
 
     # 2. DEPLOY — the single mutation, through the sub-op policy gate. The
     #    top-level composite is the approval gate (requires_approval=True on the
-    #    op); the sub-op passes requires_approval=False so an approved+resumed
-    #    dispatch isn't double-gated.
+    #    op); the sub-op passes requires_approval=False so the approved+resumed
+    #    dispatch AUTO_EXECUTEs for the non-agent operator/automation caller. (An
+    #    agent principal still hits the dangerous safety-ceiling here — see the
+    #    module docstring's "Approval gate"; agent bring-up is unsupported today.)
     gate = await enforce_subop_policy(
         operator=operator,
         connector_id=_connector_id(connector),

@@ -45,10 +45,10 @@ v0.5.next ships policy + approval flow.
 
 | Group | CLI verb | `op_id` | Path |
 | --- | --- | --- | --- |
-| fleet-about | `meho vcf-fleet about` | `GET:/lcm/lcops/api/v2/about` | vRSLCM appliance identity (HTTP 500 in 9.0 — see below) |
+| fleet-about | `meho vcf-fleet about` | `fleet.about` | vRSLCM appliance identity (HTTP 500 in 9.0 — see below) |
 | fleet-datacenter | `meho vcf-fleet datacenter list` | `GET:/lcm/lcops/api/v2/datacenters` | Datacenter inventory + wrapper-verified probe |
 | fleet-vcenter | `meho vcf-fleet vcenter list <vmid>` | `GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters` | vCenters registered under one datacenter |
-| fleet-environment | `meho vcf-fleet environment list` | `GET:/lcm/lcops/api/v2/environments` | Environment inventory (primary Fleet entry point) |
+| fleet-environment | `meho vcf-fleet environment list` | `fleet.environment.list` | Environment inventory (primary Fleet entry point) |
 | fleet-environment | `meho vcf-fleet environment info <id>` | `GET:/lcm/lcops/api/v2/environments/{environmentId}` | Per-environment detail (products + nodes) |
 | fleet-product | `meho vcf-fleet product list <env-id>` | `GET:/lcm/lcops/api/v2/environments/{environmentId}/products` | Products deployed under one environment |
 | fleet-request | `meho vcf-fleet request list` | `GET:/lcm/request/api/v2/requests` | Lifecycle request listing (deploy / patch / upgrade) |
@@ -81,7 +81,8 @@ Workarounds the connector implements:
   any working endpoint in 9.0. The fingerprint carries the LCM API version
   (e.g. `"8.0"`) under `extras.lcm_api_version`. Operators needing the
   product version cross-source from SDDC Manager (`meho sddc-manager
-  operation call GET:/v1/vcf-services`).
+  operation call sddc.vcf_service.list` — the typed read over
+  `/v1/vcf-services`).
 
 Track the upstream fix at [Broadcom developer portal](https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager/latest/);
 when the endpoint is restored, the `meho vcf-fleet about` verb starts working
@@ -208,7 +209,11 @@ meho vcf-fleet operation search "list environments"
 
 ### `meho vcf-fleet about`
 
-Dispatches `GET:/lcm/lcops/api/v2/about` against `connector_id="fleet-rest-9.0"`.
+Dispatches `fleet.about` (the typed read; repointed off the ingested
+`GET:/lcm/lcops/api/v2/about` op_id by #2355 — the legacy op_id no
+longer resolves on a zero-catalog boot; the typed op reads the same
+upstream `/lcm/lcops/api/v2/about` surface) against
+`connector_id="fleet-rest-9.0"`.
 **Warning**: returns HTTP 500 in current VCF 9.0 builds — use
 `vcf-fleet datacenter list` as the reachability probe instead. Kept for spec
 parity + future Broadcom fix. When working, renders `apiVersion`,
@@ -238,7 +243,9 @@ identifier for cross-referencing against vSphere targets.
 
 ### `meho vcf-fleet environment list`
 
-Dispatches `GET:/lcm/lcops/api/v2/environments`. The primary Fleet inventory
+Dispatches `fleet.environment.list` (the typed read; repointed off the
+ingested `GET:/lcm/lcops/api/v2/environments` op_id by #2355 — the
+legacy op_id no longer resolves on a zero-catalog boot). The primary Fleet inventory
 entry point — every vRA / vROps / vRLI / vIDM deploy lives under an
 environment. Large appliances return a JSONFlux handle through the shared
 `HandleStore`; use `result_describe` / `result_query` to filter when the
@@ -281,7 +288,7 @@ aliases.
 
 ```bash
 meho vcf-fleet operation search "upgrade workflow" --group fleet-request
-meho vcf-fleet operation call GET:/lcm/lcops/api/v2/environments --target rdc-fleet
+meho vcf-fleet operation call GET:/lcm/request/api/v2/requests --target rdc-fleet
 meho vcf-fleet operation call GET:/lcm/request/api/v2/requests/{requestId} \
   --target rdc-fleet --params '{"requestId":"req-vmid-001"}'
 ```
@@ -443,7 +450,7 @@ the canary-fixture vs recorded-fixture distinction.
 | --- | --- | --- |
 | `no backplane URL configured` (exit 2) | Never logged in / no `--backplane`. | `meho login <url>` or pass `--backplane <url>`. |
 | `auth_expired` / stored token rejected | Keycloak token expired. | `meho login <url>` again. |
-| `status=error connector_error: HTTP 500` on `vcf-fleet about` | VCF 9.0 known issue — Fleet's `/about` endpoint is broken in current builds. | Use `vcf-fleet datacenter list` as the reachability probe; cross-source product version from SDDC Manager `/v1/vcf-services`. |
+| `status=error connector_error: HTTP 500` on `vcf-fleet about` | VCF 9.0 known issue — Fleet's `/about` endpoint is broken in current builds. | Use `vcf-fleet datacenter list` as the reachability probe; cross-source product version from SDDC Manager (`sddc.vcf_service.list`). |
 | `status=error connector_error: … HTTP 401` | Fleet credentials invalid. HTTP Basic 401 is terminal — no re-login path. | Verify the Vault secret at `target.secret_ref`; confirm `admin@local` (or the configured local user) is enabled in the LCM user store; confirm the password hasn't been rotated. |
 | `status=error … unknown_op` | The 8 core ops are not registered/enabled. | Re-run `apply_fleet_core_curation` against the Fleet connector. |
 | `status=denied` | `read_only` role, or a tenant policy denied the dispatch. | Use an `operator`-role token. |

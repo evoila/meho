@@ -7,9 +7,9 @@ Importing this package registers :class:`HarborConnector` against the
 v2 connector registry under
 ``(product="harbor", version="2.x", impl_id="harbor-rest")``, and
 queues the typed-op upserts (the 9-op read core, the two robot
-lifecycle writes, and the standalone artifact CVE-detail read) onto the
-lifespan-driven registrar list so ``endpoint_descriptor`` rows land
-before the first dispatch.
+lifecycle writes, the standalone artifact CVE-detail read, and the two
+wave-2 storage-quota reads) onto the lifespan-driven registrar list so
+``endpoint_descriptor`` rows land before the first dispatch.
 
 Registration is split between two phases (mirroring the Vault precedent
 in :mod:`meho_backplane.connectors.vault`):
@@ -23,10 +23,14 @@ in :mod:`meho_backplane.connectors.vault`):
   :func:`~meho_backplane.connectors.harbor.typed_ops.register_harbor_typed_operations`
   (the audited read core),
   :func:`~meho_backplane.connectors.harbor.ops.register_harbor_robot_operations`
-  (the robot create/delete writes), and
+  (the robot create/delete writes),
   :func:`~meho_backplane.connectors.harbor.ops.register_harbor_artifact_operations`
   (the standalone ``harbor.artifact.vulnerabilities`` CVE-detail read,
-  #2857), upserting the ``endpoint_descriptor`` rows for each.
+  #2857), and
+  :func:`~meho_backplane.connectors.harbor.ops.register_harbor_project_quota_operations`
+  (the wave-2 storage-quota reads ``harbor.project.summary`` /
+  ``harbor.quota.list``, #2858), upserting the ``endpoint_descriptor``
+  rows for each.
 
 Both surfaces are **typed** (``source_kind="typed"``): they dispatch on
 a fresh boot with zero catalog ingest. The read core was converted from
@@ -49,6 +53,7 @@ from typing import Final
 from meho_backplane.connectors.harbor.connector import HarborConnector
 from meho_backplane.connectors.harbor.ops import (
     register_harbor_artifact_operations,
+    register_harbor_project_quota_operations,
     register_harbor_robot_operations,
 )
 from meho_backplane.connectors.harbor.session import (
@@ -112,6 +117,13 @@ register_typed_op_registrar(register_harbor_robot_operations)
 # scan_overview is reachable independent of the read-core ingest state.
 register_typed_op_registrar(register_harbor_artifact_operations)
 
+# Queue the wave-2 standalone storage-quota reads (harbor.project.summary,
+# harbor.quota.list, #2858). Typed reads that dispatch with zero catalog
+# ingest — the same shape as the robot ops above — so per-project and
+# fleet-wide storage-quota occupancy is reachable independent of the
+# deferred read-core ingest state.
+register_typed_op_registrar(register_harbor_project_quota_operations)
+
 __all__ = [
     "HARBOR_CONNECTOR_ID",
     "HARBOR_IMPL_ID",
@@ -126,6 +138,7 @@ __all__ = [
     "SessionCredentials",
     "load_credentials_from_vault",
     "register_harbor_artifact_operations",
+    "register_harbor_project_quota_operations",
     "register_harbor_robot_operations",
     "register_harbor_typed_operations",
 ]

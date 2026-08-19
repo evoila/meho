@@ -125,8 +125,23 @@ async def test_dispatch_smoke_nsx_core_op_returns_ok(
 #: acceptance surface. Unlike the ingested :data:`SMOKE_OP_IDS` above (seeded
 #: by the fixture), these need the typed registrar run in-test to persist
 #: their descriptor rows. ``nsx.segment.list`` (#2835) hits the same
-#: ``/policy/api/v1/infra/segments`` wire route the fixture already mocks.
-TYPED_SMOKE_OP_IDS: tuple[str, ...] = ("nsx.segment.list",)
+#: ``/policy/api/v1/infra/segments`` wire route the fixture already mocks;
+#: ``nsx.transport_node.list`` (#2836) hits the same
+#: ``/api/v1/transport-nodes`` wire route the fixture already mocks;
+#: ``nsx.transport_node.state`` (#2836) hits the per-node ``/state``
+#: sub-resource the fixture mocks for ``transport-node-0``.
+TYPED_SMOKE_OP_IDS: tuple[str, ...] = (
+    "nsx.segment.list",
+    "nsx.transport_node.list",
+    "nsx.transport_node.state",
+)
+
+#: Per-typed-op params. ``nsx.transport_node.state`` needs a transport-node
+#: ``id`` -- ``transport-node-0`` is the node the fixture's ``/state`` route
+#: is registered for; list ops take no params.
+TYPED_SMOKE_PARAMS: dict[str, dict[str, object]] = {
+    "nsx.transport_node.state": {"id": "transport-node-0"},
+}
 
 
 @pytest.mark.parametrize("op_id", TYPED_SMOKE_OP_IDS, ids=lambda op: op)
@@ -137,7 +152,8 @@ async def test_dispatch_smoke_nsx_typed_op_returns_ok(
 ) -> None:
     """Each NSX typed read dispatches over respx and returns ``status='ok'``.
 
-    ``nsx.segment.list`` (#2835) is a ``source_kind="typed"`` op: it is not
+    The segment (#2835) and transport-node (#2836) ops are
+    ``source_kind="typed"``: they are not
     in the ingested :data:`SMOKE_OP_IDS` set the fixture seeds, so this test
     runs :func:`register_nsx_typed_operations` to persist the typed
     descriptor rows before dispatching. ``encode_endpoint_text`` is stubbed
@@ -146,7 +162,8 @@ async def test_dispatch_smoke_nsx_typed_op_returns_ok(
     the multi-request model download (the same hazard
     :func:`~tests.acceptance._canary_fixtures.prewarmed_embeddings`
     documents). Dispatch itself takes a known ``op_id`` and needs no
-    embedding.
+    embedding; ``nsx.transport_node.state`` also carries the ``id`` of the
+    transport node the fixture's ``/state`` route is registered for.
     """
     monkeypatch.setattr(
         "meho_backplane.operations.typed_register.encode_endpoint_text",
@@ -160,7 +177,7 @@ async def test_dispatch_smoke_nsx_typed_op_returns_ok(
             "connector_id": ingested_nsx_canary.connector_id,
             "op_id": op_id,
             "target": {"name": ingested_nsx_canary.target_name},
-            "params": {},
+            "params": TYPED_SMOKE_PARAMS.get(op_id, {}),
         },
     )
 

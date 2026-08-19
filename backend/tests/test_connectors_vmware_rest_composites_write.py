@@ -65,6 +65,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_from_template_composite,
     vm_create_composite,
     vm_customize_composite,
+    vm_deploy_from_library_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -110,12 +111,15 @@ class _RecordingConnector:
         responses: dict[str, Any] | list[Any],
         *,
         mount_prefix: str = "/api",
+        vmomi: dict[str, Any] | None = None,
     ) -> None:
         self._responses = responses
         self._seq_index = 0
         self._mount_prefix = mount_prefix
+        self._vmomi = vmomi or {}
         self.calls: list[dict[str, Any]] = []
         self.mount_calls: list[str] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         self.mount_calls.append(path)
@@ -158,6 +162,37 @@ class _RecordingConnector:
         else:
             payload = self._responses[self._seq_index]
             self._seq_index += 1
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        """Serve the vim (VI-JSON) sub-calls the #2970 composite steps issue.
+
+        Recorded into ``vmomi_calls``. Responses are keyed by the vmomi
+        method path (``/HostSystem/h-1/EnterMaintenanceMode_Task``);
+        ``RetrievePropertiesEx`` bodies are instead keyed by the queried
+        object type (``VirtualMachine`` / ``ClusterComputeResource`` /
+        ``DistributedVirtualSwitch`` / ``Task`` -- the seam a real vCenter
+        keys them by, mirroring ``_DiskGrowConnector``). An unkeyed
+        ``Task`` read serves a terminal-success ``Task.info`` so tests
+        only model the poll when a fault/timeout is the point.
+        """
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/RetrievePropertiesEx"):
+            spec_type = json["specSet"][0]["propSet"][0]["type"]
+            if spec_type in self._vmomi:
+                payload = self._vmomi[spec_type]
+                if isinstance(payload, Exception):
+                    raise payload
+                return payload
+            if spec_type == "Task":
+                task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
+                return _task_info_result(task_moid, "success")
+            raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+        payload = self._vmomi[path]
         if isinstance(payload, Exception):
             raise payload
         return payload
@@ -237,6 +272,45 @@ def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
     )
 
 
+# --- vim (VI-JSON) canned-payload builders for the #2970 composite steps ---
+
+
+def _task_moref(value: str) -> dict[str, str]:
+    """A vim Task ``ManagedObjectReference`` as a ``*_Task`` method returns it."""
+    return {"type": "Task", "value": value}
+
+
+def _retrieve_result(obj_type: str, moid: str, prop: str, val: Any) -> dict[str, Any]:
+    """A single-object ``RetrievePropertiesEx`` result carrying one property."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": obj_type, "value": moid},
+                "propSet": [{"name": prop, "val": val}],
+            }
+        ]
+    }
+
+
+def _task_info_result(task_moid: str, state: str, error: str | None = None) -> dict[str, Any]:
+    """A ``Task.info`` RetrievePropertiesEx result in the requested state."""
+    info: dict[str, Any] = {"state": state}
+    if error is not None:
+        info["error"] = {"localizedMessage": error}
+    return _retrieve_result("Task", task_moid, "info", info)
+
+
+def _snapshot_tree_node(
+    moid: str, name: str, children: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """A ``VirtualMachineSnapshotTree`` node as the ``snapshot`` property returns it."""
+    return {
+        "snapshot": {"type": "VirtualMachineSnapshot", "value": moid},
+        "name": name,
+        "childSnapshotList": children or [],
+    }
+
+
 # ===========================================================================
 # vm.create
 # ===========================================================================
@@ -244,12 +318,12 @@ def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
 
 @pytest.mark.asyncio
 async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
-    """Folder GET -> create POST -> NIC PATCH -> power POST; every write gated."""
+    """Folder GET -> create POST -> NIC adapter POST -> power POST; every write gated."""
     conn = _RecordingConnector(
         {
             "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
             "/api/vcenter/vm": {"value": "vm-99"},
-            "/api/vcenter/vm/vm-99/network": {},
+            "/api/vcenter/vm/vm-99/hardware/ethernet": {"value": "nic-1"},
             "/api/vcenter/vm/vm-99/power?action=start": {},
         }
     )
@@ -271,15 +345,16 @@ async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("GET", "/api/vcenter/folder"),
         ("POST", "/api/vcenter/vm"),
-        ("PATCH", "/api/vcenter/vm/vm-99/network"),
+        ("POST", "/api/vcenter/vm/vm-99/hardware/ethernet"),
         ("POST", "/api/vcenter/vm/vm-99/power?action=start"),
     ]
     # Folder GET forwards the name filter as a query param; bare on /api (#2298).
     assert conn.calls[0]["query"] == {"names": ["Prod"]}
-    # Create body carries the spec; folder moid resolved in.
-    assert conn.calls[1]["body"]["spec"]["placement"]["folder"] == "folder-7"
-    # NIC PATCH body is the spec; vm rides the path, not the body.
-    assert conn.calls[2]["body"] == {"spec": {"network": "net-3"}}
+    # Create body is the VM.CreateSpec at the top level (#2973); folder moid resolved in.
+    assert conn.calls[1]["body"]["placement"]["folder"] == "folder-7"
+    # NIC create body is the Ethernet.CreateSpec at the top level (#2973): the
+    # network rides the backing spec (#2970); vm rides the path, not the body.
+    assert conn.calls[2]["body"] == {"backing": {"type": "STANDARD_PORTGROUP", "network": "net-3"}}
     # Power POST carries no body (action rides the path).
     assert conn.calls[3]["body"] is None
 
@@ -287,7 +362,7 @@ async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
     # the folder GET was never gated.
     assert gate.gated_op_ids == [
         "POST:/vcenter/vm",
-        "PATCH:/vcenter/vm/{vm}/network",
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
         "POST:/vcenter/vm/{vm}/power?action=start",
     ]
     for call in gate.calls:
@@ -385,13 +460,12 @@ async def test_vm_create_gated_create_returns_awaiting_approval_no_write(
 
 
 @pytest.mark.asyncio
-async def test_vm_clone_happy_path_polls_task_to_completion(gate: _GateRecorder) -> None:
-    """Source GET -> deploy POST (gated) -> task-poll GET until SUCCEEDED."""
+async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> None:
+    """Source GET -> per-item deploy POST (gated); 200 body IS the new VM id (#2970)."""
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items?action=deploy": {"task": "task-42"},
-            "/api/cis/tasks/task-42": {"status": "SUCCEEDED", "result": {"vm": "vm-clone-1"}},
+            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
         }
     )
     out = await vm_clone_composite(
@@ -401,72 +475,423 @@ async def test_vm_clone_happy_path_polls_task_to_completion(gate: _GateRecorder)
             "source_vm": "vm-src",
             "target_name": "vm-clone-1",
             "library_item": "li-7",
-            "timeout_seconds": 30,
         },
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "completed"
-    assert out["task_id"] == "task-42"
+    assert out["task_id"] is None
     assert out["vm_id"] == "vm-clone-1"
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("GET", "/api/vcenter/vm/vm-src"),
-        ("POST", "/api/vcenter/vm-template/library-items?action=deploy"),
-        ("GET", "/api/cis/tasks/task-42"),
+        ("POST", "/api/vcenter/vm-template/library-items/li-7?action=deploy"),
     ]
-    # Deploy body carries library_item + spec (no ``action`` body key).
-    assert conn.calls[1]["body"] == {"library_item": "li-7", "spec": {"name": "vm-clone-1"}}
-    # Only the deploy write was gated.
-    assert gate.gated_op_ids == ["POST:/vcenter/vm-template/library-items?action=deploy"]
+    # The template item rides the path (#2970); the body is only the DeploySpec.
+    assert conn.calls[1]["body"] == {"spec": {"name": "vm-clone-1"}}
+    # Only the deploy write was gated, under the per-item op_id.
+    assert gate.gated_op_ids == [
+        "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_vm_clone_wait_false_returns_pending(gate: _GateRecorder) -> None:
-    """wait_for_completion=False returns pending; no task poll fires."""
+async def test_vm_clone_legacy_value_envelope_unwraps(gate: _GateRecorder) -> None:
+    """A legacy ``{"value": ...}``-wrapped deploy response unwraps to the VM id."""
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {"name": "src"},
-            "/api/vcenter/vm-template/library-items?action=deploy": {"task": "task-99"},
+            "/api/vcenter/vm-template/library-items/li-3?action=deploy": {"value": "vm-88"},
         }
     )
     out = await vm_clone_composite(
         operator=_make_operator(),
         target=object(),
-        params={
-            "source_vm": "vm-src",
-            "target_name": "tgt",
-            "library_item": "li-3",
-            "wait_for_completion": False,
-        },
+        params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-3"},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert out["status"] == "pending"
-    assert out["task_id"] == "task-99"
-    assert out["vm_id"] is None
+    assert out["status"] == "completed"
+    assert out["vm_id"] == "vm-88"
     assert len(conn.calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_vm_clone_task_failed_raises_runtime_error(gate: _GateRecorder) -> None:
-    """A FAILED task raises -- dispatcher wraps as connector_error."""
+async def test_vm_clone_non_string_deploy_payload_raises(gate: _GateRecorder) -> None:
+    """A deploy payload that is not the VM id string raises -- wrapped connector_error."""
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm/vm-src": {},
-            "/api/vcenter/vm-template/library-items?action=deploy": {"task": "task-bad"},
-            "/api/cis/tasks/task-bad": {"status": "FAILED", "error": "deploy failed"},
+            "/api/vcenter/vm-template/library-items/li-1?action=deploy": {"task": "task-bad"},
         }
     )
-    with pytest.raises(RuntimeError, match="FAILED"):
+    with pytest.raises(RuntimeError, match="no VM id"):
         await vm_clone_composite(
             operator=_make_operator(),
             target=object(),
-            params={
-                "source_vm": "vm-src",
-                "target_name": "tgt",
-                "library_item": "li-1",
-                "timeout_seconds": 30,
-            },
+            params={"source_vm": "vm-src", "target_name": "tgt", "library_item": "li-1"},
             connector=conn,  # type: ignore[arg-type]
         )
+
+
+# ===========================================================================
+# vm.deploy_from_library (OVF/OVA content-library deploy -- #2909)
+# ===========================================================================
+
+_DEPLOY_OVF_OP = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_FIND_LIBRARY_PATH = "/api/content/library?action=find"
+_FIND_ITEM_PATH = "/api/content/library/item?action=find"
+
+
+def _deployment_result(
+    *,
+    succeeded: bool,
+    vm_id: str = "vm-ovf-9",
+    resource_type: str = "VirtualMachine",
+    errors: list[dict[str, Any]] | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Canned ``Vcenter.Ovf.LibraryItem.DeploymentResult`` for the deploy stub."""
+    result: dict[str, Any] = {"succeeded": succeeded}
+    if succeeded:
+        result["resource_id"] = {"type": resource_type, "id": vm_id}
+    error_block: dict[str, Any] = {}
+    if errors is not None:
+        error_block["errors"] = errors
+    if warnings is not None:
+        error_block["warnings"] = warnings
+    if error_block:
+        result["error"] = error_block
+    return result
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_id_passthrough_deployed(gate: _GateRecorder) -> None:
+    """library_item id passthrough → one gated deploy → status='deployed' with the VM id."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-1"
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    assert out["resource_type"] == "VirtualMachine"
+    assert out["library_item_id"] == "li-ovf"
+    assert out["powered_on"] is False
+    assert out["issues"] == []
+    # No name-resolution reads on the id path; only the deploy was gated.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> None:
+    """The deploy body carries the {deployment_spec, target} shape the pinned spec keys."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True
+            ),
+        }
+    )
+    await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item": "li-ovf",
+            "name": "router-01",
+            "resource_pool": "resgroup-8",
+            "host": "host-19",
+            "folder": "group-v10",
+            "datastore": "datastore-15",
+            "network_mappings": {"nat": "dvportgroup-42", "mgmt": "dvportgroup-43"},
+            "storage_provisioning": "thin",
+            "storage_profile": "profile-1",
+            "ovf_properties": {"guestinfo.hostname": "router-01"},
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    body = conn.calls[0]["body"]
+    assert body["deployment_spec"] == {
+        "accept_all_eula": True,
+        "name": "router-01",
+        "network_mappings": {"nat": "dvportgroup-42", "mgmt": "dvportgroup-43"},
+        "storage_provisioning": "thin",
+        "storage_profile_id": "profile-1",
+        "default_datastore_id": "datastore-15",
+        "additional_parameters": [
+            {
+                "type": "PropertyParams",
+                "properties": [{"id": "guestinfo.hostname", "value": "router-01"}],
+            }
+        ],
+    }
+    assert body["target"] == {
+        "resource_pool_id": "resgroup-8",
+        "host_id": "host-19",
+        "folder_id": "group-v10",
+    }
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _GateRecorder) -> None:
+    """library_item_name + library_name → find library → find item (type=ovf) → deploy."""
+    conn = _RecordingConnector(
+        {
+            _FIND_LIBRARY_PATH: ["lib-7"],
+            _FIND_ITEM_PATH: ["li-resolved"],
+            "/api/vcenter/ovf/library-item/li-resolved?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-2"
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item_name": "holorouter-ova",
+            "library_name": "lab-templates",
+            "resource_pool": "resgroup-8",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["library_item_id"] == "li-resolved"
+    # Library find, then item find (scoped + type=ovf), then the deploy.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", _FIND_LIBRARY_PATH),
+        ("POST", _FIND_ITEM_PATH),
+        ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
+    ]
+    assert conn.calls[0]["body"] == {"spec": {"name": "lab-templates"}}
+    assert conn.calls[1]["body"] == {
+        "spec": {"name": "holorouter-ova", "type": "ovf", "library_id": "lib-7"}
+    }
+    # The finds are un-gated reads; only the deploy hit the policy seam.
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_ambiguous_item_refused(gate: _GateRecorder) -> None:
+    """An item name matching >1 item → ambiguous_item with candidates; no deploy, no gate."""
+    conn = _RecordingConnector({_FIND_ITEM_PATH: ["li-a", "li-b"]})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item_name": "dup-ova", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous_item"
+    assert out["candidates"] == ["li-a", "li-b"]
+    assert out["vm_id"] is None
+    assert out["library_item_id"] is None
+    assert [c["path"] for c in conn.calls] == [_FIND_ITEM_PATH]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_ambiguous_library_refused(gate: _GateRecorder) -> None:
+    """A library name matching >1 library → ambiguous_library before any item lookup."""
+    conn = _RecordingConnector({_FIND_LIBRARY_PATH: ["lib-1", "lib-2"]})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "library_item_name": "ova",
+            "library_name": "dup-lib",
+            "resource_pool": "resgroup-8",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous_library"
+    assert out["candidates"] == ["lib-1", "lib-2"]
+    # Stopped at the library find; the item find never fired.
+    assert [c["path"] for c in conn.calls] == [_FIND_LIBRARY_PATH]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_item_not_found(gate: _GateRecorder) -> None:
+    """An item name matching zero items → item_not_found; no deploy."""
+    conn = _RecordingConnector({_FIND_ITEM_PATH: []})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item_name": "missing-ova", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "item_not_found"
+    assert out["candidates"] is None
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_invalid_reference(gate: _GateRecorder) -> None:
+    """Neither library_item nor library_item_name → invalid_reference; nothing touched."""
+    conn = _RecordingConnector({})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_reference"
+    assert conn.calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_failed_surfaces_report_issues(
+    gate: _GateRecorder,
+) -> None:
+    """succeeded=false → deploy_failed with the report's per-issue messages (not a raw fault)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=False,
+                errors=[
+                    {
+                        "category": "INPUT",
+                        "message": {"default_message": "network 'nat' not mapped"},
+                    },
+                    {
+                        "category": "SERVER",
+                        "error": {"messages": [{"default_message": "host busy"}]},
+                    },
+                ],
+                warnings=[
+                    {"category": "VALIDATION", "message": {"default_message": "deprecated hw"}}
+                ],
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_failed"
+    assert out["vm_id"] is None
+    assert out["library_item_id"] == "li-ovf"
+    assert out["issues"] == [
+        {"category": "INPUT", "severity": "error", "message": "network 'nat' not mapped"},
+        {"category": "SERVER", "severity": "error", "message": "host busy"},
+        {"category": "VALIDATION", "severity": "warning", "message": "deprecated hw"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorder) -> None:
+    """A 404 on the deploy (missing placement resource) → structured deploy_error, not a raise."""
+    fault = httpx.HTTPStatusError(
+        "not found",
+        request=httpx.Request(
+            "POST", "https://vc/api/vcenter/ovf/library-item/li-ovf?action=deploy"
+        ),
+        response=httpx.Response(404, json={"error_type": "NOT_FOUND"}),
+    )
+    conn = _RecordingConnector({"/api/vcenter/ovf/library-item/li-ovf?action=deploy": fault})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-missing"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["library_item_id"] == "li-ovf"
+    assert len(out["issues"]) == 1
+    assert out["issues"][0]["category"] == "placement"
+    assert "404" in out["issues"][0]["message"]
+    assert "NOT_FOUND" in out["issues"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_gate_short_circuits_before_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the OVF deploy returns verbatim; the deploy never reaches the wire."""
+    gate = _install_gate(
+        monkeypatch,
+        _GateRecorder(gate_for={_DEPLOY_OVF_OP: _awaiting(_DEPLOY_OVF_OP)}),
+    )
+    conn = _RecordingConnector({})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _DEPLOY_OVF_OP
+    # id passthrough → no resolution reads, and the deploy was gated off the wire.
+    assert conn.calls == []
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_power_on_after_deploy(gate: _GateRecorder) -> None:
+    """power_on=true → deploy then a gated power-start; powered_on=true."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-7"
+            ),
+            "/api/vcenter/vm/vm-ovf-7/power?action=start": {},
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["powered_on"] is True
+    assert out["issues"] == []
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
+        ("POST", "/api/vcenter/vm/vm-ovf-7/power?action=start"),
+    ]
+    assert gate.gated_op_ids == [_DEPLOY_OVF_OP, "POST:/vcenter/vm/{vm}/power?action=start"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_power_on_failure_stays_deployed(gate: _GateRecorder) -> None:
+    """A power-on fault leaves status='deployed' with powered_on=false + a warning issue."""
+    fault = httpx.HTTPStatusError(
+        "conflict",
+        request=httpx.Request("POST", "https://vc/api/vcenter/vm/vm-ovf-7/power?action=start"),
+        response=httpx.Response(500, json={}),
+    )
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-7"
+            ),
+            "/api/vcenter/vm/vm-ovf-7/power?action=start": fault,
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-7"
+    assert out["powered_on"] is False
+    assert len(out["issues"]) == 1
+    assert out["issues"][0]["category"] == "power_on"
+    assert out["issues"][0]["severity"] == "warning"
 
 
 # ===========================================================================
@@ -474,14 +899,20 @@ async def test_vm_clone_task_failed_raises_runtime_error(gate: _GateRecorder) ->
 # ===========================================================================
 
 
+def _snapshot_info_vmomi(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Canned ``VirtualMachine.snapshot`` property read for the vmomi stub."""
+    return _retrieve_result("VirtualMachine", "vm-1", "snapshot", {"rootSnapshotList": nodes})
+
+
 @pytest.mark.asyncio
 async def test_vm_snapshot_revert_happy_path(gate: _GateRecorder) -> None:
-    """List GET + match + revert POST (gated); status=reverted."""
+    """vim tree read + match + RevertToSnapshot_Task (gated, polled); status=reverted."""
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/vm/vm-1/snapshot": [{"snapshot": "snap-1", "name": "before-patch"}],
-            "/api/vcenter/vm/vm-1/snapshot/snap-1?action=revert": {},
-        }
+        {},
+        vmomi={
+            "VirtualMachine": _snapshot_info_vmomi([_snapshot_tree_node("snap-1", "before-patch")]),
+            "/VirtualMachineSnapshot/snap-1/RevertToSnapshot_Task": _task_moref("task-revert-1"),
+        },
     )
     out = await vm_snapshot_revert_composite(
         operator=_make_operator(),
@@ -491,22 +922,27 @@ async def test_vm_snapshot_revert_happy_path(gate: _GateRecorder) -> None:
     )
     assert out["status"] == "reverted"
     assert out["snapshot_id"] == "snap-1"
-    assert conn.calls[1]["method"] == "POST"
-    assert conn.calls[1]["path"] == "/api/vcenter/vm/vm-1/snapshot/snap-1?action=revert"
-    assert conn.calls[1]["body"] is None
-    assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert"]
+    # No REST sub-call fired -- the snapshot surface is vim-only (#2970).
+    assert conn.calls == []
+    revert_calls = [(p, b) for p, b in conn.vmomi_calls if p.endswith("/RevertToSnapshot_Task")]
+    assert revert_calls == [("/VirtualMachineSnapshot/snap-1/RevertToSnapshot_Task", {})]
+    assert gate.gated_op_ids == ["POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task"]
 
 
 @pytest.mark.asyncio
 async def test_vm_snapshot_revert_ambiguous_no_revert(gate: _GateRecorder) -> None:
-    """Multiple snapshots share the name -> status=ambiguous; no revert dispatched."""
+    """Snapshots sharing the name across the tree -> ambiguous; no revert dispatched.
+
+    The duplicate lives in a ``childSnapshotList`` to prove the tree walk
+    recurses (the flat pre-#2970 REST listing had no nesting).
+    """
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/vm/vm-1/snapshot": [
-                {"snapshot": "snap-1", "name": "x"},
-                {"snapshot": "snap-2", "name": "x"},
-            ]
-        }
+        {},
+        vmomi={
+            "VirtualMachine": _snapshot_info_vmomi(
+                [_snapshot_tree_node("snap-1", "x", [_snapshot_tree_node("snap-2", "x")])]
+            ),
+        },
     )
     out = await vm_snapshot_revert_composite(
         operator=_make_operator(),
@@ -515,8 +951,11 @@ async def test_vm_snapshot_revert_ambiguous_no_revert(gate: _GateRecorder) -> No
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "ambiguous"
-    assert len(out["candidates"]) == 2
-    assert len(conn.calls) == 1
+    assert out["candidates"] == [
+        {"name": "x", "snapshot": "snap-1"},
+        {"name": "x", "snapshot": "snap-2"},
+    ]
+    assert len(conn.vmomi_calls) == 1
     assert gate.calls == []
 
 
@@ -524,7 +963,8 @@ async def test_vm_snapshot_revert_ambiguous_no_revert(gate: _GateRecorder) -> No
 async def test_vm_snapshot_revert_not_found(gate: _GateRecorder) -> None:
     """Snapshot name not in tree -> status=not_found; no revert dispatched."""
     conn = _RecordingConnector(
-        {"/api/vcenter/vm/vm-1/snapshot": [{"snapshot": "s-1", "name": "other"}]}
+        {},
+        vmomi={"VirtualMachine": _snapshot_info_vmomi([_snapshot_tree_node("s-1", "other")])},
     )
     out = await vm_snapshot_revert_composite(
         operator=_make_operator(),
@@ -533,7 +973,7 @@ async def test_vm_snapshot_revert_not_found(gate: _GateRecorder) -> None:
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "not_found"
-    assert len(conn.calls) == 1
+    assert len(conn.vmomi_calls) == 1
     assert gate.calls == []
 
 
@@ -542,16 +982,32 @@ async def test_vm_snapshot_revert_not_found(gate: _GateRecorder) -> None:
 # ===========================================================================
 
 
+def _drs_recommendation_vmomi(vm_moid: str, destination: str) -> dict[str, Any]:
+    """Canned ``ClusterComputeResource.drsRecommendation`` property read."""
+    return _retrieve_result(
+        "ClusterComputeResource",
+        "cluster-7",
+        "drsRecommendation",
+        [
+            {
+                "key": "1",
+                "migrationList": [
+                    {
+                        "vm": {"type": "VirtualMachine", "value": vm_moid},
+                        "destination": {"type": "HostSystem", "value": destination},
+                    }
+                ],
+            }
+        ],
+    )
+
+
 @pytest.mark.asyncio
 async def test_vm_migrate_drs_recommendation_dispatches_relocate(gate: _GateRecorder) -> None:
-    """DRS recommendation GET -> relocate POST (gated) against the recommended host."""
+    """vim drsRecommendation read -> relocate POST (gated) against the recommended host."""
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/cluster/cluster-7/drs/recommendations": [
-                {"vm": "vm-1", "target_host": "host-A"}
-            ],
-            "/api/vcenter/vm/vm-1?action=relocate": {},
-        }
+        {"/api/vcenter/vm/vm-1?action=relocate": {}},
+        vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")},
     )
     out = await vm_migrate_composite(
         operator=_make_operator(),
@@ -562,8 +1018,12 @@ async def test_vm_migrate_drs_recommendation_dispatches_relocate(gate: _GateReco
     assert out["status"] == "migrated"
     assert out["target_host"] == "host-A"
     assert out["source"] == "drs"
-    assert conn.calls[1]["path"] == "/api/vcenter/vm/vm-1?action=relocate"
-    assert conn.calls[1]["body"] == {"spec": {"placement": {"host": "host-A"}}}
+    # The DRS read is vim (#2970 -- no DRS REST resource in the pinned spec).
+    assert [p for p, _ in conn.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
+    assert conn.calls[0]["path"] == "/api/vcenter/vm/vm-1?action=relocate"
+    assert conn.calls[0]["body"] == {"placement": {"host": "host-A"}}
     assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}?action=relocate"]
 
 
@@ -586,7 +1046,14 @@ async def test_vm_migrate_explicit_target_bypasses_drs(gate: _GateRecorder) -> N
 @pytest.mark.asyncio
 async def test_vm_migrate_no_recommendation(gate: _GateRecorder) -> None:
     """DRS returns empty + no override -> status=no_recommendation; no relocate."""
-    conn = _RecordingConnector({"/api/vcenter/cluster/cluster-1/drs/recommendations": []})
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "ClusterComputeResource": _retrieve_result(
+                "ClusterComputeResource", "cluster-1", "drsRecommendation", []
+            )
+        },
+    )
     out = await vm_migrate_composite(
         operator=_make_operator(),
         target=object(),
@@ -595,7 +1062,8 @@ async def test_vm_migrate_no_recommendation(gate: _GateRecorder) -> None:
     )
     assert out["status"] == "no_recommendation"
     assert out["source"] == "none"
-    assert len(conn.calls) == 1
+    assert conn.calls == []
+    assert len(conn.vmomi_calls) == 1
     assert gate.calls == []
 
 
@@ -874,15 +1342,17 @@ def _no_rec() -> OperationResult:
 
 @pytest.mark.asyncio
 async def test_host_evacuate_recurses_then_enters_maintenance(gate: _GateRecorder) -> None:
-    """VM listing GET -> per-VM vm.migrate via dispatch_child -> maintenance-enter write."""
+    """VM listing GET -> per-VM vm.migrate via dispatch_child -> vim maintenance-enter."""
     conn = _RecordingConnector(
         {
             "/api/vcenter/vm": [
                 {"vm": "vm-a", "cluster": "c-1"},
                 {"vm": "vm-b", "cluster": "c-2"},
             ],
-            "/api/vcenter/host/host-1/maintenance?action=enter": {},
-        }
+        },
+        vmomi={
+            "/HostSystem/host-1/EnterMaintenanceMode_Task": _task_moref("task-mm-1"),
+        },
     )
     dispatch = _RecordingDispatchChild([_migrated(), _migrated()])
     out = await host_evacuate_composite(
@@ -901,13 +1371,14 @@ async def test_host_evacuate_recurses_then_enters_maintenance(gate: _GateRecorde
     assert dispatch.calls[0]["params"] == {"vm": "vm-a", "cluster": "c-1"}
     assert dispatch.calls[1]["params"] == {"vm": "vm-b", "cluster": "c-2"}
     assert all(c["connector_id"] == "vmware-rest-9.0" for c in dispatch.calls)
-    # The listing read + the maintenance-enter write are the only direct calls.
-    assert [(c["method"], c["path"]) for c in conn.calls] == [
-        ("GET", "/api/vcenter/vm"),
-        ("PATCH", "/api/vcenter/host/host-1/maintenance?action=enter"),
-    ]
+    # The listing read is the only REST call; maintenance-enter is vim
+    # (#2970) -- the write POST plus its Task.info poll.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("GET", "/api/vcenter/vm")]
+    enter_calls = [(p, b) for p, b in conn.vmomi_calls if p.endswith("/EnterMaintenanceMode_Task")]
+    # ``EnterMaintenanceModeRequestType.timeout`` is required (int).
+    assert enter_calls == [("/HostSystem/host-1/EnterMaintenanceMode_Task", {"timeout": 0})]
     # Only the maintenance-enter write was gated (the recursion self-gates).
-    assert gate.gated_op_ids == ["PATCH:/vcenter/host/{host}/maintenance?action=enter"]
+    assert gate.gated_op_ids == ["POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"]
     assert out["status"] == "evacuated"
     assert out["maintenance_entered"] is True
     assert out["migrated_vms"] == ["vm-a", "vm-b"]
@@ -942,8 +1413,10 @@ async def test_host_evacuate_tolerate_partial_still_enters_maintenance(gate: _Ga
                 {"vm": "vm-a", "cluster": "c-1"},
                 {"vm": "vm-b", "cluster": "c-1"},
             ],
-            "/api/vcenter/host/host-2/maintenance?action=enter": {},
-        }
+        },
+        vmomi={
+            "/HostSystem/host-2/EnterMaintenanceMode_Task": _task_moref("task-mm-2"),
+        },
     )
     dispatch = _RecordingDispatchChild([_migrated(), _no_rec()])
     out = await host_evacuate_composite(
@@ -966,17 +1439,25 @@ async def test_host_evacuate_tolerate_partial_still_enters_maintenance(gate: _Ga
 
 @pytest.mark.asyncio
 async def test_host_detach_from_vds_happy_path(gate: _GateRecorder) -> None:
-    """Portgroup GET + VM GET + per-VM NIC PATCH + DVS remove POST; status=detached."""
+    """Portgroup GET + VM GET + per-NIC repoint + vim DVS reconfigure; status=detached."""
     conn = _RecordingConnector(
         {
             # #1602 fix: distributed portgroups are listed via the generic
             # /vcenter/network resource (no dedicated portgroup path).
             "/api/vcenter/network": [],
             "/api/vcenter/vm": [{"vm": "vm-1"}, {"vm": "vm-2"}],
-            "/api/vcenter/vm/vm-1/network": {},
-            "/api/vcenter/vm/vm-2/network": {},
-            "/api/vcenter/network/dvs/dvs-1?action=remove_host": {},
-        }
+            "/api/vcenter/vm/vm-1/hardware/ethernet": [{"nic": "4000"}],
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {},
+            "/api/vcenter/vm/vm-2/hardware/ethernet": [{"nic": "4000"}, {"nic": "4001"}],
+            "/api/vcenter/vm/vm-2/hardware/ethernet/4000": {},
+            "/api/vcenter/vm/vm-2/hardware/ethernet/4001": {},
+        },
+        vmomi={
+            "DistributedVirtualSwitch": _retrieve_result(
+                "DistributedVirtualSwitch", "dvs-1", "config.configVersion", "42"
+            ),
+            "/DistributedVirtualSwitch/dvs-1/ReconfigureDvs_Task": _task_moref("task-dvs-1"),
+        },
     )
     out = await host_detach_from_vds_composite(
         operator=_make_operator(),
@@ -986,29 +1467,56 @@ async def test_host_detach_from_vds_happy_path(gate: _GateRecorder) -> None:
     )
     assert out["status"] == "detached"
     assert out["vms_migrated"] == ["vm-1", "vm-2"]
-    last = conn.calls[-1]
-    assert last["method"] == "POST"
-    assert last["path"] == "/api/vcenter/network/dvs/dvs-1?action=remove_host"
-    assert last["body"] == {"host": "host-9"}
-    # NIC PATCH body carries the fallback network spec.
-    assert conn.calls[2]["body"] == {"spec": {"network": "standard-net"}}
-    # 2 NIC writes + 1 DVS remove write gated; the two reads were not.
+    # Per-NIC repoint (#2970): adapter listing + per-adapter PATCH with the
+    # standard-portgroup backing spec.
+    nic_patches = [c for c in conn.calls if c["method"] == "PATCH"]
+    assert [c["path"] for c in nic_patches] == [
+        "/api/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/api/vcenter/vm/vm-2/hardware/ethernet/4000",
+        "/api/vcenter/vm/vm-2/hardware/ethernet/4001",
+    ]
+    assert nic_patches[0]["body"] == {
+        "backing": {"type": "STANDARD_PORTGROUP", "network": "standard-net"}
+    }
+    # The DVS detach is the vim ReconfigureDvs_Task: configVersion echoed,
+    # host member spec with operation=remove.
+    reconfig = [(p, b) for p, b in conn.vmomi_calls if p.endswith("/ReconfigureDvs_Task")]
+    assert reconfig == [
+        (
+            "/DistributedVirtualSwitch/dvs-1/ReconfigureDvs_Task",
+            {
+                "spec": {
+                    "configVersion": "42",
+                    "host": [
+                        {
+                            "operation": "remove",
+                            "host": {"type": "HostSystem", "value": "host-9"},
+                        }
+                    ],
+                }
+            },
+        )
+    ]
+    # 3 NIC writes + 1 vim DVS reconfigure gated; the reads were not.
     assert gate.gated_op_ids == [
-        "PATCH:/vcenter/vm/{vm}/network",
-        "PATCH:/vcenter/vm/{vm}/network",
-        "POST:/vcenter/network/dvs/{dvs}?action=remove_host",
+        "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}",
+        "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}",
+        "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}",
+        "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task",
     ]
 
 
 @pytest.mark.asyncio
 async def test_host_detach_from_vds_incomplete_on_nic_failure(gate: _GateRecorder) -> None:
-    """A NIC migration transport error -> status=incomplete; DVS remove skipped."""
+    """A NIC migration transport error -> status=incomplete; DVS reconfigure skipped."""
     conn = _RecordingConnector(
         [
             [],  # portgroup GET
             [{"vm": "vm-1"}, {"vm": "vm-2"}],  # VM GET
-            {},  # vm-1 NIC ok
-            _http_error(409, "https://vc/api/vcenter/vm/vm-2/network"),  # vm-2 NIC fails
+            [{"nic": "4000"}],  # vm-1 adapter listing
+            {},  # vm-1 nic 4000 ok
+            [{"nic": "4000"}],  # vm-2 adapter listing
+            _http_error(409, "https://vc/api/vcenter/vm/vm-2/hardware/ethernet/4000"),
         ]
     )
     out = await host_detach_from_vds_composite(
@@ -1020,8 +1528,8 @@ async def test_host_detach_from_vds_incomplete_on_nic_failure(gate: _GateRecorde
     assert out["status"] == "incomplete"
     assert out["vms_migrated"] == ["vm-1"]
     assert len(out["vm_migration_failures"]) == 1
-    # No DVS remove call -- the last recorded call is the failed NIC PATCH.
-    assert all("remove_host" not in c["path"] for c in conn.calls)
+    # No vim DVS reconfigure fired -- the detach was skipped.
+    assert conn.vmomi_calls == []
 
 
 # ===========================================================================
@@ -1031,17 +1539,21 @@ async def test_host_detach_from_vds_incomplete_on_nic_failure(gate: _GateRecorde
 
 @pytest.mark.asyncio
 async def test_cluster_patch_happy_path(gate: _GateRecorder) -> None:
-    """Per-host: maintenance-enter -> patch -> maintenance-exit; status=completed."""
+    """Per-host: vim maintenance-enter -> vLCM apply (cis poll) -> vim exit; completed."""
     conn = _RecordingConnector(
         {
-            "/api/vcenter/cluster/c-1/host": [{"host": "h1"}, {"host": "h2"}],
-            "/api/vcenter/host/h1/maintenance?action=enter": {},
-            "/api/vcenter/host/h1?action=patch": {},
-            "/api/vcenter/host/h1/maintenance?action=exit": {},
-            "/api/vcenter/host/h2/maintenance?action=enter": {},
-            "/api/vcenter/host/h2?action=patch": {},
-            "/api/vcenter/host/h2/maintenance?action=exit": {},
-        }
+            "/api/vcenter/host": [{"host": "h1"}, {"host": "h2"}],
+            "/api/esx/settings/hosts/h1/software?action=apply&vmw-task=true": "task-apply-1",
+            "/api/cis/tasks/task-apply-1": {"status": "SUCCEEDED"},
+            "/api/esx/settings/hosts/h2/software?action=apply&vmw-task=true": "task-apply-2",
+            "/api/cis/tasks/task-apply-2": {"status": "SUCCEEDED"},
+        },
+        vmomi={
+            "/HostSystem/h1/EnterMaintenanceMode_Task": _task_moref("t-enter-1"),
+            "/HostSystem/h1/ExitMaintenanceMode_Task": _task_moref("t-exit-1"),
+            "/HostSystem/h2/EnterMaintenanceMode_Task": _task_moref("t-enter-2"),
+            "/HostSystem/h2/ExitMaintenanceMode_Task": _task_moref("t-exit-2"),
+        },
     )
     out = await cluster_patch_composite(
         operator=_make_operator(),
@@ -1051,29 +1563,51 @@ async def test_cluster_patch_happy_path(gate: _GateRecorder) -> None:
     )
     assert out["status"] == "completed"
     assert out["patched_hosts"] == ["h1", "h2"]
-    # The patch step carries a ``method`` body; the maintenance verbs do not.
-    patch_call = next(c for c in conn.calls if c["path"] == "/api/vcenter/host/h1?action=patch")
-    assert patch_call["body"] == {"method": "default"}
-    enter_call = next(
-        c for c in conn.calls if c["path"] == "/api/vcenter/host/h1/maintenance?action=enter"
-    )
-    assert enter_call["body"] is None
+    # The host listing is the cluster-scoped Host_list (#2970 -- there is
+    # no per-cluster /vcenter/cluster/{cluster}/host resource); bare filter
+    # keys on /api (#2298).
+    assert conn.calls[0]["path"] == "/api/vcenter/host"
+    assert conn.calls[0]["query"] == {"clusters": ["c-1"]}
+    # The vLCM apply carries an empty ApplySpec body (latest commit) and
+    # its cis task is polled to SUCCEEDED before maintenance-exit.
+    apply_call = next(c for c in conn.calls if "software?action=apply" in c["path"])
+    assert apply_call["body"] == {"spec": {}}
+    assert any(c["path"] == "/api/cis/tasks/task-apply-1" for c in conn.calls)
+    # Maintenance transitions are vim *_Task methods with the required
+    # int timeout, polled to terminal.
+    maintenance_calls = [(p, b) for p, b in conn.vmomi_calls if "MaintenanceMode_Task" in p]
+    assert maintenance_calls == [
+        ("/HostSystem/h1/EnterMaintenanceMode_Task", {"timeout": 0}),
+        ("/HostSystem/h1/ExitMaintenanceMode_Task", {"timeout": 0}),
+        ("/HostSystem/h2/EnterMaintenanceMode_Task", {"timeout": 0}),
+        ("/HostSystem/h2/ExitMaintenanceMode_Task", {"timeout": 0}),
+    ]
     # 3 writes per host x 2 hosts were gated.
     assert len(gate.calls) == 6
+    assert gate.gated_op_ids[:3] == [
+        "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+        "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
+        "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_cluster_patch_per_host_failure_stops_loop(gate: _GateRecorder) -> None:
-    """A per-host transport error stops the loop; status=stopped with remaining_hosts."""
+    """A per-host apply transport error stops the loop; status=stopped."""
     conn = _RecordingConnector(
         [
             [{"host": "h1"}, {"host": "h2"}, {"host": "h3"}],  # host listing GET
-            {},  # h1 enter
-            {},  # h1 patch
-            {},  # h1 exit
-            {},  # h2 enter
-            _http_error(500, "https://vc/api/vcenter/host/h2?action=patch"),  # h2 patch fails
-        ]
+            "task-apply-1",  # h1 apply -> cis task id
+            {"status": "SUCCEEDED"},  # h1 cis poll
+            _http_error(
+                500, "https://vc/api/esx/settings/hosts/h2/software?action=apply&vmw-task=true"
+            ),  # h2 apply fails
+        ],
+        vmomi={
+            "/HostSystem/h1/EnterMaintenanceMode_Task": _task_moref("t-enter-1"),
+            "/HostSystem/h1/ExitMaintenanceMode_Task": _task_moref("t-exit-1"),
+            "/HostSystem/h2/EnterMaintenanceMode_Task": _task_moref("t-enter-2"),
+        },
     )
     out = await cluster_patch_composite(
         operator=_make_operator(),
@@ -1086,6 +1620,32 @@ async def test_cluster_patch_per_host_failure_stops_loop(gate: _GateRecorder) ->
     assert out["failed_host"] == "h2"
     assert out["remaining_hosts"] == ["h3"]
     assert out["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_cluster_patch_failed_cis_task_stops_loop(gate: _GateRecorder) -> None:
+    """A FAILED vLCM apply cis task stops the loop before maintenance-exit."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/host": [{"host": "h1"}, {"host": "h2"}],
+            "/api/esx/settings/hosts/h1/software?action=apply&vmw-task=true": "task-apply-1",
+            "/api/cis/tasks/task-apply-1": {"status": "FAILED", "error": "image scan failed"},
+        },
+        vmomi={
+            "/HostSystem/h1/EnterMaintenanceMode_Task": _task_moref("t-enter-1"),
+        },
+    )
+    out = await cluster_patch_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"cluster": "c-1"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "stopped"
+    assert out["failed_host"] == "h1"
+    assert "image scan failed" in out["failure_reason"]
+    # Maintenance-exit never fired for h1 -- the loop stopped mid-host.
+    assert not any(p.endswith("/ExitMaintenanceMode_Task") for p, _ in conn.vmomi_calls)
 
 
 # ===========================================================================
@@ -1102,12 +1662,8 @@ async def test_reads_are_never_gated_only_writes(gate: _GateRecorder) -> None:
     write is gated with the declared dangerous / no-approval posture.
     """
     conn = _RecordingConnector(
-        {
-            "/api/vcenter/cluster/c-9/drs/recommendations": [
-                {"vm": "vm-1", "target_host": "host-A"}
-            ],
-            "/api/vcenter/vm/vm-1?action=relocate": {},
-        }
+        {"/api/vcenter/vm/vm-1?action=relocate": {}},
+        vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")},
     )
     await vm_migrate_composite(
         operator=_make_operator(),
@@ -1115,10 +1671,11 @@ async def test_reads_are_never_gated_only_writes(gate: _GateRecorder) -> None:
         params={"vm": "vm-1", "cluster": "c-9"},
         connector=conn,  # type: ignore[arg-type]
     )
-    # The DRS recommendations read fired but was not gated; only the relocate
-    # write was gated.
-    read_paths = [c["path"] for c in conn.calls if c["method"] == "GET"]
-    assert read_paths == ["/api/vcenter/cluster/c-9/drs/recommendations"]
+    # The vim DRS-recommendation read fired but was not gated; only the
+    # relocate write was gated.
+    assert [p for p, _ in conn.vmomi_calls] == [
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    ]
     assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}?action=relocate"]
 
 
@@ -2491,8 +3048,8 @@ async def test_vm_resize_powered_off_patches_cpu_and_memory(gate: _GateRecorder)
     cpu_call = next(c for c in conn.calls if c["path"].endswith("/hardware/cpu"))
     mem_call = next(c for c in conn.calls if c["path"].endswith("/hardware/memory"))
     assert cpu_call["method"] == "PATCH"
-    assert cpu_call["body"] == {"spec": {"count": 4, "cores_per_socket": 2}}
-    assert mem_call["body"] == {"spec": {"size_MiB": 8192}}
+    assert cpu_call["body"] == {"count": 4, "cores_per_socket": 2}
+    assert mem_call["body"] == {"size_MiB": 8192}
 
 
 @pytest.mark.asyncio
@@ -2650,7 +3207,7 @@ async def test_vm_nic_repoint_happy_path(gate: _GateRecorder) -> None:
     assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"]
     patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
     assert patch_call["body"] == {
-        "spec": {"backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-9"}}
+        "backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-9"}
     }
     # The portgroup resolve used the corrected /vcenter/network path (#1602 fix).
     net_read = next(c for c in conn.calls if c["path"] == "/api/vcenter/network")
@@ -2784,7 +3341,7 @@ async def test_vm_device_cdrom_update_patches_backing(gate: _GateRecorder) -> No
     assert out["requested_backing"] == {"type": "CLIENT_DEVICE"}
     assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"]
     patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
-    assert patch_call["body"] == {"spec": {"backing": {"type": "CLIENT_DEVICE"}}}
+    assert patch_call["body"] == {"backing": {"type": "CLIENT_DEVICE"}}
 
 
 @pytest.mark.asyncio
@@ -2843,7 +3400,7 @@ async def test_guest_customization_spec_create_linux_body(gate: _GateRecorder) -
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("POST", "/api/vcenter/guest/customization-specs"),
     ]
-    body = conn.calls[0]["body"]["spec"]
+    body = conn.calls[0]["body"]
     assert body["name"] == "gosc-lin"
     assert body["description"] == "web tier"
     linux = body["spec"]["configuration_spec"]["linux_config"]
@@ -2901,9 +3458,7 @@ async def test_guest_customization_spec_create_windows_sysprep_body(gate: _GateR
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    sysprep = conn.calls[0]["body"]["spec"]["spec"]["configuration_spec"]["windows_config"][
-        "sysprep"
-    ]
+    sysprep = conn.calls[0]["body"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]
     assert sysprep["user_data"]["computer_name"] == {"type": "FIXED", "fixed_name": "win-01"}
     assert sysprep["user_data"]["product_key"] == "KEY-123"
     assert sysprep["user_data"]["organization"] == "evoila"
@@ -3157,8 +3712,9 @@ def test_gosc_create_body_conforms_to_pinned_customization_spec_schema(
     ``GuiUnattended``) that ``_put_if_str`` used to drop.
     """
     body = _write._build_customization_create_body(params)
-    # The connector wraps the CreateSpec under the request-body ``spec`` key.
-    Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA).validate(body["spec"])
+    # The builder returns the CreateSpec at the top level of the request body (#2973);
+    # the only ``spec`` key is the inner CustomizationSpec field, not a /rest envelope.
+    Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA).validate(body)
 
 
 def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() -> None:
@@ -3171,12 +3727,12 @@ def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() ->
     """
     validator = Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA)
     good = _write._build_customization_create_body(_GOSC_WINDOWS_DOMAIN_JOIN)
-    validator.validate(good["spec"])  # sanity: the corrected body is valid.
+    validator.validate(good)  # sanity: the corrected body is valid.
 
     # B1 regression: the pyvmomi ``identification`` block is not a
     # WindowsSysprep property -> additionalProperties rejects it.
     b1 = copy.deepcopy(good)
-    b1_sysprep = b1["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]
+    b1_sysprep = b1["spec"]["configuration_spec"]["windows_config"]["sysprep"]
     b1_sysprep.pop("domain", None)
     b1_sysprep["identification"] = {
         "joined_domain": "corp.test",
@@ -3184,22 +3740,22 @@ def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() ->
         "domain_admin_password": "pw-join",
     }
     with pytest.raises(ValidationError):
-        validator.validate(b1["spec"])
+        validator.validate(b1)
 
     # B2 regression: GuiUnattended.auto_logon_count is required -> dropping it
     # (as the old _put_if_str-built body did) fails.
     b2 = copy.deepcopy(good)
-    del b2["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]["gui_unattended"][
+    del b2["spec"]["configuration_spec"]["windows_config"]["sysprep"]["gui_unattended"][
         "auto_logon_count"
     ]
     with pytest.raises(ValidationError):
-        validator.validate(b2["spec"])
+        validator.validate(b2)
 
     # B2 regression: CreateSpec.description is required -> dropping it fails.
     b3 = copy.deepcopy(good)
-    del b3["spec"]["description"]
+    del b3["description"]
     with pytest.raises(ValidationError):
-        validator.validate(b3["spec"])
+        validator.validate(b3)
 
 
 @pytest.mark.asyncio
@@ -3257,7 +3813,7 @@ async def test_vm_customize_powered_off_sets_customization(gate: _GateRecorder) 
     ]
     # The resolve read forwards the name filter; PUT body is the named spec ref.
     assert conn.calls[0]["query"] == {"names": ["app"]}
-    assert conn.calls[1]["body"] == {"spec": {"name": "gosc-lin"}}
+    assert conn.calls[1]["body"] == {"name": "gosc-lin"}
     # Only the PUT was gated (the resolve GET is never gated).
     assert gate.gated_op_ids == ["PUT:/vcenter/vm/{vm}/guest/customization"]
     assert out["status"] == "customization_set"

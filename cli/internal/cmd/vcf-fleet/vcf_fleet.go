@@ -5,12 +5,15 @@
 // for G3.6-T9 (#839) of Initiative #369. v0.5 ships operator-facing
 // alias verbs over the 8 enabled VCF Fleet (vRSLCM-derived) read-only
 // core ops, each pre-baking connector_id="fleet-rest-9.0" so operators
-// don't type the connector ID on every dispatch:
+// don't type the connector ID on every dispatch. Verbs whose backend
+// read went typed dispatch the dotted typed op_id (#2355 — ingested
+// METHOD:/path op_ids no longer resolve on a zero-catalog boot); the
+// rest keep their ingested op_ids until a typed counterpart ships:
 //
-//   - `meho vcf-fleet about [--target T]`                                  — GET:/lcm/lcops/api/v2/about
+//   - `meho vcf-fleet about [--target T]`                                  — fleet.about
 //   - `meho vcf-fleet datacenter list [--target T]`                        — GET:/lcm/lcops/api/v2/datacenters
 //   - `meho vcf-fleet vcenter list <datacenter-vmid> [--target T]`         — GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters
-//   - `meho vcf-fleet environment list [--target T]`                       — GET:/lcm/lcops/api/v2/environments
+//   - `meho vcf-fleet environment list [--target T]`                       — fleet.environment.list
 //   - `meho vcf-fleet environment info <environment-id> [--target T]`      — GET:/lcm/lcops/api/v2/environments/{environmentId}
 //   - `meho vcf-fleet product list <environment-id> [--target T]`          — GET:/lcm/lcops/api/v2/environments/{environmentId}/products
 //   - `meho vcf-fleet request list [--target T]`                           — GET:/lcm/request/api/v2/requests

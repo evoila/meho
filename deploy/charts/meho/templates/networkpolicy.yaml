@@ -23,6 +23,29 @@ spec:
       ports:
         - port: 8000
           protocol: TCP
+    {{- with .Values.networkPolicy.ingestAllowedNamespaces }}
+    # In-cluster webhook senders (Alertmanager, Grafana, Harbor, VCF
+    # Operations, ...) delivering to the inbound event-ingest endpoint
+    # (`POST /api/v1/events/ingest/{source_slug}`, #2881) from another
+    # namespace of the same cluster. Default empty → this rule is omitted
+    # and the backplane stays default-deny; only namespaces listed in
+    # `networkPolicy.ingestAllowedNamespaces` are admitted to tcp/8000.
+    # Each entry matches a namespace by the `kubernetes.io/metadata.name`
+    # label kube-apiserver stamps on every namespace (Kubernetes ≥ 1.22),
+    # the same label the ingress-controller rule above matches on. The
+    # peers are OR-ed, so any listed namespace is admitted. SaaS-origin
+    # senders and the satellite-runner inbound listener are out of scope —
+    # they reach the endpoint through the ingress hostname.
+    - from:
+        {{- range . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+      ports:
+        - port: 8000
+          protocol: TCP
+    {{- end }}
   egress:
     # PostgreSQL — locked to the operator-supplied CIDR. Defaults to a /32
     # placeholder so the chart fails-closed on a misconfigured value rather

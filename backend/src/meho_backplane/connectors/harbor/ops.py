@@ -1,9 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Harbor robot lifecycle typed ops (G3.5-T9 #621).
+"""Harbor typed ops — robot lifecycle writes + standalone typed reads.
 
-Registers two scoped-write ops against ``connector_id="harbor-rest-2.x"``:
+G3.5-T9 (#621) registered the two scoped-write robot-lifecycle ops.
+#2857 added the standalone artifact CVE-detail read
+``harbor.artifact.vulnerabilities`` via
+:func:`register_harbor_artifact_operations`.
+Wave-2 (#2858) adds two more standalone typed **reads** —
+``harbor.project.summary`` (per-project storage-quota occupancy) and
+``harbor.quota.list`` (fleet-wide project quotas) — via
+:func:`register_harbor_project_quota_operations`. They register the same
+way the robot ops do (independent of the deferred read-core ingest
+state), landing in the ``harbor-projects`` operation group; their handlers
+live on :class:`~meho_backplane.connectors.harbor.connector.HarborConnector`
+(``project_summary`` / ``quota_list``).
+
+Robot ops — registers two scoped-write ops against ``connector_id="harbor-rest-2.x"``:
 
 * ``harbor.robot.create`` — create a project-scoped robot account.
   Returns the minted secret in its response payload; classified
@@ -44,7 +57,11 @@ from typing import Any
 
 from meho_backplane.retrieval.embedding import EmbeddingService
 
-__all__ = ["register_harbor_artifact_operations", "register_harbor_robot_operations"]
+__all__ = [
+    "register_harbor_artifact_operations",
+    "register_harbor_project_quota_operations",
+    "register_harbor_robot_operations",
+]
 
 
 #: Curated ``when_to_use`` blurb for the Harbor ``robot`` group --
@@ -531,5 +548,294 @@ async def register_harbor_artifact_operations(
         safety_level="safe",
         requires_approval=False,
         llm_instructions=_HARBOR_ARTIFACT_VULN_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+
+
+# ---------------------------------------------------------------------------
+# harbor.project.summary + harbor.quota.list (#2858)
+# ---------------------------------------------------------------------------
+
+#: Curated ``when_to_use`` for the ``harbor-projects`` group. Both wave-2
+#: read ops register into the same group the typed project list/info
+#: reads live under (the typed read core, #2856). Typed-register group
+#: creation is first-write-wins, so ``register_harbor_typed_operations``
+#: (queued first) sets the canonical blurb from
+#: :data:`~meho_backplane.connectors.harbor.typed_ops.HARBOR_TYPED_WHEN_TO_USE_BY_GROUP`;
+#: ``register_typed_operation`` still requires a non-empty string whenever
+#: ``group_key`` is set, so this mirror is passed here and covers the
+#: storage-quota reads.
+_HARBOR_PROJECTS_WHEN_TO_USE: str = (
+    "Use this group to list or inspect Harbor projects (namespaces) and to "
+    "read their storage-quota occupancy. A project holds repositories which "
+    "hold artifacts, and each project has a storage quota. Use to answer "
+    "'what projects exist on this registry', 'is project X public or "
+    "private', 'how many repositories does project Y contain', 'how much "
+    "storage is project Z using vs. its hard limit' "
+    "(harbor.project.summary), or 'which projects are near their storage "
+    "quota' fleet-wide (harbor.quota.list)."
+)
+
+
+_HARBOR_PROJECT_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "project_name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Harbor project name (from harbor.project.list). Queried by "
+                "name; a numeric-looking name is still resolved as a name via "
+                "the X-Is-Resource-Name header, never as a project id."
+            ),
+        },
+    },
+    "required": ["project_name"],
+    "additionalProperties": False,
+}
+
+_HARBOR_PROJECT_SUMMARY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "repo_count": {
+            "type": ["integer", "null"],
+            "description": "Number of repositories under the project.",
+        },
+        "quota": {
+            "type": "object",
+            "description": "Storage quota. hard/used are resource maps keyed by resource name.",
+            "properties": {
+                "hard": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": "Hard limits, e.g. {storage: <bytes>}; storage -1 = unlimited.",
+                },
+                "used": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"},
+                    "description": "Used amounts, e.g. {storage: <bytes>}.",
+                },
+            },
+        },
+        "member_counts": {
+            "type": "object",
+            "description": "Per-role member counts for the project.",
+            "properties": {
+                "project_admin": {"type": ["integer", "null"]},
+                "maintainer": {"type": ["integer", "null"]},
+                "developer": {"type": ["integer", "null"]},
+                "guest": {"type": ["integer", "null"]},
+                "limited_guest": {"type": ["integer", "null"]},
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+_HARBOR_PROJECT_SUMMARY_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Read one Harbor project's storage-quota occupancy and membership "
+        "summary. Use for a capacity pre-flight before onboarding a new push "
+        "pipeline, or to diagnose a denied (quota-exceeded) push. This is "
+        "where storage quota lives -- harbor.project.info's Project object "
+        "does NOT carry a quota field. Requires project_name (from "
+        "harbor.project.list)."
+    ),
+    "parameter_hints": {
+        "project_name": "Harbor project name (from harbor.project.list).",
+    },
+    "output_shape": (
+        "{repo_count, quota: {hard: {storage: <bytes>, ...}, used: {storage: "
+        "<bytes>, ...}}, member_counts: {project_admin, maintainer, developer, "
+        "guest, limited_guest}}. Storage is bytes; a hard storage of -1 means "
+        "unlimited. Compare used.storage against hard.storage for pressure."
+    ),
+    "next_step": (
+        "If used.storage is close to hard.storage (and hard is not -1), surface "
+        "the storage pressure to the operator. For a fleet-wide 'which projects "
+        "are near quota' view, call harbor.quota.list instead of looping this "
+        "op per project."
+    ),
+}
+
+
+_HARBOR_QUOTA_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "sort": {
+            "type": "string",
+            "default": "-used.storage",
+            "description": (
+                "Sort key. '-used.storage' (default) lists the highest storage "
+                "consumers first -- the 'near quota' answer. Use 'used.storage' "
+                "for ascending, or 'hard.storage' / '-hard.storage' by limit."
+            ),
+        },
+        "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "1-based page number for a large fleet.",
+        },
+        "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50,
+            "description": "Quotas per page (max 100). Default 50.",
+        },
+    },
+    "additionalProperties": False,
+}
+
+_HARBOR_QUOTA_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "quotas": {
+            "type": "array",
+            "description": (
+                "Project quotas ordered per sort. The single set-shaped field: a "
+                "large fleet is reduced to a JSONFlux result handle with a "
+                "bounded inline sample."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": ["integer", "null"], "description": "Quota id."},
+                    "ref": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "Project reference this quota belongs to ({id, name, owner_name})."
+                        ),
+                    },
+                    "hard": {
+                        "type": "object",
+                        "additionalProperties": {"type": "integer"},
+                        "description": "Hard limits, e.g. {storage: <bytes>}; -1 = unlimited.",
+                    },
+                    "used": {
+                        "type": "object",
+                        "additionalProperties": {"type": "integer"},
+                        "description": "Used amounts, e.g. {storage: <bytes>}.",
+                    },
+                },
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+_HARBOR_QUOTA_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "List project storage quotas across the whole registry, sorted by "
+        "usage. Use to answer 'which projects are near their storage quota' in "
+        "one call instead of looping harbor.project.summary per project -- the "
+        "capacity-planning and quota-audit entry point. Default sort "
+        "'-used.storage' puts the fullest projects first."
+    ),
+    "parameter_hints": {
+        "sort": (
+            "Default '-used.storage' (fullest first). Other keys: 'used.storage', "
+            "'hard.storage', '-hard.storage'."
+        ),
+        "page": "1-based page number for a large fleet.",
+        "page_size": "Quotas per page (max 100, default 50).",
+    },
+    "output_shape": (
+        "{quotas: [{id, ref: {id, name, owner_name}, hard: {storage: <bytes>}, "
+        "used: {storage: <bytes>}}, ...]} ordered per sort. Storage is bytes; a "
+        "hard storage of -1 means unlimited; ref.name is the project. The "
+        "quotas list is reduced to a JSONFlux handle with a bounded inline "
+        "sample plus a fetch_more envelope for a large fleet."
+    ),
+    "next_step": (
+        "The head rows (default sort) are the projects nearest their quota -- "
+        "surface those with used vs. hard storage. Against a reduced handle, "
+        "drill in with result_query (e.g. filter on used.storage). For one "
+        "project's detail, call harbor.project.summary."
+    ),
+}
+
+
+async def register_harbor_project_quota_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Upsert harbor.project.summary and harbor.quota.list into ``endpoint_descriptor``.
+
+    Standalone typed reads (source_kind="typed") so they dispatch on a fresh
+    boot with zero catalog ingest -- the same shape as ``harbor.robot.create``
+    / ``.delete`` above and ``harbor.artifact.vulnerabilities`` (#2857). Called
+    once per process from the FastAPI lifespan via
+    :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`;
+    idempotent (the body-hash skip path in
+    :func:`~meho_backplane.operations.typed_register.register_typed_operation`).
+
+    Both ops register into the ``harbor-projects`` group (project-level
+    reads); ``harbor.quota.list`` is a fleet-wide project-quota read, so it is
+    discoverable next to the per-project ``harbor.project.summary`` there.
+
+    Test seam: ``embedding_service`` lets fixtures inject a stub so chassis
+    tests don't load the ONNX model.
+    """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    await register_typed_operation(
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
+        op_id="harbor.project.summary",
+        handler=HarborConnector.project_summary,
+        summary="Read a Harbor project's storage-quota occupancy and member counts.",
+        description=(
+            "Reads one project's storage-quota usage via "
+            "GET /api/v2.0/projects/{project_name_or_id}/summary (Harbor v2 "
+            "project API, operationId getProjectSummary) with the "
+            "X-Is-Resource-Name header set so the path segment resolves as a "
+            "project name. This is the storage quota that harbor.project.info "
+            "does NOT carry -- the vendor Project object has no quota field. "
+            "Projected to {repo_count, quota: {hard, used}, member_counts}; "
+            "quota.hard.storage / quota.used.storage are bytes. "
+            "safety_level=safe, read-only, no approval."
+        ),
+        parameter_schema=_HARBOR_PROJECT_SUMMARY_PARAMETER_SCHEMA,
+        response_schema=_HARBOR_PROJECT_SUMMARY_RESPONSE_SCHEMA,
+        group_key="harbor-projects",
+        when_to_use=_HARBOR_PROJECTS_WHEN_TO_USE,
+        tags=["read-only", "harbor", "project", "quota", "storage"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=_HARBOR_PROJECT_SUMMARY_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+
+    await register_typed_operation(
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
+        op_id="harbor.quota.list",
+        handler=HarborConnector.quota_list,
+        summary="List Harbor project storage quotas fleet-wide, sorted by usage.",
+        description=(
+            "Lists project storage quotas across the registry via "
+            "GET /api/v2.0/quotas?reference=project&sort=<sort> (Harbor v2 quota "
+            "API, operationId listQuotas). Default sort '-used.storage' returns "
+            "the highest-usage projects first, answering 'which projects are "
+            "near their storage quota' in one call instead of an N-way "
+            "harbor.project.summary fan-out. Each Quota is projected to "
+            "{id, ref, hard, used} under a 'quotas' key; storage is bytes. The "
+            "quotas list is JSONFlux-reduced to a result handle for large fleets "
+            "(CLAUDE.md postulate 6). safety_level=safe, read-only, no approval."
+        ),
+        parameter_schema=_HARBOR_QUOTA_LIST_PARAMETER_SCHEMA,
+        response_schema=_HARBOR_QUOTA_LIST_RESPONSE_SCHEMA,
+        group_key="harbor-projects",
+        when_to_use=_HARBOR_PROJECTS_WHEN_TO_USE,
+        tags=["read-only", "harbor", "quota", "storage", "capacity"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=_HARBOR_QUOTA_LIST_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

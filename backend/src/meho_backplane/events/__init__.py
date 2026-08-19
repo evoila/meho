@@ -23,14 +23,14 @@ that wakes the drain loop's sleep early, dropping per-event latency
 from "next 5-10s tick" to "sub-second". A dropped notification is
 benign -- the next polled tick picks the row up anyway.
 
-The subscription-matcher (looking up
-:class:`~meho_backplane.db.models.ScheduledTrigger` rows of
-``kind='event'`` and matching their ``event_filter`` against
-``event_outbox.payload``) is intentionally deferred. It depends on
-T5 #826's admin surface to ship the trigger-creation path. v1 of the
-drain loop processes events by stamping ``processed_at`` (no
-subscriber matched); the matcher is folded in as a follow-up once
-T5 lands.
+The subscription matcher (:mod:`meho_backplane.events.matcher`) fires
+every active ``kind='event'``
+:class:`~meho_backplane.db.models.ScheduledTrigger` whose
+``event_filter`` the drained ``event_outbox.payload`` contains
+(``payload @> event_filter``), through the same
+``AgentInvoker.run_scheduled`` seam the cron / one-off scheduler uses.
+Each fire is deduped per (event, trigger) on the run's work_ref, so a
+redelivered event never double-fires an agent.
 
 Public surface
 ==============

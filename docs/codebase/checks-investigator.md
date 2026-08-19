@@ -295,10 +295,10 @@ principal, so no execution path inherits the role.
     processes) — i.e. the reservation protocol `budget_enforcement.py` defers.
     That is a separate, larger change; until it exists, serial-to-completion is
     the only fan-out shape that keeps the cap honest.
-- **Trigger seam.** The runner-persist hook is the v1 seam because event
-  triggers are refused until the #826 matcher lands (#2325) and #2506's rollup
-  is read-path-only. Migrating to an event trigger when the matcher exists is
-  a separate task.
+- **Trigger seam.** The runner-persist hook is the v1 seam because the
+  `kind=event` matcher (#2878) dispatches subscribed agent triggers, not the
+  diagnose-only investigator, and #2506's rollup is read-path-only. Migrating
+  the investigator onto an event trigger is a separate task.
 - **Remote Sensors.** Investigation of remote / isolated-network Sensors
   (#2415 gateway workload) is out of scope here (soft link).
 

@@ -19,15 +19,16 @@ Skipped when no spec source is configured, mirroring the
 retrieval are downstream Tasks (T3 under #227 G3.1); this test only
 asserts the parser does not raise.
 
-G0.16-T8 (#95): the fetcher now accepts only ``https://`` URIs. When the
-resolver returns a local filesystem path the test wraps the file content
-in a respx-mocked HTTPS endpoint so the guard is exercised on real spec
-bytes without requiring an outbound network connection.
+G0.16-T8 (#95): the fetcher accepts only ``https://`` URIs. The resolver
+returns a local filesystem :class:`~pathlib.Path` (never a URL — see
+:mod:`tests.acceptance._vcenter_spec`), so the test uploads the spec
+bytes via the ``content=`` channel — the ``file://`` URI is just the
+audit label — skipping the https guard + DNS lookup without any network
+mock. Same shape as
+:mod:`tests.acceptance.test_portgroup_audit_op_id_reconcile`.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -41,18 +42,15 @@ from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vi_json_
 )
 def test_parse_vi_json_does_not_raise() -> None:
     """vi-json.yaml parses end-to-end after T11's parameter-ref resolver landed."""
-    spec_source_raw = resolve_vi_json_yaml()
-    assert spec_source_raw is not None  # guarded by skipif above
+    spec_path = resolve_vi_json_yaml()
+    assert spec_path is not None  # guarded by skipif above
 
-    if spec_source_raw.startswith("https://"):
-        # Already a public HTTPS URL — fetch directly; no mock needed.
-        rows = parse_openapi(spec_source_raw, spec_source="spec:vi-json.yaml")
-    else:
-        # Local filesystem path — upload the bytes via the content channel
-        # (mirrors how the CLI uploads docs:/file:// specs), so the https
-        # guard + DNS lookup are skipped without a respx mock.
-        spec_text = Path(spec_source_raw).read_text()
-        rows = parse_openapi(spec_source_raw, spec_source="spec:vi-json.yaml", content=spec_text)
+    # Upload the bytes via the content channel (mirrors how the CLI
+    # uploads docs:/file:// specs); the resolver returns a Path, so the
+    # pre-#2949 ``startswith("https://")`` branch was dead code that
+    # raised AttributeError the first time the lane actually ran.
+    spec_text = spec_path.read_text(encoding="utf-8")
+    rows = parse_openapi(f"file://{spec_path}", spec_source="spec:vi-json.yaml", content=spec_text)
 
     assert len(rows) >= 2000, f"got {len(rows)} rows; acceptance threshold is 2000"
     # Spot-check the parameter-ref resolution path: every row that

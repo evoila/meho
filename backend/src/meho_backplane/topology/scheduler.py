@@ -65,7 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target, Tenant
-from meho_backplane.metrics import TOPOLOGY_REFRESH_TOTAL
+from meho_backplane.metrics import TOPOLOGY_REFRESH_TOTAL, note_loop_tick
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.refresh import refresh_target_topology
 
@@ -274,6 +274,7 @@ async def _scheduler_loop() -> None:
             raise
         except Exception:
             _log.exception("topology_refresh_sweep_failed")
+        note_loop_tick("topology_scheduler", get_settings().topology_refresh_interval_seconds)
         await asyncio.sleep(get_settings().topology_refresh_interval_seconds)
 
 

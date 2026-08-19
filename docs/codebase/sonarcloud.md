@@ -33,12 +33,28 @@ the ~8.3k-test suite and barely moves with xdist worker count — see #1987 for 
 peak-memory measurement table. The coverage job is **job-level
 `continue-on-error: true`** so an OOM degrades to "no coverage for this push" and
 never fails the CI run conclusion (which would also suppress this gate's
-`workflow_run` trigger). A pytest *hang* degrades the same way: the pytest step
-carries its own `timeout-minutes: 45` (step timeout → step failure → absorbed),
-because `continue-on-error` absorbs failure only — a job-level timeout expiry
-*cancels* the job, and a `cancelled` run conclusion leaks through and suppresses
-this gate just like a failure would (#2800, observed 2026-08-04). The job-level
-cap (55 min) is only the outer backstop for a wedged non-pytest step.
+`workflow_run` trigger). A pytest *hang* degrades the same way, guarded in three layers
+(#2800 → #2806 → #2865). The **primary** guard is in-process: the coverage pytest
+step runs under pytest-timeout (`--timeout=300 --timeout-method=signal
+--max-worker-restart=0`), so a wedged test dies as a `Failed` carrying its own
+traceback after 300 s — from inside the pytest process, independent of runner
+health. #2865 is why in-process is primary: on the v0.28.0 cut a pytest hang
+outlived the step `timeout-minutes` because the runner itself was wedged (step 9
+still `in_progress` at the ~60-min job kill, run 31199593016 cancelled 2×), so a
+runner-enforced timeout is not a reliable backstop for a pytest hang. `signal`
+(not `thread`) is deliberate under `-n 1` xdist: thread's `os._exit()` reads as a
+worker crash that xdist re-runs up to `--max-worker-restart` times (~5×, one 300 s
+hang ballooning into a job-cap cancel) and whose stack dump xdist swallows;
+`--max-worker-restart=0` caps any *other* worker death (segfault / OOM-kill) at
+zero retries. The step's own `timeout-minutes: 45` (step timeout → step failure →
+absorbed) is the layer-2 backstop for a collection stall or a GIL-locked C call
+the per-test SIGALRM cannot reach; the job-level cap (55 min) is the outer
+backstop for a wedged non-pytest step. All three keep the run conclusion
+`success` — `continue-on-error` absorbs *failure* only, and a job-level timeout
+expiry *cancels* the job, whose `cancelled` conclusion leaks through and
+suppresses this gate just like a failure would (#2800, observed 2026-08-04). On
+any hang the step's pytest output is uploaded as the `coverage-pytest-log`
+artifact so the next hang says *where* it hung.
 
 | Concern | Where |
 |---|---|

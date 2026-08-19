@@ -381,6 +381,7 @@ def test_happy_path_returns_full_federation_response(
         # shape; the conftest autouse reset guarantees a clean slate).
         "sensor_runner": {
             "seconds_since_last_tick": None,
+            "seconds_since_last_claim": None,
             "stalled": False,
             "stall_threshold_seconds": 60.0,
         },
@@ -814,6 +815,52 @@ def test_sensor_runner_facet_stalled_when_stamp_is_stale(
     facet = response.json()["sensor_runner"]
     assert facet["stalled"] is True
     assert facet["seconds_since_last_tick"] >= 120.0
+
+
+def test_sensor_runner_facet_exposes_claim_staleness(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The facet carries ``seconds_since_last_claim`` from the claim stamp.
+
+    #3010: a fresh tick stamp with a stale claim stamp is the
+    stranded-advisory-lock signature — the loop completes every tick but
+    never actually claims. The route must surface both numbers so an
+    external prober can alert on the divergence the tick-only facet was
+    structurally blind to.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(seconds=1),
+    )
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_CLAIM_AT",
+        datetime.now(UTC) - timedelta(seconds=300),
+    )
+    key = _make_rsa_keypair("kid-runner-claim")
+    token = _mint_token(key, sub="op-runner-claim")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    facet = response.json()["sensor_runner"]
+    # Loop reads alive on the tick facet while the claim facet exposes
+    # the starvation.
+    assert facet["stalled"] is False
+    assert 0.0 <= facet["seconds_since_last_tick"] < 30.0
+    assert facet["seconds_since_last_claim"] >= 300.0
 
 
 def test_sensor_runner_facet_absent_when_runner_disabled(

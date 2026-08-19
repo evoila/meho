@@ -329,6 +329,15 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   second-expiry-fails paths via `_get_json_with_session_retry`, the
   audit-row contract, and the JSONFlux handle path on the typed
   `vrli.event.query`.
+- Spec-reconcile guard (#2993):
+  [`backend/tests/test_connectors_vcf_logs_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_logs_spec_reconcile.py)
+  asserts the hand-coded version / events / session-login paths against the
+  already-pinned `vcf-operations-9.0/vcf-operations-for-logs-openapi.json`
+  (public Apache-2.0, `vmware/vcf-api-specs`). Armed on every unit sweep; the
+  lane extracts the served set directly because the vendor doc trips
+  `parse_openapi`'s metaschema gate on a malformed `Bearer` scheme (see the
+  vcf-logs extension in
+  [`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md)).
 - Typed events-query coverage (#2295):
   [`backend/tests/test_connectors_vcf_logs_typed_event_query.py`](../../backend/tests/test_connectors_vcf_logs_typed_event_query.py)
   — dispatch-level `source_kind="typed"` dispatch on a fresh boot, the

@@ -48,11 +48,18 @@ References
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 from kubernetes_asyncio import client
 from kubernetes_asyncio.dynamic import DynamicClient
+
+from meho_backplane.connectors._shared.vault_creds import (
+    DEFAULT_KV_MOUNT,
+    load_vault_secret_data,
+    strip_credential_value,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -63,6 +70,7 @@ __all__ = [
     "DELETABLE_KINDS",
     "FIELD_MANAGER",
     "ApplyManifestError",
+    "KubernetesSecretRefError",
     "UndeletableKindError",
     "k8s_apply",
     "k8s_delete",
@@ -105,6 +113,19 @@ class ApplyManifestError(ValueError):
 
 class UndeletableKindError(ValueError):
     """The requested delete kind is outside the v1 pod/job/replicaset scope."""
+
+
+class KubernetesSecretRefError(ValueError):
+    """A ``*_secret_ref`` entry could not be resolved to a usable value.
+
+    Raised when a ref's resolved credential payload lacks the requested
+    field or carries a non-string / empty value. The message names the
+    Secret key + the resolved field (never the value), mirroring keycloak's
+    ``KeycloakPasswordSecretError``. Subclasses :class:`ValueError` so the
+    dispatcher's ``connector_error`` envelope tags
+    ``extras.exception_class="KubernetesSecretRefError"``, like the sibling
+    manifest / kind errors above.
+    """
 
 
 def _parse_manifest(manifest: str) -> list[dict[str, Any]]:
@@ -272,6 +293,73 @@ async def k8s_delete(
     }
 
 
+@dataclass(slots=True)
+class _SecretRefTarget:
+    """Adapter presenting one per-key secret ref to the credential seam.
+
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`
+    reads its ``secret_ref`` off a
+    :class:`~meho_backplane.connectors._shared.vault_creds.BasicCredentialsTargetLike`
+    (``name`` / ``host`` / ``secret_ref``). A ``k8s.secret.create`` ref
+    lives per Secret key in the op params, not at the connector target's
+    ``secret_ref`` -- so this adapter carries the connector target's
+    ``name`` / ``host`` for log + error attribution while pointing the seam
+    at the per-key ref (mirrors keycloak's ``_PasswordSecretTarget``).
+    """
+
+    name: str
+    host: str
+    secret_ref: str | None
+
+
+async def _resolve_secret_refs(
+    operator: Operator,
+    target: KubernetesTargetLike,
+    refs: dict[str, str],
+    *,
+    mount: str,
+) -> dict[str, str]:
+    """Resolve a ``{secret-key: ref}`` map to ``{secret-key: value}``.
+
+    Each ref is read under the operator's identity through the
+    credential-backend seam
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+    the same seam the kubeconfig loader rides). The value NEVER transits the
+    op params -- only the ref does -- so a Vault/GSM-resident secret
+    materialises into the Secret without ever entering the caller's context
+    (mirrors keycloak's ``password_secret_ref``, #2401).
+
+    A ref may carry a trailing ``#<field>`` fragment naming which field of
+    the resolved payload to use; it defaults to the Secret key. The fragment
+    is split off **here**, before the seam read, because a Vault KV-v2 path
+    cannot carry a ``#`` (hvac would build a ``/data/<path>#<field>`` URL and
+    404) -- so the caller, not the backend, owns fragment->field selection,
+    uniformly for the ``vault:`` and ``gsm:`` schemes the issue's grammar
+    (``{key: "<scheme>:<path>#<field>"}``) spans.
+    """
+    resolved: dict[str, str] = {}
+    for secret_key, raw_ref in refs.items():
+        body, sep, fragment = str(raw_ref).rpartition("#")
+        store_ref = body.strip() if sep else str(raw_ref).strip()
+        field = fragment.strip() if (sep and fragment.strip()) else secret_key
+        payload = await load_vault_secret_data(
+            _SecretRefTarget(name=target.name, host=target.host, secret_ref=store_ref),
+            operator,
+            mount=mount,
+        )
+        value = payload.get(field) if isinstance(payload, dict) else None
+        stripped = strip_credential_value(value) if isinstance(value, str) else None
+        if not stripped:
+            raise KubernetesSecretRefError(
+                f"k8s.secret.create secret_ref for key {secret_key!r} (ref={store_ref!r}) "
+                f"carries no usable string value under field {field!r}. Store the value "
+                f"under that field (or name it with a '#field' fragment) so the Secret "
+                f"can source it without the value ever appearing in op params."
+            )
+        resolved[secret_key] = stripped
+    return resolved
+
+
 def secret_create_summary(
     name: str, namespace: str, secret_type: str, data_keys: list[str]
 ) -> dict[str, Any]:
@@ -302,17 +390,46 @@ async def k8s_secret_create(
     """Handler for ``k8s.secret.create`` -- create an Opaque (or typed) Secret.
 
     Accepts ``string_data`` (plaintext, base64-encoded by the API server)
-    and/or ``data`` (already base64-encoded). The values are written to
-    the cluster but never echoed back: the response is
+    and/or ``data`` (already base64-encoded), inline and/or by reference.
+    The ``string_data_secret_ref`` / ``data_secret_ref`` maps
+    (``{secret-key: "<scheme>:<path>#<field>"}``) are resolved server-side
+    through the credential-backend seam (:func:`_resolve_secret_refs`) and
+    merged into the respective inline map -- so a Vault/GSM-resident value
+    materialises into the Secret without the value ever transiting the op
+    params (mirrors keycloak's ``password_secret_ref``, #2401). The values
+    are written to the cluster but never echoed back: the response is
     :func:`secret_create_summary` (key names only). The op classifies
     ``credential_write`` so the broadcast event collapses to
-    aggregate-only -- the values in ``params`` never reach the feed.
+    aggregate-only -- the refs in ``params`` never reach the feed either.
     """
     name: str = params["name"]
     namespace: str = params["namespace"]
     secret_type: str = params.get("type", "Opaque")
     string_data: dict[str, str] = dict(params.get("string_data") or {})
     data: dict[str, str] = dict(params.get("data") or {})
+
+    # Resolve ref-valued siblings server-side and merge over the inline maps.
+    # Only the ref transits op params; the value materialises in-process.
+    string_ref = params.get("string_data_secret_ref")
+    if string_ref:
+        string_data.update(
+            await _resolve_secret_refs(
+                operator,
+                target,
+                dict(string_ref),
+                mount=str(params.get("string_data_secret_mount") or DEFAULT_KV_MOUNT).strip(),
+            )
+        )
+    data_ref = params.get("data_secret_ref")
+    if data_ref:
+        data.update(
+            await _resolve_secret_refs(
+                operator,
+                target,
+                dict(data_ref),
+                mount=str(params.get("data_secret_mount") or DEFAULT_KV_MOUNT).strip(),
+            )
+        )
 
     api_client = await connector._get_api_client(target, operator)
     core_v1 = client.CoreV1Api(api_client)

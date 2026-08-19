@@ -84,6 +84,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "meho_topology_create_node",
         "meho_topology_delete_node",
         "meho_topology_unannotate",
+        "meho_targets_register",
         "preview_operation",
         "query_audit",
         "query_topology",
@@ -743,6 +744,72 @@ async def test_topology_annotate_parked_branch_conforms(
             client,
             "meho_topology_annotate",
             {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
+        ),
+    )
+    assert payload["status"] == "awaiting_approval"
+    assert uuid.UUID(payload["approval_request_id"])
+
+
+# ---------------------------------------------------------------------------
+# Targets registry write (#2861) — executed (human) + parked (agent) branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_meho_targets_register_executed_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A human tenant_admin registration executes immediately and conforms.
+
+    Real end-to-end dispatch through the synthetic ``targets-registry-1.x``
+    connector into ``create_target``; the reduced ``{target_id, name,
+    product, host, tenant_id}`` payload is validated against the executed
+    branch of the declared ``oneOf``.
+    """
+    client, op = client_with_operator
+    await _seed_tenant()
+    payload = _assert_conforms(
+        "meho_targets_register",
+        _call(
+            client,
+            "meho_targets_register",
+            {"name": "conf-target", "product": "vault", "host": "vault.example"},
+        ),
+    )
+    assert payload["name"] == "conf-target"
+    assert payload["product"] == "vault"
+    assert payload["host"] == "vault.example"
+    assert payload["tenant_id"] == str(op.tenant_id)
+    assert uuid.UUID(payload["target_id"])
+
+
+@pytest.mark.parametrize(
+    "custom_client",
+    [
+        {
+            "role": TenantRole.TENANT_ADMIN,
+            "principal_kind": PrincipalKind.AGENT,
+        }
+    ],
+    indirect=True,
+)
+async def test_meho_targets_register_parked_branch_conforms(
+    custom_client: tuple[TestClient, Operator],
+) -> None:
+    """An agent-principal registration parks: the ``awaiting_approval`` branch.
+
+    The parked envelope is a first-class success result (``isError:
+    false``), so it must validate against the declared ``oneOf`` union
+    exactly like the executed shape.
+    """
+    client, _op = custom_client
+    await _seed_tenant()
+    payload = _assert_conforms(
+        "meho_targets_register",
+        _call(
+            client,
+            "meho_targets_register",
+            {"name": "conf-target-agent", "product": "vault", "host": "vault.example"},
         ),
     )
     assert payload["status"] == "awaiting_approval"

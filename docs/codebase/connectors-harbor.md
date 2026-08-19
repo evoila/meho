@@ -13,7 +13,12 @@ broadcast classifier. G3.5-T10 (#622) added the `meho harbor …` CLI verb tree
 `goharbor/harbor-core:v2.11.0`, and `docs/cross-repo/harbor-onboarding.md`.
 Wave-2 (#2857) adds `harbor.artifact.vulnerabilities` — a standalone typed
 read for the per-artifact CVE list behind `harbor.artifact.info`'s
-`scan_overview` severity counts.
+`scan_overview` severity counts. Wave-2 (#2858) adds two more standalone
+typed storage-quota reads — `harbor.project.summary` (per-project quota/usage
+occupancy) and `harbor.quota.list` (fleet-wide project quotas) — and fixes the
+`harbor.project.info` overpromise: the vendor Harbor 2.11 `Project` object
+carries no `quota` or `chart_count` field, so those claims were dropped
+from its `llm_instructions` and repointed at `harbor.project.summary`.
 
 **#2856** converted the 9-op read core from the original ingested-curation
 apparatus (a retired `core_ops.py` whose ops only dispatched once a per-deploy
@@ -38,8 +43,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   read shims (`about` / `health` / `project_list` / `project_info` /
   `repository_list` / `repository_info` / `artifact_list` / `artifact_info`
   / `robot_list`, each delegating to a `typed_reads` body), the two robot
-  writes (`robot_create` / `robot_delete`), and the standalone
-  `artifact_vulnerabilities` CVE-detail read (#2857).
+  writes (`robot_create` / `robot_delete`), the standalone
+  `artifact_vulnerabilities` CVE-detail read (#2857), and the two standalone
+  storage-quota reads (`project_summary` / `quota_list`, #2858).
 - **`HarborTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
   the minimum target shape the connector reads: `name`, `host`, `port`,
   `secret_ref`, and `auth_model`. No `sso_realm` field — Harbor sends
@@ -95,6 +101,12 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   (#2857) into `endpoint_descriptor` (group `harbor-artifacts`, `safety_level=safe`,
   no approval). Same lifespan/idempotency contract as the robot registrar; queued
   separately in `__init__.py`.
+- **`register_harbor_project_quota_operations`** (`ops.py`) — async lifespan
+  registrar that upserts the wave-2 standalone typed reads
+  `harbor.project.summary` and `harbor.quota.list` (#2858) into
+  `endpoint_descriptor` (group `harbor-projects`, `safety_level=safe`, no
+  approval). Same lifespan/idempotency contract as the robot registrar;
+  queued separately in `__init__.py`.
 
 ## Control flow
 
@@ -217,6 +229,53 @@ dispatched operator threads in and is forwarded to `auth_headers` →
    `SELECT ... WHERE id = 'CVE-…'` away. A never-scanned artifact returns
    Harbor 404 → `httpx.HTTPStatusError` → `connector_error`.
 
+### project_summary(operator, target, params)
+
+Typed op handler for `harbor.project.summary` (#2858) — a project's
+storage-quota occupancy. Classified `read` (`classify_op`; `.summary` is a
+`_READ_SUFFIXES` entry, so its broadcast sensitivity matches the
+`harbor.project.info` sibling rather than falling through to the full-detail
+`other` class — the same edit also reclassifies
+`vmware.composite.performance.summary` `other`→`read`, a correctness
+improvement; neither class is sensitive, so redaction is unchanged).
+`safety_level=safe`, no approval. Like the robot handlers, the `operator`
+signature threads the dispatched operator to `auth_headers` →
+`_load_credentials` for the operator-context Vault read.
+
+1. Percent-encodes `project_name` with `quote(value, safe="")`.
+2. Calls `_request_json(target, "GET",
+   "/api/v2.0/projects/{name}/summary", operator=operator,
+   extra_headers={"X-Is-Resource-Name": "true"})`. `_request_json` (not
+   `_get_json`) forwards the per-call header; the header makes Harbor resolve
+   the path segment as a project *name* even when it looks numeric (the vendor
+   default treats a numeric segment as an id). GET stays idempotent, so the
+   tenacity retry still applies.
+3. Projects the native `ProjectSummary` to
+   `{repo_count, quota: {hard, used}, member_counts}`. `quota.hard`/`quota.used`
+   are `ResourceList` maps (`storage` in bytes; hard `-1` = unlimited); the
+   proxy-only `registry` field is dropped. **This is the quota
+   `harbor.project.info` does not carry** — the vendor `Project` object has no
+   `quota` field.
+
+### quota_list(operator, target, params)
+
+Typed op handler for `harbor.quota.list` (#2858) — fleet-wide project storage
+quotas, the "which projects are near quota" read. Classified `read` (`.list`
+suffix), `safety_level=safe`, no approval. `operator` threads the same way.
+
+1. Builds the query `{reference: "project", sort, page, page_size}`.
+   `reference=project` is fixed (project quotas are the only reference type in
+   the stable Harbor 2.x line); `sort` defaults to `-used.storage` (fullest
+   projects first).
+2. Calls `_get_json(target, "/api/v2.0/quotas", operator=operator,
+   params=query)` — idempotent GET with query params, no per-call header.
+3. Projects each native `Quota` to `{id, ref, hard, used}` and returns a
+   **bare list**. `ref` is the project reference (`{id, name, owner_name}`);
+   `hard`/`used` are `ResourceList` maps (`storage` in bytes). The dispatcher's
+   JSONFlux reducer materialises the list into a result handle when the fleet
+   crosses the ~50-row / 4 KB threshold (postulate 6); a "projects over N bytes
+   used" filter is a `result_query` away.
+
 ### execute() shim
 
 `execute()` synthesises a system `Operator` and delegates to
@@ -245,34 +304,66 @@ construct a real `Operator` and call `dispatch` directly — they bypass this sh
   `.health` / `.list` / `.info` read suffixes plus `.vulnerabilities`, #2857)
   and `credential_mint` for `harbor.robot.create`.
 
-## The 9 read-only core ops
+## The read-only core ops
 
 All register under `connector_id="harbor-rest-2.x"` as `source_kind="typed"`
-and dispatch on a fresh boot with zero catalog ingest. The 9 rows below are the
-audited read core (`HARBOR_TYPED_OPS`, via `register_harbor_typed_operations`);
-the trailing `harbor.artifact.vulnerabilities` row (#2857) is a **standalone
-typed read** registered separately in `ops.py` via
-`register_harbor_artifact_operations` — read-only like the core, but not one of
-the 9.
+and dispatch on a fresh boot with zero catalog ingest. The first 9 rows below
+are the audited read core (`HARBOR_TYPED_OPS`, via
+`register_harbor_typed_operations`); the `harbor.artifact.vulnerabilities` row
+(#2857) is a **standalone typed read** registered separately in `ops.py` via
+`register_harbor_artifact_operations`, and the `harbor.project.summary` /
+`harbor.quota.list` rows (#2858) are **standalone typed reads** registered via
+`register_harbor_project_quota_operations` — all read-only like the core, but
+not one of the 9.
 
 | Op id | Group | Vendor path (Harbor 2.x) |
 |---|---|---|
 | `harbor.about` | `harbor-system` | `GET /api/v2.0/systeminfo` |
 | `harbor.health` | `harbor-system` | `GET /api/v2.0/health` |
 | `harbor.project.list` | `harbor-projects` | `GET /api/v2.0/projects` |
-| `harbor.project.info` | `harbor-projects` | `GET /api/v2.0/projects/{project_name}` |
+| `harbor.project.info` | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}` |
 | `harbor.repository.list` | `harbor-repositories` | `GET /api/v2.0/projects/{project_name}/repositories` |
 | `harbor.repository.info` | `harbor-repositories` | `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}` |
 | `harbor.artifact.list` | `harbor-artifacts` | `GET …/repositories/{repository_name}/artifacts` |
 | `harbor.artifact.info` | `harbor-artifacts` | `GET …/artifacts/{reference}` |
 | `harbor.robot.list` | `harbor-robots` | `GET /api/v2.0/robots` |
 | `harbor.artifact.vulnerabilities` *(standalone typed read, #2857)* | `harbor-artifacts` | `GET …/artifacts/{reference}/additions/vulnerabilities` |
+| `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
+| `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
+
+**Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
+(`GET /projects/{name}`) returns the vendor `Project` object, which has no
+`quota` and no `chart_count` field. Per-project storage occupancy
+(`quota.hard`/`quota.used` in bytes) comes from `harbor.project.summary`
+(`GET /projects/{name}/summary`); the fleet-wide "which projects are near
+quota" answer comes from `harbor.quota.list` (`GET /quotas`).
 
 **Robot id + secret invariant**: `harbor.robot.list` returns each robot's
 numeric `id` (needed for `harbor.robot.delete`) and never a `secret` — Harbor
 only exposes secrets in the `POST` create response, and the read handler
 returns Harbor's list payload verbatim. The unit and acceptance tests assert
 this invariant explicitly.
+
+**Spec-reconcile lane (#2990).** Every request path the connector dispatches
+is declared once as a `_*_PATH` template constant in
+[`_paths.py`](../../backend/src/meho_backplane/connectors/harbor/_paths.py)
+(hoisted out of inline f-strings by #2990); each handler builds its concrete
+path via `fill_path` (or uses a placeholder-free constant directly), and the
+single `encode_segment` helper percent-encodes caller-controlled segments — so
+these constants ARE the dispatched surface. The lane
+[`test_connectors_harbor_spec_reconcile.py`](../../backend/tests/test_connectors_harbor_spec_reconcile.py)
+(parse-only, in the required unit sweep; uniform skip when the shelf is
+unconfigured) introspects those live constants and asserts all 14 hand-coded
+`METHOD:/path` op_ids are served by the pinned `harbor-2.12` shelf spec
+(`harbor-swagger.yaml` — `goharbor/harbor@v2.12.2` `api/v2.0/swagger.yaml`,
+Apache-2.0). The spec is Swagger 2.0 (ingest rejects it, #2090), so the lane
+extracts its own served set and folds the document's `basePath: /api/v2.0`
+onto every path key; template placeholders carry the vendor's own parameter
+names (`{project_name_or_id}` on the project detail / `/summary` routes,
+`{project_name}` / `{repository_name}` / `{reference}` on the repository
+sub-tree, `{robot_id}` on robot-delete). All 14 were served on the first armed
+run — no repoints, no exclusions. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Tests
 
@@ -281,6 +372,11 @@ this invariant explicitly.
   forwarding, `source_kind="typed"`, the robot id/secret invariant,
   `classify_op == "read"`, and the registration-shape invariants (safe,
   no-approval, read-only tag, `llm_instructions` canonical keys, no write op).
+- `tests/test_connectors_harbor_spec_reconcile.py` — the #2990 real-spec
+  reconcile lane: introspects the `_paths` template constants and asserts every
+  hand-coded `METHOD:/path` is served by the pinned `harbor-2.12` Swagger 2.0
+  spec (basePath-folded); the two offline guards (constant-set + op_id manifest)
+  run unconditionally, the armed assertion skips clean without the shelf.
 - `tests/acceptance/_harbor_canary_fixtures.py` — shared fixtures: runs the
   typed registrar, seeds a `Target`, respx-mocks the Harbor REST surface, and
   stubs the credentials loader.
@@ -295,6 +391,12 @@ this invariant explicitly.
   parity with `harbor.artifact.info`, MIME-keyed / bare envelope unwrap, empty
   and 404 paths, `dispatch_typed` operator threading, and the `read`
   classification.
+- `tests/test_connectors_harbor_quota.py` — unit tests for
+  `harbor.project.summary` and `harbor.quota.list` (#2858): quota-byte
+  projection, the `X-Is-Resource-Name` header, the `reference=project` +
+  `-used.storage` default query, `dispatch_typed` operator threading, `read`
+  classification, and the `harbor.project.info` overpromise fix (no `quota` /
+  `chart_count` in the op's `llm_instructions` or the `Project` fixtures).
 - `tests/integration/test_connectors_harbor_container.py` — env-gated real
   Harbor `v2.11.0` stack E2E: `harbor.about` + `harbor.robot.list` reads and
   the robot create/delete four-eyes flow, all `source_kind="typed"`.
@@ -314,7 +416,9 @@ this invariant explicitly.
 - Issues: #619 (G3.5-T7 skeleton), #621 (G3.5-T9 robot lifecycle +
   credential_mint classifier), #622 (G3.5-T10 CLI verbs + real-container E2E +
   harbor-onboarding.md), **#2856 (typed read-core conversion)**,
-  #2857 (wave-2 CVE-detail read `harbor.artifact.vulnerabilities`)
+  #2857 (wave-2 CVE-detail read `harbor.artifact.vulnerabilities`),
+  #2858 (wave-2 storage-quota reads `harbor.project.summary` /
+  `harbor.quota.list` + `harbor.project.info` overpromise fix)
 - Precedent: Task #2358 / Goal #2247 — the NSX (#2302) and SDDC Manager (#2306)
   typed-read conversions this task mirrors
 - Initiative: #368 (G3.5 tier-2 batch), #2833 (connector read-op coverage wave 2)

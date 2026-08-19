@@ -74,6 +74,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
     {
         "vmware.composite.vm.create",
         "vmware.composite.vm.clone",
+        "vmware.composite.vm.deploy_from_library",
         "vmware.composite.vm.clone_from_template",
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.migrate",
@@ -304,10 +305,10 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 # ===========================================================================
 
 
-def test_all_eighteen_write_composites_register_a_preview_builder() -> None:
+def test_all_nineteen_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 18
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 19
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -415,7 +416,6 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
                 "source_vm": "vm-1",
                 "target_name": "vm-clone",
                 "library_item": "lib-1",
-                "wait_for_completion": False,
             }
         )
     )
@@ -423,7 +423,63 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
         "source_vm": "vm-1",
         "target_name": "vm-clone",
         "library_item": "lib-1",
-        "wait_for_completion": False,
+    }
+
+
+async def test_vm_deploy_from_library_preview_echoes_deploy_coordinates() -> None:
+    """The deploy echo names the blast radius — item, placement, mappings — no I/O."""
+    preview = await _write_preview._vm_deploy_from_library_preview(
+        _make_preview_ctx(
+            {
+                "library_item_name": "holorouter-ova",
+                "library_name": "lab-templates",
+                "name": "router-01",
+                "resource_pool": "resgroup-8",
+                "host": "host-19",
+                "folder": "group-v10",
+                "datastore": "datastore-15",
+                "network_mappings": {"nat": "dvportgroup-42"},
+                "storage_provisioning": "thin",
+                "ovf_properties": {"guestinfo.password": "s3cret", "guestinfo.hostname": "r1"},
+                "power_on": True,
+            }
+        )
+    )
+    assert preview == {
+        "library_item": None,
+        "library_item_name": "holorouter-ova",
+        "library_name": "lab-templates",
+        "name": "router-01",
+        "resource_pool": "resgroup-8",
+        "host": "host-19",
+        "folder": "group-v10",
+        "datastore": "datastore-15",
+        "network_mappings": {"nat": "dvportgroup-42"},
+        "storage_provisioning": "thin",
+        # Only property IDs — never the (possibly secret) values (#1503).
+        "ovf_property_keys": ["guestinfo.hostname", "guestinfo.password"],
+        "power_on": True,
+    }
+
+
+async def test_vm_deploy_from_library_preview_defaults_optional_fields() -> None:
+    """id passthrough + only the required resource_pool → optional fields default cleanly."""
+    preview = await _write_preview._vm_deploy_from_library_preview(
+        _make_preview_ctx({"library_item": "li-ovf", "resource_pool": "resgroup-8"})
+    )
+    assert preview == {
+        "library_item": "li-ovf",
+        "library_item_name": None,
+        "library_name": None,
+        "name": None,
+        "resource_pool": "resgroup-8",
+        "host": None,
+        "folder": None,
+        "datastore": None,
+        "network_mappings": {},
+        "storage_provisioning": None,
+        "ovf_property_keys": [],
+        "power_on": False,
     }
 
 
@@ -523,6 +579,7 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     """Missing required params decline (→ identifier-only default), never raise."""
     assert await _write_preview._vm_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_clone_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_deploy_from_library_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_clone_from_template_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_snapshot_revert_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_migrate_preview(_make_preview_ctx({})) is None
@@ -814,7 +871,9 @@ async def test_cluster_patch_park_resolves_host_set(
     stub_embedding_service: AsyncMock,
 ) -> None:
     recorder = await _bootstrap_registry(stub_embedding_service)
-    recorder.responses["/vcenter/cluster/domain-c1/host"] = {
+    # #2970: cluster hosts resolve via the cluster-filtered Host_list --
+    # the pinned spec serves no per-cluster /vcenter/cluster/{c}/host.
+    recorder.responses["/vcenter/host"] = {
         "value": [
             {"host": "host-1", "name": "esx-1"},
             {"host": "host-2", "name": "esx-2"},
@@ -827,7 +886,6 @@ async def test_cluster_patch_park_resolves_host_set(
         "op_class": "write",
         "preview": {
             "cluster": "domain-c1",
-            "patch_method": "default",
             "resolved": [
                 {"host": "host-1", "name": "esx-1"},
                 {"host": "host-2", "name": "esx-2"},
@@ -838,7 +896,7 @@ async def test_cluster_patch_park_resolves_host_set(
         "safety_level": "dangerous",
     }
     # Only the host listing fired — no maintenance / patch sub-ops.
-    assert recorder.specs == ["/vcenter/cluster/domain-c1/host"]
+    assert recorder.specs == ["/vcenter/host"]
 
 
 # ===========================================================================

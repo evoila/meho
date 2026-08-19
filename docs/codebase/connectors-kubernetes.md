@@ -102,6 +102,105 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   rubric **State 2** wiring (`shared_service_account` only). Decision:
   [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
+## vSphere Supervisor (WCP) SSO auth mode (#2905)
+
+A **vSphere Supervisor** (the WCP "Supervisor cluster" fronting a
+vSphere workload domain) is a real Kubernetes cluster people want to
+observe, but it **issues no static/durable credential**: WCP owns the
+cluster RBAC and even `administrator@vsphere.local` is not cluster-admin,
+so the read-only-ServiceAccount + non-expiring-token recipe every normal
+appliance/kubeadm cluster allows is unavailable. The only credential a
+Supervisor hands out is the **short-lived vSphere-SSO token** from its
+`POST /wcp/login` exchange (it expires with the SSO session). The static
+`kubeconfig` path can't consume that durably — so the Supervisor was the
+one k8s tier the connector couldn't register.
+
+The WCP mode makes the connector hold the SSO credential and run the
+login dance itself — the same shape `kubectl vsphere login` /
+`kubelogin` implement — to **mint → cache → refresh** the Supervisor
+token transparently.
+
+### Credential-protocol discrimination (not `auth_model`)
+
+`load_kubernetes_credential`
+(`connectors/kubernetes/kubeconfig.py`) reads `target.secret_ref` **once**
+through the same `load_vault_secret_data` seam the kubeconfig path uses,
+then routes on the payload's **field shape** — the same pattern the
+GitHub connector uses for its App-vs-PAT split, deliberately **not**
+overloading the target's `auth_model` (that is the *identity* model —
+`shared_service_account` etc. — not a credential protocol):
+
+- a `kubeconfig` field → `KubeconfigCredential` (today's static path,
+  checked **first** so an existing kubeconfig secret is never
+  re-interpreted);
+- else `username` + `password` fields → `WcpSsoCredential` (the WCP SSO
+  path — the username is the fully-qualified SSO principal, e.g.
+  `administrator@vsphere.local` or a scoped read-only namespace user, so
+  no separate realm field is needed);
+- neither → `VaultCredentialsReadError`.
+
+A Supervisor target therefore differs from a normal k8s target **only**
+in the shape of the credential its `secret_ref` holds. It still
+registers as `product="k8s"`, still resolves through the single
+`("k8s","1.x","k8s")` connector, and needs **no target-schema change** —
+the fingerprint/resolver/target model are untouched (a whole sibling
+connector class would be the wrong altitude for an auth-only difference).
+
+### Mint → cache → refresh (`connectors/kubernetes/wcp.py`)
+
+`build_wcp_api_configuration` performs the initial
+`wcp_login` (`POST https://{host}:443/wcp/login`, HTTP Basic, **no body**
+— which selects the top-level Supervisor context, not a
+`guest_cluster_*` per-workload sub-session), takes the Supervisor CA from
+the response's `kube_config`, and builds a
+`kubernetes_asyncio.client.Configuration` whose bearer refreshes itself.
+The refresh rides `kubernetes_asyncio`'s async-capable
+`refresh_api_key_hook`: `Configuration.get_api_key_with_prefix` awaits it
+before reading `api_key["BearerToken"]` on **every** request, so the hook
+re-mints once the cached token is inside `WCP_TOKEN_REFRESH_MARGIN_SECONDS`
+of expiry (single-flight under a lock). Expiry is stamped from the
+token's JWT `exp` claim (read unverified — it's our own token, used only
+to schedule refresh) with a short `DEFAULT_WCP_TOKEN_TTL_SECONDS` fallback
+for a non-JWT token. The cached `ApiClient` (keyed on `secret_ref` like
+the static path) stays put across the token's lifetime — only its bearer
+rotates — so both the read `ApiClient` and the exec `WsApiClient` get the
+self-refreshing client with no per-op login round-trip.
+
+### Internal-VIP redirect avoidance + TLS bootstrap
+
+The `/wcp/login` response's `kube_config` points its `server` at the
+Supervisor's **raw internal VIP**, which is unreachable when the
+Supervisor is dialed over a NAT'd alias (a lab / operator-VPN norm). The
+connector keeps that CA but **overrides the host to the
+operator-reachable `target.host`** (the top-level Supervisor kube-API
+context) and never follows the internal-VIP workload-session redirects.
+Because it deliberately dials the alias rather than the cert's VIP SAN,
+hostname assertion is disabled while the Supervisor **CA chain stays
+verified**.
+
+TLS for the login POST itself follows the target's knobs exactly like the
+shared HTTP transport: a `tls_ca_pin` (the Supervisor CA, staged
+out-of-band) is verified against; otherwise `verify_tls` toggles
+system-CA verification. A self-signed Supervisor therefore needs either
+the CA pinned on the target (recommended) or `verify_tls=false` (lab) —
+the same trust bootstrap `kubectl vsphere login` needs a thumbprint or
+`--insecure-skip-tls-verify` for. No SSO credential or minted token is
+ever logged (structlog events carry host / port / mode only).
+
+### Operator staging
+
+Register the Supervisor as an ordinary k8s target (`product: k8s`,
+`host:` the reachable Supervisor address, `port:` the kube-API port,
+default 6443) and stage its `secret_ref` with **`username` + `password`**
+fields (vSphere SSO) instead of a `kubeconfig` field. Pin the Supervisor
+CA via the target's `tls_ca_pin` (recommended) or set `verify_tls=false`
+for a lab. **Least privilege:** the SSO super-admin works but the
+recommended long-term credential is a scoped read-only vSphere SSO user
+granted a read-only vSphere-Namespace role; the connector is
+credential-agnostic and uses whatever SSO pair is staged. Sibling
+issue #2902 (operator-CLI login-token longevity) is a different surface
+(Keycloak OIDC) and shares no implementation with this WCP token dance.
+
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
 The `Connector.fingerprint(target, operator=None)` ABC signature

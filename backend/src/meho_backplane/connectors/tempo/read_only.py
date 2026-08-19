@@ -19,6 +19,11 @@ gate over that passthrough:
   ``/api`` root). Every documented query endpoint is under ``/api``; the
   probe/fingerprint reads ``/ready`` (outside ``/api``) travel a different,
   ungated seam (``_unauth_get``), so the passthrough surface stays tight.
+* **Traversal guard** -- a ``..`` path segment is rejected (the prometheus
+  precedent). ``/api/../flush`` passes the prefix check but httpx resolves
+  RFC 3986 dot-segments before the request leaves the process, collapsing the
+  wire path to ``/flush`` -- outside the read surface. Rejecting ``..`` keeps
+  the passthrough inside ``/api`` on the wire, not just in the literal string.
 
 Unlike the loki gate, this one carries **no** ``push``/``delete`` segment
 blocklist, and deliberately so: Tempo exposes no state-changing endpoint that
@@ -85,4 +90,15 @@ def assert_tempo_read_only(method: str, path: str) -> None:
     if normalized != TEMPO_API_PREFIX and not normalized.startswith(f"{TEMPO_API_PREFIX}/"):
         raise TempoReadOnlyError(
             f"path {path!r} is outside the allowed Tempo read surface ({TEMPO_API_PREFIX}/...)"
+        )
+
+    # Traversal guard (the prometheus-connector precedent): a ``..`` segment
+    # passes the prefix check (``/api/../flush`` starts with ``/api/``) but
+    # httpx resolves RFC 3986 dot-segments before the request leaves the
+    # process, so the wire path would collapse to ``/flush`` — outside the read
+    # surface. Reject any ``..`` segment so the passthrough cannot escape /api.
+    if ".." in normalized.split("/"):
+        raise TempoReadOnlyError(
+            f"tempo connector rejects path traversal in {path!r} (a '..' segment could "
+            "escape the /api read surface once the client normalises the path)"
         )

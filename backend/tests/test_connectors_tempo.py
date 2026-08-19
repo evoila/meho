@@ -226,10 +226,14 @@ def test_every_op_is_safe_read_only_with_closed_schema() -> None:
         ("GET", "/metrics"),
         ("GET", "/status/version"),
         ("GET", "/"),
+        # Traversal: passes the /api prefix check but httpx would resolve the
+        # dot-segments and dial /flush — must be rejected by the gate.
+        ("GET", "/api/../flush"),
+        ("GET", "/api/v2/search/../../shutdown"),
     ],
 )
 def test_read_only_gate_rejects_writes_and_off_surface(method: str, path: str) -> None:
-    """AC: non-GET and any path outside /api are rejected with no upstream call."""
+    """AC: non-GET, off-/api, and ../traversal paths are rejected with no upstream call."""
     with pytest.raises(TempoReadOnlyError):
         assert_tempo_read_only(method, path)
 
@@ -475,6 +479,32 @@ async def test_get_passthrough_rejects_off_surface_without_upstream_call(
             op_id="tempo.get",
             target=_TempoTarget(),
             params={"path": "/flush"},
+        )
+
+    assert result.status == "error"
+    assert not route.called
+
+
+@pytest.mark.asyncio
+async def test_get_passthrough_rejects_traversal_that_matches_the_schema(
+    _stub_embedding: AsyncMock, session: AsyncSession
+) -> None:
+    """AC: `/api/../flush` matches the passthrough schema but the gate rejects it.
+
+    The `path` param's `^/api(/.*)?$` pattern admits `/api/../flush`, so the
+    read-only gate — not schema validation — is the load-bearing defense against
+    a dot-segment escape off the /api surface. No wire call is made.
+    """
+    await _register_ops(_stub_embedding)
+
+    async with respx.mock(base_url=_TEMPO_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get("/flush").respond(200, json={})
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="tempo.get",
+            target=_TempoTarget(),
+            params={"path": "/api/../flush"},
         )
 
     assert result.status == "error"

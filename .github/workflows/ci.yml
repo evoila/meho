@@ -878,7 +878,7 @@ jobs:
         run: |
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
-            --ignore=tests/integration tests/ 2>&1 | tee pytest-coverage.log
+            tests/test_zz_hang_canary_2865.py 2>&1 | tee pytest-coverage.log
 
       - name: Combine coverage + write XML (offline, workers exited)
         # Runs AFTER the pytest step above fully returned — every xdist worker

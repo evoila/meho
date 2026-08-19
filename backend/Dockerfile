@@ -156,6 +156,25 @@ RUN set -eux; \
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
 
+# ---------- Base-OS security patch: util-linux family (CVE-2026-53615) -------
+# The pinned base still carries util-linux 2.41-5, which Trivy flags as a
+# fixable HIGH (CVE-2026-53615). Debian trixie-security already serves the fix
+# (2.41.5-0+deb13u1), but the upstream python:3.14-slim manifest has not been
+# rebuilt against it yet, so the digest bump the Dependabot docker block would
+# normally carry cannot clear it. Rather than publish a release image with a
+# known fixable HIGH, upgrade just the util-linux binary family to the security
+# version in one apt layer (indexes dropped in the same RUN, so no apt metadata
+# persists in the image). This is a targeted --only-upgrade of packages already
+# present — no new package enters the image — and is the sibling in intent of
+# the pip uninstall below: keep the Trivy scan clean. Remove this layer once
+# the base-digest bump lands a rebuilt base already carrying util-linux
+# >= 2.41.5-0+deb13u1.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade \
+      util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
+      mount bsdutils login \
+ && rm -rf /var/lib/apt/lists/*
+
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho
 

@@ -14,11 +14,13 @@ binds its bring-up step to — it generates the `SddcSpec`, meho governs the POS
 Filed under Initiative [#2907](https://github.com/evoila/meho/issues/2907)
 (backplane-first coverage) as [#3065](https://github.com/evoila/meho/issues/3065),
 converting the register's "VCF stack / Cloud Builder bring-up — to file" row to
-the 9.x reality. This increment is the **skeleton**: token auth, fingerprint /
-probe, and the bring-up **status poll**. The governed bring-up **write**
-(validate → deploy → poll) lands as a `dangerous` + `requires_approval`
-composite in a following increment — the highest-blast-radius write in the
-product must carry the preview + sub-op-policy machinery a raw op cannot.
+the 9.x reality. Increment 1 (the **skeleton** — token auth, fingerprint / probe,
+and the bring-up **status poll**) shipped in
+[#3066](https://github.com/evoila/meho/issues/3066). Increment 2 adds the
+governed bring-up **write** `installer.composite.sddc.bringup` — a `dangerous` +
+`requires_approval` composite (validate → deploy) — because the
+highest-blast-radius write in the product must carry the preview + sub-op-policy
+machinery a raw op cannot.
 
 Source: `backend/src/meho_backplane/connectors/vcf_installer/`.
 
@@ -84,20 +86,56 @@ ingest; the body lives in `typed_reads.py`, a bound-method shim on the connector
 exposes it. This is the poll the automation add-on (or an operator) runs while a
 bring-up is in flight or to triage a failed one.
 
-### Governed bring-up write (following increment)
+### `installer.composite.sddc.bringup` — governed bring-up write (composite, `dangerous`)
 
-`installer.composite.sddc.bringup` — a `dangerous` + `requires_approval`
-composite orchestrating `POST /v1/sddcs/validations` (validate) → `POST /v1/sddcs`
-(deploy) → poll-to-terminal, with a secret-hygienic preview (SDDC identity /
-network blast-radius echoed, passwords never on reviewer surfaces) and every
-mutating sub-call through `enforce_subop_policy`. Not shipped in this increment.
+The highest-blast-radius write in the product, in `bringup.py`. A `dangerous` +
+`requires_approval` composite (`source_kind="composite"`) orchestrating, as one
+approved unit:
+
+1. **validate** — `POST /v1/sddcs/validations` with the `SddcSpec` body, then poll
+   `GET /v1/sddcs/validations/{id}` to a terminal `executionStatus`. Validation is
+   a **non-mutating dry-run**, so it is *ungated*. The deploy is gated on the
+   `resultStatus`: `SUCCEEDED`/`WARNING` proceed (warnings surfaced in the
+   return), anything else returns `validation_failed` / `validation_timeout`
+   **before any mutation**, with the failed checks summarised.
+2. **deploy** — `POST /v1/sddcs` with the same `SddcSpec` through
+   `enforce_subop_policy`. This is the single state mutation and the single sub-op
+   gate (the top-level composite is `requires_approval=True`; the deploy sub-op
+   passes `requires_approval=False` so an approved-and-resumed dispatch is not
+   double-gated).
+3. **hand off** — the bring-up runs for *hours*, so the composite returns
+   `{status: "deploying", sddc_task: {id, status, …}, poll_with:
+   "installer.sddc.status"}` the moment the deploy is accepted. The caller (an
+   operator or the deploy-automation add-on's durable workflow) polls
+   `installer.sddc.status` to a terminal `COMPLETED_WITH_SUCCESS` /
+   `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`. Blocking one dispatch on a
+   multi-hour terminal state would be wrong.
+
+**Secret hygiene (#1503).** The park-time approval preview and the sub-op policy
+params are both built by `_blast_radius(spec)`, which reads only a whitelist of
+SDDC identity + network keys and *never* reads any `*Password` /
+`credentials` field of the `SddcSpec` — redaction by construction. Covered by the
+whole-suite secret-leak guard.
+
+**Direct-session dispatch (Goal #2247).** Every sub-call goes through the injected
+connector's own session helpers (`_post_json_with_session_retry` /
+`_get_json_with_session_retry`) — never `dispatch_child` into an ingested
+`METHOD:/path` primitive — so correctness never depends on per-deploy catalog
+state. `_post_json_with_session_retry` is the write-path twin of the increment-1
+GET helper: a `401` means auth was rejected *before* the server processed the
+request, so re-issuing the non-idempotent POST once after a re-login cannot
+double-apply.
+
+Shipped as increment 2 of [#3065](https://github.com/evoila/meho/issues/3065).
 
 ## Spec-reconcile lane
 
 Every hand-coded `METHOD:/path` — `POST:/v1/tokens`,
-`GET:/v1/system/appliance-info` (fingerprint), `GET:/v1/sddcs/{id}` (status) — is
-asserted against the pinned `vcf-installer-9.1` shelf spec (vendored from
-`vmware/vcf-api-specs`) by
+`GET:/v1/system/appliance-info` (fingerprint), `GET:/v1/sddcs/{id}` (status), and
+the composite's `POST:/v1/sddcs/validations`, `POST:/v1/sddcs`,
+`GET:/v1/sddcs/validations/{id}` (introspected from
+`bringup.BRINGUP_DECLARED_OP_IDS`) — is asserted against the pinned
+`vcf-installer-9.1` shelf spec (vendored from `vmware/vcf-api-specs`) by
 [`backend/tests/test_connectors_vcf_installer_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_installer_spec_reconcile.py)
 (the #2980 harness; parse-only, in the required unit sweep, uniform skip when the
 shelf is unconfigured). Standard:
@@ -114,8 +152,30 @@ shelf is unconfigured). Standard:
 
 ## Known issues
 
-- The bring-up write surface is not yet shipped (following increment) — a VCF
-  management-domain deployment cannot yet be dispatched, only its status polled.
+- The composite **kicks off** the bring-up and returns the `SddcTask` id; it does
+  not block on the multi-hour deployment. Terminal state (`COMPLETED_WITH_SUCCESS`
+  / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`) is reached by polling
+  `installer.sddc.status`. Durable orchestration of that wait (retry, resume) is
+  the deploy-automation add-on's DBOS workflow, not this connector.
+- `WARNING`-result validations proceed to deploy (VCF treats them as non-fatal);
+  the return always echoes `validation_result_status` (and the leaf WARNING
+  checks when present), but the approver saw the preview *before* validation ran.
+  Blocking on `WARNING` would make most lab bring-ups unrunnable; revisit if a
+  stricter posture is needed.
+- **Secret at rest in the approval table.** The `_blast_radius` preview + sub-op
+  policy params never carry a password, but when the top-level op parks for
+  approval the dispatcher persists the raw dispatch `params` (the full `SddcSpec`,
+  including plaintext passwords) verbatim in `approval_request.params` for the
+  approval TTL (#1503 store-verbatim). That column is never surfaced by any API /
+  audit / broadcast read path — exposure is at-rest-in-the-governance-table,
+  gated by DB/row access control, the same posture as every `requires_approval`
+  op taking inline secrets (e.g. the GOSC composites). A Vault-ref-in-spec
+  redesign that keeps plaintext out of the row entirely is future work.
+- **Agent callers are not a supported path.** The intended caller is a non-agent
+  operator or the automation add-on's service account. A run-bound agent hits the
+  backplane's `dangerous` safety-ceiling on the deploy sub-op and would re-park a
+  second, currently un-resumable approval (fleet-wide `dangerous`-composite
+  behavior, not specific to this op).
 - The default credentials loader is the live State-2 read; a target must be
   `shared_service_account` with a `secret_ref` resolving to a
   `{username, password}` KV-v2 secret.

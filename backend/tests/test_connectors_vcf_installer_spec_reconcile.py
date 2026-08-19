@@ -23,13 +23,15 @@ path:
   ``session_login_token`` scheme spec).
 * :mod:`~meho_backplane.connectors.vcf_installer.profile` — the declarative
   fingerprint recipe's ``GET /v1/system/appliance-info``.
-
-The governed bring-up composite's write paths (``POST /v1/sddcs``,
-``POST /v1/sddcs/validations``) join this set when that increment lands.
+* :mod:`~meho_backplane.connectors.vcf_installer.bringup` — the governed
+  composite's ``BRINGUP_DECLARED_OP_IDS`` (``POST /v1/sddcs/validations``,
+  ``POST /v1/sddcs``, ``GET /v1/sddcs/validations/{id}``), which carry their own
+  HTTP method, so they contribute the ``METHOD:`` verb directly.
 """
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vcf_installer import bringup as _bringup
 from meho_backplane.connectors.vcf_installer import connector as _connector
 from meho_backplane.connectors.vcf_installer import typed_reads as _typed_reads
 from meho_backplane.connectors.vcf_installer.profile import INSTALLER_EXECUTION_PROFILE
@@ -58,6 +60,7 @@ def _declared_op_ids() -> set[str]:
     declared = {f"GET:{path}" for path in _typed_read_paths().values()}
     declared.add(f"POST:{_connector._SESSION_CREATE_PATH}")
     declared.add(f"GET:{INSTALLER_EXECUTION_PROFILE.fingerprint.path}")
+    declared |= set(_bringup.BRINGUP_DECLARED_OP_IDS)
     return declared
 
 
@@ -69,6 +72,24 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
     shrink the reconciled set to a vacuous pass.
     """
     assert sorted(_typed_read_paths()) == ["_SDDC_STATUS_PATH"]
+
+
+def test_bringup_declared_op_ids_are_pinned() -> None:
+    """Guard: the composite's declared write/validate set can't go vacuous.
+
+    Pinning the exact ``METHOD:/path`` set means dropping or renaming a bring-up
+    path constant can't silently shrink the reconciled set to a passing subset.
+    """
+    assert (
+        frozenset(
+            {
+                "POST:/v1/sddcs/validations",
+                "POST:/v1/sddcs",
+                "GET:/v1/sddcs/validations/{id}",
+            }
+        )
+        == _bringup.BRINGUP_DECLARED_OP_IDS
+    )
 
 
 def test_declared_op_ids_are_served_by_the_pinned_spec() -> None:

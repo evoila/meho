@@ -78,15 +78,18 @@ class PostgresConnector(Connector):
 
     Registry v2 triple ``("postgres", "16", "postgres-wire")``. ``priority`` is
     ``1`` so a future ``GenericRestConnector`` auto-shim registering the same
-    product loses the resolver tie-break. ``supported_version_range`` covers
-    the maintained PostgreSQL releases; the catalog + statistics views this
-    connector reads are stable across them.
+    product loses the resolver tie-break. ``supported_version_range`` starts at
+    PostgreSQL 13 (12 is EOL as of 2024-11): the catalog + statistics views this
+    connector reads are stable across 13-17, and ``pg_stat_wal_receiver`` (read
+    by ``postgres.replication``) only gained the ``written_lsn`` / ``flushed_lsn``
+    columns -- which replaced 12's single ``received_lsn`` -- in 13, so
+    advertising 12 would parse-error that op on a 12 standby.
     """
 
     product = "postgres"
     version = "16"
     impl_id = "postgres-wire"
-    supported_version_range = ">=12,<18"
+    supported_version_range = ">=13,<18"
     priority = 1
 
     # ------------------------------------------------------------------
@@ -161,6 +164,18 @@ class PostgresConnector(Connector):
         """``postgres.settings`` -- curated (or caller-named) runtime settings."""
         async with self._connection(target, operator) as conn:
             return await queries.fetch_settings(conn, params.get("names"))
+
+    async def replication(
+        self, operator: Operator, target: Target, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``postgres.replication`` -- physical replication health + standby lag.
+
+        Cluster-wide views, so no ``database`` param -- connects to the default
+        maintenance database like ``postgres.activity``.
+        """
+        del params  # declared empty in schema
+        async with self._connection(target, operator) as conn:
+            return await queries.fetch_replication(conn)
 
     async def run_query(
         self, operator: Operator, target: Target, params: dict[str, Any]

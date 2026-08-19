@@ -143,6 +143,7 @@ dev = [
     "aiosqlite>=0.19",
     "testcontainers>=4.15.0",
     "types-jsonschema>=4.26.0.20260518",
+    "pytest-timeout>=2.4.0",
 ]
 # Docs-site toolchain (#2670). Lives here — not in a separate docs
 # project — so the pins ride the existing uv.lock + Dependabot `uv`

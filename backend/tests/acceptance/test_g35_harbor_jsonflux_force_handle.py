@@ -36,7 +36,7 @@ from tests.acceptance._harbor_canary_fixtures import (
     HARBOR_CANARY_ARTIFACTS,
     HARBOR_FORCE_HANDLE_LIST_OP_ID,
     HARBOR_FORCE_HANDLE_PARAMS,
-    IngestedHarborCanary,
+    TypedHarborCanary,
 )
 
 
@@ -59,7 +59,7 @@ def force_handle_reducer() -> Any:
 
 async def test_force_handle_reducer_populates_operation_result_handle_for_harbor(
     force_handle_reducer: None,
-    ingested_harbor_canary: IngestedHarborCanary,
+    typed_harbor_canary: TypedHarborCanary,
 ) -> None:
     """Dispatching the Harbor artifact list populates ``OperationResult.handle``.
 
@@ -85,11 +85,11 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_harbor
     expected_rows = len(HARBOR_CANARY_ARTIFACTS)
 
     result_envelope = await call_operation(
-        ingested_harbor_canary.operator,
+        typed_harbor_canary.operator,
         {
-            "connector_id": ingested_harbor_canary.connector_id,
+            "connector_id": typed_harbor_canary.connector_id,
             "op_id": HARBOR_FORCE_HANDLE_LIST_OP_ID,
-            "target": {"name": ingested_harbor_canary.target_name},
+            "target": {"name": typed_harbor_canary.target_name},
             "params": HARBOR_FORCE_HANDLE_PARAMS,
         },
     )

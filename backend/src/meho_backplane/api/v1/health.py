@@ -221,11 +221,21 @@ class SensorRunnerStatus(BaseModel):
     always a number. The value is per-process: each replica reports its
     own loop, which is exactly the failure mode observed (one process's
     loop coroutine going quiet).
+
+    ``seconds_since_last_claim`` (#3010) measures from the last tick
+    that actually **held** the runner's advisory lock. It diverges from
+    ``seconds_since_last_tick`` when the loop is alive but never winning
+    the lock — the stranded-lock starvation ``stalled`` is structurally
+    blind to (every tick completes; nothing is ever claimed). Per-process
+    and informational: on a multi-replica deploy only the lock-winning
+    replica's claim stamp advances, so alert on the minimum across
+    replicas, not per pod.
     """
 
     model_config = ConfigDict(frozen=True)
 
     seconds_since_last_tick: float | None
+    seconds_since_last_claim: float | None
     stalled: bool
     stall_threshold_seconds: float
 
@@ -545,6 +555,7 @@ def _sensor_runner_status() -> SensorRunnerStatus | None:
     liveness = sensor_runner_liveness()
     return SensorRunnerStatus(
         seconds_since_last_tick=liveness.seconds_since_last_tick,
+        seconds_since_last_claim=liveness.seconds_since_last_claim,
         stalled=liveness.stalled,
         stall_threshold_seconds=liveness.stall_threshold_seconds,
     )

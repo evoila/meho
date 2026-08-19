@@ -3,7 +3,9 @@
 
 """G3.7-T9 dispatch smoke — the 10 curated Hetzner Robot read ops over respx.
 
-Proves the acceptance criteria for issue #852:
+Proves the acceptance criteria for issue #852 (as amended by #2985, which
+removed ``GET:/query`` / ``hetzner-robot.about`` after the spec-reconcile
+lane proved the Robot Webservice serves no such endpoint):
 
 * AC1: every enabled op dispatches via the agent's ``call_operation``
   meta-tool and returns ``status='ok'`` against a respx-mocked Webservice.
@@ -14,8 +16,8 @@ Proves the acceptance criteria for issue #852:
 * AC3: every dispatch writes an audit row (``op_id`` + ``target_id`` +
   ``params_hash``) — asserted by checking the backplane's audit log
   after each call.
-* AC4: the MCP ``llm_instructions`` for ``GET:/query`` and ``GET:/server``
-  contain the 401-IP-block warning text — asserted from the in-memory
+* AC4: the MCP ``llm_instructions`` for ``GET:/server`` contain the
+  401-IP-block warning text — asserted from the in-memory
   ``ROBOT_CORE_OPS`` constant (no DB read required; the curation step
   writes these values into the descriptor rows at review time, and the
   acceptance tests seed the rows directly from the same constant).
@@ -73,12 +75,14 @@ from tests.acceptance._robot_canary_fixtures import (
 # ---------------------------------------------------------------------------
 
 #: Required warning phrase that MUST appear in the ``when_to_call`` field
-#: of ``GET:/query`` (hetzner-robot.about) and ``GET:/server``
-#: (hetzner-robot.server.list) per the issue #852 acceptance criteria.
+#: of ``GET:/server`` (hetzner-robot.server.list) per the issue #852
+#: acceptance criteria. #852 also named ``GET:/query`` (about); #2985
+#: removed that op, so the first-probe warning carrier is server.list.
 _REQUIRED_WARNING_PHRASE = "401 IP-BLOCK WARNING"
 
-#: Op ids that MUST carry the warning per AC4 of issue #852.
-_WARNING_REQUIRED_OPS = frozenset({"GET:/query", "GET:/server"})
+#: Op ids that MUST carry the warning per AC4 of issue #852 (as amended
+#: by the #2985 about-op removal).
+_WARNING_REQUIRED_OPS = frozenset({"GET:/server"})
 
 
 @pytest.mark.parametrize(
@@ -125,7 +129,8 @@ SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in ROBOT_CORE_OPS)
 #: The respx router is registered for specific values; these must match.
 SMOKE_PARAMS: dict[str, dict[str, object]] = {
     "GET:/server/{server-ip}": {"server-ip": "1.2.3.1"},
-    "GET:/vswitch/{id}": {"id": "4321"},
+    "GET:/vswitch/{vswitch-id}": {"vswitch-id": "4321"},
+    "GET:/firewall/{server-ip}": {"server-ip": "1.2.3.1"},
 }
 
 
@@ -255,7 +260,7 @@ async def test_dispatch_writes_audit_row_with_op_id_target_id_params_hash(
 ) -> None:
     """AC3: dispatching an op writes one DISPATCH audit row with the required fields.
 
-    Dispatches ``hetzner-robot.about`` (``GET:/query``) — the lightest read
+    Dispatches ``hetzner-robot.ssh_key.list`` (``GET:/key``) — a light read
     op, no path parameters — and then queries the backplane's ``audit_log``
     table for the resulting row. Asserts:
 
@@ -276,7 +281,7 @@ async def test_dispatch_writes_audit_row_with_op_id_target_id_params_hash(
     Proves AC3 of #852: dispatch writes audit row with op_id + target_id +
     params_hash.
     """
-    ac3_op_id = "GET:/query"
+    ac3_op_id = "GET:/key"
 
     sessionmaker = get_sessionmaker()
 

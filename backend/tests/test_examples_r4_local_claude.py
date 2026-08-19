@@ -202,10 +202,11 @@ def test_scheduler_payload_parses_against_live_schema() -> None:
     raw["agent_definition_id"] = str(uuid.uuid4())
     parsed = ScheduledTriggerCreate.model_validate(raw)
     assert parsed.kind.value == "cron", (
-        "R4 trigger ships as cron because the kind=event dispatcher "
-        "is not yet wired (see backend/src/meho_backplane/events/drain.py "
-        "-- v0.2 no-op subscriber match). If a future PR flips this "
-        "to event, update GUIDE.md Step 2 too."
+        "R4 trigger ships as cron: it is a periodic (every-15-min) reporter, "
+        "not an event subscriber. The kind=event dispatcher is wired now "
+        "(see backend/src/meho_backplane/events/matcher.py), so this is a "
+        "deliberate example choice; if a future PR flips R4 to event, update "
+        "GUIDE.md Step 2 too."
     )
     # The shipped cron expression is the cheap-tier-friendly cadence
     # (every 15 minutes). Per-minute (``* * * * *``) burns one

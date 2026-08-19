@@ -13,7 +13,7 @@ op surface:
   database there is no free-form query surface here at all: every op maps to
   exactly one fixed read command (``listDatabases`` / ``listCollections`` /
   ``dbStats`` / ``collStats`` / ``listIndexes`` / ``count`` / ``serverStatus`` /
-  ``buildInfo`` / ``hello`` / ``replSetGetStatus``). There is **no**
+  ``buildInfo`` / ``hello`` / ``replSetGetStatus`` / ``currentOp``). There is **no**
   arbitrary-command / ``eval`` / ``$where`` / aggregation passthrough, so
   read-only is guaranteed by the fixed command set rather than by a runtime gate.
   :func:`assert_read_command` is the belt-and-suspenders check the query layer
@@ -87,6 +87,7 @@ MONGO_READ_COMMANDS: frozenset[str] = frozenset(
         "buildInfo",
         "hello",
         "replSetGetStatus",
+        "currentOp",
     }
 )
 

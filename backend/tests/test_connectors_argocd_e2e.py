@@ -26,18 +26,20 @@ meta-tools.
 Acceptance criteria verified (Issue #1392)
 ==========================================
 
-* All 6 read ops dispatch through ``call_operation`` against a registered
+* All 7 read ops dispatch through ``call_operation`` against a registered
   ``argocd`` target and return ``status="ok"`` with the recorded ArgoCD
   payload (the CLI-verb-equivalent invocation surface).
 * MCP ``search_operations(connector_id="argocd-api-3.x", …)`` surfaces all
-  6 ops; ``call_operation`` dispatches them.
+  7 ops; ``call_operation`` dispatches them.
 * Every dispatched op carries the Vault-sourced bearer token
   (``Authorization: Bearer <token>``) and the loader's secret never leaks
   into the returned envelope.
+* ``argocd.cluster.list`` strips the destination cluster's own credential
+  ``config`` (bearer token / TLS cert) from every item, end to end.
 
 Fixtures reproduce realistic-but-minimal ArgoCD 3.x ``argocd-server`` REST
 output (``ApplicationList`` / ``Application`` / managed-resources delta /
-resource tree / ``AppProjectList`` / ``RepositoryList``).
+resource tree / ``AppProjectList`` / ``RepositoryList`` / ``ClusterList``).
 """
 
 from __future__ import annotations
@@ -84,6 +86,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "argocd.app.resource_tree",
     "argocd.appproject.list",
     "argocd.repo.list",
+    "argocd.cluster.list",
 )
 
 _APP_NAME = "guestbook"
@@ -188,6 +191,32 @@ _FIXTURE_REPO_LIST: dict[str, Any] = {
     ],
 }
 
+#: The destination cluster's own bearer token — must never survive the handler.
+_DEST_CLUSTER_SECRET = "dest-cluster-bearer-e2e-DO-NOT-LEAK"
+
+#: ClusterList carrying the credential-bearing ``config`` block, so the E2E
+#: proves the handler strips it through the full call_operation stack.
+_FIXTURE_CLUSTER_LIST: dict[str, Any] = {
+    "metadata": {},
+    "items": [
+        {
+            "server": "https://10.0.4.10:6443",
+            "name": "prod-rke2",
+            "config": {
+                "bearerToken": _DEST_CLUSTER_SECRET,
+                "tlsClientConfig": {"insecure": False, "certData": "REDACT", "keyData": "REDACT"},
+            },
+            "connectionState": {
+                "status": "Successful",
+                "message": "",
+                "attemptedAt": "2026-08-06T09:00:00Z",
+            },
+            "serverVersion": "1.28",
+            "info": {"applicationsCount": 12, "connectionState": {"status": "Successful"}},
+        }
+    ],
+}
+
 
 def _mount_argocd_routes(mock: respx.MockRouter) -> None:
     """Register the 6 read-op fixture routes on *mock*."""
@@ -201,6 +230,7 @@ def _mount_argocd_routes(mock: respx.MockRouter) -> None:
     )
     mock.get("/api/v1/projects").respond(200, json=_FIXTURE_APPPROJECT_LIST)
     mock.get("/api/v1/repositories").respond(200, json=_FIXTURE_REPO_LIST)
+    mock.get("/api/v1/clusters").respond(200, json=_FIXTURE_CLUSTER_LIST)
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +322,10 @@ async def argocd_e2e() -> AsyncIterator[ArgoCdConnector]:
 # ---------------------------------------------------------------------------
 
 
-def test_argocd_e2e_op_set_is_exactly_the_six_read_ops() -> None:
-    """ARGOCD_OPS carries exactly the 6 curated read ops and no write op."""
+def test_argocd_e2e_op_set_is_exactly_the_seven_read_ops() -> None:
+    """ARGOCD_OPS carries exactly the 7 curated read ops and no write op."""
     assert {op.op_id for op in ARGOCD_OPS} == set(EXPECTED_OP_IDS)
-    assert len(ARGOCD_OPS) == 6
+    assert len(ARGOCD_OPS) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +456,31 @@ async def test_argocd_e2e_repo_list(argocd_e2e: ArgoCdConnector) -> None:
     assert repo["connectionState"]["status"] == "Successful"
 
 
+@pytest.mark.asyncio
+async def test_argocd_e2e_cluster_list(argocd_e2e: ArgoCdConnector) -> None:
+    """argocd.cluster.list returns destination clusters with config stripped."""
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        _mount_argocd_routes(mock)
+        result = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": _CONNECTOR_ID,
+                "op_id": "argocd.cluster.list",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+    assert result["status"] == "ok", f"cluster.list failed: {result.get('error')}"
+    cluster = result["result"]["items"][0]
+    assert cluster["server"] == "https://10.0.4.10:6443"
+    assert cluster["name"] == "prod-rke2"
+    assert cluster["connectionState"]["status"] == "Successful"
+    assert cluster["serverVersion"] == "1.28"
+    # The credential-bearing config is stripped end to end; its secret is gone.
+    assert "config" not in cluster
+    assert _DEST_CLUSTER_SECRET not in str(result)
+
+
 # ---------------------------------------------------------------------------
 # Bearer-token + secret-leak guarantees across the full op set
 # ---------------------------------------------------------------------------
@@ -445,6 +500,7 @@ async def test_argocd_e2e_all_ops_carry_bearer_token_and_never_leak_secret(
             ("argocd.app.resource_tree", {"name": _APP_NAME}),
             ("argocd.appproject.list", {}),
             ("argocd.repo.list", {}),
+            ("argocd.cluster.list", {}),
         ):
             result = await call_operation(
                 _OPERATOR,
@@ -481,7 +537,7 @@ async def test_argocd_e2e_ops_visible_to_search_operations(
         _OPERATOR,
         {
             "connector_id": _CONNECTOR_ID,
-            "query": "argocd application sync health diff project repository",
+            "query": "argocd application sync health diff project repository cluster",
             "limit": 50,
         },
     )

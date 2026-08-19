@@ -432,13 +432,19 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   a real ``REFERENCES sensor(id)`` FK, so truncating ``sensor`` in this
         #   same statement requires ``sensor_results`` be listed too or PG raises
         #   ``cannot truncate a table referenced in a foreign key constraint``.
+        # * ``event_source`` — migration 0074 (G11.3 inbound ingest, #2880)
+        #   carries a real ``REFERENCES tenant(id)`` FK (the newer ``Sensor`` /
+        #   ``EventOutbox`` discipline, not ``Target``'s soft FK); must be listed
+        #   here or PG rejects the per-test TRUNCATE with ``cannot truncate a
+        #   table referenced in a foreign key constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
-                "check_dashboard_sensors, check_dashboards, event_outbox, gateway_command, "
+                "check_dashboard_sensors, check_dashboards, "
+                "event_outbox, event_source, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
@@ -506,7 +512,8 @@ async def pg_engine_empty_tenant(
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
-                "check_dashboard_sensors, check_dashboards, event_outbox, gateway_command, "
+                "check_dashboard_sensors, check_dashboards, "
+                "event_outbox, event_source, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "

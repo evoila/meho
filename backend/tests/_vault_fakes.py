@@ -100,6 +100,9 @@ class _FakeTokenAuth:
     accessors_payload: Any = None
     raise_on_list_accessors: Exception | None = None
     list_accessors_calls: int = 0
+    lookup_accessor_payload: Any = None
+    raise_on_lookup_accessor: Exception | None = None
+    lookup_accessor_calls: list[str] = field(default_factory=list)
 
     def revoke_self(self, mount_point: str = "token") -> None:
         _ = mount_point
@@ -132,6 +135,13 @@ class _FakeTokenAuth:
         if self.raise_on_list_accessors is not None:
             raise self.raise_on_list_accessors
         return self.accessors_payload
+
+    def lookup_accessor(self, accessor: str, mount_point: str = "token") -> Any:
+        _ = mount_point
+        self.lookup_accessor_calls.append(accessor)
+        if self.raise_on_lookup_accessor is not None:
+            raise self.raise_on_lookup_accessor
+        return self.lookup_accessor_payload
 
 
 @dataclass

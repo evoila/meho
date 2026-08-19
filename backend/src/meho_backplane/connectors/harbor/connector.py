@@ -1,80 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+#
+# code-quality-allow: file-size — the connector hosts fingerprint / probe /
+# auth, the two robot write handlers, the nine typed-read shims (#2856), the
+# artifact_vulnerabilities CVE read (#2857), and the project.summary /
+# quota.list storage-quota reads (#2858). The nine core read *bodies* live in
+# ``typed_reads`` (this file keeps only their thin shims); the standalone
+# reads keep full bodies here. Every op handler must be a method on the
+# connector class because the dispatcher binds the resolved handler to the
+# per-process connector instance at dispatch time (``_maybe_bind_method``), so
+# the handler bodies that remain here cannot move off this file without losing
+# that binding. Matches the NSX/SDDC on-connector shim placement and the other
+# >600-line connectors in this package.
 
 """HarborConnector — hand-rolled HttpConnector subclass for Harbor 2.x.
 
-Skeleton-only — auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #620 via G0.7 spec ingestion against the Harbor 2.x
-OpenAPI spec into the ``endpoint_descriptor`` table.
-
-Registered against the v2 registry at module-import time via
-:func:`~meho_backplane.connectors.registry.register_connector_v2` in
-:mod:`meho_backplane.connectors.harbor.__init__`. The G0.7 auto-shim's
-idempotency check (in
-:func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
-once #408's pipeline lands in main) no-ops on subsequent ingests against the
-same ``(product="harbor", version="2.x", impl_id="harbor-rest")`` triple.
-
-Auth
-----
-
-Harbor uses HTTP Basic auth sent on every request — no session cookie or
-XSRF token is established. The connector caches the raw service-account
-credentials (loaded once from Vault via an injectable loader) and computes
-the ``Authorization: Basic`` header on each :meth:`auth_headers` call.
-
-Harbor supports two account forms:
-
-* **Admin account**: plain username (e.g. ``"admin"``).
-* **Robot account**: Harbor-formatted username (e.g. ``"robot$project+name"``
-  for a project-scoped robot or ``"robot$name"`` for a system-level robot).
-
-Both forms are stored verbatim in Vault under the target's ``secret_ref``
-path. No reformatting is applied; the stored username is sent as-is.
-
-This differs from the SDDC Manager precedent in that no ``sso_realm`` suffix
-is appended — Harbor's Basic auth header carries ``username:password`` directly.
-
-Auth model gating
------------------
-
-v0.2 locks the connector to :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` (or
-``None`` for pre-G0.3 targets where the column hasn't been populated yet).
-:meth:`auth_headers` rejects any other ``target.auth_model`` value with a
-clear :exc:`NotImplementedError` naming both the target and the requested mode.
-
-Fingerprint
------------
-
-``GET /api/v2.0/systeminfo`` returns a ``GeneralInfo`` object. The
-``harbor_version`` field carries the full version string (e.g.
-``"v2.11.0-abc1234"``); the connector splits on the first ``-`` to extract
-separate ``version`` (``"v2.11.0"``) and ``build`` (``"abc1234"``) values.
-``extras["auth_mode"]`` carries the Harbor auth mode (e.g. ``"db_auth"``,
-``"ldap_auth"``, ``"oidc_auth"``).
-
-Probe
------
-
-``GET /api/v2.0/health`` is Harbor's own composite healthcheck covering DB,
-redis, registry, jobservice, and related subsystems. The connector maps the
-per-component ``status`` fields to a single ``ok`` boolean + a ``reason``
-string listing any unhealthy component names.
-
-This differs from the SDDC Manager / NSX precedents that delegate ``probe()``
-to ``fingerprint()``. Harbor's health endpoint is purpose-built for
-reachability checks and covers subsystem state that ``systeminfo`` does not
-expose, making the dedicated endpoint the better choice.
+Auth + fingerprint + probe + the G0.6 dispatch shim, plus the bound-method
+handlers backing the typed operations. Registered against the v2 registry at
+import time via :func:`~meho_backplane.connectors.registry.register_connector_v2`
+in :mod:`meho_backplane.connectors.harbor.__init__`.
 
 Operations
 ----------
 
-This module ships zero operations — the G0.6 dispatch shim :meth:`execute`
-exists for ABC compatibility but operations land in the ``endpoint_descriptor``
-table via #620's spec ingestion. Until then, the connector is registered and
-discoverable but ``execute(target, op_id, ...)`` against any ``op_id``
-resolves to "unknown operation" at the dispatcher layer — which is the correct
-behaviour for a registered-but-empty connector at this Task's stage.
+The audited read core (``harbor.about`` / ``harbor.health`` /
+``harbor.project.*`` / ``harbor.repository.*`` / ``harbor.artifact.*`` /
+``harbor.robot.list``) ships as **typed** ops (#2856): the bodies live in
+:mod:`meho_backplane.connectors.harbor.typed_reads`, the metadata + registrar
+in :mod:`meho_backplane.connectors.harbor.typed_ops`, and the thin shims
+:meth:`about` … :meth:`robot_list` below delegate to them. The robot
+**writes** (:meth:`robot_create` / :meth:`robot_delete`) are registered from
+:mod:`meho_backplane.connectors.harbor.ops`. All dispatch on a fresh boot
+with zero catalog ingest — the #2358 typed-op conversion the NSX and SDDC
+Manager connectors already carry.
+
+Auth
+----
+
+Harbor uses HTTP Basic auth on every request — no session cookie or XSRF
+token is established. The connector caches the raw service-account
+credentials (loaded once from Vault via an injectable loader) and computes
+the ``Authorization: Basic`` header on each :meth:`auth_headers` call; both
+admin (``"admin"``) and robot (``"robot$project+name"``) usernames are sent
+verbatim, with no ``sso_realm`` suffix. :attr:`AuthModel.SHARED_SERVICE_ACCOUNT`
+(or ``None`` for pre-G0.3 targets) is the only accepted ``auth_model``; any
+other value raises :exc:`NotImplementedError`.
+
+Fingerprint / probe
+-------------------
+
+:meth:`fingerprint` reads ``GET /api/v2.0/systeminfo`` and splits
+``harbor_version`` into separate ``version`` + ``build`` values;
+:meth:`probe` reads Harbor's purpose-built ``GET /api/v2.0/health`` composite
+healthcheck (DB / redis / registry / jobservice), mapping the per-component
+status fields to a single ``ok`` boolean + a ``reason`` string.
 """
 
 from __future__ import annotations
@@ -94,6 +73,17 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.harbor._paths import (
+    _ARTIFACT_VULNERABILITIES_PATH,
+    _HEALTH_PATH,
+    _PROJECT_SUMMARY_PATH,
+    _QUOTAS_PATH,
+    _ROBOT_PATH,
+    _ROBOTS_PATH,
+    _SYSTEMINFO_PATH,
+    encode_segment,
+    fill_path,
+)
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -147,6 +137,63 @@ def _parse_harbor_version(harbor_version: str) -> tuple[str | None, str | None]:
         version_str, build_str = harbor_version.split("-", 1)
         return version_str or None, build_str or None
     return harbor_version, None
+
+
+#: The current-format native vulnerability report media type. Sent as the
+#: ``X-Accept-Vulnerabilities`` request header so Harbor renders the report
+#: in the pluggable-scanner-spec v1.1 shape (per-item field names ``id`` /
+#: ``fix_version`` / ``description``). Harbor's own ``acceptVulnerabilities``
+#: parameter default comma-joins this type with the legacy
+#: ``vnd.scanner.adapter.vuln.report.harbor+json; version=1.0`` (first-match
+#: wins); pinning the current type alone keeps the projected field names
+#: stable instead of depending on which format Harbor falls back to.
+_VULN_REPORT_MIME = "application/vnd.security.vulnerability.report; version=1.1"
+
+
+def _project_vulnerability(item: dict[str, Any]) -> dict[str, Any]:
+    """Project one native-report ``VulnerabilityItem`` to the agent shape.
+
+    Reads the pluggable-scanner-spec v1.1 field names (``id`` / ``fix_version``
+    / ``description``), NOT the Harbor Security-Hub ``VulnerabilityItem``
+    spellings (``cve_id`` / ``fixed_version`` / ``desc``) — the
+    ``additions/vulnerabilities`` endpoint returns the scanner-native report,
+    not a Security-Hub row. ``links`` is coerced to a list so the projected
+    shape stays uniform even when a scanner omits it.
+    """
+    links = item.get("links")
+    return {
+        "id": item.get("id"),
+        "package": item.get("package"),
+        "version": item.get("version"),
+        "fix_version": item.get("fix_version"),
+        "severity": item.get("severity"),
+        "description": item.get("description"),
+        "links": links if isinstance(links, list) else [],
+    }
+
+
+def _extract_vuln_report(payload: Any) -> dict[str, Any]:
+    """Pull the ``HarborVulnerabilityReport`` out of the endpoint response.
+
+    Harbor keys the report by the resolved MIME type (mirroring
+    ``scan_overview``): ``{"application/vnd.security.vulnerability.report;
+    version=1.1": {..report..}}``. Prefer the exact requested key, then a bare
+    already-unwrapped report, then any single MIME-keyed value carrying a
+    ``vulnerabilities`` array (tolerating whitespace / version variance in the
+    returned key). Returns ``{}`` when no report shape is recognisable so the
+    handler yields an empty list rather than raising.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    report = payload.get(_VULN_REPORT_MIME)
+    if isinstance(report, dict):
+        return report
+    if "vulnerabilities" in payload:
+        return payload
+    for value in payload.values():
+        if isinstance(value, dict) and "vulnerabilities" in value:
+            return value
+    return {}
 
 
 class HarborConnector(HttpConnector):
@@ -308,7 +355,7 @@ class HarborConnector(HttpConnector):
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_json(
-                target, "/api/v2.0/systeminfo", operator=synthesise_system_operator()
+                target, _SYSTEMINFO_PATH, operator=synthesise_system_operator()
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
@@ -316,7 +363,7 @@ class HarborConnector(HttpConnector):
                 product="harbor",
                 reachable=False,
                 probed_at=probed_at,
-                probe_method="GET /api/v2.0/systeminfo",
+                probe_method=f"GET {_SYSTEMINFO_PATH}",
                 extras={"error": f"{type(exc).__name__}: {exc}"},
             )
         harbor_version = payload.get("harbor_version") or ""
@@ -328,7 +375,7 @@ class HarborConnector(HttpConnector):
             build=build_str,
             reachable=True,
             probed_at=probed_at,
-            probe_method="GET /api/v2.0/systeminfo",
+            probe_method=f"GET {_SYSTEMINFO_PATH}",
             extras={
                 "auth_mode": payload.get("auth_mode"),
                 "registry_url": payload.get("registry_url"),
@@ -352,7 +399,7 @@ class HarborConnector(HttpConnector):
         probed_at = datetime.now(UTC)
         try:
             payload = await self._get_json(
-                target, "/api/v2.0/health", operator=synthesise_system_operator()
+                target, _HEALTH_PATH, operator=synthesise_system_operator()
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return ProbeResult(
@@ -488,8 +535,7 @@ class HarborConnector(HttpConnector):
                 }
             ],
         }
-        path = "/api/v2.0/robots"
-        result = await self._post_json(target, path, operator=operator, json=body)
+        result = await self._post_json(target, _ROBOTS_PATH, operator=operator, json=body)
         return {
             "id": result["id"],
             "name": result["name"],
@@ -546,12 +592,343 @@ class HarborConnector(HttpConnector):
         """
         robot_id = int(params["id"])
 
-        path = f"/api/v2.0/robots/{robot_id}"
+        path = fill_path(_ROBOT_PATH, {"robot_id": str(robot_id)})
         client = await self._http_client(target)
         headers = await self.auth_headers(target, operator)
         resp = await client.request("DELETE", path, headers=headers)
         resp.raise_for_status()
         return {"id": robot_id, "deleted": True}
+
+    # Typed read ops (#2856): thin bound-method shims delegating to the
+    # ``harbor.typed_reads`` bodies (kept in a sibling module for the
+    # file-length budget). All read-only, safety_level=safe.
+
+    async def about(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.about`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_about_impl
+
+        return await harbor_about_impl(self, operator, target, params)
+
+    async def health(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.health`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_health_impl
+
+        return await harbor_health_impl(self, operator, target, params)
+
+    async def project_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.project.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_project_list_impl
+
+        return await harbor_project_list_impl(self, operator, target, params)
+
+    async def project_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.project.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_project_info_impl
+
+        return await harbor_project_info_impl(self, operator, target, params)
+
+    async def repository_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.repository.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_repository_list_impl
+
+        return await harbor_repository_list_impl(self, operator, target, params)
+
+    async def repository_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.repository.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_repository_info_impl
+
+        return await harbor_repository_info_impl(self, operator, target, params)
+
+    async def artifact_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.artifact.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_artifact_list_impl
+
+        return await harbor_artifact_list_impl(self, operator, target, params)
+
+    async def artifact_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.artifact.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_artifact_info_impl
+
+        return await harbor_artifact_info_impl(self, operator, target, params)
+
+    async def robot_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.robot.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_robot_list_impl
+
+        return await harbor_robot_list_impl(self, operator, target, params)
+
+    async def artifact_vulnerabilities(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read one artifact's full CVE list via Harbor 2.x.
+
+        Op-id: ``harbor.artifact.vulnerabilities``. Classified ``read``
+        (:func:`~meho_backplane.broadcast.events.classify_op`), safety_level
+        ``safe``, no approval — a non-mutating supply-chain / promotion-gate
+        read.
+
+        ``GET .../artifacts/{reference}/additions/vulnerabilities`` with the
+        ``X-Accept-Vulnerabilities`` header pinned to the current native report
+        format. This is the detail behind ``harbor.artifact.info``'s
+        ``scan_overview`` (which carries severity *counts* only); it answers
+        "is CVE-X in image Y" and "what is the fixed-in version for package P"
+        that counts alone cannot.
+
+        The response is the scanner-native report keyed by MIME type; the
+        handler unwraps it, projects each ``VulnerabilityItem`` to
+        ``{id, package, version, fix_version, severity, description, links}``,
+        and returns ``{severity, scanner, generated_at, vulnerabilities}``.
+        ``vulnerabilities`` is the single set-shaped field, so the dispatcher's
+        JSONFlux reducer materialises it into a result handle when a real
+        image's CVE list crosses the ~50-row / 4 KB threshold (CLAUDE.md
+        postulate 6); a named-CVE lookup against that handle is a
+        ``result_query`` ``WHERE id = ...`` away.
+
+        Uses :meth:`_request_json` (not :meth:`_get_json`) because the read
+        needs the per-call ``X-Accept-Vulnerabilities`` header, which
+        ``_get_json`` does not forward; GET stays idempotent so the tenacity
+        retry still applies. The dispatched ``operator`` threads to the
+        operator-context Vault credential read the same way the robot ops
+        thread it.
+
+        Parameters
+        ----------
+        operator
+            Request-scoped operator; its validated JWT authenticates the
+            per-target Vault credential read.
+        target
+            Resolved Harbor target.
+        params
+            Schema-validated: ``project_name`` (str), ``repository_name``
+            (str), ``reference`` (str — a tag name or a ``sha256:`` digest).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{severity, scanner, generated_at, vulnerabilities: [...]}`` — the
+            overall severity, scanner provenance, and the projected per-CVE
+            list. ``vulnerabilities`` is ``[]`` for a clean (scanned,
+            zero-finding) artifact.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor (e.g. 404 when the artifact has never
+            been scanned). The dispatcher wraps it as a ``connector_error``
+            OperationResult.
+        """
+        path = fill_path(
+            _ARTIFACT_VULNERABILITIES_PATH,
+            {
+                "project_name": encode_segment(params["project_name"]),
+                "repository_name": encode_segment(params["repository_name"]),
+                "reference": encode_segment(params["reference"]),
+            },
+        )
+        payload = await self._request_json(
+            target,
+            "GET",
+            path,
+            operator=operator,
+            extra_headers={"X-Accept-Vulnerabilities": _VULN_REPORT_MIME},
+        )
+        report = _extract_vuln_report(payload)
+        raw_vulnerabilities = report.get("vulnerabilities")
+        vulnerabilities = [
+            _project_vulnerability(item)
+            for item in (raw_vulnerabilities if isinstance(raw_vulnerabilities, list) else [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "severity": report.get("severity"),
+            "scanner": report.get("scanner"),
+            "generated_at": report.get("generated_at"),
+            "vulnerabilities": vulnerabilities,
+        }
+
+    async def project_summary(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read one project's storage-quota occupancy via Harbor 2.x.
+
+        Op-id: ``harbor.project.summary`` (#2858). Classified ``read``
+        (:func:`~meho_backplane.broadcast.events.classify_op`; ``.summary``
+        is a ``_READ_SUFFIXES`` entry), ``safety_level=safe``, no approval —
+        the per-project capacity pre-flight / denied-push diagnostic read.
+
+        ``GET /api/v2.0/projects/{project_name_or_id}/summary`` with the
+        ``X-Is-Resource-Name: true`` header so Harbor always resolves the
+        path segment as a project *name* (its default treats a
+        numeric-looking segment as an id). This is the storage-quota detail
+        ``harbor.project.info`` does NOT carry — the vendor ``Project``
+        object has no ``quota`` field; ``quota.hard`` / ``quota.used`` live
+        only on the summary endpoint.
+
+        The native ``ProjectSummary`` is projected to the fields the
+        operator question needs: ``repo_count``, the native ``quota`` object
+        (``{hard, used}``, each a ``ResourceList`` map keyed by resource
+        name — ``storage`` is bytes, hard ``-1`` = unlimited), and the
+        per-role ``member_counts``. The ``registry`` field (present only for
+        proxy-cache projects) is dropped.
+
+        Uses :meth:`_request_json` (not :meth:`_get_json`) because the read
+        needs the per-call ``X-Is-Resource-Name`` header, which
+        ``_get_json`` does not forward; GET stays idempotent so the tenacity
+        retry still applies. The dispatched ``operator`` threads to the
+        operator-context Vault credential read the same way the robot ops do.
+
+        Parameters
+        ----------
+        operator
+            Request-scoped operator; its validated JWT authenticates the
+            per-target Vault credential read.
+        target
+            Resolved Harbor target.
+        params
+            Schema-validated: ``project_name`` (str).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{repo_count, quota: {hard, used}, member_counts: {...}}`` —
+            ``quota.hard.storage`` / ``quota.used.storage`` are bytes.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor (e.g. 404 for an unknown project).
+            The dispatcher wraps it as a ``connector_error`` OperationResult.
+        """
+        path = fill_path(
+            _PROJECT_SUMMARY_PATH,
+            {"project_name_or_id": encode_segment(params["project_name"])},
+        )
+        payload = await self._request_json(
+            target,
+            "GET",
+            path,
+            operator=operator,
+            extra_headers={"X-Is-Resource-Name": "true"},
+        )
+        quota = payload.get("quota") or {}
+        return {
+            "repo_count": payload.get("repo_count"),
+            "quota": {
+                "hard": quota.get("hard") or {},
+                "used": quota.get("used") or {},
+            },
+            "member_counts": {
+                "project_admin": payload.get("project_admin_count"),
+                "maintainer": payload.get("maintainer_count"),
+                "developer": payload.get("developer_count"),
+                "guest": payload.get("guest_count"),
+                "limited_guest": payload.get("limited_guest_count"),
+            },
+        }
+
+    async def quota_list(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List project storage quotas fleet-wide via Harbor 2.x.
+
+        Op-id: ``harbor.quota.list`` (#2858). Classified ``read`` (``.list``
+        suffix), ``safety_level=safe``, no approval — the fleet-wide "which
+        projects are near their storage quota" read that saves the operator
+        an N-way per-project ``harbor.project.summary`` fan-out.
+
+        ``GET /api/v2.0/quotas?reference=project&sort=<sort>``. The
+        ``reference=project`` filter is fixed: project quotas are the only
+        quota reference type in the stable Harbor 2.x line. The default
+        ``sort=-used.storage`` returns the highest-usage projects first, so
+        the head of the list answers the capacity question directly.
+        ``page`` / ``page_size`` page a large fleet.
+
+        Each native ``Quota`` is projected to ``{id, ref, hard, used}``:
+        ``ref`` is the project reference object (``{id, name, owner_name}`` —
+        which project this quota belongs to) and ``hard`` / ``used`` are
+        ``ResourceList`` maps (``storage`` in bytes, hard ``-1`` = unlimited).
+        The projected rows are returned under a single ``quotas`` key — the
+        one set-shaped field — so the dispatcher's JSONFlux reducer
+        materialises them into a result handle once the fleet crosses the
+        ~50-row / 4 KB threshold (CLAUDE.md postulate 6); a "projects over N
+        bytes used" filter is a ``result_query`` away.
+
+        Uses :meth:`_get_json` (idempotent GET with query params; no per-call
+        header needed). The dispatched ``operator`` threads to the
+        operator-context Vault credential read the same way the robot ops do.
+
+        Parameters
+        ----------
+        operator
+            Request-scoped operator; its validated JWT authenticates the
+            per-target Vault credential read.
+        target
+            Resolved Harbor target.
+        params
+            Schema-validated: ``sort`` (str, default ``-used.storage``),
+            ``page`` (int ≥ 1, default 1), ``page_size`` (int, default 50).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{"quotas": [{id, ref, hard, used}, ...]}`` ordered per ``sort``;
+            ``quotas`` is ``[]`` when no project quotas exist and is
+            JSONFlux-reduced to a result handle by the dispatcher for large
+            fleets.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor. The dispatcher wraps it as a
+            ``connector_error`` OperationResult.
+        """
+        query: dict[str, Any] = {
+            "reference": "project",
+            "sort": str(params.get("sort") or "-used.storage"),
+            "page": int(params.get("page") or 1),
+            "page_size": int(params.get("page_size") or 50),
+        }
+        payload: Any = await self._get_json(target, _QUOTAS_PATH, operator=operator, params=query)
+        quotas = payload if isinstance(payload, list) else []
+        return {
+            "quotas": [
+                {
+                    "id": quota.get("id"),
+                    "ref": quota.get("ref"),
+                    "hard": quota.get("hard") or {},
+                    "used": quota.get("used") or {},
+                }
+                for quota in quotas
+                if isinstance(quota, dict)
+            ]
+        }
 
     async def invalidate_credentials(self, target: HarborTargetLike) -> None:
         """Duck-typed credential-eviction hook for the dispatch path (#2396).

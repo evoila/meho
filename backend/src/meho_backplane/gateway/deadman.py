@@ -29,8 +29,11 @@ Design moulds
   scheduler trigger loop.
 * Lapse-then-flip tick body + advisory lock: moulded on the agent-run
   reaper (:mod:`meho_backplane.agent.reaper`) — a fixed non-blocking PG
-  advisory lock elects one replica per tick (no-op on SQLite), the flip
-  is per-row isolated, one internal audit row per flipped runner.
+  advisory lock elects one replica per tick (no-op on SQLite; hosted on
+  a dedicated pinned connection via
+  :func:`meho_backplane.db.advisory.advisory_lock` because the tick
+  commits mid-lock, #3010), the flip is per-row isolated, one internal
+  audit row per flipped runner.
 * Internal audit row: :func:`~meho_backplane.memory.audit.write_internal_audit_row`
   (opens its own session, commits) — mould parity with the memory sweeper.
 
@@ -72,9 +75,10 @@ from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 import structlog
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunnerAssignmentRow, RunnerPrincipal
 from meho_backplane.gateway.queue import GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
@@ -83,6 +87,7 @@ from meho_backplane.memory.audit import (
     SYSTEM_OPERATOR_SUB,
     write_internal_audit_row,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -144,29 +149,6 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire a session-level PG advisory lock; ``True`` on non-PG.
-
-    Returns ``True`` when the lock is held (or the dialect has no advisory
-    locks, i.e. the single-replica SQLite test path) and the caller should
-    proceed; ``False`` when another replica holds it and this tick should
-    be skipped. Mould: :func:`meho_backplane.agent.reaper._try_advisory_lock`.
-    """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
-    return bool(locked)
-
-
-async def _release_advisory_lock(session: AsyncSession, key: int) -> None:
-    """Release the session-level PG advisory lock; no-op on non-PG."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
-
-
 async def _run_one_tick() -> None:
     """One sweep: flip lapsed runners' assignment rows, audit each flip.
 
@@ -189,11 +171,13 @@ async def _run_one_tick() -> None:
     sessionmaker = get_sessionmaker()
     # (tenant_id, runner_name, lapse_seconds) for each flip this tick won.
     flipped: list[tuple[uuid.UUID, str, float]] = []
-    async with sessionmaker() as session:
-        if not await _try_advisory_lock(session, _DEADMAN_ADVISORY_LOCK_KEY):
+    # #3010: the lock rides a dedicated pinned connection — the tick's
+    # commit would strand a lock taken on the work session.
+    async with advisory_lock(_DEADMAN_ADVISORY_LOCK_KEY, subsystem="gateway_deadman") as locked:
+        if not locked:
             _log.debug("gateway_deadman_tick_skipped_lock_held")
             return
-        try:
+        async with sessionmaker() as session:
             candidate_stmt = (
                 select(
                     RunnerAssignmentRow.id,
@@ -237,14 +221,33 @@ async def _run_one_tick() -> None:
                     lapse_seconds = (now - _as_utc(last_seen_at)).total_seconds()
                     flipped.append((tenant_id, runner_name, lapse_seconds))
             await session.commit()
-        finally:
-            await _release_advisory_lock(session, _DEADMAN_ADVISORY_LOCK_KEY)
 
     if not flipped:
         _log.debug("gateway_deadman_tick_clean")
         return
 
     duration_ms = (time.perf_counter() - tick_started) * 1000.0
+    await _audit_flips(flipped, duration_ms=duration_ms)
+    _log.info(
+        "gateway_deadman_tick_done",
+        flipped=len(flipped),
+        threshold_seconds=_threshold_seconds(),
+        duration_ms=duration_ms,
+    )
+
+
+async def _audit_flips(
+    flipped: list[tuple[uuid.UUID, str, float]],
+    *,
+    duration_ms: float,
+) -> None:
+    """Write one internal audit row per won flip, isolating failures.
+
+    Runs after the flips committed (the memory-sweeper ordering: mutate +
+    commit, then audit) and outside the advisory lock — the audit helper
+    opens its own session, and holding a lock across a foreign commit is
+    the #3010 shape this module just shed.
+    """
     for tenant_id, runner_name, lapse_seconds in flipped:
         try:
             await write_internal_audit_row(
@@ -265,12 +268,6 @@ async def _run_one_tick() -> None:
                 tenant_id=str(tenant_id),
                 runner=runner_name,
             )
-    _log.info(
-        "gateway_deadman_tick_done",
-        flipped=len(flipped),
-        threshold_seconds=_threshold_seconds(),
-        duration_ms=duration_ms,
-    )
 
 
 async def clear_runner_stale(
@@ -328,6 +325,7 @@ async def _sweeper_loop() -> None:
                 "gateway_deadman_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("gateway_deadman", get_settings().gateway_deadman_tick_interval_seconds)
 
 
 def start_gateway_deadman_sweeper() -> asyncio.Task[None]:

@@ -66,6 +66,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
     publish_approval_event,
@@ -204,6 +205,7 @@ async def _sweeper_loop() -> None:
             raise
         except Exception:
             _log.warning("approval_expiry_tick_failed", exc_info=True)
+        note_loop_tick("approval_expiry", get_settings().approval_expiry_tick_interval_seconds)
 
 
 def start_approval_expiry_sweeper() -> asyncio.Task[None]:

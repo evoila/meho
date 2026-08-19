@@ -144,6 +144,7 @@ _EXPECTED: dict[str, tuple[str, bool, str]] = {
     "vault.token.create": ("dangerous", True, "token"),
     "vault.token.revoke_accessor": ("dangerous", True, "token"),
     "vault.token.list_accessors": ("safe", False, "token"),
+    "vault.token.lookup_accessor": ("safe", False, "token"),
 }
 
 
@@ -504,6 +505,83 @@ async def test_list_accessors_empty_store_normalises(
 
     assert result.status == "ok", result.error
     assert result.result == {"keys": []}
+
+
+# ---------------------------------------------------------------------------
+# token.lookup_accessor
+# ---------------------------------------------------------------------------
+
+
+async def test_lookup_accessor_unwraps_token_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """lookup_accessor unwraps Vault's data envelope into the token metadata."""
+    fake = install_fake_client(monkeypatch)
+    fake.auth.token.lookup_accessor_payload = {
+        "data": {
+            "accessor": "acc-1412",
+            "policies": ["default", "scheduler"],
+            "ttl": 2_592_000,
+            "expire_time": "2026-09-12T00:00:00Z",
+            "period": 2_764_800,
+            "display_name": "token-scheduler",
+            "creation_time": 1_754_000_000,
+            "renewable": True,
+            # Vault blanks the token id in a lookup-accessor response; it
+            # passes through harmlessly (never the raw secret).
+            "id": "",
+        }
+    }
+
+    result = await _dispatch_vault("vault.token.lookup_accessor", {"accessor": "  acc-1412 "})
+
+    assert result.status == "ok", result.error
+    # Every field the TTL/policy/expiry audit needs is present.
+    for field_name in (
+        "policies",
+        "ttl",
+        "expire_time",
+        "period",
+        "display_name",
+        "creation_time",
+        "renewable",
+    ):
+        assert field_name in result.result, f"missing {field_name}"
+    assert result.result["policies"] == ["default", "scheduler"]
+    assert result.result["period"] == 2_764_800
+    # The accessor is stripped before it reaches hvac (mirrors revoke_accessor).
+    assert fake.auth.token.lookup_accessor_calls == ["acc-1412"]
+
+
+def test_lookup_accessor_classifies_other() -> None:
+    """lookup_accessor falls through to `other` — `.lookup_accessor` is no read-suffix.
+
+    Matches revoke_accessor / list_accessors: no secret rides in the
+    response (Vault blanks the token id), so the full-detail `other`
+    broadcast is safe.
+    """
+    assert classify_op("vault.token.lookup_accessor") == "other"
+
+
+async def test_lookup_accessor_unknown_surfaces_connector_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """An unknown accessor RAISES (not swallowed) -> connector_error naming InvalidPath.
+
+    Distinct from list_accessors' empty-store normalisation: a
+    single-accessor lookup has no 'legitimately empty' case, so a 404 is a
+    genuine not-found the dispatcher surfaces.
+    """
+    fake = install_fake_client(monkeypatch)
+    fake.auth.token.raise_on_lookup_accessor = hvac.exceptions.InvalidPath("no such accessor")
+
+    result = await _dispatch_vault("vault.token.lookup_accessor", {"accessor": "ghost"})
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["exception_class"] == "InvalidPath"
 
 
 # ---------------------------------------------------------------------------

@@ -207,6 +207,25 @@ def bound_backup_path(raw_path: Any) -> str:
     return normalised
 
 
+def resolve_backup_dir(raw_path: Any) -> str:
+    """Resolve the optional ``path`` param to a bounded backups directory.
+
+    Shared by ``holodeck.backups.prune`` (write) and
+    ``holodeck.backups.list`` (read, #2847) so both confine an
+    operator-supplied sub-path through the **single**
+    :func:`bound_backup_path` safety bound -- there is no second
+    path-validation implementation that could drift from it. ``None`` (the
+    ``path`` param omitted) or :data:`_BACKUPS_ROOT` itself resolves to the
+    root; any sub-path is routed through :func:`bound_backup_path`, which
+    rejects a traversal or absolute-path escape by raising
+    :exc:`HolodeckWriteSafetyError`. The returned path is not yet
+    shell-quoted -- the caller quotes it.
+    """
+    if raw_path is None or raw_path == _BACKUPS_ROOT:
+        return _BACKUPS_ROOT
+    return bound_backup_path(raw_path)
+
+
 def bound_image_tar(raw_path: Any) -> str:
     """Return the canonical seed-image tar path, or raise if out of bounds.
 
@@ -328,14 +347,10 @@ async def holodeck_backups_prune(
     if not isinstance(keep_newest, int) or isinstance(keep_newest, bool) or keep_newest < 1:
         return {"pruned": False, "error": "keep_newest must be an integer >= 1"}
 
-    target_dir = params.get("path", _BACKUPS_ROOT)
-    if target_dir == _BACKUPS_ROOT:
-        resolved_dir = _BACKUPS_ROOT
-    else:
-        try:
-            resolved_dir = bound_backup_path(target_dir)
-        except HolodeckWriteSafetyError as exc:
-            return {"pruned": False, "error": f"backups.prune safety check: {exc}"}
+    try:
+        resolved_dir = resolve_backup_dir(params.get("path"))
+    except HolodeckWriteSafetyError as exc:
+        return {"pruned": False, "error": f"backups.prune safety check: {exc}"}
 
     quoted_dir = shlex.quote(resolved_dir)
     # List regular files newest-first (mtime), drop the newest keep_newest,

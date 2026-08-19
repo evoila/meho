@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""pfSense read ops -- 7 read ops for G3.7-T2 (#847).
+"""pfSense read ops -- the pfSense read-op surface (G3.7-T2 #847, #2849).
 
 Adds the following typed ops to :class:`PfSenseConnector`:
 
@@ -12,9 +12,14 @@ Adds the following typed ops to :class:`PfSenseConnector`:
 * ``pfsense.nat.rules`` -- ``pfctl -sn`` parsed into NAT rule rows.
 * ``pfsense.interface.list`` -- ``ifconfig -a`` parsed.
 * ``pfsense.gateway.list`` -- ``/cf/conf/config.xml`` ``<gateways>``
-  block parsed.
+  block parsed, merged with live ``dpinger`` health (up/RTT/loss) from
+  ``pfSsh.php playback gatewaystatus``.
 * ``pfsense.config.show`` -- full ``/cf/conf/config.xml`` content
   returned as a structured envelope.
+* ``pfsense.dhcp.leases`` (#2849) -- ``cat
+  /var/dhcpd/var/db/dhcpd.leases`` (the ISC dhcpd lease database under
+  pfSense's dhcpd chroot) parsed into de-duplicated lease rows;
+  returns rows inline as ``{rows, total}``.
 
 Pure parsers vs handler thin layer
 -----------------------------------
@@ -60,6 +65,7 @@ References
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from defusedxml.ElementTree import ParseError, fromstring
@@ -72,12 +78,15 @@ if TYPE_CHECKING:
 
 __all__ = [
     "READ_OPS",
+    "parse_dhcp_leases",
+    "parse_gateway_status",
     "parse_gateways_xml",
     "parse_ifconfig",
     "parse_pfctl_nat",
     "parse_pfctl_rules",
     "parse_pfctl_states",
     "pfsense_config_show",
+    "pfsense_dhcp_leases",
     "pfsense_firewall_rules",
     "pfsense_firewall_state",
     "pfsense_gateway_list",
@@ -470,6 +479,281 @@ def _xml_text(element: Any, tag: str) -> str | None:
     return child.text if child is not None else None
 
 
+# ISC dhcpd lease database (``/var/dhcpd/var/db/dhcpd.leases`` under
+# pfSense's dhcpd chroot). Grammar per ``dhcpd.leases(5)``: the file is
+# log-structured -- every lease change appends a fresh
+# ``lease <ip> { ... }`` block, so the block appearing LAST for a given
+# IP is authoritative. Date statements are ``<weekday> YYYY/MM/DD
+# HH:MM:SS`` in UTC (the weekday index 0-6 is a human-readability aid),
+# with the literal ``never`` for non-expiring leases. Binding states are
+# ``active`` / ``free`` / ``backup`` plus failover transitional states.
+_LEASE_HEADER_RE = re.compile(r"^lease\s+(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\{")
+_LEASE_STARTS_RE = re.compile(r"^starts\s+(?P<val>.+?)\s*;\s*$")
+_LEASE_ENDS_RE = re.compile(r"^ends\s+(?P<val>.+?)\s*;\s*$")
+_LEASE_BINDING_RE = re.compile(r"^binding\s+state\s+(?P<state>\S+?)\s*;")
+_LEASE_HW_RE = re.compile(r"^hardware\s+ethernet\s+(?P<mac>[0-9A-Fa-f:]+)\s*;")
+_LEASE_HOSTNAME_RE = re.compile(r'^client-hostname\s+"(?P<hostname>[^"]*)"\s*;')
+_LEASE_TS_RE = re.compile(r"\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}")
+
+
+def _lease_timestamp(value: str | None) -> str | None:
+    """Normalise a lease ``starts``/``ends`` value to its UTC timestamp.
+
+    Returns the ``YYYY/MM/DD HH:MM:SS`` substring (dropping the leading
+    weekday index), the literal ``"never"``, or ``None`` when the value
+    holds neither a recognisable timestamp nor ``never``.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "never":
+        return "never"
+    match = _LEASE_TS_RE.search(value)
+    return match.group(0) if match else None
+
+
+def _lease_datetime(timestamp: str) -> datetime | None:
+    """Parse a ``YYYY/MM/DD HH:MM:SS`` lease timestamp as a UTC datetime."""
+    try:
+        return datetime.strptime(timestamp, "%Y/%m/%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _effective_binding_state(
+    raw_state: str | None,
+    ends: str | None,
+    now: datetime,
+) -> str | None:
+    """Return the effective binding state, downgrading a stale ``active`` lease.
+
+    An ``active`` lease whose ``ends`` timestamp has already elapsed
+    relative to *now* is reported as ``expired`` -- the classification
+    pfSense's own ``Status > DHCP Leases`` view applies to a past-``ends``
+    lease. Every other state (and ``ends == "never"``) passes through
+    unchanged.
+    """
+    if raw_state != "active" or ends is None or ends == "never":
+        return raw_state
+    ends_dt = _lease_datetime(ends)
+    if ends_dt is not None and ends_dt < now:
+        return "expired"
+    return raw_state
+
+
+def _apply_lease_body_line(current: dict[str, Any], line: str) -> None:
+    """Apply one in-block statement line to the lease dict under construction.
+
+    Recognises the ``starts`` / ``ends`` / ``binding state`` /
+    ``hardware ethernet`` / ``client-hostname`` statements; any other line
+    (``cltt``, ``tstp``, ``next binding state``, options) is ignored.
+    """
+    if starts := _LEASE_STARTS_RE.match(line):
+        current["starts"] = _lease_timestamp(starts.group("val"))
+    elif ends := _LEASE_ENDS_RE.match(line):
+        current["ends"] = _lease_timestamp(ends.group("val"))
+    elif binding := _LEASE_BINDING_RE.match(line):
+        current["binding_state"] = binding.group("state")
+    elif hardware := _LEASE_HW_RE.match(line):
+        current["mac"] = hardware.group("mac")
+    elif hostname := _LEASE_HOSTNAME_RE.match(line):
+        current["hostname"] = hostname.group("hostname")
+
+
+def parse_dhcp_leases(
+    output: str,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Parse an ISC dhcpd lease database into de-duplicated lease rows.
+
+    Accepts the raw text of ``/var/dhcpd/var/db/dhcpd.leases`` and returns
+    one dict per currently-effective lease:
+
+    .. code-block:: python
+
+        {
+            "ip": "192.168.1.100",
+            "mac": "08:00:27:aa:bb:cc",
+            "hostname": "laptop",
+            "starts": "2026/08/12 10:00:00",
+            "ends": "2026/08/12 22:00:00",
+            "binding_state": "active",
+        }
+
+    The lease file is log-structured (``dhcpd.leases(5)``): every lease
+    change appends a fresh ``lease <ip> { ... }`` block, so the block
+    appearing LAST for a given IP is authoritative. Rows are de-duplicated
+    to that last block per IP, preserving first-seen order.
+
+    ``mac`` comes from ``hardware ethernet`` and ``hostname`` from
+    ``client-hostname`` (``None`` when the client sent none). ``starts``
+    and ``ends`` are the lease-file UTC timestamps in ``YYYY/MM/DD
+    HH:MM:SS`` form (the leading weekday index is dropped); ``ends`` is
+    the literal ``"never"`` for a non-expiring lease, or ``None`` when
+    absent.
+
+    ``binding_state`` is the lease's effective state: the raw ``binding
+    state`` token (``active`` / ``free`` / ``backup`` / failover
+    transitional states), except an ``active`` lease whose ``ends`` has
+    already elapsed relative to *now* is reported as ``expired``. Only
+    ``binding_state == "active"`` rows are currently-live leases. *now*
+    defaults to the current UTC time; inject it for deterministic parsing.
+
+    Non-``lease`` blocks (``server-duid``, ``failover peer`` state) and
+    comment lines are ignored. An unterminated trailing block (a lease
+    dhcpd was mid-write on) is dropped. Empty or malformed input yields an
+    empty list.
+
+    >>> text = (
+    ...     "lease 10.0.0.5 {\\n"
+    ...     "  starts 3 2026/08/12 10:00:00;\\n"
+    ...     "  ends 3 2026/08/12 22:00:00;\\n"
+    ...     "  binding state active;\\n"
+    ...     "  hardware ethernet 08:00:27:aa:bb:cc;\\n"
+    ...     '  client-hostname "laptop";\\n'
+    ...     "}\\n"
+    ... )
+    >>> rows = parse_dhcp_leases(text, now=datetime(2026, 8, 12, 12, tzinfo=UTC))
+    >>> rows[0]["ip"], rows[0]["binding_state"], rows[0]["hostname"]
+    ('10.0.0.5', 'active', 'laptop')
+    """
+    if now is None:
+        now = datetime.now(UTC)
+
+    leases: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if current is None:
+            header = _LEASE_HEADER_RE.match(line)
+            if header:
+                current = {
+                    "ip": header.group("ip"),
+                    "mac": None,
+                    "hostname": None,
+                    "starts": None,
+                    "ends": None,
+                    "binding_state": None,
+                }
+            continue
+        if line.startswith("}"):
+            current["binding_state"] = _effective_binding_state(
+                current["binding_state"], current["ends"], now
+            )
+            leases[current["ip"]] = current  # last block per IP wins
+            current = None
+            continue
+        _apply_lease_body_line(current, line)
+    return list(leases.values())
+
+
+# ``pfSsh.php playback gatewaystatus`` renders pfSense's live ``dpinger``
+# view (``return_gateways_status_text`` in ``gwlb.inc``) as a
+# whitespace-padded table: one header row, then one row per *monitored*
+# gateway. Example (columns space-padded; abbreviated here):
+#
+#   Name      Monitor        Source          Delay     StdDev    Loss    Status  Substatus
+#   WAN_DHCP  172.21.16.1    172.21.16.226   0.651ms   0.112ms   0.0%    online  none
+#   LTE_GW    1.1.1.1        10.0.5.1        0ms       0ms       100%    down    highloss
+#
+# No field value contains internal whitespace (names are alnum/underscore,
+# IPs and metrics have none), so a plain ``str.split()`` yields exactly the
+# eight columns. ``Delay``/``StdDev`` carry an ``ms`` suffix, ``Loss`` a
+# ``%`` suffix. Only gateways ``dpinger`` is actively monitoring appear --
+# a configured-but-unmonitored gateway (e.g. on a down interface) is simply
+# absent from the output.
+_GATEWAY_STATUS_HEADER = ("Name", "Monitor", "Source")
+
+#: Live-health fields set to ``None`` for a configured gateway that is
+#: absent from the ``gatewaystatus`` view (never mutated -- merged via
+#: ``dict.update`` which copies the values).
+_GATEWAY_STATUS_NULL_FIELDS: dict[str, Any] = {
+    "status": None,
+    "delay_ms": None,
+    "stddev_ms": None,
+    "loss_pct": None,
+    "substatus": None,
+}
+
+
+def parse_gateway_status(text: str) -> dict[str, dict[str, Any]]:
+    """Parse ``pfSsh.php playback gatewaystatus`` output into a status map.
+
+    Returns a dict keyed by gateway ``name``; each value carries the live
+    ``dpinger`` health for that gateway:
+
+    .. code-block:: python
+
+        {
+            "WAN_DHCP": {
+                "status": "online",
+                "delay_ms": 0.651,
+                "stddev_ms": 0.112,
+                "loss_pct": 0.0,
+                "substatus": "none",
+            },
+        }
+
+    ``status`` / ``substatus`` are the raw dpinger strings (``online`` /
+    ``down`` for status; ``none`` / ``delay`` / ``loss`` / ``highdelay`` /
+    ``highloss`` / ``force_down`` for substatus). ``delay_ms`` and
+    ``stddev_ms`` are the ``Delay`` / ``StdDev`` columns with the ``ms``
+    suffix stripped and parsed to float; ``loss_pct`` is the ``Loss``
+    column with ``%`` stripped and parsed to float. A metric that fails to
+    parse (unexpected placeholder) becomes ``None`` for that field.
+
+    The header row and any line that does not split into exactly eight
+    columns are skipped; the parser never raises on malformed input and
+    returns ``{}`` for empty text.
+
+    >>> out = (
+    ...     "Name Monitor Source Delay StdDev Loss Status Substatus\\n"
+    ...     "WAN_DHCP 1.1.1.1 10.0.0.2 0.6ms 0.1ms 0.0% online none\\n"
+    ... )
+    >>> parse_gateway_status(out)["WAN_DHCP"]["status"]
+    'online'
+    >>> parse_gateway_status(out)["WAN_DHCP"]["delay_ms"]
+    0.6
+    """
+    status_map: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        tokens = line.split()
+        if len(tokens) != 8:
+            continue
+        if tuple(tokens[:3]) == _GATEWAY_STATUS_HEADER:
+            continue  # header row
+        name, _monitorip, _srcip, delay, stddev, loss, status, substatus = tokens
+        status_map[name] = {
+            "status": status,
+            "delay_ms": _parse_metric(delay, "ms"),
+            "stddev_ms": _parse_metric(stddev, "ms"),
+            "loss_pct": _parse_metric(loss, "%"),
+            "substatus": substatus,
+        }
+    return status_map
+
+
+def _parse_metric(value: str, unit: str) -> float | None:
+    """Strip a trailing *unit* from *value* and parse the rest to float.
+
+    ``_parse_metric("0.651ms", "ms")`` -> ``0.651``;
+    ``_parse_metric("100%", "%")`` -> ``100.0``. Returns ``None`` when the
+    remainder is not a number (defends against placeholders such as ``~``).
+
+    >>> _parse_metric("0ms", "ms")
+    0.0
+    >>> _parse_metric("100%", "%")
+    100.0
+    >>> _parse_metric("n/a", "ms") is None
+    True
+    """
+    stripped = value[: -len(unit)] if value.endswith(unit) else value
+    try:
+        return float(stripped)
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Handler functions (bound-method shims on PfSenseConnector)
 # ---------------------------------------------------------------------------
@@ -606,13 +890,26 @@ async def pfsense_gateway_list(
     params: dict[str, Any],
     operator: Operator | None = None,
 ) -> dict[str, Any]:
-    """Return the pfSense gateway list from ``/cf/conf/config.xml``.
+    """Return the pfSense gateway list merged with live ``dpinger`` status.
 
-    Op-id: ``pfsense.gateway.list``. Reads the live pfSense
-    configuration file and parses the ``<gateways>`` block into
-    structured gateway dicts. Each gateway dict carries ``name``,
-    ``interface``, ``gateway`` (IP), ``monitor`` (monitor IP),
-    ``descr``, and ``defaultgw`` (bool).
+    Op-id: ``pfsense.gateway.list``. Two SSH round-trips (the asyncssh
+    pool reuses one connection), mirroring
+    :func:`meho_backplane.connectors.bind9.ops_zone.bind9_zone_read`:
+
+    1. ``cat /cf/conf/config.xml`` -- the static ``<gateways>`` block
+       (``name``, ``interface``, ``gateway`` IP, ``monitor`` IP,
+       ``descr``, ``defaultgw``).
+    2. ``pfSsh.php playback gatewaystatus`` -- pfSense's shell view onto
+       ``dpinger``'s live per-gateway state.
+
+    The live status is keyed by gateway name and merged onto each config
+    row, adding ``status``, ``delay_ms``, ``stddev_ms``, ``loss_pct``,
+    and ``substatus``. A gateway configured in ``config.xml`` but not
+    currently monitored by ``dpinger`` (e.g. on a down interface) is
+    absent from the live view; its five health fields are ``None`` and
+    the row is never dropped. A failure of the status command degrades to
+    all-``None`` health fields rather than failing the whole op -- the
+    config listing is still returned.
     """
     del params  # declared empty; intentionally ignored
     proc = await self._run_command(target, "cat /cf/conf/config.xml", operator=operator)
@@ -625,6 +922,22 @@ async def pfsense_gateway_list(
             "error": f"cat /cf/conf/config.xml exit {proc.exit_status}",
         }
     rows = parse_gateways_xml(content)
+
+    # Second round-trip: overlay live dpinger health. A failed / empty
+    # status command yields an empty map, so every row falls back to the
+    # null health fields -- the config listing is never lost to a dpinger
+    # hiccup.
+    status_proc = await self._run_command(
+        target, "pfSsh.php playback gatewaystatus", operator=operator
+    )
+    status_stdout = (status_proc.stdout or "") if hasattr(status_proc, "stdout") else ""
+    status_text = status_stdout if isinstance(status_stdout, str) else ""
+    status_map = parse_gateway_status(status_text)
+    for row in rows:
+        name = row.get("name")
+        live = status_map.get(name) if isinstance(name, str) else None
+        row.update(live or _GATEWAY_STATUS_NULL_FIELDS)
+
     return {"rows": rows, "total": len(rows)}
 
 
@@ -654,6 +967,39 @@ async def pfsense_config_show(
             "error": f"cat /cf/conf/config.xml exit {proc.exit_status}",
         }
     return {"config_xml": content, "length": len(content)}
+
+
+async def pfsense_dhcp_leases(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Return the pfSense DHCPv4 lease table from the ISC dhcpd lease DB.
+
+    Op-id: ``pfsense.dhcp.leases``. Reads
+    ``/var/dhcpd/var/db/dhcpd.leases`` (the ISC dhcpd lease database under
+    pfSense's dhcpd chroot) over SSH and parses it into de-duplicated
+    lease rows via :func:`parse_dhcp_leases`. Returns rows inline as
+    ``{rows, total}``; a busy pool's lease table can be large, so the
+    dispatcher's default
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    wraps the payload in a ``ResultHandle`` when ``total`` exceeds its
+    threshold. Non-zero exit with empty stdout (file missing, DHCP server
+    disabled) returns the sibling error envelope.
+    """
+    del params  # declared empty; intentionally ignored
+    proc = await self._run_command(target, "cat /var/dhcpd/var/db/dhcpd.leases", operator=operator)
+    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
+    content = stdout if isinstance(stdout, str) else ""
+    if proc.exit_status != 0 and not content.strip():
+        return {
+            "rows": [],
+            "total": 0,
+            "error": f"cat /var/dhcpd/var/db/dhcpd.leases exit {proc.exit_status}",
+        }
+    rows = parse_dhcp_leases(content)
+    return {"rows": rows, "total": len(rows)}
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +1037,9 @@ _WHEN_TO_USE_NETWORK = (
     "``pfsense.interface.list`` when the operator wants IP address, "
     "MAC, MTU, or link-status information. Call "
     "``pfsense.gateway.list`` when the operator wants routing-gateway "
-    "configuration from the pfSense config."
+    "configuration together with each gateway's live ``dpinger`` health "
+    "(up/down, round-trip latency, packet loss) -- e.g. to answer "
+    "whether the WAN is degraded right now."
 )
 
 #: Curated ``when_to_use`` for the ``config`` group.
@@ -703,6 +1051,18 @@ _WHEN_TO_USE_CONFIG = (
     "export the complete pfSense config.xml. Call "
     "``pfsense.version`` when a structured version output is needed "
     "without the full FingerprintResult envelope."
+)
+
+#: Curated ``when_to_use`` for the ``dhcp`` group.
+_WHEN_TO_USE_DHCP = (
+    "Use for pfSense DHCP lease-state operations: reading the live DHCPv4 "
+    "lease table (``pfsense.dhcp.leases``). Call when the operator wants to "
+    "know which IPs are currently leased (and to whom) or how close a DHCP "
+    "pool is to exhaustion before provisioning more hosts on a segment. Rows "
+    "carry the client IP, MAC, hostname, lease start/end (UTC), and the "
+    "effective binding state; only ``binding_state == 'active'`` rows are "
+    "currently-live leases. A busy pool's lease list is reduced to a JSONFlux "
+    "handle carrying a bounded inline sample plus a ``fetch_more`` envelope."
 )
 
 _EMPTY_PARAMS: dict[str, Any] = {
@@ -952,14 +1312,21 @@ READ_OPS: tuple[PfSenseOp, ...] = (
     PfSenseOp(
         op_id="pfsense.gateway.list",
         handler_attr="gateway_list",
-        summary="List pfSense routing gateways from config.xml.",
+        summary="List pfSense routing gateways with live dpinger up/RTT/loss status.",
         description=(
-            "Reads ``/cf/conf/config.xml`` over SSH and parses the "
-            "``<gateways>`` block into structured gateway dicts. Each "
-            "dict carries the gateway name, interface, gateway IP, "
-            "monitor IP, description, and whether it is the default "
-            "gateway. Returns a ``{rows, total}`` envelope. No params; "
-            "safe to call on any healthy pfSense target."
+            "Reads ``/cf/conf/config.xml`` over SSH for the static "
+            "``<gateways>`` block, then runs ``pfSsh.php playback "
+            "gatewaystatus`` for pfSense's live ``dpinger`` view and "
+            "merges the two by gateway name. Each row carries the static "
+            "config (name, interface, gateway IP, monitor IP, "
+            "description, default flag) plus the live health "
+            "(``status`` up/down, ``delay_ms`` round-trip latency, "
+            "``stddev_ms``, ``loss_pct`` packet loss, ``substatus``). "
+            "Use to answer whether a WAN gateway is degraded right now. "
+            "A gateway configured but not currently monitored by dpinger "
+            "reports ``null`` health fields. Returns a ``{rows, total}`` "
+            "envelope. No params; safe to call on any healthy pfSense "
+            "target."
         ),
         parameter_schema=_EMPTY_PARAMS,
         response_schema={
@@ -976,6 +1343,11 @@ READ_OPS: tuple[PfSenseOp, ...] = (
                             "monitor": {"type": ["string", "null"]},
                             "descr": {"type": ["string", "null"]},
                             "defaultgw": {"type": "boolean"},
+                            "status": {"type": ["string", "null"]},
+                            "delay_ms": {"type": ["number", "null"]},
+                            "stddev_ms": {"type": ["number", "null"]},
+                            "loss_pct": {"type": ["number", "null"]},
+                            "substatus": {"type": ["string", "null"]},
                         },
                     },
                 },
@@ -992,11 +1364,22 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "parameter_hints": {},
             "output_shape": (
                 "``{rows: [{name, interface, gateway, monitor, descr, "
-                "defaultgw}], total: N}``. ``defaultgw`` is ``true`` "
-                "when the ``<defaultgw/>`` element is present in the "
-                "pfSense config. ``gateway`` is the gateway IP address. "
-                "``interface`` is the pfSense interface logical name "
-                "(e.g. ``wan``, ``lan``)."
+                "defaultgw, status, delay_ms, stddev_ms, loss_pct, "
+                "substatus}], total: N}``. The first six fields are static "
+                "config from ``config.xml``; the last five are live "
+                "``dpinger`` health merged from ``pfSsh.php playback "
+                "gatewaystatus``. ``status`` is ``online`` or ``down``; "
+                "``delay_ms`` / ``stddev_ms`` are round-trip latency and "
+                "its standard deviation in milliseconds; ``loss_pct`` is "
+                "packet-loss percent; ``substatus`` refines the state "
+                "(``none`` / ``delay`` / ``loss`` / ``highdelay`` / "
+                "``highloss`` / ``force_down``). A gateway configured but "
+                "not currently monitored by dpinger (e.g. on a down "
+                "interface) has all five live fields ``null`` -- the row "
+                "is still returned. ``defaultgw`` is ``true`` when the "
+                "``<defaultgw/>`` element is present. ``gateway`` is the "
+                "gateway IP; ``interface`` is the pfSense logical "
+                "interface name (e.g. ``wan``, ``lan``)."
             ),
         },
     ),
@@ -1034,6 +1417,65 @@ READ_OPS: tuple[PfSenseOp, ...] = (
                 "is the raw pfSense ``config.xml`` content as a string. "
                 "``length`` is the character count. ``error`` is set when "
                 "the command failed."
+            ),
+        },
+    ),
+    PfSenseOp(
+        op_id="pfsense.dhcp.leases",
+        handler_attr="dhcp_leases",
+        summary="List live pfSense DHCPv4 leases from the ISC dhcpd lease database.",
+        description=(
+            "Reads ``/var/dhcpd/var/db/dhcpd.leases`` (the ISC dhcpd lease "
+            "database under pfSense's dhcpd chroot) over SSH and parses it "
+            "into structured lease rows. Each row carries the client IP, MAC "
+            "(``hardware ethernet``), hostname (``client-hostname``, nullable), "
+            "the lease ``starts``/``ends`` UTC timestamps, and the effective "
+            "``binding_state`` (``active`` / ``free`` / ``backup`` / "
+            "``expired``). Rows are de-duplicated to the most-recent lease per "
+            "IP (the lease DB is log-structured). Returns a ``{rows, total}`` "
+            "envelope. Use to answer 'which IPs are leased right now' and DHCP "
+            "pool-exhaustion questions before provisioning hosts on a segment. "
+            "No params; safe to call on any healthy pfSense target."
+        ),
+        parameter_schema=_EMPTY_PARAMS,
+        response_schema={
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ip": {"type": "string"},
+                            "mac": {"type": ["string", "null"]},
+                            "hostname": {"type": ["string", "null"]},
+                            "starts": {"type": ["string", "null"]},
+                            "ends": {"type": ["string", "null"]},
+                            "binding_state": {"type": ["string", "null"]},
+                        },
+                    },
+                },
+                "total": {"type": "integer"},
+            },
+            "additionalProperties": True,
+        },
+        group_key="dhcp",
+        tags=("read-only", "dhcp", "leases", "pfsense"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": _WHEN_TO_USE_DHCP,
+            "parameter_hints": {},
+            "output_shape": (
+                "``{rows: [{ip, mac, hostname, starts, ends, binding_state}], "
+                "total: N}``. ``ip`` is the leased address; ``mac`` is the "
+                "client hardware address; ``hostname`` is the client-sent name "
+                "or ``null``. ``starts``/``ends`` are UTC ``YYYY/MM/DD "
+                "HH:MM:SS`` strings (``ends`` may be ``'never'``). "
+                "``binding_state`` is ``active`` / ``free`` / ``backup`` / "
+                "``expired``; only ``active`` rows are currently-live leases. "
+                "A large lease list is reduced to a JSONFlux handle with a "
+                "bounded inline sample plus a ``fetch_more`` envelope."
             ),
         },
     ),

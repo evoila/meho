@@ -127,7 +127,21 @@ gh catalog ingest.
     `options {id name}`), and its items. This is the ergonomic linchpin:
     it hands back the `project_id` / `field_id` / `option_id` node ids the
     two writes consume, so an agent never shells out to `gh project` to
-    discover them.
+    discover them. Each item row also carries a **`field_values`** map of
+    the item's currently-set fields keyed by field name (e.g.
+    `{"Status": "In Progress", "Priority": "high"}`) — the read half of the
+    board that answers `/board-status`-shaped "what Status/Priority is #N?"
+    questions without a `gh` GraphQL fallback (#2845). The query selects
+    each item's `fieldValues` and `_parse_field_values` projects only the
+    single-select (`ProjectV2ItemFieldSingleSelectValue.name`) and text
+    (`ProjectV2ItemFieldTextValue.text`) value types, dropping the other
+    union members (iteration / number / date / repository / labels / ...)
+    the same defensive way `_parse_fields` skips unexpected shapes. The
+    `fieldValues(first: 20)` bound is a deliberate per-item cap: on the
+    live MEHO board the busiest items hold 9 field values and the smaller
+    `first: 8` the Task originally sketched was measured to truncate the
+    trailing `Track` single-select on every assigned item; per-item
+    field-value pagination stays a separate follow-on.
   - `gh.composite.project_item_add` (write) — `addProjectV2ItemById`.
   - `gh.composite.project_item_set_field` (write) —
     `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.

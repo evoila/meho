@@ -30,9 +30,10 @@ provenance), the pre-run budget gate + kill switch, bounded waiting, and
 The trigger seam
 ================
 
-There is no event machinery to ride (``kind=event`` trigger creation is refused
-until the #826 matcher lands, #2325) and #2506's rollup is read-path-only by
-decision, so the seam is a **hook at #2505's runner result-persist path**:
+The investigator does not ride the event-outbox machinery (the ``kind=event``
+matcher, #2878, dispatches subscribed agent triggers, not the diagnose-only
+investigator) and #2506's rollup is read-path-only by decision, so the seam is
+a **hook at #2505's runner result-persist path**:
 :func:`investigate_on_transition` is called immediately after every
 ``record_sensor_result`` persist. It recomputes the rollup for exactly the
 Dashboards containing the just-evaluated Sensor, compares against the

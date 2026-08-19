@@ -3,12 +3,19 @@
 
 """op_id reconciliation between the write composites and the ingest pipeline.
 
-G3.16-T1 (#1414). The 9 REST-sub-op vmware-rest write composites each
+G3.16-T1 (#1414). The 14 REST-sub-op vmware-rest write composites each
 declare the L2 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
-:mod:`~meho_backplane.connectors.vmware_rest.composites._write`; the tenth
-write composite, ``vm.disk.grow`` (#2893), dispatches into vi-json instead
-and declares its sub-ops in ``_VIM_SUB_OPS_VM_DISK_GROW`` (reconciled in the
-dedicated vi-json section at the end of this module). At
+:mod:`~meho_backplane.connectors.vmware_rest.composites._write` (the
+T6/#509 + vm.power writes, the #2891 hardware trio, the two GOSC
+composites / #2892, and the OVF/OVA content-library deploy / #2909); the
+four vi-json write composites (``vm.disk.grow`` /
+#2893, ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
+writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch
+into vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
+(reconciled in the dedicated vi-json section at the end of this module),
+as do the composite steps #2970 switched to vim because the pinned
+vcenter.yaml serves no REST path for them (snapshot list/revert, host
+maintenance, DRS recommendations, DVS host removal). At
 dispatch time :func:`~...composites._preflight.preflight_l2_dependencies`
 looks each sub-op_id up in ``endpoint_descriptor`` and raises
 :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
@@ -26,12 +33,11 @@ the parser emits from ``vcenter.yaml``. The two surfaces that could drift:
   query suffix *in the path key itself* (it does not model the verb as a
   body/query parameter on a shared base path). The parser passes the path
   key through verbatim into the op_id, so the action suffix survives. The
-  composites' ``_power_vm_op_id`` / ``_host_maintenance_op_id`` helpers
-  build the same string.
+  composites' ``_power_vm_op_id`` helper builds the same string.
 
 This module proves the match automatically, without a live backplane:
 
-1. Derive the full set of raw L2 sub-op_ids the 8 composites need by
+1. Derive the full set of raw L2 sub-op_ids the 14 composites need by
    introspecting the live ``_SUB_OPS_*`` constants (so the test tracks
    any future edit to those tuples -- no hardcoded mirror to drift).
 2. Build a representative OpenAPI fixture whose ``paths`` are keyed
@@ -45,6 +51,25 @@ once the operator ingests the vSphere specs and enables the carrying
 groups (acceptance criterion 2 on #1414, verified in code rather than
 against a deploy). If anyone edits a ``_SUB_OPS_*`` op_id into a shape
 the ingest pipeline cannot emit, this test goes red.
+
+**Two tiers of proof -- shape vs. real-path existence.** The hand-built
+fixture assertion
+(:func:`test_every_write_composite_sub_op_resolves_to_an_ingested_op_id`)
+proves op_id *shape*: that every ``_SUB_OPS_*`` string is a well-formed
+``METHOD:/path`` the parser emits, keyed vCenter's action-verb-in-path
+way. It synthesises the fixture *from* those same constants, so it
+**cannot** prove a path actually exists in vCenter 9.0 -- a typo, a
+renamed endpoint, or a wrong API-version path passes it. The env-gated
+:func:`test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec`
+closes that gap: it parses the canonical pinned ``vcenter.yaml`` and
+asserts real *path existence*. It skips when the vendor-licensed
+spec-shelf is unconfigured (the #1602 / G0.7-canary convention -- the
+specs live in the operator's separate spec-shelf repo, not this chassis
+repo), so the default local run and CI stay green on the shape assertion
+with zero external dependency; wherever ``MEHO_VCENTER_OPENAPI_VCENTER``
+/ ``MEHO_CONSUMER_DOCS_ROOT`` is wired it runs for real. The vi-json
+write composites get the same real-path treatment in the
+``*_paths_exist_in_the_pinned_spec`` checks lower down.
 """
 
 from __future__ import annotations
@@ -60,7 +85,11 @@ import respx
 
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.operations.ingest import parse_openapi
-from tests.acceptance._vcenter_spec import VCENTER_SPEC_REASON, resolve_vi_json_yaml
+from tests.acceptance._vcenter_spec import (
+    VCENTER_SPEC_REASON,
+    resolve_vcenter_yaml,
+    resolve_vi_json_yaml,
+)
 
 # Public IP returned by the mock getaddrinfo for specs.example.test.
 _PUBLIC_TEST_IP = "93.184.216.34"
@@ -79,12 +108,13 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 9 REST write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 14 REST write composites.
 
-    ``vm.disk.grow``'s vi-json sub-ops live in ``_VIM_SUB_OPS_VM_DISK_GROW``
-    (a distinct namespace this ``_SUB_OPS_*`` sweep deliberately skips), so
-    a vcenter.yaml-shaped fixture never has to model a vi-json path; the
-    vi-json section at the end of this module reconciles them separately.
+    The vi-json sub-ops live in ``_VIM_SUB_OPS_*`` tuples (a distinct
+    namespace this ``_SUB_OPS_*`` sweep deliberately skips), so a
+    vcenter.yaml-shaped fixture never has to model a vi-json path; the
+    vi-json sections at the end of this module reconcile them separately
+    (the four vi-json write composites plus the #2970 vim-switched steps).
 
     Excludes composite-to-composite references (``vmware.composite.*``):
     those are not ``endpoint_descriptor`` rows and the pre-flight walk
@@ -104,22 +134,78 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Nine ``_SUB_OPS_*`` module constants today, one per write composite.
-    Pinning the exact set means a renamed or dropped constant can't
-    silently shrink the reconciled set to a vacuous pass.
+    Fourteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    writes, the #2891 hardware trio, the two GOSC composites / #2892, plus
+    the OVF/OVA content-library deploy / #2909 — whose reads ride the
+    content-library find actions, both served by the pinned vcenter.yaml).
+    ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
+    the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
+    REST resource), so its manifest lives in
+    ``_VIM_SUB_OPS_VM_SNAPSHOT_REVERT`` and is reconciled against
+    ``vi-json.yaml`` below. Pinning the exact set means a renamed or
+    dropped constant can't silently shrink the reconciled set to a
+    vacuous pass.
     """
     tuple_names = sorted(n for n in dir(_write) if n.startswith("_SUB_OPS_"))
     assert tuple_names == [
         "_SUB_OPS_CLUSTER_PATCH",
+        "_SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE",
         "_SUB_OPS_HOST_DETACH_FROM_VDS",
         "_SUB_OPS_HOST_EVACUATE",
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
+        "_SUB_OPS_VM_CUSTOMIZE",
+        "_SUB_OPS_VM_DEPLOY_FROM_LIBRARY",
+        "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_MIGRATE",
+        "_SUB_OPS_VM_NIC_REPOINT",
         "_SUB_OPS_VM_POWER",
         "_SUB_OPS_VM_POWER_BULK",
-        "_SUB_OPS_VM_SNAPSHOT_REVERT",
+        "_SUB_OPS_VM_RESIZE",
     ]
+
+
+def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
+    """Pin the deploy_from_library manifest so a drift can't shrink the reconcile.
+
+    All four sub-ops are ``vcenter.yaml``-served REST paths (the OVF deploy,
+    both content-library find actions used for name resolution, and the
+    power-on), so — unlike the vim-shaped writes — they reconcile through the
+    generic ``_SUB_OPS_*`` sweep above rather than a ``_VIM_SUB_OPS_*`` lane.
+    """
+    assert set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY) == {
+        "POST:/content/library?action=find",
+        "POST:/content/library/item?action=find",
+        "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    }
+
+
+def test_vm_deploy_from_library_sub_ops_resolve_against_pinned_vcenter_spec() -> None:
+    """The #2909 OVF deploy + find + power paths are real ``vcenter.yaml`` paths.
+
+    The definitive #2909 grounding (the issue's ingest-reconcile-against-the-
+    pinned-spec-rows criterion, scoped to the ovf/library-item deploy paths):
+    parse the canonical pinned ``vcenter.yaml`` through the real
+    :func:`parse_openapi` and assert every ``_SUB_OPS_VM_DEPLOY_FROM_LIBRARY``
+    op_id is in the emitted descriptor set — real path existence for the OVF
+    library-item deploy, both content-library find actions, and the power-on.
+    Skips when the spec-shelf is unconfigured (the canary's convention), so CI
+    — where the env vars are wired — is the operator-visible signal.
+    """
+    spec_path = resolve_vcenter_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    required = set(_write._SUB_OPS_VM_DEPLOY_FROM_LIBRARY)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    rows = parse_openapi(f"file://{spec_path}", spec_source="spec:vcenter.yaml", content=spec_text)
+    ingested_op_ids = {row.op_id for row in rows}
+    missing = required - ingested_op_ids
+    assert not missing, (
+        "vm.deploy_from_library declares REST sub-op_ids the real vcenter.yaml "
+        f"ingest does not emit: {sorted(missing)} — re-check the OVF deploy / "
+        "content-library find paths against the pinned 9.0 spec."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +297,13 @@ def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest() -> None
     """
     action_op_ids = {op_id for op_id in _required_raw_sub_op_ids() if "?action=" in op_id}
     # Sanity: the write composites really do depend on action-bearing ops.
+    # (Host maintenance left this set in #2970 -- it is vim-only in the
+    # pinned spec; the vLCM apply carries the compound
+    # ``?action=apply&vmw-task=true`` suffix instead.)
     assert {
         "POST:/vcenter/vm/{vm}/power?action=start",
         "POST:/vcenter/vm/{vm}/power?action=stop",
-        "PATCH:/vcenter/host/{host}/maintenance?action=enter",
+        "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
         "POST:/vcenter/vm/{vm}?action=relocate",
     } <= action_op_ids
 
@@ -237,6 +326,60 @@ def test_action_discriminated_sub_ops_keep_query_suffix_through_ingest() -> None
     assert action_op_ids <= ingested_op_ids
     # And no op_id lost its query suffix (proves no stripping).
     assert all("?action=" in op_id for op_id in ingested_op_ids)
+
+
+def test_every_write_composite_sub_op_resolves_against_pinned_vcenter_spec() -> None:
+    """Every REST ``_SUB_OPS_*`` op_id is emitted by parsing the real vcenter.yaml.
+
+    The env-gated real-spec analogue of
+    :func:`test_every_write_composite_sub_op_resolves_to_an_ingested_op_id`.
+    That test synthesises its OpenAPI fixture *from* the ``_SUB_OPS_*``
+    constants, so it proves op_id **shape** (a well-formed ``METHOD:/path``
+    that survives the parser, keyed vCenter's action-verb-in-path way) but
+    cannot prove a path actually **exists** in vCenter 9.0 -- a typo, a
+    renamed endpoint, or a wrong API-version path passes it. This parses the
+    canonical pinned ``vcenter.yaml`` through the real :func:`parse_openapi`
+    and asserts every REST ``_SUB_OPS_*`` op_id is in the emitted descriptor
+    set, i.e. real path existence -- the vcenter.yaml/REST analogue of the
+    vi-json ``*_paths_exist_in_the_pinned_spec`` checks below, mirroring
+    #1602's ``test_portgroup_audit_op_id_reconcile.py``.
+
+    Skips when the spec-shelf is unconfigured (the canary's convention), so
+    the default local run and CI stay green on the hand-built-fixture
+    assertion above with zero external dependency; wherever
+    ``MEHO_VCENTER_OPENAPI_VCENTER`` / ``MEHO_CONSUMER_DOCS_ROOT`` is wired
+    it runs for real. A shelf-backed red is the guard surfacing a real
+    finding (a ``_SUB_OPS_*`` path the pinned spec does not serve), not a
+    reason to withhold the guard.
+    """
+    spec_path = resolve_vcenter_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+
+    required = _required_raw_sub_op_ids()
+    assert required, "introspection found no raw sub-op_ids -- wiring broke"
+
+    spec_text = spec_path.read_text(encoding="utf-8")
+    # ``content=`` feeds the bytes verbatim (the https-only SSRF guard
+    # applies only to the URL-fetch path); the URI arg is just the audit
+    # label. Mirrors #1602's portgroup-audit real-spec reconcile.
+    rows = parse_openapi(
+        f"file://{spec_path}",
+        spec_source="spec:vcenter.yaml",
+        content=spec_text,
+    )
+    ingested_op_ids = {row.op_id for row in rows}
+
+    missing = required - ingested_op_ids
+    assert not missing, (
+        "vmware write composites declare _SUB_OPS_* REST op_ids the real "
+        f"vcenter.yaml ingest does not emit: {sorted(missing)}. Either a "
+        "_SUB_OPS_* constant references a path vCenter 9.0 does not serve "
+        "(a typo, a renamed endpoint, or a wrong API-version path -- the "
+        "class of defect the hand-built fixture cannot catch), or the pinned "
+        "spec revision moved the resource (re-check against the vSphere "
+        "Automation REST API)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -493,4 +636,88 @@ def test_folder_create_vi_json_paths_exist_in_the_pinned_spec() -> None:
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "folder.create vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #2970 vim-switched composite steps — snapshot revert, DRS recommendations,
+# host maintenance, DVS host removal. The pinned vcenter.yaml serves no REST
+# path for any of these surfaces, so the affected steps ride vim and their
+# manifests reconcile against the pinned vi-json.yaml like the #2893-#2895
+# write composites above.
+# ---------------------------------------------------------------------------
+
+#: Expected #2970 vim manifests, pinned so a drift can't shrink a reconcile.
+_EXPECTED_2970_VIM_MANIFESTS: dict[str, set[str]] = {
+    "_VIM_SUB_OPS_VM_SNAPSHOT_REVERT": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task",
+    },
+    "_VIM_SUB_OPS_VM_MIGRATE": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    },
+    "_VIM_SUB_OPS_HOST_EVACUATE": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+    },
+    "_VIM_SUB_OPS_CLUSTER_PATCH": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task",
+        "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task",
+    },
+    "_VIM_SUB_OPS_HOST_DETACH_FROM_VDS": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task",
+    },
+}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_sub_op_manifests_are_pinned(manifest_name: str) -> None:
+    """Pin each #2970 vim manifest so a drift can't shrink the reconcile."""
+    assert set(getattr(_write, manifest_name)) == _EXPECTED_2970_VIM_MANIFESTS[manifest_name]
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_sub_ops_round_trip_through_ingest(manifest_name: str) -> None:
+    """The #2970 vim op_ids are byte-for-byte what ``parse_openapi`` emits.
+
+    Same proof shape as the #2893-#2895 round-trips above: the ``{moId}``
+    path template survives the parser, so governance op_ids / grants
+    resolve against the ingested rows once ``vi-json.yaml`` is ingested.
+    """
+    required = set(getattr(_write, manifest_name))
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_2970_VIM_MANIFESTS))
+def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
+    """Each #2970 vim sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #2970 grounding: the vim-switched steps must target
+    paths the pinned spec actually serves. Skips when the spec-shelf is
+    not configured (the canary's convention), so CI is the
+    operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in getattr(_write, manifest_name):
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            f"{manifest_name} vim sub-op targets a path the spec does not serve"
         )

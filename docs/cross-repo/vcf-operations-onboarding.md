@@ -52,10 +52,10 @@ stay in the wrapper until v0.5.next ships policy + approval flow:
 
 | Group | CLI verb | `op_id` | Path |
 | --- | --- | --- | --- |
-| vrops-system | `meho vcf-operations about` | `GET:/suite-api/api/versions/current` | Appliance release name + build number |
+| vrops-system | `meho vcf-operations about` | `vrops.liveness` | Appliance release name + build number |
 | vrops-resources | `meho vcf-operations resource list` | `GET:/suite-api/api/resources` | Resource inventory (VMs, hosts, datastores, adapters) |
 | vrops-resources | `meho vcf-operations resource get <id>` | `GET:/suite-api/api/resources/{id}` | Per-resource detail by UUID |
-| vrops-alerts | `meho vcf-operations alert list` | `GET:/suite-api/api/alerts` | Currently firing or recently resolved alerts |
+| vrops-alerts | `meho vcf-operations alert list` | `vrops.alert.list` | Currently firing or recently resolved alerts |
 | vrops-alert-definitions | `meho vcf-operations alertdefinition list` | `GET:/suite-api/api/alertdefinitions` | Alert definitions (the policy surface) |
 | vrops-symptoms | `meho vcf-operations symptom list` | `GET:/suite-api/api/symptoms` | Per-condition signals beneath alerts |
 | vrops-recommendations | `meho vcf-operations recommendation list` | `GET:/suite-api/api/recommendations` | Operator-facing remediation hints |
@@ -205,7 +205,7 @@ meho vcf-operations resource list --target rdc-vrops --json \
   | jq '.result.resourceList[] | .identifier'
 
 # Escape hatch: run any vrops-rest-9.0 op by op_id
-meho vcf-operations operation call GET:/suite-api/api/versions/current --target rdc-vrops
+meho vcf-operations operation call GET:/suite-api/api/resources --target rdc-vrops
 meho vcf-operations operation search "alerts" --target rdc-vrops
 ```
 
@@ -213,14 +213,17 @@ meho vcf-operations operation search "alerts" --target rdc-vrops
 
 ### `meho vcf-operations about`
 
-Dispatches `GET:/suite-api/api/versions/current` against
-`connector_id="vrops-rest-9.0"`. Human output: `release` (e.g.
+Dispatches `vrops.liveness` (the typed read; repointed off the
+ingested `GET:/suite-api/api/versions/current` op_id by #2355 — the
+legacy op_id no longer resolves on a zero-catalog boot; the typed op
+reads the same upstream `/suite-api/api/versions/current` surface)
+against `connector_id="vrops-rest-9.0"`. Human output: `release` (e.g.
 `9.0.0.1.23456789`), `build`, `human` (the humanly readable name when
 the appliance emits it).
 
 ```text
 $ meho vcf-operations about --target rdc-vrops
-vrops-rest-9.0 GET:/suite-api/api/versions/current — status=ok (42ms)
+vrops-rest-9.0 vrops.liveness — status=ok (42ms)
   release:  9.0.0.1.23456789
   build:    23456789
   human:    VMware Aria Operations 9.0
@@ -243,10 +246,13 @@ Renders identifier / name / kind / status / state.
 
 ### `meho vcf-operations alert list`
 
-Dispatches `GET:/suite-api/api/alerts`. Renders `alertId` /
+Dispatches `vrops.alert.list` (the typed read; repointed off the
+ingested `GET:/suite-api/api/alerts` op_id by #2355 — the legacy
+op_id no longer resolves on a zero-catalog boot). Renders `alertId` /
 `alertDefinitionName` / `alertLevel` / `status`. Filter via `--params`
 (`activeOnly`, `alertCriticality`, `alertStatus`, `resourceId`,
-`page`, `pageSize`).
+`page`, `pageSize` — the typed op's closed parameter schema accepts
+exactly these keys).
 
 ### `meho vcf-operations alertdefinition list`
 
@@ -283,7 +289,7 @@ dedicated CLI aliases.
 
 ```bash
 meho vcf-operations operation search "list resources" --group vrops-resources
-meho vcf-operations operation call GET:/suite-api/api/versions/current --target rdc-vrops
+meho vcf-operations operation call GET:/suite-api/api/resources --target rdc-vrops
 ```
 
 ## Audit and broadcast classification

@@ -45,6 +45,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     folder_create_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_deploy_from_library_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
 )
@@ -116,11 +117,14 @@ class _RecordingConnector:
 
     Serves canned read payloads and records writes. The governance tests
     assert on whether a *write* ``_post_json`` ever fires -- the read
-    payloads only need to steer the handler to its first write.
+    payloads only need to steer the handler to its first write. ``vmomi``
+    serves the VI-JSON reads the #2970 vim-switched steps issue (keyed by
+    the ``RetrievePropertiesEx`` object type).
     """
 
-    def __init__(self, reads: dict[str, Any]) -> None:
+    def __init__(self, reads: dict[str, Any], *, vmomi: dict[str, Any] | None = None) -> None:
         self._reads = reads
+        self._vmomi = vmomi or {}
         self.writes: list[dict[str, Any]] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
@@ -150,6 +154,44 @@ class _RecordingConnector:
     ) -> Any:
         self.writes.append({"verb": verb, "path": path, "body": json})
         return {"value": "vm-should-not-exist"}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        assert path.endswith("/RetrievePropertiesEx"), (
+            f"governance tests only expect vmomi reads here, got {path!r}"
+        )
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        return self._vmomi[spec_type]
+
+
+def _drs_recommendation_vmomi(vm_moid: str, destination: str) -> dict[str, Any]:
+    """Canned ``ClusterComputeResource.drsRecommendation`` property read (#2970)."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": "c-1"},
+                "propSet": [
+                    {
+                        "name": "drsRecommendation",
+                        "val": [
+                            {
+                                "migrationList": [
+                                    {
+                                        "vm": {"type": "VirtualMachine", "value": vm_moid},
+                                        "destination": {
+                                            "type": "HostSystem",
+                                            "value": destination,
+                                        },
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
 
 
 @pytest.mark.asyncio
@@ -196,7 +238,7 @@ async def test_gated_write_subop_queues_for_approval_via_composite(session: Asyn
 async def test_dangerous_write_subop_denied_without_grant(session: AsyncSession) -> None:
     """An agent with no grant is denied the dangerous relocate write; it never runs."""
     conn = _RecordingConnector(
-        {"/api/vcenter/cluster/c-1/drs/recommendations": [{"vm": "vm-1", "target_host": "host-A"}]}
+        {}, vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")}
     )
     out = await vm_migrate_composite(
         operator=_operator(sub="agent-no-grant"),
@@ -224,7 +266,7 @@ async def test_human_operator_subop_auto_executes(session: AsyncSession) -> None
     gate and the write proceeds -- no double-gate on the resume path.
     """
     conn = _RecordingConnector(
-        {"/api/vcenter/cluster/c-1/drs/recommendations": [{"vm": "vm-1", "target_host": "host-A"}]}
+        {}, vmomi={"ClusterComputeResource": _drs_recommendation_vmomi("vm-1", "host-A")}
     )
     out = await vm_migrate_composite(
         operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
@@ -533,6 +575,127 @@ async def test_clone_from_template_human_operator_vmomi_write_auto_executes(
     assert out["status"] == "cloned"
     # The CloneVM_Task executed on the session; the sub-op auto-executed.
     assert len(conn.clone_writes) == 1
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+
+
+# ===========================================================================
+# vm.deploy_from_library — the synchronous OVF deploy flows through the same
+# #2254 REST write-sub-op gate (#2909)
+# ===========================================================================
+
+
+_DEPLOY_OVF_OP_ID = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+
+
+class _DeployRecordingConnector:
+    """Recording double for the OVF-deploy governance tests.
+
+    Serves the synchronous OVF deploy and records every deploy write, so the
+    tests can assert the mutating POST never fired when the gate parks/denies.
+    id-passthrough params → no content-library find reads are needed.
+    """
+
+    def __init__(self) -> None:
+        self.deploy_writes: list[Any] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params("/api", query)
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        data: Any = None,
+        extra_headers: Any = None,
+    ) -> Any:
+        self.deploy_writes.append((path, json))
+        return {"succeeded": True, "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-1"}}
+
+
+def _deploy_gate_params() -> dict[str, Any]:
+    return {"library_item": "li-ovf", "resource_pool": "resgroup-8"}
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_gated_deploy_queues_and_never_reaches_wire(
+    session: AsyncSession,
+) -> None:
+    """An agent-gated OVF deploy queues for approval; the deploy POST never fires."""
+    await _grant(
+        principal_sub="agent-write-composite",
+        op_pattern=_DEPLOY_OVF_OP_ID,
+        verdict=PermissionVerdict.NEEDS_APPROVAL,
+    )
+    conn = _DeployRecordingConnector()
+
+    out = await vm_deploy_from_library_composite(
+        operator=_operator(),
+        target=None,
+        params=_deploy_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _DEPLOY_OVF_OP_ID
+    request_id = uuid.UUID(out.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.op_id == _DEPLOY_OVF_OP_ID
+    assert row.connector_id == "vmware-rest-9.0"
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    # The mutating OVF deploy never reached the wire.
+    assert conn.deploy_writes == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_dangerous_deploy_denied_without_grant(
+    session: AsyncSession,
+) -> None:
+    """An agent with no grant is denied the dangerous OVF deploy; it never runs."""
+    conn = _DeployRecordingConnector()
+    out = await vm_deploy_from_library_composite(
+        operator=_operator(sub="agent-no-grant"),
+        target=None,
+        params=_deploy_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "denied"
+    assert out.op_id == _DEPLOY_OVF_OP_ID
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    assert conn.deploy_writes == []
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_human_operator_deploy_auto_executes(
+    session: AsyncSession,
+) -> None:
+    """A human operator's already-approved composite auto-executes the OVF deploy."""
+    conn = _DeployRecordingConnector()
+    out = await vm_deploy_from_library_composite(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        target=None,
+        params=_deploy_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    # The deploy executed on the session; the sub-op auto-executed.
+    assert len(conn.deploy_writes) == 1
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
 

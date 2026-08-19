@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 18 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 24 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,13 +26,17 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 13 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 19 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
-``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
-``cluster.drs_rule.create`` + ``folder.create`` / #2895) inherit the T4
-defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
-the call site; the helper would default to those values anyway).
+``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
+``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
+hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
+``vm.device.cdrom``, the two GOSC composites
+``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
+OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909) inherit
+the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
+at the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -55,15 +59,21 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
+    guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_customize_composite,
+    vm_deploy_from_library_composite,
+    vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
+    vm_nic_repoint_composite,
     vm_power_bulk_composite,
     vm_power_composite,
+    vm_resize_composite,
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
@@ -79,6 +89,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     EVENT_TAIL_RESPONSE_SCHEMA,
     FOLDER_CREATE_PARAMETER_SCHEMA,
     FOLDER_CREATE_RESPONSE_SCHEMA,
+    GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
+    GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
@@ -93,14 +105,24 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CLONE_RESPONSE_SCHEMA,
     VM_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
+    VM_CUSTOMIZE_PARAMETER_SCHEMA,
+    VM_CUSTOMIZE_RESPONSE_SCHEMA,
+    VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
+    VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
+    VM_DEVICE_CDROM_PARAMETER_SCHEMA,
+    VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
     VM_DISK_GROW_RESPONSE_SCHEMA,
     VM_MIGRATE_PARAMETER_SCHEMA,
     VM_MIGRATE_RESPONSE_SCHEMA,
+    VM_NIC_REPOINT_PARAMETER_SCHEMA,
+    VM_NIC_REPOINT_RESPONSE_SCHEMA,
     VM_POWER_BULK_PARAMETER_SCHEMA,
     VM_POWER_BULK_RESPONSE_SCHEMA,
     VM_POWER_PARAMETER_SCHEMA,
     VM_POWER_RESPONSE_SCHEMA,
+    VM_RESIZE_PARAMETER_SCHEMA,
+    VM_RESIZE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -183,7 +205,10 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "attach + optional power-on (rollback on partial failure), "
         "clone from a content-library template (long-running task "
         "polling) or from a folder VM template (CloneVM_Task, with "
-        "optional inline guest customization), revert to a named "
+        "optional inline guest customization), deploy an OVF/OVA "
+        "content-library item to a new VM (deploy_from_library — "
+        "OVF-network→portgroup mappings, ambiguity-rejecting name "
+        "lookup, structured deploy-report statuses), revert to a named "
         "snapshot (ambiguity-rejecting), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
@@ -208,13 +233,27 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "DVS-audit prerequisite to host_detach_from_vds, and with "
         "'cluster' / 'vm' for the pre-flight reads."
     ),
+    "guest": (
+        "Use for guest OS customization (GOSC) write composites -- how a "
+        "cloned VM gets its network identity on first boot. Write "
+        "(dangerous / approval-required): create a reusable named "
+        "customization spec (hostname + per-NIC static IP + gateway + "
+        "DNS for Linux, or a Windows sysprep spec), and apply a saved "
+        "spec to a powered-off VM (optional power-on afterward so it "
+        "applies that boot). The right group after a 'vm' clone/create "
+        "when the question is 'give this VM its hostname and static IP'. "
+        "Pair with 'vm' for the clone/create that produces the VM, and "
+        "with 'networking' when the per-NIC IPs need portgroup context. "
+        "GOSC specs can carry admin / sysprep credentials; those never "
+        "reach a reviewer surface (the create op is credential-class)."
+    ),
 }
 
 
 class _CompositeSpec(NamedTuple):
     """Per-composite registration arguments.
 
-    Field-table form rather than fourteen repeated kwargs blocks:
+    Field-table form rather than seventeen repeated kwargs blocks:
     keeps the op_id / handler / schemas / group / tags / policy
     posture adjacent per composite and drops the outer registrar
     function below the 100-line block limit. Common fields
@@ -255,10 +294,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "Orchestrates a cluster summary read plus a DRS-config read, "
             "returning a single aggregated payload. Equivalent of "
             "'govc cluster.recommendations' for the operator-facing "
-            "workflow: one composite call replaces two raw vCenter REST "
-            "GETs while preserving the audit-tree linkage between the "
-            "parent composite row and each sub-op row. Read-only -- "
-            "never mutates cluster state."
+            "workflow: one composite call replaces a raw vCenter REST "
+            "GET plus a vim property read (DRS state is vim-only in "
+            "vSphere 9.0). Read-only -- never mutates cluster state."
         ),
         parameter_schema=CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
         response_schema=CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
@@ -330,14 +368,15 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=network_portgroup_audit_composite,
         summary="Audit distributed portgroups with parent DVS + connected VMs.",
         description=(
-            "Reads the distributed-switches listing (for parent-DVS name "
-            "enrichment) plus the distributed portgroups via "
+            "Lists the distributed portgroups via "
             "'GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP', "
             "then per-portgroup queries the VM list via "
             "'GET:/vcenter/vm?filter.networks=...'. Aggregates one row "
-            "per portgroup with its parent DVS + connected VM names. "
-            "Equivalent of 'govc dvs.portgroup.info' rolled up across "
-            "every portgroup. Read-only -- never mutates network "
+            "per portgroup with connected VM names. Parent-DVS name "
+            "enrichment is degraded (dvs_name always null): the pinned "
+            "spec serves no DVS list resource (#2970). Equivalent of "
+            "'govc dvs.portgroup.info' rolled up across every "
+            "portgroup. Read-only -- never mutates network "
             "configuration."
         ),
         parameter_schema=NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
@@ -356,7 +395,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Create a VM with NIC attach + optional power-on; rollback on failure.",
         description=(
             "Orchestrates folder lookup, POST:/vcenter/vm create, per-NIC "
-            "attach via PATCH:/vcenter/vm/{vm}/network, and optional "
+            "adapter create via POST:/vcenter/vm/{vm}/hardware/ethernet, "
+            "and optional "
             "POST:/vcenter/vm/{vm}/power start. Partial-failure rollback: "
             "if any step after the create succeeds fails, the half-"
             "created VM is removed via DELETE:/vcenter/vm/{vm} so the "
@@ -373,21 +413,51 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.clone",
         handler=vm_clone_composite,
-        summary="Clone a VM from a content-library template; poll the deploy task.",
+        summary="Clone a VM from a content-library template (synchronous deploy).",
         description=(
-            "Reads source VM config, dispatches "
-            "POST:/vcenter/vm-template/library-items?action=deploy, then "
-            "polls GET:/cis/tasks/{task} until completion or timeout. "
-            "Long-running -- blocks for up to timeout_seconds when "
-            "wait_for_completion=True (default). Setting "
-            "wait_for_completion=False returns the task id for caller "
-            "polling. Equivalent of 'govc vm.clone' for operator-facing "
+            "Reads source VM config, then dispatches "
+            "POST:/vcenter/vm-template/library-items/{templateLibraryItem}"
+            "?action=deploy. The pinned deploy operation is synchronous "
+            "-- its 200 body is the deployed VM id, so the composite "
+            "returns status='completed' with vm_id directly (no task "
+            "poll). Equivalent of 'govc vm.clone' for operator-facing "
             "dispatch."
         ),
         parameter_schema=VM_CLONE_PARAMETER_SCHEMA,
         response_schema=VM_CLONE_RESPONSE_SCHEMA,
         group_key="vm",
-        tags=["composite", "write", "vm", "lifecycle", "long-running"],
+        tags=["composite", "write", "vm", "lifecycle"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.deploy_from_library",
+        handler=vm_deploy_from_library_composite,
+        summary="Deploy an OVF/OVA content-library item to a new VM (retires govc library.deploy).",
+        description=(
+            "Deploys an OVF/OVA package from a content library to a new VM via "
+            "the synchronous "
+            "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy. "
+            "The library item is referenced by id (passthrough) or by name — "
+            "resolved via POST:/content/library/item?action=find (filtered to "
+            "type=ovf), optionally scoped by library name through "
+            "POST:/content/library?action=find, with ambiguity refused "
+            "(status='ambiguous_item' / 'ambiguous_library') before any deploy. "
+            "resource_pool is the required placement anchor; host / folder / "
+            "datastore refine it, and network_mappings maps each OVF network key "
+            "to a portgroup. Unlike vm.clone (200 body is a bare VM id) the OVF "
+            "deploy's 200 body is a DeploymentResult: a failed OVF / network / "
+            "placement validation returns succeeded=false and surfaces as "
+            "status='deploy_failed' with per-issue messages, and an invalid / "
+            "missing placement resource (HTTP 400/404) as status='deploy_error' "
+            "— structured statuses, never a raw vendor error. With power_on the "
+            "deployed VM is started best-effort. Equivalent of 'govc "
+            "library.deploy' for operator-facing dispatch."
+        ),
+        parameter_schema=VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
+        response_schema=VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "ovf"],
         safety_level="dangerous",
         requires_approval=True,
     ),
@@ -396,10 +466,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=vm_snapshot_revert_composite,
         summary="Revert a VM to a named snapshot; reject on name ambiguity.",
         description=(
-            "Lists the VM's snapshot tree via "
-            "GET:/vcenter/vm/{vm}/snapshot, matches by snapshot name, "
-            "and dispatches "
-            "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert when "
+            "Reads the VM's snapshot tree (vim RetrievePropertiesEx on "
+            "VirtualMachine.snapshot -- the pinned REST spec serves no "
+            "snapshot resource, #2970), matches by snapshot name, and "
+            "dispatches the vim "
+            "VirtualMachineSnapshot.RevertToSnapshot_Task (polled to a "
+            "terminal state) when "
             "exactly one match is found. Multiple-match cases return "
             "status='ambiguous' with candidates listed so the operator "
             "can re-dispatch by snapshot moid. Idempotent within a "
@@ -420,8 +492,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=vm_migrate_composite,
         summary="Migrate a VM via DRS recommendation or explicit target host.",
         description=(
-            "Consults "
-            "GET:/vcenter/cluster/{cluster}/drs/recommendations for the "
+            "Consults the cluster's DRS migration recommendations (vim "
+            "RetrievePropertiesEx on "
+            "ClusterComputeResource.drsRecommendation -- the pinned REST "
+            "spec serves no DRS resource, #2970) for the "
             "VM, then dispatches POST:/vcenter/vm/{vm}?action=relocate "
             "with the recommended host. If DRS returns no recommendation "
             "and no target_host override is supplied, the composite "
@@ -543,8 +617,10 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "vmware.composite.vm.migrate per VM (recursive composite "
             "call -- first production composite that calls another "
             "composite). On full migration success, the host enters "
-            "maintenance via "
-            "PATCH:/vcenter/host/{host}/maintenance?action=enter. "
+            "maintenance via the vim "
+            "HostSystem.EnterMaintenanceMode_Task (polled to a terminal "
+            "state -- the pinned REST spec serves no host-maintenance "
+            "path, #2970). "
             "tolerate_partial_failure=True lets maintenance-enter fire "
             "even with VMs left behind. Equivalent of 'govc host.evacuate' "
             "operator workflow."
@@ -562,10 +638,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         summary="Migrate host VM NICs off a DVS to a fallback network, then remove host from DVS.",
         description=(
             "Lists DVS portgroups on the host and VMs on the host, "
-            "migrates each VM's NICs off the DVS to the supplied "
-            "fallback_network via PATCH:/vcenter/vm/{vm}/network, and "
-            "then dispatches "
-            "POST:/vcenter/network/dvs/{dvs}?action=remove_host. "
+            "migrates each VM's NICs to the supplied fallback_network "
+            "per adapter (GET + "
+            "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}), and then "
+            "removes the host via the vim "
+            "DistributedVirtualSwitch.ReconfigureDvs_Task host-member "
+            "remove (polled to a terminal state -- the pinned REST spec "
+            "serves no DVS write path, #2970). "
             "vSphere refuses the host detach when any VM still has "
             "active NICs on the DVS -- the composite verifies every NIC "
             "migrated before attempting the detach; on partial NIC "
@@ -585,11 +664,13 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         handler=cluster_patch_composite,
         summary="Sequentially patch every host in a cluster: maintenance + patch + exit.",
         description=(
-            "Lists cluster hosts via GET:/vcenter/cluster/{cluster}/host, "
-            "then iterates each host sequentially: "
-            "PATCH:/vcenter/host/{host}/maintenance?action=enter -> "
-            "POST:/vcenter/host/{host}?action=patch -> "
-            "PATCH:/vcenter/host/{host}/maintenance?action=exit. "
+            "Lists cluster hosts via GET:/vcenter/host?clusters=..., "
+            "then iterates each host sequentially: vim "
+            "EnterMaintenanceMode_Task -> vLCM "
+            "POST:/esx/settings/hosts/{host}/software?action=apply"
+            "&vmw-task=true (cis task polled to terminal) -> vim "
+            "ExitMaintenanceMode_Task, every task polled before the "
+            "next step. "
             "Sequential by design -- concurrent host patches would "
             "force every VM in the cluster to vMotion at once, "
             "overwhelming DRS. Per-host failure stops the loop; the "
@@ -652,6 +733,133 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # Hardware write composites (#2891) -- dangerous / requires approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.vm.resize",
+        handler=vm_resize_composite,
+        summary="Reconfigure a VM's CPU count / cores-per-socket and/or memory.",
+        description=(
+            "Reads current sizing + hot-add flags via GET:/vcenter/vm/{vm}, "
+            "then PATCHes PATCH:/vcenter/vm/{vm}/hardware/cpu and/or "
+            "PATCH:/vcenter/vm/{vm}/hardware/memory. A freshly-cloned VM is "
+            "stuck at the template's sizing; this rightsizes it. A change a "
+            "powered-on VM cannot take live (no hot-add, a decrease, or a "
+            "cores_per_socket change) returns status='requires_power_off' "
+            "rather than a raw vCenter 400; a request already matching "
+            "current returns 'no_change'. Equivalent of the sizing half of "
+            "'govc vm.change'."
+        ),
+        parameter_schema=VM_RESIZE_PARAMETER_SCHEMA,
+        response_schema=VM_RESIZE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.nic.repoint",
+        handler=vm_nic_repoint_composite,
+        summary="Repoint a vNIC to a different distributed portgroup.",
+        description=(
+            "Reads the NIC's current backing + MAC via "
+            "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}, resolves the "
+            "target portgroup by display name via "
+            "GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP (there "
+            "is no dedicated portgroup list resource), then PATCHes the NIC "
+            "backing to {type: DISTRIBUTED_PORTGROUP, network}. A name that "
+            "resolves to zero / many portgroups refuses the repoint "
+            "(status='not_found' / 'ambiguous') with no PATCH issued. The "
+            "from->to network pair is what the four-eyes reviewer needs. "
+            "Equivalent of 'govc vm.network.change'."
+        ),
+        parameter_schema=VM_NIC_REPOINT_PARAMETER_SCHEMA,
+        response_schema=VM_NIC_REPOINT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "networking"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.device.cdrom",
+        handler=vm_device_cdrom_composite,
+        summary="Remove / update / disconnect a VM CD-ROM device.",
+        description=(
+            "Reads the CD-ROM's current backing + state via "
+            "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom} (the host-local ISO "
+            "path the approver needs to see), then dispatches the requested "
+            "action: 'remove' (DELETE the device), 'update' (PATCH its "
+            "backing, e.g. to CLIENT_DEVICE to un-pin a host-local ISO), or "
+            "'disconnect' (POST ?action=disconnect). A template shipping a "
+            "host-local-ISO-backed CD-ROM silently pins every clone to one "
+            "host and blocks vMotion; this clears it. Equivalent of "
+            "'govc device.cdrom.eject' / 'govc device.remove'."
+        ),
+        parameter_schema=VM_DEVICE_CDROM_PARAMETER_SCHEMA,
+        response_schema=VM_DEVICE_CDROM_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    # ----------------------------------------------------------------
+    # Guest customization (GOSC) composites (#2892) -- dangerous / approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.guest.customization_spec.create",
+        handler=guest_customization_spec_create_composite,
+        summary="Create a reusable named guest customization (GOSC) spec.",
+        description=(
+            "Creates a named GuestOS customization spec via "
+            "POST:/vcenter/guest/customization-specs from the tractable "
+            "provisioning subset: hostname (FIXED HostnameGenerator), "
+            "per-NIC static IP / prefix / gateways, and global DNS, for "
+            "either a Linux (linux_config) or Windows "
+            "(windows_config sysprep) guest. The spec a later "
+            "vmware.composite.vm.customize -- or a clone's "
+            "guest_customization_spec -- references by name so a cloned "
+            "VM comes up with its hostname and network identity. Windows "
+            "admin / product-key / domain-join credentials are consumed "
+            "into the sysprep body but never serialized onto any "
+            "reviewer / preview / broadcast / audit surface (#1503): the "
+            "op is credential-class and its park-time preview echoes "
+            "identity fields only."
+        ),
+        parameter_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
+        response_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
+        group_key="guest",
+        tags=["composite", "write", "guest", "customization", "provisioning"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.customize",
+        handler=vm_customize_composite,
+        summary="Apply a saved customization spec to a VM (by name); optional power-on.",
+        description=(
+            "Resolves a VM by display name via GET:/vcenter/vm, then "
+            "applies a saved customization spec via "
+            "PUT:/vcenter/vm/{vm}/guest/customization with the spec name. "
+            "vCenter only accepts a pending customization on a "
+            "powered-off VM, so the composite pre-checks the resolved "
+            "power state and refuses a powered-on VM with "
+            "status='precondition_failed' rather than letting the PUT "
+            "400. Ambiguous / missing names return "
+            "status='ambiguous' / 'not_found'. With power_on=True the VM "
+            "is powered on afterward via "
+            "POST:/vcenter/vm/{vm}/power?action=start so the "
+            "customization applies on that boot. The spec reference "
+            "carries no secret (the credential material lives in the "
+            "saved spec)."
+        ),
+        parameter_schema=VM_CUSTOMIZE_PARAMETER_SCHEMA,
+        response_schema=VM_CUSTOMIZE_RESPONSE_SCHEMA,
+        group_key="guest",
+        tags=["composite", "write", "guest", "vm", "customization"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
 )
 
 
@@ -668,13 +876,17 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 18 composites total -- 5 read (T5 / #508) + 13 write (T6 /
+    Scope: 24 composites total -- 5 read (T5 / #508) + 19 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
-    ``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
-    ``cluster.drs_rule.create`` + ``folder.create`` / #2895). (The former
-    ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
-    as typed ops in #2258.)
+    ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
+    ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
+    hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
+    ``vm.device.cdrom``, the two GOSC composites
+    ``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
+    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909). (The
+    former ``host.network_uplinks`` / ``host.vsan_health`` reads were
+    re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +
     ``requires_approval`` come from its :class:`_CompositeSpec` row:
     reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /

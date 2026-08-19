@@ -215,6 +215,7 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   | `vault.token.create` | `auth.token.create` | dangerous | True | `credential_mint` |
   | `vault.token.revoke_accessor` | `auth.token.revoke_accessor` | dangerous | True | `other` |
   | `vault.token.list_accessors` | `auth.token.list_accessors` | safe | False | `other` |
+  | `vault.token.lookup_accessor` | `auth.token.lookup_accessor` | safe | False | `other` |
 
   `token.create` mints a client token in its **response** →
   `credential_mint` (aggregate-only broadcast; the token reaches only the
@@ -223,8 +224,25 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   **surgical** — it revokes exactly one token by accessor; there is
   intentionally **no bulk-revoke op** (the vault skill's loudest
   Don't-rule). Token accessors are non-secret reference handles, so they
-  are not redacted (`revoke_accessor` param / `list_accessors` response
-  classify `other`).
+  are not redacted (`revoke_accessor` / `lookup_accessor` param /
+  `list_accessors` response classify `other`).
+
+  `lookup_accessor` (#2844, Initiative #2833) reads one token's metadata
+  by its accessor (Vault's `POST /v1/auth/token/lookup-accessor`) —
+  `policies`, `ttl`, `expire_time`, `period` (non-null only for periodic
+  tokens), `display_name`, `creation_time`, `renewable`, unwrapped from
+  the `{'data': {...}}` envelope like `identity.entity.read`. It closes
+  the audit gap behind the scheduler periodic-token death
+  (#2328 / #2652): `list_accessors` answers *which* accessors exist,
+  `lookup_accessor` answers *what a token carries and when it expires* —
+  without falling back to a break-glass `vault token lookup` that bypasses
+  policy / audit / broadcast. Vault deliberately blanks the token `id` in
+  a lookup-accessor response, so the read exposes no secret — the same
+  non-secret-reference-handle framing that keeps it `safe` /
+  `requires_approval=False` / `other`-class. Unlike `list_accessors`
+  (empty-store `404` → `{"keys": []}`), a single-accessor lookup has no
+  legitimately-empty case, so an unknown accessor's `404` surfaces as the
+  underlying `hvac.exceptions.InvalidPath` rather than being swallowed.
 
   Both groups register from `ops_identity.py` / `ops_token.py` spec
   tables, composed by the thin
@@ -658,7 +676,8 @@ and a real Postgres audit store (reusing the integration conftest's
   #547 (G3.3-T3 auth read group), #551 (G3.3-T7 dev-mode CI
   integration harness), #1409 (G3.15-T1 KV writes), #1410 (G3.15-T2
   policy ops), #1411 (G3.15-T3 auth credential lifecycle), #1412
-  (G3.15-T4 identity + token ops).
+  (G3.15-T4 identity + token ops), #2844 (token lookup_accessor detail
+  read — TTL/policy/expiry audit; Initiative #2833).
 - Vault dev mode: https://developer.hashicorp.com/vault/docs/concepts/dev-server
 - Substrate: #388 (G0.6 operation registry), #390 (Refactor-Vault).
 - Vault API: https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2

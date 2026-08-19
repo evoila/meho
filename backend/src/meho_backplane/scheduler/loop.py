@@ -10,8 +10,13 @@ scheduler. On each cadence (default 30s, settable via
 1. **Claim the process-wide advisory lock**
    (``pg_try_advisory_lock``) so only one replica's loop is running the
    tick body at a time. Non-blocking: a replica that loses the race
-   sleeps and tries the next cadence. Mirrors the
-   :mod:`meho_backplane.topology.scheduler` precedent.
+   sleeps and tries the next cadence. The lock lives on a dedicated
+   pinned connection (:func:`meho_backplane.db.advisory.advisory_lock`,
+   #3010) — **advisory lock and unlock must run on the same
+   connection**. The tick body commits per fired row; a lock taken on
+   the work session would strand on the pooled connection the first
+   commit releases, and every later tick drawing a different connection
+   would skip silently (#2245-shaped stalls).
 
 2. **Scan for due rows**
    (:func:`~meho_backplane.scheduler.repository.claim_due_triggers`)
@@ -44,8 +49,9 @@ scheduler. On each cadence (default 30s, settable via
    The ``agent_run`` row's ``trigger`` column is set to
    ``AgentRunTrigger.SCHEDULED`` for provenance.
 
-5. **Release the advisory lock** in a ``finally`` so a crash mid-tick
-   never strands the lock for the rest of the connection's life.
+5. **Release the advisory lock** on the same pinned connection that
+   acquired it (the helper's ``finally``) so a crash mid-tick never
+   strands the lock for the rest of the connection's life.
 
 Per-row failure isolation
 =========================
@@ -127,7 +133,7 @@ from datetime import UTC, datetime
 
 import structlog
 from pydantic import SecretStr
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invocation import (
@@ -139,6 +145,7 @@ from meho_backplane.agent.invocation import (
     get_agent_invoker,
 )
 from meho_backplane.auth.agent_token import AgentTokenError
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentDefinition,
@@ -147,6 +154,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerKind,
     ScheduledTriggerStatus,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.scheduler.credentials import (
     AgentCredentialsUnresolvedError,
     resolve_agent_credentials,
@@ -160,16 +168,10 @@ from meho_backplane.scheduler.repository import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
-    "reconcile_active_event_triggers",
     "run_one_tick",
     "start_scheduler",
     "stop_scheduler",
 ]
-
-#: Logged reason (and the code an operator greps) for an event trigger
-#: parked by the #2325 startup reconcile -- event dispatch is refused at
-#: create until #826 wires the event-subscription matcher.
-_EVENT_PARK_REASON: str = "event_triggers_not_implemented:826"
 
 _log = structlog.get_logger(__name__)
 
@@ -274,35 +276,6 @@ class _ResolvedDefinition:
     name: str
     enabled: bool
     identity_ref: str
-
-
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire the process-wide PG advisory lock; ``True`` on non-PG.
-
-    Returns ``True`` when the lock is held (or the dialect has no
-    advisory locks -- the SQLite single-replica test path) and the
-    caller should proceed; ``False`` when another replica holds it
-    and this tick is skipped.
-    """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(
-        text("SELECT pg_try_advisory_lock(:k)"),
-        {"k": key},
-    )
-    return bool(locked)
-
-
-async def _advisory_unlock(session: AsyncSession, key: int) -> None:
-    """Release the advisory lock; no-op on non-PG dialects."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(
-        text("SELECT pg_advisory_unlock(:k)"),
-        {"k": key},
-    )
 
 
 async def _resolve_definition(
@@ -843,13 +816,18 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
     """
     if invoker is None:
         invoker = get_agent_invoker()
-    sessionmaker = get_sessionmaker()
     fires = 0
-    async with sessionmaker() as session:
-        locked = await _try_advisory_lock(session, _SCHEDULER_ADVISORY_LOCK_KEY)
+    # The advisory lock lives on its own pinned connection (#3010): the
+    # per-row fire paths commit on the work session below, and a lock
+    # taken on that session would strand on the pooled connection the
+    # first commit releases -- silently starving every later tick that
+    # draws a different connection.
+    async with advisory_lock(_SCHEDULER_ADVISORY_LOCK_KEY, subsystem="scheduler") as locked:
         if not locked:
+            _log.debug("scheduler_tick_lock_busy")
             return 0
-        try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
             now = datetime.now(UTC)
             rows = await claim_due_triggers(
                 session,
@@ -894,53 +872,7 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
                     # Roll back any partial work on this row so the
                     # next row's claim sees a clean session.
                     await session.rollback()
-        finally:
-            await _advisory_unlock(session, _SCHEDULER_ADVISORY_LOCK_KEY)
-            # Commit the unlock (PG sessions hold no transaction across
-            # the advisory-unlock call but flush + commit is the
-            # mirror-image of the topology scheduler's discipline).
-            await session.commit()
     return fires
-
-
-async def reconcile_active_event_triggers() -> int:
-    """Park any pre-existing ``active`` event triggers (#2325). Return the count.
-
-    ``kind=event`` triggers are refused at create until #826 wires the
-    event-subscription matcher (:mod:`meho_backplane.events.drain` is
-    still a no-op, so an event trigger sits ``active`` but can never
-    fire). Rows created ``active`` before that refusal landed would sit
-    silently dead. This one-shot startup reconcile transitions every
-    ``active`` event trigger to ``paused`` so an operator sees it parked
-    (via ``GET /api/v1/scheduler/triggers?kind=event&status=paused`` or
-    the UI list) rather than misleadingly ``active``; the reason is
-    logged under ``scheduler_event_triggers_parked`` -- mirroring the
-    :func:`_park_trigger` "reason is logged for audit" precedent, since
-    the row carries no reason column.
-
-    Idempotent: a second run finds no ``active`` event rows and parks
-    nothing. Removed in the change that lands the #826 matcher (event
-    triggers become dispatchable and no longer need parking).
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        result = await session.execute(
-            update(ScheduledTrigger)
-            .where(
-                ScheduledTrigger.kind == ScheduledTriggerKind.EVENT.value,
-                ScheduledTrigger.status == ScheduledTriggerStatus.ACTIVE.value,
-            )
-            .values(status=ScheduledTriggerStatus.PAUSED.value)
-        )
-        await session.commit()
-    parked: int = result.rowcount or 0  # type: ignore[attr-defined]
-    if parked:
-        _log.warning(
-            "scheduler_event_triggers_parked",
-            count=parked,
-            reason=_EVENT_PARK_REASON,
-        )
-    return parked
 
 
 async def _check_scheduler_vault_token(*, reason: str) -> None:
@@ -988,7 +920,7 @@ async def _renew_scheduler_vault_token(*, reason: str) -> None:
 
 
 async def _scheduler_loop() -> None:
-    """The forever loop: reconcile once, then sleep one cadence, tick, repeat.
+    """The forever loop: sleep one cadence, tick, repeat.
 
     Sleep-then-tick (rather than tick-then-sleep) so the first tick
     after process start is delayed by one cadence -- letting the rest
@@ -1006,15 +938,6 @@ async def _scheduler_loop() -> None:
     """
     interval = get_settings().scheduler_tick_interval_seconds
     _log.info("scheduler_started", interval_seconds=interval)
-    # #2325 one-shot startup reconcile: park any pre-existing active event
-    # triggers -- event dispatch is refused at create pending #826, so an
-    # active event row is silently dead. Guarded so a reconcile failure
-    # never stops the tick loop from starting.
-    try:
-        await reconcile_active_event_triggers()
-    except Exception:
-        _log.warning("scheduler_event_reconcile_failed", exc_info=True)
-
     await _check_scheduler_vault_token(reason="startup")
     await _renew_scheduler_vault_token(reason="startup")
     last_token_check = time.monotonic()
@@ -1037,6 +960,7 @@ async def _scheduler_loop() -> None:
         if time.monotonic() - last_token_renew >= _TOKEN_RENEW_INTERVAL_SECONDS:
             last_token_renew = time.monotonic()
             await _renew_scheduler_vault_token(reason="periodic")
+        note_loop_tick("scheduler", get_settings().scheduler_tick_interval_seconds)
 
 
 def start_scheduler() -> asyncio.Task[None]:

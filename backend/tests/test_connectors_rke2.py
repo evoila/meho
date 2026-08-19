@@ -22,20 +22,41 @@ Coverage matrix (per Task #2221 acceptance criteria):
   probe (never a ``cat`` of the token path); the token entry carries
   ``redacted: true`` and no secret material bleeds into the result
   envelope or logs.
-* ``RKE2_OPS`` registration shape -- 6 ops: two read (``rke2.about`` /
-  ``rke2.posture.show``, T1 #2221), three approval-gated write
-  (``rke2.token.rotate`` T2 #2429, ``rke2.node.service.restart`` /
-  ``rke2.node.config.update`` T3 #2430), and one safe non-gated snapshot
-  (``rke2.etcd-snapshot.save`` T4 #2431). Read ops are safe / read-only /
-  no-approval and take no params; write ops are dangerous / approval-gated;
-  the snapshot op is safe / no-approval but neither read-only nor write and
-  takes an optional charset-bounded ``name``. Every op has
-  ``additionalProperties=False`` on its parameter schema, a non-empty
+* :func:`build_service_status_command` / :func:`parse_service_status` -- the
+  service-state read (``rke2.node.service.status``, #2833 / #2852): the
+  read-only ``systemctl show`` probe over the fixed ``rke2-server`` /
+  ``rke2-agent`` pair, and the ``UNIT=`` / ``KEY=VALUE`` parser that reports
+  each unit's load / active / sub state, start time, and restart count.
+  ``LoadState=not-found`` nulls the live-state fields; a non-zero
+  ``NRestarts`` surfaces as the crash-loop signal; the probe raises
+  :class:`Rke2ServiceStatusProbeError` when ``systemctl`` is absent.
+* ``RKE2_OPS`` registration shape -- 9 ops: four read (``rke2.about`` /
+  ``rke2.posture.show``, T1 #2221; ``rke2.node.service.status``, #2852;
+  ``rke2.node.config.get``, the redacted config-content read #2854), three
+  approval-gated write (``rke2.token.rotate`` T2 #2429,
+  ``rke2.node.service.restart`` / ``rke2.node.config.update`` T3 #2430), and
+  two safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431,
+  ``rke2.etcd-snapshot.list`` #2853). Read ops are safe / read-only /
+  no-approval; ``rke2.about`` / ``rke2.posture.show`` /
+  ``rke2.node.service.status`` take no params while ``rke2.node.config.get``
+  takes an optional path-bounded ``path``; write ops are dangerous /
+  approval-gated; ``.save`` is safe / no-approval but active (neither
+  read-only nor write) and takes an optional charset-bounded ``name``;
+  ``.list`` is safe / no-approval / read-only and takes no params. Every op
+  has ``additionalProperties=False`` on its parameter schema, a non-empty
   SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
   on the class.
+* ``rke2.node.config.get`` handler (#2854) -- reuses the write op's
+  ``bound_config_path`` confinement (traversal rejected before any SSH), the
+  ``cat`` + ``yaml.safe_load`` read step, and redacts the join tokens + etcd
+  S3 credentials (``redact_config_content``) so no secret VALUE reaches the
+  result envelope.
 * ``rke2.etcd-snapshot.save`` handler -- name charset re-check
-  (fail-closed), the embedded-etcd-server precondition guard, and a
+  (fail-closed), the shared embedded-etcd-server precondition guard, and a
   bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
+* ``rke2.etcd-snapshot.list`` handler -- the *same* shared precondition
+  guard, and a version-drift-resilient parse of the RKE2 ``Name / Location
+  / Size / Created`` table into ``{snapshots: [...]}`` rows.
 """
 
 from __future__ import annotations
@@ -56,20 +77,34 @@ from meho_backplane.connectors.rke2.connector import (
 )
 from meho_backplane.connectors.rke2.ops_read import (
     POSTURE_CONFIG_PATHS,
+    REDACTED_SENTINEL,
     RKE2_TOKEN_PATH,
+    SECRET_CONFIG_KEYS,
+    SERVICE_STATUS_PROPERTIES,
+    SERVICE_UNITS,
     STATUS_ABSENT,
     STATUS_PRESENT,
     STATUS_UNKNOWN,
     Rke2PostureProbeError,
+    Rke2ServiceStatusProbeError,
+    bound_read_config_path,
     build_posture_probe_command,
+    build_service_status_command,
     parse_posture,
     parse_posture_probe_output,
+    parse_service_status,
+    redact_config_content,
 )
 from meho_backplane.connectors.rke2.ops_snapshot import (
     SNAPSHOT_DEFAULT_DIR,
     Rke2SnapshotNameError,
     Rke2SnapshotPreconditionError,
     parse_saved_snapshot_name,
+    parse_snapshot_list,
+)
+from meho_backplane.connectors.rke2.ops_write import (
+    ConfigPathRejectedError,
+    bound_config_path,
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -101,6 +136,56 @@ _CANARY_SSH_KEY = "RKE2-CANARY-KEY-MARKER-QWER5678ZX"  # gitleaks:allow -- synth
 # A token *value* canary. The posture tier must NEVER read the token
 # content, so this string must never surface anywhere.
 _CANARY_TOKEN_VALUE = "K10rke2canarytokenvalueDONOTLEAK::server:abc123"  # gitleaks:allow NOSONAR
+# Secret-value canaries planted in the rke2.node.config.get fixture (#2854).
+# The op reads the config body but must REDACT every secret key, so none of
+# these may surface anywhere in the result.
+_CONFIG_TOKEN_CANARY = "K10rke2configREADcanaryDONOTLEAK::server:ccc333"  # gitleaks:allow NOSONAR
+_CONFIG_AGENT_TOKEN_CANARY = "rke2configAGENTcanaryDONOTLEAKddd444"  # gitleaks:allow NOSONAR
+_CONFIG_S3_SECRET_CANARY = "rke2configS3secretDONOTLEAKeee555"  # gitleaks:allow NOSONAR
+_CONFIG_DSN_PASS_CANARY = "dsnPassDONOTLEAKfff666"  # gitleaks:allow NOSONAR
+# A config.yaml body carrying secret + non-secret keys the operator wants to
+# read back (tls-san / node-taint) alongside the redacted ones.
+_CONFIG_YAML_FIXTURE = (
+    f"token: {_CONFIG_TOKEN_CANARY}\n"
+    f"agent-token: {_CONFIG_AGENT_TOKEN_CANARY}\n"
+    f"etcd-s3-secret-key: {_CONFIG_S3_SECRET_CANARY}\n"
+    "tls-san:\n"
+    "  - 10.0.0.5\n"
+    "  - rke2.lab.example\n"
+    "node-taint:\n"
+    "  - dedicated=infra:NoSchedule\n"
+    f"datastore-endpoint: postgres://dbuser:{_CONFIG_DSN_PASS_CANARY}@db.lab.example:5432/kine\n"
+)
+
+# Nested-secret canaries for the sibling files config.get must REJECT (#2854 B1).
+# The flat top-level redaction set only covers config.yaml's schema, so these
+# secrets -- the admin kubeconfig's cluster-admin private key and a registry
+# password, both nested -- would leak verbatim if the op ever read the file.
+# The op must therefore refuse rke2.yaml / registries.yaml before any SSH read.
+_KUBECONFIG_KEY_CANARY = "RKE2-ADMIN-KEY-MARKER-DONOTLEAK-8842"  # gitleaks:allow NOSONAR
+_REGISTRIES_PASSWORD_CANARY = "registryPassDONOTLEAKggg777"  # gitleaks:allow NOSONAR
+# /etc/rancher/rke2/rke2.yaml -- the admin kubeconfig; client-key-data is nested
+# under users[].user, not a top-level config.yaml key.
+_RKE2_KUBECONFIG_FIXTURE = (
+    "apiVersion: v1\n"
+    "clusters:\n"
+    "  - name: default\n"
+    "    cluster:\n"
+    "      server: https://127.0.0.1:6443\n"
+    "users:\n"
+    "  - name: default\n"
+    "    user:\n"
+    f"      client-key-data: {_KUBECONFIG_KEY_CANARY}\n"
+)
+# /etc/rancher/rke2/registries.yaml -- the private-registry config; the password
+# is nested under configs.<registry>.auth, not a top-level config.yaml key.
+_REGISTRIES_YAML_FIXTURE = (
+    "configs:\n"
+    "  registry.lab.example:\n"
+    "    auth:\n"
+    "      username: admin\n"
+    f"      password: {_REGISTRIES_PASSWORD_CANARY}\n"
+)
 
 
 @dataclass
@@ -533,13 +618,446 @@ async def test_posture_show_never_leaks_secret_material(
 
 
 # ---------------------------------------------------------------------------
+# build_service_status_command / parse_service_status (#2833 / #2852)
+# ---------------------------------------------------------------------------
+
+
+# A server node: rke2-server active, rke2-agent not installed. systemd still
+# prints inactive/dead + NRestarts=0 for the not-found unit under `--all`; the
+# parser must null those live-state fields off the LoadState=not-found verdict.
+_SERVICE_STATUS_SERVER_ACTIVE = (
+    "UNIT=rke2-server\n"
+    "LoadState=loaded\n"
+    "ActiveState=active\n"
+    "SubState=running\n"
+    "ExecMainStartTimestamp=Fri 2026-08-01 09:12:03 UTC\n"
+    "NRestarts=0\n"
+    "UNIT=rke2-agent\n"
+    "LoadState=not-found\n"
+    "ActiveState=inactive\n"
+    "SubState=dead\n"
+    "ExecMainStartTimestamp=\n"
+    "NRestarts=0\n"
+)
+
+# A crash-looping server: systemd auto-restarting, NRestarts non-zero.
+_SERVICE_STATUS_SERVER_CRASHLOOP = (
+    "UNIT=rke2-server\n"
+    "LoadState=loaded\n"
+    "ActiveState=activating\n"
+    "SubState=auto-restart\n"
+    "ExecMainStartTimestamp=Sat 2026-08-02 14:03:11 UTC\n"
+    "NRestarts=7\n"
+    "UNIT=rke2-agent\n"
+    "LoadState=not-found\n"
+)
+
+
+def test_build_service_status_command_probes_both_units_read_only() -> None:
+    cmd = build_service_status_command(SERVICE_UNITS)
+    # Both fixed units are probed; the caller supplies no unit name.
+    for unit in ("rke2-server", "rke2-agent"):
+        assert unit in cmd
+    # Every requested property is in the -p selection.
+    for prop in SERVICE_STATUS_PROPERTIES:
+        assert prop in cmd
+    # Read-only: `systemctl show`, never a mutating systemctl verb.
+    assert "systemctl show" in cmd
+    for verb in ("restart", "start", "stop", "reload", "kill", "enable", "disable"):
+        assert f"systemctl {verb}" not in cmd
+    assert "is-active" not in cmd
+    # --all so NRestarts=0 / an empty start-time are not suppressed.
+    assert "--all" in cmd
+    # Fails closed when the node has no systemctl (infra failure != verdict).
+    assert "command -v systemctl" in cmd
+    assert "exit 127" in cmd
+
+
+def test_parse_service_status_active_server_and_not_found_agent() -> None:
+    units = parse_service_status(_SERVICE_STATUS_SERVER_ACTIVE)
+    by_unit = {u["unit"]: u for u in units}
+    server = by_unit["rke2-server"]
+    assert server["load_state"] == "loaded"
+    assert server["active_state"] == "active"
+    assert server["sub_state"] == "running"
+    assert server["since"] == "Fri 2026-08-01 09:12:03 UTC"
+    assert server["restart_count"] == 0
+    # The agent unit is not installed on a server node: not-found nulls the
+    # live-state fields even though systemd prints inactive/dead defaults.
+    agent = by_unit["rke2-agent"]
+    assert agent["load_state"] == "not-found"
+    assert agent["active_state"] is None
+    assert agent["sub_state"] is None
+    assert agent["since"] is None
+    assert agent["restart_count"] is None
+
+
+def test_parse_service_status_preserves_probe_order() -> None:
+    units = parse_service_status(_SERVICE_STATUS_SERVER_ACTIVE)
+    assert [u["unit"] for u in units] == ["rke2-server", "rke2-agent"]
+
+
+def test_parse_service_status_surfaces_nonzero_restart_count() -> None:
+    """AC: a non-zero NRestarts surfaces as the crash-loop signal."""
+    units = parse_service_status(_SERVICE_STATUS_SERVER_CRASHLOOP)
+    server = next(u for u in units if u["unit"] == "rke2-server")
+    assert server["restart_count"] == 7
+    assert server["active_state"] == "activating"
+    assert server["sub_state"] == "auto-restart"
+
+
+def test_parse_service_status_ignores_banner_and_blank_lines() -> None:
+    noisy = "login banner line\n\n" + _SERVICE_STATUS_SERVER_ACTIVE
+    units = parse_service_status(noisy)
+    assert {u["unit"] for u in units} == {"rke2-server", "rke2-agent"}
+
+
+def test_parse_service_status_loaded_but_never_started_has_null_since() -> None:
+    """A loaded-but-stopped unit reports restart_count 0 and a null since."""
+    stdout = (
+        "UNIT=rke2-server\n"
+        "LoadState=loaded\n"
+        "ActiveState=inactive\n"
+        "SubState=dead\n"
+        "ExecMainStartTimestamp=\n"
+        "NRestarts=0\n"
+    )
+    entry = parse_service_status(stdout)[0]
+    assert entry["load_state"] == "loaded"
+    assert entry["active_state"] == "inactive"
+    assert entry["since"] is None
+    assert entry["restart_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# service_status shim (service-state read tier)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_service_status_runs_systemctl_show_and_returns_units() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_SERVICE_STATUS_SERVER_ACTIVE)
+        result = await connector.service_status(_TARGET, {})
+    by_unit = {u["unit"]: u for u in result["units"]}
+    assert by_unit["rke2-server"]["active_state"] == "active"
+    assert by_unit["rke2-agent"]["load_state"] == "not-found"
+    # Exactly one read-only systemctl-show round-trip; never a mutation.
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    assert len(issued) == 1
+    assert "systemctl show" in issued[0]
+    assert "systemctl restart" not in issued[0]
+
+
+@pytest.mark.asyncio
+async def test_service_status_missing_systemctl_raises_probe_error() -> None:
+    """A node with no systemctl (guard exit 127) is an infra failure, not a verdict."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="", exit_status=127)
+        with pytest.raises(Rke2ServiceStatusProbeError, match="no `systemctl` on the node"):
+            await connector.service_status(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_service_status_accepts_output_with_no_exit_status() -> None:
+    """``exit_status=None`` + parsed unit blocks is a complete run, not a failure.
+
+    ``asyncssh`` reports ``None`` when the peer closed the channel without
+    sending an exit status; the per-unit markers give independent evidence the
+    probe finished, so this must not fail a status read that worked.
+    """
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_SERVICE_STATUS_SERVER_ACTIVE, exit_status=None)
+        result = await connector.service_status(_TARGET, {})
+    assert {u["unit"] for u in result["units"]} == {"rke2-server", "rke2-agent"}
+
+
+@pytest.mark.asyncio
+async def test_service_status_propagates_ssh_failure() -> None:
+    """A transport failure escapes so the dispatcher reports connector_error."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = OSError("connection refused")
+        with pytest.raises(OSError, match="connection refused"):
+            await connector.service_status(_TARGET, {})
+
+
+# ---------------------------------------------------------------------------
+# rke2.node.config.get -- redacted config-content read (#2854)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_config_content_masks_all_secret_keys() -> None:
+    """Every documented secret-bearing key is fully redacted; names sorted."""
+    raw: dict[str, Any] = {key: f"secret-value-of-{key}" for key in SECRET_CONFIG_KEYS}
+    raw["tls-san"] = ["10.0.0.5", "rke2.lab.example"]
+    redacted, names = redact_config_content(raw)
+    for key in SECRET_CONFIG_KEYS:
+        assert redacted[key] == REDACTED_SENTINEL, f"{key!r} not redacted"
+    # Non-secret operator-facing keys pass through untouched.
+    assert redacted["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert names == sorted(SECRET_CONFIG_KEYS)
+    # The input mapping is not mutated in place.
+    assert raw["token"] == "secret-value-of-token"
+
+
+def test_redact_config_content_masks_only_datastore_userinfo() -> None:
+    """datastore-endpoint keeps host/port/db; only the user:pass@ is masked."""
+    raw = {"datastore-endpoint": "mysql://kine:s3cr3t@tcp(10.0.0.9:3306)/kine"}
+    redacted, names = redact_config_content(raw)
+    assert redacted["datastore-endpoint"] == (
+        f"mysql://{REDACTED_SENTINEL}@tcp(10.0.0.9:3306)/kine"
+    )
+    assert names == ["datastore-endpoint"]
+
+
+def test_redact_config_content_leaves_credential_less_datastore() -> None:
+    """An embedded-etcd datastore endpoint (no userinfo) is left untouched."""
+    raw = {"datastore-endpoint": "https://etcd.lab.example:2379"}
+    redacted, names = redact_config_content(raw)
+    assert redacted["datastore-endpoint"] == "https://etcd.lab.example:2379"
+    assert names == []
+
+
+def test_redact_config_content_no_secrets_is_noop() -> None:
+    """A config with no secret keys returns unchanged content + empty names.
+
+    ``token-file`` is a filesystem PATH, not a secret value, so it is never
+    redacted -- verifying it is exactly what an operator asked to read.
+    """
+    raw = {
+        "tls-san": ["a", "b"],
+        "write-kubeconfig-mode": "0644",
+        "token-file": "/var/lib/rancher/rke2/server/token",
+    }
+    redacted, names = redact_config_content(raw)
+    assert redacted == raw
+    assert names == []
+
+
+@pytest.mark.asyncio
+async def test_config_get_returns_redacted_content() -> None:
+    """AC: config.get returns parsed content with every secret redacted, not withheld."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        result = await connector.config_get(_TARGET, {})
+    # One bounded SSH round-trip; the same cat+parse the update op runs.
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert "cat -- /etc/rancher/rke2/config.yaml" in cmd
+    assert result["path"] == "/etc/rancher/rke2/config.yaml"
+    content = result["content"]
+    # Non-secret operator-facing keys are returned verbatim.
+    assert content["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert content["node-taint"] == ["dedicated=infra:NoSchedule"]
+    # Secret keys are redacted to the sentinel...
+    assert content["token"] == REDACTED_SENTINEL
+    assert content["agent-token"] == REDACTED_SENTINEL
+    assert content["etcd-s3-secret-key"] == REDACTED_SENTINEL
+    # ...datastore-endpoint keeps host/port/db but masks the userinfo.
+    assert content["datastore-endpoint"] == (
+        f"postgres://{REDACTED_SENTINEL}@db.lab.example:5432/kine"
+    )
+    # redacted_keys lists exactly the masked names, sorted (write-side discipline).
+    assert set(result["redacted_keys"]) == {
+        "agent-token",
+        "datastore-endpoint",
+        "etcd-s3-secret-key",
+        "token",
+    }
+    assert result["redacted_keys"] == sorted(result["redacted_keys"])
+    # THE guarantee: no planted secret VALUE surfaces anywhere in the result.
+    rendered = repr(result)
+    for canary in (
+        _CONFIG_TOKEN_CANARY,
+        _CONFIG_AGENT_TOKEN_CANARY,
+        _CONFIG_S3_SECRET_CANARY,
+        _CONFIG_DSN_PASS_CANARY,
+    ):
+        assert canary not in rendered, f"{canary!r} leaked into the result"
+
+
+@pytest.mark.asyncio
+async def test_config_get_rejects_path_traversal_before_ssh() -> None:
+    """AC: a traversal path is rejected via bound_config_path -- no SSH round trip."""
+    # The op relies on the write side's confinement; a traversal escapes the
+    # /etc/rancher/rke2 root and raises before any transport is touched.
+    with pytest.raises(ConfigPathRejectedError):
+        bound_config_path("../../etc/passwd")
+
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.config_get(_TARGET, {"path": "../../etc/passwd"})
+    mock_cmd.assert_not_awaited()
+    assert "content" not in result
+    assert "path check" in result["error"]
+
+
+def test_bound_read_config_path_confines_to_server_config() -> None:
+    """B1: only config.yaml + config.yaml.d/*.yaml pass; sibling files are rejected."""
+    # The server config and a single-level drop-in are accepted.
+    assert bound_read_config_path(None) == "/etc/rancher/rke2/config.yaml"
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml") == "/etc/rancher/rke2/config.yaml"
+    )
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml.d/10-tls.yaml")
+        == "/etc/rancher/rke2/config.yaml.d/10-tls.yaml"
+    )
+    # Sibling files (nested secrets the flat redaction set cannot mask) and a
+    # nested drop-in subdir are rejected outright.
+    for rejected in (
+        "/etc/rancher/rke2/rke2.yaml",
+        "/etc/rancher/rke2/registries.yaml",
+        "/etc/rancher/rke2/config.yaml.d/nested/dir.yaml",
+        "/etc/rancher/rke2/config.yaml.d/../rke2.yaml",
+    ):
+        with pytest.raises(ConfigPathRejectedError):
+            bound_read_config_path(rejected)
+
+
+@pytest.mark.asyncio
+async def test_config_get_rejects_sibling_files_before_ssh() -> None:
+    """B1: rke2.yaml / registries.yaml -- whose nested secrets the flat redaction
+    set cannot mask -- are rejected before any SSH read, so a safe/no-approval call
+    never returns the cluster-admin private key or the registry password.
+    """
+    connector = Rke2SshConnector()
+    cases = (
+        (
+            "/etc/rancher/rke2/rke2.yaml",
+            _RKE2_KUBECONFIG_FIXTURE,
+            _KUBECONFIG_KEY_CANARY,
+        ),
+        (
+            "/etc/rancher/rke2/registries.yaml",
+            _REGISTRIES_YAML_FIXTURE,
+            _REGISTRIES_PASSWORD_CANARY,
+        ),
+    )
+    for path, fixture, canary in cases:
+        with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+            # Even if the file WOULD read back with a nested secret, the op must
+            # refuse it before the `cat` ever runs.
+            mock_cmd.return_value = _proc(stdout=fixture)
+            result = await connector.config_get(_TARGET, {"path": path})
+        mock_cmd.assert_not_awaited()
+        assert "content" not in result
+        assert "path check" in result["error"]
+        assert "server config" in result["error"]
+        assert canary not in repr(result), f"{canary!r} leaked for {path}"
+
+
+@pytest.mark.asyncio
+async def test_config_get_accepts_config_yaml_d_dropin() -> None:
+    """A config.yaml.d/*.yaml drop-in stays in scope (same flat schema, redacted)."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        result = await connector.config_get(
+            _TARGET, {"path": "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"}
+        )
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert "cat -- /etc/rancher/rke2/config.yaml.d/99-custom.yaml" in cmd
+    assert result["path"] == "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"
+    assert result["content"]["token"] == REDACTED_SENTINEL
+
+
+@pytest.mark.asyncio
+async def test_config_get_non_mapping_yaml_returns_structured_error() -> None:
+    """AC: a YAML sequence/scalar (not a mapping) surfaces an error, not a crash."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="- just\n- a\n- list\n")
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert result["error"] == "config file is not a YAML mapping"
+    assert result["path"] == "/etc/rancher/rke2/config.yaml"
+
+
+@pytest.mark.asyncio
+async def test_config_get_invalid_yaml_returns_structured_error() -> None:
+    """AC: unparseable YAML surfaces a structured error rather than crashing."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="key: [unterminated\n")
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert "not valid YAML" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_get_missing_or_empty_file_returns_empty_content() -> None:
+    """A missing/empty config.yaml (the ``[ -e ]`` guard) yields content: {}."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="")
+        result = await connector.config_get(_TARGET, {})
+    assert result["content"] == {}
+    assert result["redacted_keys"] == []
+
+
+@pytest.mark.asyncio
+async def test_config_get_read_failure_returns_structured_error() -> None:
+    """A non-zero read exit surfaces a structured error, not a partial parse."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="cat: permission denied", exit_status=1)
+        result = await connector.config_get(_TARGET, {})
+    assert "content" not in result
+    assert result["error"] == "failed to read the config file"
+
+
+@pytest.mark.asyncio
+async def test_config_get_never_leaks_secret_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The config-get envelope + logs carry no credential material."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        with caplog.at_level("DEBUG"):
+            result = await connector.config_get(_TARGET, {})
+    rendered = repr(result)
+    for canary in (
+        _CONFIG_TOKEN_CANARY,
+        _CONFIG_AGENT_TOKEN_CANARY,
+        _CONFIG_S3_SECRET_CANARY,
+        _CONFIG_DSN_PASS_CANARY,
+    ):
+        assert canary not in rendered
+        assert canary not in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # RKE2_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-#: The read-only tier (T1 #2221). Every entry is safe-tier / no-approval and
-#: takes no operator parameters.
-_READ_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
+#: The read-only tier: ``rke2.about`` + ``rke2.posture.show`` (T1 #2221),
+#: ``rke2.node.service.status`` (Initiative #2833 / #2852), and the redacted
+#: config-content read ``rke2.node.config.get`` (#2854). Every entry is
+#: safe-tier / no-approval.
+_READ_OP_IDS: frozenset[str] = frozenset(
+    {
+        "rke2.about",
+        "rke2.posture.show",
+        "rke2.node.service.status",
+        "rke2.node.config.get",
+    }
+)
+
+#: The read ops that take no operator parameters at all (fixed paths/units).
+#: The sibling ``rke2.node.config.get`` takes an optional path-bounded
+#: ``path``, so it is excluded from the no-params invariant.
+_PARAMETERLESS_READ_OP_IDS: frozenset[str] = frozenset(
+    {"rke2.about", "rke2.posture.show", "rke2.node.service.status"}
+)
 
 #: The approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus the
 #: node-write ops ``rke2.node.service.restart`` / ``rke2.node.config.update``
@@ -548,18 +1066,27 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
     {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
 )
 
-#: The safe, non-gated snapshot tier (T4 #2431): ``rke2.etcd-snapshot.save``.
-#: Safe-tier / no-approval like the read ops, but it is active (it copies etcd
-#: to disk), so it carries NEITHER the read-only tag NOR the dangerous/write
-#: tier -- it belongs to neither sweep set.
-_SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
+#: The safe, non-gated snapshot tier: ``.save`` (T4 #2431) + ``.list``
+#: (#2853). Both are safe-tier / no-approval like the read ops.
+_SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save", "rke2.etcd-snapshot.list"})
+
+#: The *active* snapshot op: ``.save`` copies etcd to disk, so it carries
+#: NEITHER the read-only tag NOR the dangerous/write tier -- it belongs to
+#: neither sweep set. (``.list``, by contrast, is a genuine read.)
+_SNAPSHOT_ACTIVE_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
+
+#: Every op that must carry the ``read-only`` tag: the identity/posture read
+#: tier plus the read-only ``.list`` snapshot op (#2853). ``.save`` is
+#: deliberately excluded (it is active).
+_READ_ONLY_TAGGED_OP_IDS: frozenset[str] = _READ_OP_IDS | frozenset({"rke2.etcd-snapshot.list"})
 
 _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_IDS
 
 
 def test_rke2_ops_count_matches_expected() -> None:
-    # Two read ops (#2221) + three approval-gated write ops (#2429 / #2430)
-    # + one safe non-gated snapshot op (#2431) = six.
+    # Four read ops (#2221 posture/about + #2852 service.status + #2854
+    # config.get) + three approval-gated write ops (#2429 / #2430) + two safe
+    # non-gated snapshot ops (.save #2431, .list #2853) = nine.
     assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -587,30 +1114,52 @@ def test_rke2_read_ops_all_safe_read_only_no_approval() -> None:
 
 
 def test_rke2_read_ops_tagged_read_only() -> None:
-    """The read-tier ops carry the read-only tag; the snapshot op does not."""
+    """Read-tier ops + ``.list`` carry the read-only tag; ``.save`` does not."""
     by_id = {op.op_id: op for op in RKE2_OPS}
-    for op_id in _READ_OP_IDS:
+    for op_id in _READ_ONLY_TAGGED_OP_IDS:
         assert "read-only" in by_id[op_id].tags, f"{op_id!r} missing read-only tag"
-    # The snapshot op is active (copies etcd to disk), so it is NOT read-only.
-    assert "read-only" not in by_id["rke2.etcd-snapshot.save"].tags
+    # ``.save`` is active (copies etcd to disk), so it is NOT read-only.
+    for op_id in _SNAPSHOT_ACTIVE_OP_IDS:
+        assert "read-only" not in by_id[op_id].tags, f"{op_id!r} must not be read-only"
 
 
 def test_rke2_snapshot_op_safe_active_not_gated() -> None:
-    """AC: the snapshot op is safe-tier / no-approval, but neither read nor write.
+    """AC: the active snapshot op is safe-tier / no-approval, neither read nor write.
 
     ``rke2.etcd-snapshot.save`` copies etcd to disk -- it is active on the node
     filesystem yet does not mutate running cluster state, so it is deliberately
     safe-tier and non-gated. It must sit in NEITHER sweep set: not read-only
-    (no ``read-only`` tag) and not the dangerous/approval write tier.
+    (no ``read-only`` tag) and not the dangerous/approval write tier. (``.list``
+    is a genuine read and IS read-only -- covered separately.)
     """
     by_id = {op.op_id: op for op in RKE2_OPS}
-    for op_id in _SNAPSHOT_OP_IDS:
+    for op_id in _SNAPSHOT_ACTIVE_OP_IDS:
         op = by_id[op_id]
         assert op.safety_level == "safe", f"{op_id!r} is not safe-tier"
         assert op.requires_approval is False, f"{op_id!r} requires approval"
         assert "read-only" not in op.tags, f"{op_id!r} must not be read-only-tagged"
         assert op_id not in _READ_OP_IDS
         assert op_id not in _WRITE_OP_IDS
+
+
+def test_rke2_snapshot_list_is_read_only_safe_no_approval() -> None:
+    """AC: ``.list`` is safe-tier / no-approval / read-only (unlike ``.save``).
+
+    Unlike ``.save`` (active), ``rke2.etcd-snapshot.list`` only enumerates
+    existing snapshots -- a genuine read -- so it carries the ``read-only`` tag
+    and is counted in the snapshot tier, but it is NOT in the dangerous/approval
+    write set.
+    """
+    by_id = {op.op_id: op for op in RKE2_OPS}
+    op = by_id["rke2.etcd-snapshot.list"]
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags, "'.list' must be read-only-tagged"
+    assert "rke2.etcd-snapshot.list" in _SNAPSHOT_OP_IDS
+    assert "rke2.etcd-snapshot.list" not in _WRITE_OP_IDS
+    # No operator params: the local snapshot store is fixed.
+    assert op.parameter_schema.get("properties") == {}
+    assert op.parameter_schema.get("additionalProperties") is False
 
 
 def test_rke2_write_ops_all_dangerous_approval_gated() -> None:
@@ -629,9 +1178,22 @@ def test_rke2_read_ops_parameter_schemas_closed() -> None:
         if op.op_id not in _READ_OP_IDS:
             continue
         assert op.parameter_schema.get("additionalProperties") is False
-    # The read tier takes no operator parameters -- fixed paths only.
-    for op_id in _READ_OP_IDS:
+    # rke2.about / rke2.posture.show / rke2.node.service.status take no
+    # operator parameters -- fixed paths/units.
+    for op_id in _PARAMETERLESS_READ_OP_IDS:
         assert by_id[op_id].parameter_schema.get("properties") == {}
+    # rke2.node.config.get (#2854) exposes exactly one optional param -- a path
+    # bounded to the server config.yaml + its config.yaml.d/*.yaml drop-ins
+    # (sibling files like rke2.yaml / registries.yaml are rejected; the
+    # handler-side bound_read_config_path check is authoritative).
+    get_schema = by_id["rke2.node.config.get"].parameter_schema
+    get_props = get_schema.get("properties", {})
+    assert set(get_props) == {"path"}
+    assert (
+        get_props["path"].get("pattern")
+        == r"^/etc/rancher/rke2/config\.yaml(\.d/[^/\x00\n\r]+\.yaml)?$"
+    )
+    assert get_schema.get("required", []) == []  # path is optional
     # The snapshot op exposes exactly one optional, charset-bounded param.
     save_schema = by_id["rke2.etcd-snapshot.save"].parameter_schema
     props = save_schema.get("properties", {})
@@ -807,6 +1369,169 @@ async def test_etcd_snapshot_save_never_leaks_credentials(
         mock_cmd.side_effect = sequence
         with caplog.at_level("DEBUG"):
             result = await connector.etcd_snapshot_save(_TARGET, {})
+    rendered = repr(result)
+    for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
+        assert canary not in rendered
+        assert canary not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# etcd-snapshot.list handler (#2853)
+# ---------------------------------------------------------------------------
+
+
+# A realistic ``rke2 etcd-snapshot list`` transcript: a header row and three
+# snapshot rows (two local ``file://``, one ``s3://``). The first row's size is
+# non-trivial (50 MiB) per the acceptance criterion; sizes are the documented
+# raw-byte integers. Each row is split across adjacent string literals (the
+# real vendor lines exceed the 100-col lint limit); they concatenate at compile
+# time, and the parser is whitespace-count-insensitive.
+_LIST_TABLE_OK = (
+    "Name  Location  Size  Created\n"
+    "on-demand-srv-0-1754471523  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754471523  "
+    "52428800  2026-08-06T09:12:03Z\n"
+    "on-demand-srv-0-1754385123  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754385123  "
+    "51380224  2026-08-05T09:12:03Z\n"
+    "etcd-snapshot-srv-0-1754298723  "
+    "s3://rke2-backups/etcd-snapshot-srv-0-1754298723  "
+    "50331648  2026-08-04T09:12:03Z\n"
+)
+
+
+def test_parse_snapshot_list_parses_rows() -> None:
+    rows = parse_snapshot_list(_LIST_TABLE_OK)
+    assert rows == [
+        {
+            "name": "on-demand-srv-0-1754471523",
+            "location": (
+                "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754471523"
+            ),
+            "size_bytes": 52428800,
+            "created_at": "2026-08-06T09:12:03Z",
+        },
+        {
+            "name": "on-demand-srv-0-1754385123",
+            "location": (
+                "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754385123"
+            ),
+            "size_bytes": 51380224,
+            "created_at": "2026-08-05T09:12:03Z",
+        },
+        {
+            "name": "etcd-snapshot-srv-0-1754298723",
+            "location": "s3://rke2-backups/etcd-snapshot-srv-0-1754298723",
+            "size_bytes": 50331648,
+            "created_at": "2026-08-04T09:12:03Z",
+        },
+    ]
+
+
+def test_parse_snapshot_list_skips_header_regardless_of_casing() -> None:
+    # An UPPERCASE header (some versions) and a "no snapshots" notice are both
+    # skipped: neither ends in an ISO-8601 timestamp.
+    out = "NAME  LOCATION  SIZE  CREATED\nNo snapshots found\n"
+    assert parse_snapshot_list(out) == []
+
+
+def test_parse_snapshot_list_empty_output() -> None:
+    assert parse_snapshot_list("") == []
+    assert parse_snapshot_list("\n  \n") == []
+
+
+def test_parse_snapshot_list_non_integer_size_is_null() -> None:
+    # Version drift: a human-readable ``Size`` column parses to size_bytes=None
+    # (fail-closed) rather than a guessed byte conversion; the row survives.
+    out = "legacy-snap-1  local  50 MiB  2026-08-01T00:00:00Z\n"
+    rows = parse_snapshot_list(out)
+    assert rows == [
+        {
+            "name": "legacy-snap-1",
+            "location": "local",
+            "size_bytes": None,
+            "created_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_success_parses_and_no_sudo() -> None:
+    connector = Rke2SshConnector()
+    # side_effect order: precondition guard, then the list command.
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stdout=_LIST_TABLE_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.etcd_snapshot_list(_TARGET, {})
+    assert [s["name"] for s in result["snapshots"]] == [
+        "on-demand-srv-0-1754471523",
+        "on-demand-srv-0-1754385123",
+        "etcd-snapshot-srv-0-1754298723",
+    ]
+    assert result["snapshots"][0]["size_bytes"] == 52428800
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    # Guard runs first (plain, as root -- no sudo argv); then the list by
+    # absolute binary path. No command constructs a sudo argv.
+    assert issued[0].startswith("sh -c ")
+    assert "datastore-endpoint" in issued[0]
+    assert issued[1] == "/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list"
+    assert not any("sudo" in cmd for cmd in issued)
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_reuses_guard_refuses_external_datastore() -> None:
+    """AC: ``.list`` raises the SAME precondition error as ``.save`` (shared guard)."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="external-datastore\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="external datastore"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+    # Guard ran; the list command never did (single await).
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_reuses_guard_refuses_non_server_node() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="no-embedded-etcd\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="embedded-etcd server"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_nonzero_exit_raises() -> None:
+    from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
+
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr="FATA[0000] failed to list snapshots\n", exit_status=1),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with pytest.raises(Rke2SnapshotError, match="list exited 1"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_never_leaks_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No SSH/sudo credential material appears in the result or logs."""
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stdout=_LIST_TABLE_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with caplog.at_level("DEBUG"):
+            result = await connector.etcd_snapshot_list(_TARGET, {})
     rendered = repr(result)
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered

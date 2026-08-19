@@ -151,15 +151,22 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
     Mirrors :func:`meho_backplane.connectors.pfsense.ops._pfsense_ops`
     and :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
 
-    G3.18-T2 (#2154) appends the 3 approval-gated remediation write ops
-    (:data:`~meho_backplane.connectors.holodeck.ops_write.WRITE_OPS`:
+    G3.18-T1 (#2153) appends ``holodeck.disk.usage`` and #2847 appends
+    ``holodeck.backups.list`` (the safe read half of the ``backups``
+    surface). G3.18-T2 (#2154) appends the 3 approval-gated remediation
+    write ops (:data:`~meho_backplane.connectors.holodeck.ops_write.WRITE_OPS`:
     ``holodeck.k8s.pods.gc`` / ``holodeck.backups.prune`` /
-    ``holodeck.images.import``) onto the tuple -- 12 ops total.
+    ``holodeck.images.import``) onto the tuple -- 13 ops. #2908 appends the
+    4 deploy-lifecycle ops
+    (:data:`~meho_backplane.connectors.holodeck.ops_deploy.DEPLOY_OPS`:
+    ``holodeck.config.apply`` / ``holodeck.instance.start`` /
+    ``holodeck.instance.status`` / ``holodeck.router.patch``) -- 17 ops total.
     """
+    from meho_backplane.connectors.holodeck.ops_deploy import DEPLOY_OPS
     from meho_backplane.connectors.holodeck.ops_read import READ_OPS
     from meho_backplane.connectors.holodeck.ops_write import WRITE_OPS
 
-    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS)
+    return (_HOLODECK_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DEPLOY_OPS)
 
 
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.
@@ -169,8 +176,9 @@ def _holodeck_ops() -> tuple[HolodeckOp, ...]:
 #: ``holodeck.pod.info``, ``holodeck.service.list``,
 #: ``holodeck.k8s.exec``, ``holodeck.logs.tail``,
 #: ``holodeck.networking.show``); G3.18-T1 (#2153) appends
-#: ``holodeck.disk.usage`` -- 9 ops total. The registration
-#: walk in :meth:`HolodeckConnector.register_operations` does not
-#: need to change as ops are added; only :func:`_holodeck_ops`
+#: ``holodeck.disk.usage`` and #2847 appends ``holodeck.backups.list``
+#: -- 10 read ops (13 total with the 3 G3.18-T2 write ops). The
+#: registration walk in :meth:`HolodeckConnector.register_operations`
+#: does not need to change as ops are added; only :func:`_holodeck_ops`
 #: composes the merged tuple.
 HOLODECK_OPS: tuple[HolodeckOp, ...] = _holodeck_ops()

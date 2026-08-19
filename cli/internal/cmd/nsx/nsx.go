@@ -5,15 +5,18 @@
 // G3.5-T3 (#615) of Initiative #368. v0.2 ships the operator-facing
 // alias verbs over the 9 enabled NSX read-only core ops, each
 // pre-baking connector_id="nsx-rest-4.2" so operators don't type
-// the connector ID on every dispatch:
+// the connector ID on every dispatch. Verbs whose backend read went
+// typed dispatch the dotted typed op_id (#2355, #2942 — ingested
+// METHOD:/path op_ids no longer resolve on a zero-catalog boot); the
+// rest keep their ingested op_ids until a typed counterpart ships:
 //
-//   - `meho nsx about [--target T]`                        — GET:/api/v1/node
-//   - `meho nsx node list [--target T]`                    — GET:/api/v1/transport-nodes
-//   - `meho nsx cluster status [--target T]`               — GET:/api/v1/cluster/status
-//   - `meho nsx segment list [--target T]`                 — GET:/policy/api/v1/infra/segments
-//   - `meho nsx transport-zone list [--target T]`          — GET:/policy/.../transport-zones
+//   - `meho nsx about [--target T]`                        — nsx.node.status
+//   - `meho nsx node list [--target T]`                    — nsx.transport_node.list
+//   - `meho nsx cluster status [--target T]`               — nsx.cluster.status
+//   - `meho nsx segment list [--target T]`                 — nsx.segment.list
+//   - `meho nsx transport-zone list [--target T]`          — nsx.transport_zone.list
 //   - `meho nsx tier0 list [--target T]`                   — GET:/policy/api/v1/infra/tier-0s
-//   - `meho nsx tier1 list [--target T]`                   — GET:/policy/api/v1/infra/tier-1s
+//   - `meho nsx tier1 list [--target T]`                   — nsx.tier1.list
 //   - `meho nsx firewall policy list [--scope D] [--target T]`
 //   - `meho nsx firewall rule list <policy> [--scope D] [--target T]`
 //   - `meho nsx operation search/call`                     — meta-tool wrappers

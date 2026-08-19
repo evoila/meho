@@ -48,6 +48,8 @@ from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
     VsphereTargetLike,
 )
+from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.composites._write import vm_customize_composite
 
 # ---------------------------------------------------------------------------
 # Mocked vCenter surface
@@ -741,7 +743,7 @@ async def test_vm_create_composite_over_modern_mount(
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
         mock.get("/api/vcenter/folder").respond(200, json=[{"folder": "group-1", "name": "prod"}])
         create_route = mock.post("/api/vcenter/vm").respond(200, json="vm-1")
-        nic_route = mock.patch("/api/vcenter/vm/vm-1/network").respond(200, json={})
+        nic_route = mock.post("/api/vcenter/vm/vm-1/hardware/ethernet").respond(200, json="nic-1")
         power_route = mock.post("/api/vcenter/vm/vm-1/power").respond(200, json={})
         mock.delete("/api/session").respond(204)
         try:
@@ -767,10 +769,13 @@ async def test_vm_create_composite_over_modern_mount(
     assert create_route.called
     assert nic_route.called
     assert power_route.called
-    # The create body carries the spec wrapper the vCenter POST expects.
+    # The create body is the VM.CreateSpec at the top level of the /api body (#2973).
     create_body = json.loads(create_route.calls.last.request.content)
-    assert create_body["spec"]["name"] == "web-01"
-    assert create_body["spec"]["placement"]["folder"] == "group-1"
+    assert create_body["name"] == "web-01"
+    assert create_body["placement"]["folder"] == "group-1"
+    # The NIC create body is the Ethernet.CreateSpec backing shape (#2970), top-level (#2973).
+    nic_body = json.loads(nic_route.calls.last.request.content)
+    assert nic_body["backing"] == {"type": "STANDARD_PORTGROUP", "network": "net-1"}
 
 
 @pytest.mark.asyncio
@@ -780,9 +785,11 @@ async def test_cluster_patch_composite_over_legacy_mount_routes_to_rest(
     """A legacy-only target mounts cluster.patch's writes onto /rest.
 
     The modern ``POST /api/session`` 404s, the connector falls back to the
-    legacy path, and every write sub-op (maintenance enter/exit PATCH, host
-    patch POST) must route through ``/rest`` via ``mount_op_path`` or it 404s
-    — the modern+legacy mount coverage on the #2256 write path.
+    legacy path, and every sub-op must route through ``/rest``: the host
+    listing GET, the vim maintenance ``*_Task`` methods + their ``Task.info``
+    polls (a legacy session mounts vmomi paths onto ``/rest`` too, per
+    ``_post_vmomi_json``), the vLCM apply POST, and its cis-task poll — the
+    modern+legacy mount coverage on the #2256 write path, post-#2970.
     """
     from meho_backplane.connectors.vmware_rest.composites._write import cluster_patch_composite
 
@@ -791,6 +798,21 @@ async def test_cluster_patch_composite_over_legacy_mount_routes_to_rest(
 
     connector = VmwareRestConnector(session_loader=_loader)
 
+    def _task_info_success(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        task_moid = body["specSet"][0]["objectSet"][0]["obj"]["value"]
+        return httpx.Response(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": task_moid},
+                        "propSet": [{"name": "info", "val": {"state": "success"}}],
+                    }
+                ]
+            },
+        )
+
     async with respx.mock(
         base_url=VCENTER_BASE_URL,
         assert_all_called=False,
@@ -798,9 +820,22 @@ async def test_cluster_patch_composite_over_legacy_mount_routes_to_rest(
     ) as mock:
         mock.post("/api/session").respond(404)
         mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
-        mock.get("/rest/vcenter/cluster/domain-c1/host").respond(200, json=[{"host": "host-1"}])
-        enter_route = mock.patch("/rest/vcenter/host/host-1/maintenance").respond(200, json={})
-        patch_route = mock.post("/rest/vcenter/host/host-1").respond(200, json={})
+        mock.get("/rest/vcenter/host").respond(200, json=[{"host": "host-1"}])
+        enter_route = mock.post("/rest/HostSystem/host-1/EnterMaintenanceMode_Task").respond(
+            200, json={"type": "Task", "value": "t-enter-1"}
+        )
+        exit_route = mock.post("/rest/HostSystem/host-1/ExitMaintenanceMode_Task").respond(
+            200, json={"type": "Task", "value": "t-exit-1"}
+        )
+        mock.post("/rest/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+            side_effect=_task_info_success
+        )
+        apply_route = mock.post("/rest/esx/settings/hosts/host-1/software").respond(
+            200, json="task-apply-1"
+        )
+        cis_route = mock.get("/rest/cis/tasks/task-apply-1").respond(
+            200, json={"value": {"status": "SUCCEEDED"}}
+        )
         mock.delete("/rest/com/vmware/cis/session").respond(204)
         try:
             out = await cluster_patch_composite(
@@ -814,9 +849,13 @@ async def test_cluster_patch_composite_over_legacy_mount_routes_to_rest(
 
     assert out["status"] == "completed"
     assert out["patched_hosts"] == ["host-1"]
-    # maintenance enter + exit both hit the same PATCH route; the patch POST hit /rest.
-    assert enter_route.call_count == 2
-    assert patch_route.called
+    # Every step routed through /rest: vim enter/exit, the vLCM apply
+    # (with its ?action=apply&vmw-task=true query), and the cis poll.
+    assert enter_route.called
+    assert exit_route.called
+    assert apply_route.called
+    assert "action=apply" in str(apply_route.calls.last.request.url)
+    assert cis_route.called
 
 
 @pytest.mark.asyncio
@@ -855,18 +894,57 @@ async def test_host_evacuate_recursion_over_modern_mount(
         )
         return OperationResult(status="ok", op_id=op_id, result=inner, duration_ms=1.0)
 
+    def _vmomi_reads(request: httpx.Request) -> httpx.Response:
+        # One RetrievePropertiesEx route serves both the recursion's DRS
+        # read (ClusterComputeResource) and the maintenance Task.info poll.
+        body = json.loads(request.content)
+        spec = body["specSet"][0]
+        spec_type = spec["propSet"][0]["type"]
+        moid = spec["objectSet"][0]["obj"]["value"]
+        if spec_type == "ClusterComputeResource":
+            val: Any = [
+                {
+                    "migrationList": [
+                        {
+                            "vm": {"type": "VirtualMachine", "value": "vm-a"},
+                            "destination": {"type": "HostSystem", "value": "host-target"},
+                        }
+                    ]
+                }
+            ]
+            prop = "drsRecommendation"
+        else:
+            assert spec_type == "Task", spec_type
+            val = {"state": "success"}
+            prop = "info"
+        return httpx.Response(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": spec_type, "value": moid},
+                        "propSet": [{"name": prop, "val": val}],
+                    }
+                ]
+            },
+        )
+
     async with respx.mock(
         base_url=VCENTER_BASE_URL,
         assert_all_called=False,
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        # The vmomi calls derive their VI-JSON {release} from about.version (#2466).
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
         mock.get("/api/vcenter/vm").respond(200, json=[{"vm": "vm-a", "cluster": "domain-c1"}])
-        mock.get("/api/vcenter/cluster/domain-c1/drs/recommendations").respond(
-            200, json=[{"vm": "vm-a", "target_host": "host-target"}]
-        )
+        mock.post(
+            "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        ).mock(side_effect=_vmomi_reads)
         relocate_route = mock.post("/api/vcenter/vm/vm-a").respond(200, json={})
-        maintenance_route = mock.patch("/api/vcenter/host/host-1/maintenance").respond(200, json={})
+        maintenance_route = mock.post(
+            "/sdk/vim25/9.0.0.0/HostSystem/host-1/EnterMaintenanceMode_Task"
+        ).respond(200, json={"type": "Task", "value": "t-enter-1"})
         mock.delete("/api/session").respond(204)
         try:
             out = await host_evacuate_composite(
@@ -882,12 +960,14 @@ async def test_host_evacuate_recursion_over_modern_mount(
     assert out["status"] == "evacuated"
     assert out["migrated_vms"] == ["vm-a"]
     assert out["maintenance_entered"] is True
-    # The recursion's relocate write and the host maintenance-enter write both
-    # reached the /api session.
+    # The recursion's relocate write reached the /api session; the
+    # maintenance-enter reached the VI-JSON mount (#2970).
     assert relocate_route.called
     assert maintenance_route.called
     relocate_body = json.loads(relocate_route.calls.last.request.content)
-    assert relocate_body["spec"]["placement"]["host"] == "host-target"
+    assert relocate_body["placement"]["host"] == "host-target"
+    enter_body = json.loads(maintenance_route.calls.last.request.content)
+    assert enter_body == {"timeout": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -1100,3 +1180,62 @@ async def test_tasks_recent_over_modern_mount_returns_task_rows(
     assert task["entity"] == "vm-9"
     assert task["state"] == "success"
     assert task["progress"] == 100
+
+
+# ---------------------------------------------------------------------------
+# vm.customize (GOSC apply, #2892) — respx-verified PUT wire body
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_puts_named_spec_over_respx(
+    vcsim_target: _VcsimTarget,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply on a powered-off VM issues the PUT with the named-spec wire body.
+
+    Exercises the real connector transport (respx-intercepted): the resolve
+    listing mounts onto ``/api/vcenter/vm``, and the customization set mounts
+    onto ``PUT /api/vcenter/vm/{vm}/guest/customization`` with the top-level
+    ``{"name": <spec>}`` SetSpec body (#2973). The #2254 governance seam is stubbed
+    to auto-execute so the write reaches the wire (the seam itself is proven
+    end-to-end in the write-gate lane).
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
+        mock.delete("/api/session").respond(204)
+        # Modern /api VM listing returns a bare array of summary rows.
+        mock.get("/api/vcenter/vm").respond(
+            200, json=[{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+        )
+        put_route = mock.put("/api/vcenter/vm/vm-7/guest/customization").respond(200, json={})
+        try:
+            result = await vm_customize_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={"name": "app", "spec_name": "gosc-lin"},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    assert result["status"] == "customization_set"
+    assert put_route.called
+    sent_body = json.loads(put_route.calls.last.request.content)
+    assert sent_body == {"name": "gosc-lin"}

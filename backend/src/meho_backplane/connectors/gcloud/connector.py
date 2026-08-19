@@ -962,6 +962,64 @@ class GcloudConnector(HttpConnector):
 
         return {"rows": rows, "total": len(rows)}
 
+    async def gcloud_iam_service_account_keys_list(
+        self,
+        operator: Operator,
+        target: GcloudTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List the keys on a single service account.
+
+        Op-id: ``gcloud.iam.service_account_keys.list``. Calls IAM v1
+        ``projects.serviceAccounts.keys.list``
+        (``GET .../serviceAccounts/<email>/keys``). Required
+        ``params.service_account_email`` selects the SA — the endpoint is
+        per-SA, not project-wide. Optional ``params.key_types`` forwards to
+        the API's repeated ``keyTypes[]`` query filter; omit it to return both
+        managed types.
+
+        Unlike ``keys.get``, the list endpoint returns no ``privateKeyData``
+        or ``publicKeyData``; each row exposes only key metadata. ``keyType``
+        is what the org-policy compliance question keys on: ``USER_MANAGED``
+        is the violation, ``SYSTEM_MANAGED`` is Google-rotated and expected;
+        ``validBeforeTime`` is the expiry.
+
+        No ``nextPageToken`` pagination — ``keys.list`` returns the full key
+        set in one response (unlike the ``serviceAccounts.list`` sibling), so
+        this is a single GET rather than a pagination loop.
+        """
+        email = params.get("service_account_email")
+        if not isinstance(email, str) or not email.strip():
+            raise ValueError(
+                "gcloud.iam.service_account_keys.list requires a non-empty "
+                "'service_account_email' param (the service account to inspect)."
+            )
+
+        query_params: dict[str, Any] = {}
+        key_types = params.get("key_types")
+        if key_types:
+            query_params["keyTypes"] = key_types
+
+        base_url = (
+            f"https://iam.googleapis.com/v1/projects/{target.gcp_project}"
+            f"/serviceAccounts/{email}/keys"
+        )
+        payload = await self._get_json_abs(
+            target, base_url, operator=operator, params=query_params or None
+        )
+        rows: list[dict[str, Any]] = [
+            {
+                "name": key.get("name", ""),
+                "key_type": key.get("keyType"),
+                "key_origin": key.get("keyOrigin"),
+                "valid_after_time": key.get("validAfterTime"),
+                "valid_before_time": key.get("validBeforeTime"),
+                "disabled": bool(key.get("disabled", False)),
+            }
+            for key in payload.get("keys") or []
+        ]
+        return {"rows": rows, "total": len(rows)}
+
     # C901 pre-existing (11>10): the zone/aggregated branch + paginated
     # while-loops predate this Task. #985 only threads `operator` for the
     # SA-key gate; complexity is unchanged from main. Refactoring the

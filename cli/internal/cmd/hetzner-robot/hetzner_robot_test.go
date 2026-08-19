@@ -153,41 +153,6 @@ func TestDecodeRobotListEmptyArray(t *testing.T) {
 
 // ---------- renderers ----------
 
-func TestPrintAboutHumanFormat(t *testing.T) {
-	r := &CallResult{
-		Status:     "ok",
-		OpID:       "GET:/query",
-		Result:     json.RawMessage(`{"api_version":"1.0","account_id":"robot-acc-001"}`),
-		DurationMs: 42.0,
-	}
-	var buf bytes.Buffer
-	printAbout(&buf, r)
-	out := buf.String()
-	for _, want := range []string{"status=ok", "hetzner-rest-2026.04", "1.0", "robot-acc-001"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("printAbout missing %q in output:\n%s", want, out)
-		}
-	}
-}
-
-func TestPrintAboutErrorRendersErrorString(t *testing.T) {
-	errMsg := "auth_failed"
-	r := &CallResult{
-		Status:     "error",
-		OpID:       "GET:/query",
-		Error:      &errMsg,
-		DurationMs: 5.0,
-	}
-	var buf bytes.Buffer
-	printAbout(&buf, r)
-	out := buf.String()
-	for _, want := range []string{"status=error", "auth_failed"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("printAbout error missing %q in:\n%s", want, out)
-		}
-	}
-}
-
 func TestPrintServerList(t *testing.T) {
 	r := &CallResult{
 		Status: "ok",
@@ -278,6 +243,35 @@ func TestPrintFailoverList(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printFailoverList missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestPrintFirewallGet(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(`{"firewall":{"server_ip":"1.2.3.1","status":"active","whitelist_hos":true,"filter_ipv6":false,"port":"main","rules":{"input":[{"name":"operator-https","ip_version":"ipv4","src_ip":"198.51.100.7/32","dst_port":"443","protocol":"tcp","action":"accept"},{"name":"default-discard","action":"discard"}],"output":[]}}}`),
+	}
+	var buf bytes.Buffer
+	printFirewallGet(&buf, r)
+	out := buf.String()
+	for _, want := range []string{
+		"status=ok", "active", "whitelist_hos", "input rules (2)",
+		"operator-https", "198.51.100.7/32", "443", "default-discard",
+		"discard", "output rules (0)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printFirewallGet missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintFirewallGetEmptySandbox(t *testing.T) {
+	// The sandbox returns 200 + {} for a single-object GET; render must not crash.
+	r := &CallResult{Status: "ok", Result: json.RawMessage(`{}`)}
+	var buf bytes.Buffer
+	printFirewallGet(&buf, r)
+	if !strings.Contains(buf.String(), "status=ok") {
+		t.Errorf("empty firewall should still print the status header; got:\n%s", buf.String())
 	}
 }
 
@@ -374,20 +368,20 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 			if body.ConnectorID != "hetzner-rest-2026.04" {
 				t.Errorf("connector_id: got %q want hetzner-rest-2026.04", body.ConnectorID)
 			}
-			if body.OpID != "GET:/query" {
+			if body.OpID != "GET:/rdns" {
 				t.Errorf("op_id: got %q", body.OpID)
 			}
 			writeJSON(t, w, 200, CallResult{
 				Status: "ok",
-				OpID:   "GET:/query",
-				Result: json.RawMessage(`{"api_version":"1.0"}`),
+				OpID:   "GET:/rdns",
+				Result: json.RawMessage(`[{"rdns":{"ip":"1.2.3.1","ptr":"srv1.example.com"}}]`),
 			})
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/query", "rdc-robot", nil)
+	r, err := dispatchOp(context.Background(), srv.URL, "GET:/rdns", "rdc-robot", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -409,13 +403,13 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 			if raw["target"] != nil {
 				t.Errorf("empty target should be null on wire; got %v", raw["target"])
 			}
-			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "GET:/query"})
+			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "GET:/rdns"})
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/query", "", nil); err != nil {
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/rdns", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -449,7 +443,7 @@ func TestDispatchServerInfoSendsParams(t *testing.T) {
 	}
 }
 
-// TestDispatchVswitchInfoSendsID — vswitch info passes id in params.
+// TestDispatchVswitchInfoSendsID — vswitch info passes vswitch-id in params.
 func TestDispatchVswitchInfoSendsID(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
@@ -459,11 +453,11 @@ func TestDispatchVswitchInfoSendsID(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			id, _ := body.Params["id"].(string)
+			id, _ := body.Params["vswitch-id"].(string)
 			if id != "4321" {
-				t.Errorf("id: got %q want %q", id, "4321")
+				t.Errorf("vswitch-id: got %q want %q", id, "4321")
 			}
-			if body.OpID != "GET:/vswitch/{id}" {
+			if body.OpID != "GET:/vswitch/{vswitch-id}" {
 				t.Errorf("op_id: got %q", body.OpID)
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
@@ -472,8 +466,37 @@ func TestDispatchVswitchInfoSendsID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	params := map[string]any{"id": "4321"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/vswitch/{id}", "rdc-robot", params); err != nil {
+	params := map[string]any{"vswitch-id": "4321"}
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/vswitch/{vswitch-id}", "rdc-robot", params); err != nil {
+		t.Fatalf("dispatchOp: %v", err)
+	}
+}
+
+// TestDispatchFirewallGetSendsParams — firewall get passes server-ip in params.
+func TestDispatchFirewallGetSendsParams(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			var body callRequestBody
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			serverIP, _ := body.Params["server-ip"].(string)
+			if serverIP != "1.2.3.1" {
+				t.Errorf("server-ip: got %q want %q", serverIP, "1.2.3.1")
+			}
+			if body.OpID != "GET:/firewall/{server-ip}" {
+				t.Errorf("op_id: got %q", body.OpID)
+			}
+			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	params := map[string]any{"server-ip": "1.2.3.1"}
+	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/firewall/{server-ip}", "rdc-robot", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -492,7 +515,7 @@ func TestNewRootCmdHasExpectedSubcommands(t *testing.T) {
 	for _, c := range root.Commands() {
 		names[c.Name()] = true
 	}
-	for _, expected := range []string{"about", "server", "ip", "subnet", "vswitch", "failover", "rdns", "ssh-key", "operation"} {
+	for _, expected := range []string{"server", "ip", "subnet", "vswitch", "failover", "rdns", "firewall", "ssh-key", "operation"} {
 		if !names[expected] {
 			t.Errorf("expected subcommand %q under hetzner-robot; commands: %v", expected, names)
 		}

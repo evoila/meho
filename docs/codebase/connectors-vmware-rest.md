@@ -8,14 +8,19 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 18 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 24 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 13 write composites (G3.1-T6 / `#509`, plus the
+in `#2258`) and 19 write composites (G3.1-T6 / `#509`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
-mutating VI-JSON `vm.disk.grow` / `#2893`, and the folder-template
-`vm.clone_from_template` / `#2894`). The
+mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
+`vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
+`cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
+post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
+`vm.device.cdrom`, the two guest-customization (GOSC) composites
+`guest.customization_spec.create` + `vm.customize` / `#2892`, and the
+OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -70,12 +75,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — nine module-level
+- **Write composites** (`composites/_write.py`) — fifteen module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
+  `vm_deploy_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
   `vm_power_composite`, `vm_power_bulk_composite`,
+  `vm_resize_composite`, `vm_nic_repoint_composite`,
+  `vm_device_cdrom_composite`,
   `host_evacuate_composite`, `host_detach_from_vds_composite`,
-  `cluster_patch_composite`). Since
+  `cluster_patch_composite`, `guest_customization_spec_create_composite`,
+  `vm_customize_composite`). The `vm_resize` / `vm_nic_repoint` /
+  `vm_device_cdrom` trio (`#2891`) is the post-clone hardware reconfigure
+  trio — see the **Hardware write composites** subsection under Control
+  flow. Since
   `#2256` each accepts `(operator, target, params, connector)` and
   issues its raw-REST sub-ops **directly on the resolved connector
   session** — `connector._get_json` (`_read_sub_op`) for the resolution
@@ -116,10 +128,63 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   recursion-depth contextvar (default cap 8) handles the depth-1 nesting
   cleanly, and the resolved `vm.migrate` runs its own relocate write on
   the direct session under the same governance seam.
+- **Guest customization (GOSC) composites** (`#2892`, group `guest`) —
+  `guest_customization_spec_create_composite`
+  (`POST:/vcenter/guest/customization-specs`) creates a reusable named
+  customization spec from the tractable provisioning subset (hostname as a
+  FIXED `HostnameGenerator`, per-NIC static IP / prefix / gateways, global
+  DNS, for a Linux `linux_config` or a Windows `windows_config` sysprep);
+  `vm_customize_composite`
+  (`PUT:/vcenter/vm/{vm}/guest/customization`) resolves a VM by display
+  name and applies a saved spec by name, refusing a powered-on VM with a
+  structured `precondition_failed` status (vCenter only accepts a pending
+  customization on a powered-off VM) and optionally powering it on
+  afterward so the customization applies on that boot. GOSC is how a cloned
+  VM gets its hostname + network identity on first boot; the create op's
+  `spec_name` is what `vm.customize` — and a clone's
+  `CloneSpec.guest_customization_spec` (consumed by the Task-D clone op) —
+  reference. The body builders map the agent subset onto the vCenter
+  `CreateSpec {name, description, spec:CustomizationSpec}` /
+  `SetSpec {name}`, sent at the **top level** of the `/api` request body
+  (#2973). The `CreateSpec`'s own `spec` field (the `CustomizationSpec`) is
+  a legitimate top-level property here — not a `/rest`-style envelope, which
+  the modern `/api` surface rejects (see the request-body envelope note
+  under Control flow).
+
+  **GOSC secret hygiene (`#1503`) — the load-bearing property.** A
+  customization spec can carry Windows admin passwords, sysprep product
+  keys, and domain-join credentials
+  (`windows_admin_password` / `windows_product_key` /
+  `windows_domain_admin_password`). Those values are consumed into the
+  sysprep request body — the real API call that provisions the guest — but
+  must never serialize onto a reviewer / preview / broadcast / audit
+  surface. Three independent surfaces enforce this:
+  1. **`proposed_effect` (approval park).** The bespoke park-time preview
+     builder (`_write_preview._guest_customization_spec_create_preview`)
+     reads ONLY identity keys and echoes
+     `{spec_name, os_type, hostname_scheme, nic_count, static_ip_summary}`
+     — it never touches the credential params, so no secret can reach the
+     durable `ApprovalRequest.proposed_effect` row by construction.
+  2. **Broadcast frame.** `guest.customization_spec.create` is pinned into
+     `broadcast/events._CREDENTIAL_WRITE_OPS`, so `redact_payload` collapses
+     its params to aggregate-only on the feed. The pin is required (not just
+     nice-to-have): the `password`-suffixed fields trip the runtime
+     key-name scrub, but `product_key` does not (`key` is neither an
+     anywhere- nor final-position secret token), and the classifier-coverage
+     CI gate (`test_broadcast_classifier_coverage`) fails a secret-bearing
+     schema that is not pinned to a credential class.
+  3. **Audit row.** The durable `audit_log` payload stores only a
+     `params_hash`, never the raw params — safe by construction.
+
+  `vm.customize` carries only a spec-name reference (no secret), so it is
+  not pinned; its preview live-reads the VM's power state for the reviewer.
+  The end-to-end proof across all three surfaces lives in
+  `test_connectors_vmware_rest_composites_write_e2e`
+  (`test_gosc_create_secret_hygiene_across_all_surfaces`).
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 18
-  `_CompositeSpec` rows (5 read + 13 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 24
+  `_CompositeSpec` rows (5 read + 19 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -131,7 +196,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
   therefore works on a **fresh boot with zero catalog ingest** — the same
   direct-session property the 5 read composites (`#2253`) and, since
-  `#2256`, the 9 write composites now share. The only `dispatch_child`
+  `#2256`, the 14 write composites now share. The only `dispatch_child`
   leg left on the whole vmware surface is the `host.evacuate` →
   `vm.migrate` composite→composite recursion (a registrar-guaranteed
   `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
@@ -246,9 +311,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 14 `vmware.composite.*` rows with
+   queued registrar and upserts: the 23 `vmware.composite.*` rows with
    `source_kind="composite"` (5 reads with `safety_level="safe"` +
-   `requires_approval=False`; 9 writes with `safety_level="dangerous"`
+   `requires_approval=False`; 19 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -344,7 +409,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 18 composites (5 reads + 13 writes) land as `source_kind="composite"`
+The 24 composites (5 reads + 19 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -392,9 +457,9 @@ calls another composite via `dispatch_child`. Two-level nesting:
 host.evacuate                                            # depth 0 (top-level dispatch)
   ├─ GET:/vcenter/vm                                     # depth 0 (direct session read)
   └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
-       ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 1 (direct session read)
+       ├─ vim RetrievePropertiesEx (drsRecommendation)  # depth 1 (direct vmomi read, #2970)
        └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
-  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 0 (direct session write, gated)
+  └─ vim POST:/HostSystem/{moId}/EnterMaintenanceMode_Task # depth 0 (gated vmomi write + Task poll, #2970)
 ```
 
 `composite_depth_var` (default cap 8) handles the one nesting level
@@ -411,7 +476,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 18 composites are hand-authored aggregators the connector ships as
+The 24 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -426,10 +491,12 @@ failure-coping apparatus is gone (Task #2259): the dispatch-time
 exceptions, and the `composite_l2_missing` / `composite_l2_disabled`
 structured errors are deleted, not guarded. The `_SUB_OPS_*` tuples in
 `_read.py` / `_write.py` are retained purely as the canonical
-sub-op-path manifest the ingest-reconcile acceptance guard
-(`tests/acceptance/test_portgroup_audit_op_id_reconcile.py` and
-`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`)
-checks against the vCenter spec.
+sub-op-path manifest the spec-reconcile lanes
+(`tests/test_connectors_vmware_rest_composites_read_reconcile.py` — the
+exhaustive read lane, #2986 —
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`,
+and `tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) check
+against the pinned vCenter specs.
 
 The sole remaining safety net is the platform-wide registration-time
 invariant (`operations.composite_invariant`, `#2252`): if any future
@@ -443,6 +510,69 @@ sub-ops resolve to registrar-guaranteed `source_kind='composite'` rows,
 not ingested primitives, and the invariant skips `*.composite.*` sub-ops
 for that reason.
 
+### Request-body envelope: top-level `*Spec`, not `{"spec": {...}}` (#2973)
+
+The write composites build their `/api` request bodies as the vSphere
+Automation `*Spec` **at the top level** of the JSON body —
+`{"placement": {…}}` for relocate, `{"count": …, "cores_per_socket": …}`
+for the CPU PATCH, and so on. `_split_sub_op` substitutes the
+`{vm}` / `{nic}` / `{cdrom}` path variables into the URL and posts every
+remaining key verbatim as the body, so a handler passes the `*Spec` fields
+alongside the path vars (e.g. `{"vm": vm_moid, "placement": {"host": …}}`).
+
+This is a behavioural contract of the modern `/api` surface, not a style
+choice. The legacy `/rest` surface wrapped each operation's structured
+input under a `{"spec": {...}}` envelope; the `/api` surface flattened it
+and **rejects the envelope** with `400 INVALID_ARGUMENT`
+(`vapi.invoke.invalid.input`). `vmware.composite.vm.migrate`'s first
+real-world dispatch hit exactly this (#2973) — the relocate body still
+carried the `/rest` `{"spec": {"placement": …}}` shape — which also wedged
+`host.evacuate` (it recurses into `vm.migrate` per VM). The same divergent
+envelope was swept off `vm.create`, the NIC create/repoint bodies, the
+CPU / memory / CD-ROM PATCH bodies, and the two guest-customization bodies
+(`guest.customization_spec.create` / `vm.customize`). The pinned
+`vcenter.yaml` declares each of these request bodies as the `*Spec`
+directly (`VM.RelocateSpec` / `VM.CreateSpec` / `Cpu.UpdateSpec` / …), with
+no `spec` property.
+
+Two `spec` shapes are **kept** and must not be confused with the legacy
+envelope:
+
+- The **vmomi (VI-JSON) write bodies** (`ReconfigVM_Task`, `CloneVM_Task`,
+  `ReconfigureDvs_Task`, `ReconfigureComputeResource_Task`) dispatch through
+  `_write_vmomi_sub_op` onto the `/sdk/vim25` mount, where the vim request
+  types genuinely take a `spec` parameter — a real field, not the `/rest`
+  envelope.
+- The **GOSC `CreateSpec`'s own `spec` field** (the inline
+  `CustomizationSpec`): the flattened create body is
+  `{name, description, spec: <CustomizationSpec>}` at the top level, so the
+  only `spec` key is the legitimate `CreateSpec.spec` property, not an outer
+  wrapper.
+
+A body-shape reconcile lane
+(`tests/test_connectors_vmware_rest_composites_write_body_reconcile.py`)
+grounds the flat-body contract against the pinned spec: for every REST write
+sub-op the pinned `vcenter.yaml` serves with a body, the `requestBody` must
+be a flat `*Spec`, never a single-`spec` wrapper. It follows the
+spec-reconcile standard (skips without the shelf, runs where it is wired).
+The byte-for-byte connector-side proof — that the composites emit the flat
+bodies with no envelope — lives in
+`tests/test_connectors_vmware_rest_composites_write.py`, which runs
+everywhere. The path-only reconcile lanes assert *which* endpoints exist;
+this pair asserts *what shape* their bodies take.
+
+**Not-yet-swept (adjacent findings).** The same envelope still rides three
+non-VM write bodies that the pinned spec likewise declares flat, left for a
+follow-up because each carries a wrinkle beyond the mechanical flatten:
+`vm.clone`'s library-item deploy (`DeploySpec`), the content-library `find`
+reads (`FindSpec`, a distinct `_post_json` helper, not `_write_sub_op`), and
+`cluster.patch`'s vLCM software apply (`ApplySpec` — an all-optional spec
+whose empty body raises the `json=body or None` "send `{}` vs no body"
+question). Separately, the create/memory bodies still use vSphere's
+documented mixed-case field names (`guest_OS`, `size_MiB`) while the pinned
+spec keys them lowercase (`guest_os`, `size_mib`); that field-casing gap is
+independent of the envelope and untouched here.
+
 ### Write-composite partial-failure conventions
 
 Write composites return a structured `{"status": ...}` envelope so
@@ -453,24 +583,86 @@ enum) are:
 | Composite | Status values |
 | --- | --- |
 | `vm.create` | `created`, `rolled_back` |
-| `vm.clone` | `completed`, `pending`, `timeout` |
-| `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found` |
+| `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
+| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error` with a structured message, and the name-resolution refusals are pre-deploy — so a placement/mapping error is a structured status, never a raw vendor fault) |
+| `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
-| `host.evacuate` | `evacuated`, `partial`, `aborted` |
-| `host.detach_from_vds` | `detached`, `incomplete` |
-| `cluster.patch` | `completed`, `stopped` |
+| `host.evacuate` | `evacuated`, `partial`, `aborted` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; fault/timeout raises `connector_error`, #2970) |
+| `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
+| `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
+| `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
+| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
+| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
-revert.
+revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
+that lands followed by a failing memory PATCH is reported (CPU stays
+applied), not rolled back.
+
+### Hardware write composites (`vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`, #2891)
+
+The post-clone reconfigure trio are pure vSphere Automation REST
+writes (no `pyvmomi`). A freshly-cloned VM is stuck at the template's
+sizing, on the template's portgroup, and with the template's CD-ROM
+backing — these three composites rightsize it, move its NIC, and clear
+a host-pinning ISO:
+
+- **`vm.resize`** reads current sizing + hot-add flags via
+  `GET:/vcenter/vm/{vm}` (one read serves `name`, `power_state`,
+  `cpu.{count,cores_per_socket,hot_add_enabled}`,
+  `memory.{size_MiB,hot_add_enabled}`), then PATCHes
+  `PATCH:/vcenter/vm/{vm}/hardware/cpu` and/or
+  `PATCH:/vcenter/vm/{vm}/hardware/memory`. When the VM is powered on
+  and the requested change cannot be made live — no hot-add for the
+  changed dimension, a decrease, or any `cores_per_socket` change — the
+  handler returns `requires_power_off` **before** issuing the PATCH, so
+  the operator gets a typed status instead of a raw vCenter 400.
+- **`vm.nic.repoint`** reads the NIC's current backing + MAC via
+  `GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, resolves the target
+  distributed portgroup by display name via
+  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`, then PATCHes
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}` with
+  `{backing: {type: DISTRIBUTED_PORTGROUP, network: <moid>}}`. A name
+  that matches zero / many portgroups refuses the repoint
+  (`not_found` / `ambiguous`) with no PATCH issued.
+- **`vm.device.cdrom`** reads the device's current backing + state via
+  `GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}` (surfacing a host-local
+  ISO path the approver needs to see), then dispatches the `action`:
+  `remove` (`DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}`), `update`
+  (`PATCH` the backing — requires a `backing` param, e.g.
+  `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), or `disconnect`
+  (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+
+All three register a live-read **from->to** preview builder in
+`_write_preview.py`, so the parked approval row names the current state
+alongside the requested change (the delta is the decision the four-eyes
+reviewer signs off). Update PATCH bodies send the `*Spec`'s fields at the
+**top level** of the request body — the modern `/api` surface takes the
+`Cpu.UpdateSpec` / `Ethernet.UpdateSpec` / `Cdrom.UpdateSpec` directly, not
+the legacy `/rest` `{"spec": {...}}` envelope (#2973; see the request-body
+envelope note under Control flow).
+
+**Portgroup resolution — the #1602 lesson.** There is no dedicated
+`distributed-portgroup` list resource in the REST Automation API;
+distributed portgroups are enumerated via the generic
+`GET:/vcenter/network` resource filtered to `DISTRIBUTED_PORTGROUP`
+(each summary row is `{network (id), name, type}`). The
+`_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"`
+constant `_write.py` carried (declared by `#509`, singular spelling,
+absent from the pinned spec) was corrected to `_OP_LIST_NETWORK =
+"GET:/vcenter/network"` as part of `#2891` — the same shape
+`_read.py`'s `network.portgroup.audit` composite already used. The
+`host.detach_from_vds` composite's pre-flight portgroup read moved to
+the corrected path too.
 
 ### Mutating VI-JSON write substrate (`vm.disk.grow`, #2893)
 
@@ -543,8 +735,21 @@ lives:
 
 | Op | Source | Path | When |
 | --- | --- | --- | --- |
-| `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items?action=deploy`, poll `GET:/cis/tasks/{task}` | the golden image is published to a content library |
+| `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy` (synchronous — the 200 body is the new VM id; #2970) | the golden image is published to a content library |
 | `vm.clone_from_template` | a **folder VM template** (a marked-as-template VM in a VM folder) | vim `POST:/VirtualMachine/{moId}/CloneVM_Task`, poll via `poll_vim_task` | the golden image is a plain marked-as-template VM (govc/terraform's `CloneVM_Task` path) |
+
+A third content-library deploy path, `vm.deploy_from_library` (#2909,
+retiring `govc library.deploy`), covers a different **item type**: an
+**OVF/OVA** library item (content-library item `type=ovf`) rather than a
+VM-template item. It deploys via the synchronous REST
+`POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy` whose
+200 body is a `DeploymentResult` (not a bare VM id), so it can surface
+OVF-descriptor / network-mapping / placement validation failures as a
+structured `deploy_failed` / `deploy_error` status. It also resolves the
+item by name (`POST:/content/library/item?action=find`, filtered to
+`type=ovf`, optionally scoped by a library name resolved via
+`POST:/content/library?action=find`), refusing ambiguity before any
+deploy. See the OVF/OVA deploy section below.
 
 `vm.clone`'s content-library deploy path **cannot** clone a folder
 template — a marked-as-template VM has no content-library item to deploy
@@ -592,6 +797,55 @@ radius without leaking credential material. New vim sub-op paths
 (`CloneVM_Task`, `RetrievePropertiesEx`, `GetCustomizationSpec`) are
 declared in `_VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE` and reconciled against
 the pinned `vi-json.yaml`.
+
+### OVF/OVA content-library deploy (`vm.deploy_from_library`, #2909)
+
+Retires `govc library.deploy` for OVF/OVA appliances (the HoloRouter OVA
+and friends). Pure vSphere Automation REST — no `pyvmomi`. All four
+sub-ops are `vcenter.yaml`-served paths, so the composite reconciles
+through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep (not a
+`_VIM_SUB_OPS_*` lane).
+
+**Item resolution.** `library_item` (an id) is a passthrough. Otherwise
+`library_item_name` is resolved to an id via
+`POST:/content/library/item?action=find` (a *read* — returns a bare id
+array — issued un-gated through the `_find_content_library_ids` helper,
+which rides `_post_json` since find is POST-shaped), filtered to
+`type=ovf` so a colliding non-OVF item name never matches. An optional
+`library_name` first resolves to a library id via
+`POST:/content/library?action=find` to scope the item lookup. Zero
+matches → `item_not_found` / `library_not_found`; more than one →
+`ambiguous_item` / `ambiguous_library` with the candidate ids — every
+refusal is **pre-deploy**, so the operator re-dispatches by explicit id.
+
+**Deploy.** The body is `{deployment_spec, target}` (two top-level params
+— not the single-`spec` wrapper the `find` reads and `CreateSpec` writes
+use). `target.resource_pool_id` is the one **required** placement
+(`host_id` / `folder_id` refine it); `deployment_spec` carries
+`accept_all_eula` (defaults true), `name`, the OVF-network-key →
+portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
+not an array), `storage_provisioning` / `storage_profile_id` /
+`default_datastore_id`, and any `ovf_properties` folded into a single
+`PropertyParams` entry in `additional_parameters`. Note the pinned 9.0
+spec keys the EULA field `accept_all_eula` (lowercase) — divergent from
+`govmomi`'s legacy `accept_all_EULA`; the connector follows the pinned
+spec it ingests.
+
+**Result mapping — structured statuses, never a raw vendor error.** The
+deploy is synchronous, but unlike `vm.clone` its 200 body is a
+`DeploymentResult` structure. `succeeded=true` → `deployed` with the VM
+moid from `resource_id.id` (+ `resource_type`); `succeeded=false` →
+`deploy_failed` with the report's per-issue messages
+(`error.errors/warnings/information`, each projected to
+`{category, severity, message}`) — this is how a bad network-mapping key
+or OVF-descriptor validation surfaces. An HTTP 400/404 (invalid args, or
+a placement moid that does not exist) is **caught** and mapped to
+`deploy_error` with a parsed message rather than re-raised — so a
+placement/mapping error is always a structured status. With `power_on`,
+a best-effort `POST:/vcenter/vm/{vm}/power?action=start` follows a
+successful deploy; a power-on fault leaves `status='deployed'` with
+`powered_on=false` and a `power_on` warning issue (a deployed appliance
+is never rolled back over a power-on hiccup).
 
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
@@ -716,7 +970,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 13 write composites ship `requires_approval=True`, so a human/agent
+All 19 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -727,23 +981,34 @@ approver could not tell a one-VM power cycle from a 1000-VM outage.
 composite on the generic per-op hook (`register_preview_builder`,
 `operations/_preview.py`, #1437). The builder result lands under
 `proposed_effect["preview"]`, wrapped with the op's sensitivity
-`op_class` (see [`approvals.md`](approvals.md)). Two depths:
+`op_class` (see [`approvals.md`](approvals.md)). Three depths:
 
 | Composite | Preview | Depth |
 | --- | --- | --- |
 | `vm.power.bulk` | `{action, filter, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
-| `cluster.patch` | `{cluster, patch_method, resolved, total_resolved}` | live read (`GET:/vcenter/cluster/{cluster}/host`) |
+| `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
+| `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
+| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
+| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, sizing, networks, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
+| `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder, new_folder_name}` echo | param echo, no I/O |
 
-The live-read previews resolve the same entity set the approved
+The `#2891` hardware previews are a live-read **from->to diff**: the
+delta between the VM's current sizing / NIC backing / CD-ROM backing
+and the requested change is exactly what the approver signs off, so
+the builder reads current state via the shared
+`_write._read_vm_info` / `_write._read_ethernet_nic` /
+`_write._read_cdrom` / `_write._resolve_distributed_portgroup` helpers
+(the same ones the handlers use) and pairs it with the request. The
+fan-out live-read previews resolve the same entity set the approved
 dispatch would act on, through the **same shared helpers** the handlers
 use at dispatch time (`_write._resolve_vm_list` /
 `_write._resolve_cluster_hosts`) — one resolution code path, two call
@@ -868,8 +1133,10 @@ they never park.
   (#509) ships 8 write composites, #2301 adds a 9th (single-VM
   `vm.power`, incl. Tools soft shutdown), #2893 adds a 10th (the
   mutating VI-JSON `vm.disk.grow`), #2894 an 11th (the folder-template
-  `vm.clone_from_template`), and #2895 a 12th + 13th (the vim cluster /
-  inventory writes `cluster.drs_rule.create` + `folder.create`) — 18
+  `vm.clone_from_template`), #2895 a 12th + 13th (the vim cluster /
+  inventory writes `cluster.drs_rule.create` + `folder.create`), and
+  #2891 a 14th / 15th / 16th (the post-clone hardware reconfigure trio
+  `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`) — 21
   composites today. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
@@ -898,26 +1165,79 @@ they never park.
   there is **no** dedicated distributed-portgroup list resource at all —
   distributed portgroups are enumerated via the generic
   `GET:/vcenter/network` resource filtered to the
-  `DISTRIBUTED_PORTGROUP` type. Both corrected sub-ops live in the REST
-  Automation `vcenter.yaml` (this is **not** a VI-JSON MoRef family
-  swap). The generic `Network` summary carries no parent-DVS field, so
-  the per-portgroup `dvs`/`dvs_name` enrichment is best-effort and
-  `filter_dvs` scopes only the DVS-name index, not the portgroup set.
+  `DISTRIBUTED_PORTGROUP` type. **#2970 update:** the first run against
+  the *canonical pinned* `vcenter.yaml` showed the plural
+  `distributed-switches` path exists only under the NSX-scoped
+  `/vcenter/namespace-management/` tree — there is **no** generic DVS
+  list resource in the pinned REST spec at all — so the audit's DVS-list
+  step was dropped entirely. `dvs_name` is now always `null` (the
+  generic `Network` summary carries no parent-DVS field to join on, so
+  the name index was never consulted with a hit anyway), `dvs` stays
+  best-effort from the portgroup row itself, and `filter_dvs` is
+  accepted but inert.
   A build-time guard
   (`tests/acceptance/test_portgroup_audit_op_id_reconcile.py`) parses
   the pinned `vcenter.yaml` and asserts every audit sub-op_id is emitted
-  by the ingest, so a future drift goes red in CI.
-- **`host.detach_from_vds` write composite carries the same singular
-  `distributed-portgroup` defect (out of scope for #1602)** —
-  `_write.py`'s `_OP_LIST_PORTGROUPS =
-  "GET:/vcenter/network/distributed-portgroup"` has the identical
-  unresolvable spelling. #1602 is scoped to the read
-  `network.portgroup.audit` composite only; the write-side fix plus a
-  reconcile guard over the 9 write composites' `_SUB_OPS_*` against the
-  real pinned spec (the existing
-  `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
-  synthesises its fixture *from* the constants, so it cannot catch a
-  wrong key) is a follow-up under the #1529 cleanup.
+  by the ingest. The vendor-licensed spec-shelf is not provisioned in
+  public-repo CI, so that guard **skips** there (the #1602 convention);
+  it runs wherever the spec-shelf is wired — an operator deploy or a
+  spec-shelf-backed run — which is where a future drift surfaces.
+- **`host.detach_from_vds` write-side portgroup fix: done (#2891);
+  real-spec reconcile guard: done (#2944)** — `_write.py` once carried
+  `_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"`
+  (singular, absent from the pinned spec — the same class of defect
+  #1602 fixed on the read side). #2891 corrected it to `_OP_LIST_NETWORK
+  = "GET:/vcenter/network"`, so `_SUB_OPS_HOST_DETACH_FROM_VDS` now
+  dispatches the resolvable path (see "Portgroup resolution — the #1602
+  lesson" above). #2944 then closed the guard gap: the always-on
+  reconcile in `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
+  synthesises its fixture *from* the constants (proves op_id **shape**,
+  cannot catch a wrong key), so #2944 added an env-gated assertion that
+  parses the real pinned `vcenter.yaml` and asserts every `_SUB_OPS_*`
+  REST path actually **exists** — skipping in CI where the spec-shelf is
+  unprovisioned (the #1602 convention), running wherever it is wired.
+- **#2970 real-spec repoint** — running the #2944 guard against the real
+  shelf (the #2949 verification) found 11 op_ids the pinned
+  `vcenter.yaml` does not serve. The composites were repointed:
+  `vm.clone`'s deploy moved to the per-item
+  `POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy`
+  (synchronous — the cis-task poll went away), cluster-host listing to
+  `GET:/vcenter/host` + `clusters` filter, `vm.create`'s NIC attach to
+  `POST:/vcenter/vm/{vm}/hardware/ethernet`, `host.detach_from_vds`'s
+  NIC migration to per-adapter
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, and `cluster.patch`'s
+  patch step to the vLCM
+  `POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true`.
+  Surfaces with **no** REST path in the pinned spec switched to vim
+  (`_VIM_SUB_OPS_*`, reconciled against `vi-json.yaml`): snapshot
+  list/revert (`VirtualMachine.snapshot` +
+  `VirtualMachineSnapshot.RevertToSnapshot_Task`), host maintenance
+  (`HostSystem.EnterMaintenanceMode_Task` / `ExitMaintenanceMode_Task`),
+  DRS recommendations (`ClusterComputeResource.drsRecommendation`), and
+  DVS host removal (`DistributedVirtualSwitch.ReconfigureDvs_Task` with
+  the `config.configVersion` read). The audit's DVS listing was dropped
+  (degradation note above).
+- **#2986 read-composite residual + exhaustive read lane** — #2970's
+  sweep covered the write composites; the read side's
+  `_OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"` was
+  recorded as an adjacent finding (unserved by the pinned
+  `vcenter.yaml`, which has **no** cluster DRS REST resource — the
+  `/vcenter/cluster` family is list/get/evc-mode only). #2986 switched
+  the `cluster.drs_recommendations` DRS leg to vim: one
+  `RetrievePropertiesEx` on the `propertyCollector` singleton reading
+  `ClusterComputeResource.configurationEx.drsConfig`
+  (`ClusterDrsConfigInfo`) and — when
+  `include_recommendations_history=True` — `drsRecommendation` in the
+  same call (the surface `vm.migrate`'s DRS lookup already uses; the
+  response envelope keys are unchanged, `drs` now carries the vim
+  config object). The same task added the exhaustive read lane
+  (`tests/test_connectors_vmware_rest_composites_read_reconcile.py`,
+  #2980 harness): every `_OP_*` constant in `_read.py` is introspected
+  live, cross-checked against the `_SUB_OPS_*` manifests, and asserted
+  against the spec serving its dispatch leg — GET legs vs
+  `vcenter-9.0/vcenter.yaml`, vmomi POST legs vs
+  `vcenter-9.0/vi-json.yaml` — skipping uniformly without the shelf,
+  running for real in CI.
 
 ## References
 

@@ -180,7 +180,10 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     ``k8s.service.list`` / ``k8s.ingress.list``) + ``CONFIG_OPS`` (T4
     config: ``k8s.configmap.list`` keys-only / ``k8s.configmap.info``
     full data) + ``EVENT_OPS`` (T4 observability: ``k8s.event.list``)
-    + ``k8s.logs`` (T5).
+    + ``STORAGE_OPS`` (#2830 storage: ``k8s.storageclass.list`` /
+    ``k8s.persistentvolume.list`` / ``k8s.persistentvolumeclaim.list``)
+    + ``CUSTOM_RESOURCE_OPS`` (#2830 generic CR reads: ``k8s.crd.list``
+    / ``k8s.cr.list`` / ``k8s.cr.info``) + ``k8s.logs`` (T5).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -197,6 +200,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     """
     from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+    from meho_backplane.connectors.kubernetes.ops_customresource import CUSTOM_RESOURCE_OPS
     from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
     from meho_backplane.connectors.kubernetes.ops_logs import (
         K8S_LOGS_LLM_INSTRUCTIONS,
@@ -204,6 +208,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         K8S_LOGS_RESPONSE_SCHEMA,
     )
     from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
+    from meho_backplane.connectors.kubernetes.ops_storage import STORAGE_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
     from meho_backplane.connectors.kubernetes.ops_write_meta import (
         WRITE_CAUTION_OPS,
@@ -248,6 +253,8 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         *NETWORK_OPS,
         *CONFIG_OPS,
         *EVENT_OPS,
+        *STORAGE_OPS,
+        *CUSTOM_RESOURCE_OPS,
         logs_op,
         _exec_op(),
         *WRITE_CAUTION_OPS,

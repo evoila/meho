@@ -7,10 +7,10 @@ Two SDDC Manager acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.sddc_manager.SddcManagerConnector` instance
 with a stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 4 ingested browse-breadth
+:class:`~meho_backplane.db.models.Target` row, the 3 ingested browse-breadth
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
 :data:`_SDDC_SEED_OPS`, and a :mod:`respx`-mocked SDDC Manager REST surface
-answering each of the 4 read ops.
+answering each of the 3 read ops.
 
 SDDC Manager is token-only: the connector establishes a session at
 ``POST /v1/tokens`` (the ``session_login_token`` scheme, #2290) and sends the
@@ -25,7 +25,7 @@ Why a minimal direct-insert path (not full G0.7 canary ingest)
 The full VCF API spec ingest needs the SDDC Manager 9.0 OpenAPI spec file
 reachable on the CI runner. Until the spec-shelf is wired to the
 meho-runners pool, the dispatch leg is exercised against a minimal
-direct-insert path that seeds the 4 curated endpoint_descriptor rows (plus
+direct-insert path that seeds the 3 curated endpoint_descriptor rows (plus
 the hosts breadth row the JSONFlux test dispatches) by
 hand. Same pattern :mod:`tests.acceptance._nsx_canary_fixtures` established
 for NSX (which also has no public CI simulator).
@@ -288,15 +288,18 @@ class IngestedSddcCanary:
 
 
 #: Ingested browse-breadth seed data for the SDDC Manager dispatch canary —
-#: the four ``source_kind="ingested"`` read ops (and their four groups)
-#: declined from typed conversion on #2306 but kept browsable. Relocated here
-#: from the retired ``sddc_manager.core_ops`` curation apparatus (#2358): this
-#: is test-only fixture material describing the ``EndpointDescriptor`` rows the
-#: dispatch tests seed and mock. ``(group_key, name, when_to_use)``.
+#: the three ``source_kind="ingested"`` read ops (and their three groups) that
+#: have no typed equivalent (release, domain detail, bundles), kept browsable.
+#: Network pools left this ingested-only set when #2837 promoted them to typed
+#: ops (hosts + domain list did the same on #2306); the ingested
+#: ``GET:/v1/network-pools`` row still exists as browse breadth but is no longer
+#: seeded here. Relocated here from the retired ``sddc_manager.core_ops``
+#: curation apparatus (#2358): this is test-only fixture material describing the
+#: ``EndpointDescriptor`` rows the dispatch tests seed and mock.
+#: ``(group_key, name, when_to_use)``.
 _SDDC_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
     ("sddc-releases", "SDDC Manager (release)", "Appliance release / BOM version info."),
     ("sddc-domains", "VCF Domains", "Management + workload domain inventory."),
-    ("sddc-network-pools", "VCF Network Pools", "Network pool inventory."),
     ("sddc-bundles", "VCF LCM Bundles", "Lifecycle-manager upgrade bundles."),
 )
 
@@ -304,7 +307,6 @@ _SDDC_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
 _SDDC_SEED_OPS: tuple[tuple[str, str], ...] = (
     ("GET:/v1/releases/system", "sddc-releases"),
     ("GET:/v1/domains/{id}", "sddc-domains"),
-    ("GET:/v1/network-pools", "sddc-network-pools"),
     ("GET:/v1/bundles", "sddc-bundles"),
 )
 
@@ -314,7 +316,7 @@ SDDC_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _SDDC_SEE
 
 
 async def _insert_sddc_descriptors(*, enabled: bool = True) -> None:
-    """Seed the 4 ingested SDDC Manager browse-breadth ops + their groups.
+    """Seed the 3 ingested SDDC Manager browse-breadth ops + their groups.
 
     One :class:`OperationGroup` per entry in :data:`_SDDC_SEED_GROUPS`,
     one :class:`EndpointDescriptor` per entry in :data:`_SDDC_SEED_OPS`
@@ -496,7 +498,7 @@ async def ingested_sddc_canary(
     Setup mirrors :func:`tests.acceptance._nsx_canary_fixtures.ingested_nsx_canary`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 4 curated SDDC Manager core ops (plus the hosts breadth row).
+       rows for the 3 curated SDDC Manager core ops (plus the hosts breadth row).
     2. Seed a :class:`Target` with ``product="sddc"`` and the
        :data:`SDDC_CANARY_FINGERPRINT` so the resolver binds
        :class:`SddcManagerConnector`.

@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 18 composites land before
+``endpoint_descriptor`` upserts for the 24 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -29,11 +29,14 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 13 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
+* 19 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
   #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
-  folder-template ``vm.clone_from_template`` / #2894, and the vim
+  folder-template ``vm.clone_from_template`` / #2894, the vim
   cluster / inventory writes ``cluster.drs_rule.create`` +
-  ``folder.create`` / #2895) -- inherit
+  ``folder.create`` / #2895, the #2891 post-clone hardware
+  reconfigure trio ``vm.resize`` / ``vm.nic.repoint`` /
+  ``vm.device.cdrom``, the two GOSC composites / #2892, and the OVF/OVA
+  content-library deploy ``vm.deploy_from_library`` / #2909) -- inherit
   T4's ``safety_level="dangerous"`` +
   ``requires_approval=True`` defaults.
   They cover every state-mutating workflow Goal #214 names as
@@ -46,7 +49,13 @@ Scope:
   ``host.evacuate`` (first recursive composite),
   ``host.detach_from_vds``, ``cluster.patch``,
   ``cluster.drs_rule.create`` (DRS rule by explicit VM list, no REST
-  path) and ``folder.create`` (synchronous vim ``CreateFolder``).
+  path), ``folder.create`` (synchronous vim ``CreateFolder``), the
+  post-clone hardware reconfigure trio ``vm.resize``,
+  ``vm.nic.repoint``, ``vm.device.cdrom`` (#2891), plus guest OS
+  customization: ``guest.customization_spec.create`` and
+  ``vm.customize`` (GOSC create + apply, secret-hygienic) (#2892), plus
+  ``vm.deploy_from_library`` (OVF/OVA content-library deploy, retiring
+  ``govc library.deploy``) (#2909).
 """
 
 from meho_backplane.connectors.vmware_rest.composites._read import (
@@ -63,15 +72,21 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
+    guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_customize_composite,
+    vm_deploy_from_library_composite,
+    vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
+    vm_nic_repoint_composite,
     vm_power_bulk_composite,
     vm_power_composite,
+    vm_resize_composite,
     vm_snapshot_revert_composite,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
@@ -82,7 +97,7 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
-# Side-effect import: registers the 13 write composites' park-time
+# Side-effect import: registers the 19 write composites' park-time
 # ``proposed_effect`` preview builders (#1608) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
@@ -95,6 +110,7 @@ __all__ = [
     "datastore_usage_composite",
     "event_tail_composite",
     "folder_create_composite",
+    "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "network_portgroup_audit_composite",
@@ -103,9 +119,14 @@ __all__ = [
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
+    "vm_customize_composite",
+    "vm_deploy_from_library_composite",
+    "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
+    "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
     "vm_power_composite",
+    "vm_resize_composite",
     "vm_snapshot_revert_composite",
 ]

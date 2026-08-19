@@ -212,8 +212,13 @@ def _seed_target(
     fingerprint: dict[str, Any] | None = None,
     vpn_required: bool = False,
     updated_at: datetime | None = None,
+    deleted_at: datetime | None = None,
 ) -> uuid.UUID:
-    """Insert one ``targets`` row and return its id."""
+    """Insert one ``targets`` row and return its id.
+
+    Pass ``deleted_at`` to seed a soft-deleted tombstone (the state a
+    ``DELETE /api/v1/targets/{name}`` leaves behind).
+    """
     target_id = uuid.uuid4()
     now = updated_at if updated_at is not None else datetime.now(UTC)
 
@@ -239,6 +244,7 @@ def _seed_target(
                     preferred_impl_id=None,
                     created_at=now,
                     updated_at=now,
+                    deleted_at=deleted_at,
                 ),
             )
 
@@ -558,6 +564,56 @@ def test_list_handles_empty_inventory() -> None:
         response = client.get("/ui/connectors")
     assert response.status_code == 200, response.text
     assert "No targets match the current filter." in response.text
+
+
+def test_list_excludes_soft_deleted_targets() -> None:
+    """A soft-deleted target is absent from the console list (#2874).
+
+    The list read filters ``deleted_at IS NULL`` — the same filter the
+    resolver and the ``/api/v1/targets`` route apply — so a tombstone the
+    API surfaces already hide never renders in the console either.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="live-target", product="vmware")
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="deleted-target",
+        product="vmware",
+        deleted_at=datetime.now(UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "live-target" in body
+    assert "deleted-target" not in body
+
+
+def test_list_product_dropdown_excludes_soft_deleted_only_product() -> None:
+    """The product filter omits a product whose only carrier is a tombstone.
+
+    ``_distinct_products`` filters ``deleted_at IS NULL`` too, so a
+    product present solely on a soft-deleted target never appears as a
+    selectable option (#2874).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="live-vmware", product="vmware")
+    _seed_target(
+        tenant_id=_TENANT_A,
+        name="dead-ssh",
+        product="ssh",
+        deleted_at=datetime.now(UTC),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert ">vmware<" in body
+    assert ">ssh<" not in body
 
 
 def test_list_htmx_request_returns_fragment_only() -> None:

@@ -46,7 +46,7 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
    pass derives operation groups with operator-readable `when_to_use`
    hints and per-op group assignments. The path-prefix classifier in
    [`meho_backplane.connectors.hetzner_robot.core_ops.ROBOT_PATH_RULES`](../../backend/src/meho_backplane/connectors/hetzner_robot/core_ops.py)
-   names the 4 groups the curated core spans.
+   names the 3 groups the curated core spans.
 4. **Curate.** The operator drives `apply_robot_core_curation`
    (which uses `ReviewService.edit_group` + `enable_group` +
    `edit_op(llm_instructions=…)`) against the staged connector to land
@@ -167,20 +167,19 @@ entry and short-circuits.
 meho connector review hetzner-rest-2026.04
 ```
 
-Expected: a rendered table of 4–10 groups. Compare against the canonical
-4 groups in
+Expected: a rendered table of 3–10 groups. Compare against the canonical
+3 groups in
 [`ROBOT_CORE_GROUPS`](../../backend/src/meho_backplane/connectors/hetzner_robot/core_ops.py):
 
 | group_key | name | covers |
 |---|---|---|
-| `robot-about` | Hetzner Robot (about) | `GET /query` |
 | `robot-servers` | Hetzner Robot Dedicated Servers | `GET /server`, `GET /server/{server-ip}` |
-| `robot-networking` | Hetzner Robot Networking | `GET /ip`, `/subnet`, `/vswitch`, `/vswitch/{id}`, `/failover`, `/rdns` |
+| `robot-networking` | Hetzner Robot Networking | `GET /ip`, `/subnet`, `/vswitch`, `/vswitch/{vswitch-id}`, `/failover`, `/rdns`, `/firewall/{server-ip}` |
 | `robot-ssh-keys` | Hetzner Robot SSH Keys | `GET /key` |
 
 The LLM may propose additional groups for write paths (`/boot`,
 `/reset`, `/wol`, `/order`). These are expected and stay `staged` —
-the curated read core only enables the 4 groups above.
+the curated read core only enables the 3 groups above.
 
 ### Step 3 — apply the curated read-core
 

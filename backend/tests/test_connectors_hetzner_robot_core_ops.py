@@ -9,7 +9,7 @@ Covers :mod:`meho_backplane.connectors.hetzner_robot.core_ops`:
   path structure. Validates that the most-specific prefix wins and that
   only GET verbs are classified as curated.
 * :func:`apply_robot_core_curation` — the operator-review-time substrate
-  call that flips ``review_status='enabled'`` on the 4 curated groups,
+  call that flips ``review_status='enabled'`` on the 3 curated groups,
   lands ``llm_instructions`` on the 10 curated ops, and explicitly
   disables non-core ops via the audit-log-driven operator-override
   exclusion. The load-bearing assertion is "10 ops dispatchable, every
@@ -85,8 +85,6 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
 @pytest.mark.parametrize(
     "op_id,expected_group",
     [
-        # About
-        ("GET:/query", "robot-about"),
         # Servers
         ("GET:/server", "robot-servers"),
         ("GET:/server/{server-ip}", "robot-servers"),
@@ -94,9 +92,10 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
         ("GET:/ip", "robot-networking"),
         ("GET:/subnet", "robot-networking"),
         ("GET:/vswitch", "robot-networking"),
-        ("GET:/vswitch/{id}", "robot-networking"),
+        ("GET:/vswitch/{vswitch-id}", "robot-networking"),
         ("GET:/failover", "robot-networking"),
         ("GET:/rdns", "robot-networking"),
+        ("GET:/firewall/{server-ip}", "robot-networking"),
         # SSH keys
         ("GET:/key", "robot-ssh-keys"),
         # Non-curated paths → "none"
@@ -119,9 +118,23 @@ def test_classify_robot_op_returns_correct_group(op_id: str, expected_group: str
 
 
 def test_classify_robot_op_vswitch_info_classifies_as_networking() -> None:
-    """GET:/vswitch/{id} classifies as robot-networking, not an artifact of /vswitch prefix."""
-    assert classify_robot_op("GET:/vswitch/{id}") == "robot-networking"
+    """GET:/vswitch/{vswitch-id} classifies as robot-networking, not a /vswitch-prefix artifact."""
+    assert classify_robot_op("GET:/vswitch/{vswitch-id}") == "robot-networking"
     assert classify_robot_op("GET:/vswitch") == "robot-networking"
+
+
+def test_classify_robot_op_firewall_classifies_as_networking() -> None:
+    """GET:/firewall/{server-ip} classifies as robot-networking (#2848 firewall read).
+
+    The ``/firewall`` prefix is anchored (``path == prefix`` or
+    ``path.startswith(prefix + "/")``), so the templated single-server path
+    curates into robot-networking without colliding with the sibling
+    ``/failover`` prefix, and a path that merely shares leading characters
+    (``/firewalls``) is not curated.
+    """
+    assert classify_robot_op("GET:/firewall/{server-ip}") == "robot-networking"
+    assert classify_robot_op("GET:/firewall") == "robot-networking"
+    assert classify_robot_op("GET:/firewalls") == "none"
 
 
 def test_classify_robot_op_all_core_ops_are_classified() -> None:
@@ -176,16 +189,21 @@ def test_robot_core_groups_when_to_use_all_populated() -> None:
 
 
 def test_robot_core_ops_count_is_10() -> None:
-    """ROBOT_CORE_OPS contains exactly 10 ops per the G3.7 DoD."""
+    """ROBOT_CORE_OPS contains exactly 10 ops.
+
+    The 9 G3.7 read ops + the #2848 firewall read; ``GET:/query``
+    (hetzner-robot.about) was removed by #2985 after the spec-reconcile
+    lane proved the Robot Webservice serves no such endpoint.
+    """
     assert len(ROBOT_CORE_OPS) == 10, (
         f"expected 10 ops in ROBOT_CORE_OPS; got {len(ROBOT_CORE_OPS)}"
     )
 
 
-def test_robot_core_groups_count_is_4() -> None:
-    """ROBOT_CORE_GROUPS contains exactly 4 groups."""
-    assert len(ROBOT_CORE_GROUPS) == 4, (
-        f"expected 4 groups in ROBOT_CORE_GROUPS; got {len(ROBOT_CORE_GROUPS)}"
+def test_robot_core_groups_count_is_3() -> None:
+    """ROBOT_CORE_GROUPS contains exactly 3 groups (robot-about removed by #2985)."""
+    assert len(ROBOT_CORE_GROUPS) == 3, (
+        f"expected 3 groups in ROBOT_CORE_GROUPS; got {len(ROBOT_CORE_GROUPS)}"
     )
 
 
@@ -312,7 +330,7 @@ async def _seed_curated_groups_and_ops(
     return group_ids
 
 
-async def test_apply_robot_core_curation_enables_exactly_10_ops() -> None:
+async def test_apply_robot_core_curation_enables_exactly_the_core_ops() -> None:
     """apply_robot_core_curation enables exactly the 10 core ops."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
@@ -401,8 +419,8 @@ async def test_apply_robot_core_curation_sets_llm_instructions_on_all_core_ops()
         )
 
 
-async def test_apply_robot_core_curation_enables_all_4_curated_groups() -> None:
-    """All 4 curated groups land review_status='enabled' after curation."""
+async def test_apply_robot_core_curation_enables_all_curated_groups() -> None:
+    """All 3 curated groups land review_status='enabled' after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)

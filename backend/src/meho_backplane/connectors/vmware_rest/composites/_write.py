@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 13 protocol-driven composite handlers for the
+# code-quality-allow: 19 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
 # handler's body is the documented orchestration workflow from #509's spec
-# (plus the mutating VI-JSON disk-grow from #2893, the folder-template clone
-# from #2894, and the vim cluster / inventory writes — DRS-rule + folder
-# create — from #2895).
+# (plus the single-VM vm.power from #2301, the mutating VI-JSON disk-grow
+# from #2893, the folder-template clone from #2894, the vim cluster /
+# inventory writes — DRS-rule + folder create — from #2895, the #2891
+# hardware writes — vm.resize / vm.nic.repoint / vm.device.cdrom, the
+# GOSC create/apply from #2892, and the OVF/OVA content-library deploy
+# from #2909).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (13 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (19 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -87,13 +90,13 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.vim_task import poll_vim_task
+from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
 from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -103,15 +106,21 @@ __all__ = [
     "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
     "folder_create_composite",
+    "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
+    "vm_customize_composite",
+    "vm_deploy_from_library_composite",
+    "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
+    "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
     "vm_power_composite",
+    "vm_resize_composite",
     "vm_snapshot_revert_composite",
 ]
 
@@ -141,24 +150,77 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 # ``POST:/vcenter/vm/{vm}/power?action=start``; the ``?action=<verb>`` rides on
 # the mounted path verbatim (httpx sends it as the request query string), so no
 # ``action`` body param is ever constructed. Endpoints whose action verb is
-# operator-chosen (power start/stop, maintenance enter/exit) build the op_id
-# per-call via :func:`_power_vm_op_id` / :func:`_host_maintenance_op_id`.
+# operator-chosen (power start/stop) build the op_id per-call via
+# :func:`_power_vm_op_id`.
 _OP_LIST_FOLDERS = "GET:/vcenter/folder"
 _OP_LIST_VMS = "GET:/vcenter/vm"
 _OP_GET_VM = "GET:/vcenter/vm/{vm}"
 _OP_CREATE_VM = "POST:/vcenter/vm"
 _OP_DELETE_VM = "DELETE:/vcenter/vm/{vm}"
-_OP_ATTACH_VM_NIC = "PATCH:/vcenter/vm/{vm}/network"
+# NIC attach on vm.create is the Ethernet adapter *create* resource. The
+# pinned spec serves no ``PATCH:/vcenter/vm/{vm}/network`` (the #2970
+# reconcile finding); attaching a NIC to a network is
+# ``Vcenter.Vm.Hardware.Ethernet_create`` with the network in the
+# ``backing`` spec.
+_OP_CREATE_VM_NIC = "POST:/vcenter/vm/{vm}/hardware/ethernet"
+# Per-VM adapter listing for host.detach_from_vds's NIC repoint fan-out
+# (``Vcenter.Vm.Hardware.Ethernet_list``).
+_OP_LIST_VM_NICS = "GET:/vcenter/vm/{vm}/hardware/ethernet"
 _OP_RELOCATE_VM = "POST:/vcenter/vm/{vm}?action=relocate"
-_OP_LIST_VM_SNAPSHOTS = "GET:/vcenter/vm/{vm}/snapshot"
-_OP_REVERT_VM_SNAPSHOT = "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert"
-_OP_LIST_CLUSTER_HOSTS = "GET:/vcenter/cluster/{cluster}/host"
-_OP_GET_DRS_RECOMMENDATIONS = "GET:/vcenter/cluster/{cluster}/drs/recommendations"
-_OP_DEPLOY_LIBRARY_VM = "POST:/vcenter/vm-template/library-items?action=deploy"
+# Host listing (``Vcenter.Host_list``). The pinned spec serves no
+# per-cluster ``GET:/vcenter/cluster/{cluster}/host`` (#2970); cluster
+# scoping rides the ``Host.FilterSpec.clusters`` query filter instead.
+_OP_LIST_HOSTS = "GET:/vcenter/host"
+# Content-library template deploy. The pinned spec keys the deploy on the
+# template item as a *path* param
+# (``Vcenter.VmTemplate.LibraryItems_deploy``) and the operation is
+# synchronous -- its 200 body is the deployed VM id, NOT a cis task
+# (#2970; there is no ``vmw-task=true`` variant of this path).
+_OP_DEPLOY_LIBRARY_VM = (
+    "POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy"
+)
+# OVF/OVA content-library deploy (``vm.deploy_from_library`` / #2909). The
+# pinned spec keys the deploy on the OVF item as a *path* param
+# (``Vcenter.Ovf.LibraryItem_deploy``); like the VMTX deploy it is
+# synchronous, but its 200 body is a ``DeploymentResult`` structure
+# (``succeeded`` / ``resource_id`` / ``error``) — a deploy that fails OVF /
+# placement / network validation returns ``succeeded=false`` with an error
+# report rather than raising, so the composite surfaces it as a structured
+# status. Name-based item resolution rides the content-library find actions
+# (both served by the pinned ``vcenter.yaml``): items via
+# ``Content.Library.Item_find`` (filtered to ``type=ovf``), the optional
+# scoping library via ``Content.Library_find`` — both return a bare array of
+# id strings and mutate nothing, so they run un-gated like the REST listing
+# reads.
+_OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+_OP_FIND_LIBRARY = "POST:/content/library?action=find"
+_OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
+# Content-library item type discriminator for OVF/OVA templates — the find
+# filter that keeps a colliding non-OVF item name (ISO, other) from matching.
+_OVF_LIBRARY_ITEM_TYPE = "ovf"
+# ``Vcenter.Ovf.OvfParams`` subtype discriminator for injected OVF
+# product-section properties. The pinned 9.0 ``/api`` schema keys the union on
+# ``type`` (the legacy ``/rest`` ``@class`` form is not used on the modern
+# mount); a single ``PropertyParams`` entry carries the operator's
+# ``ovf_properties`` map as ``{id, value}`` rows.
+_OVF_PROPERTY_PARAMS_TYPE = "PropertyParams"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
-_OP_HOST_PATCH = "POST:/vcenter/host/{host}?action=patch"
-_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
-_OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
+# Per-host vLCM remediation (``Esx.Settings.Hosts.Software_apply$Task``).
+# The pinned spec serves no ``POST:/vcenter/host/{host}?action=patch``
+# (#2970); patching a host is the vLCM apply, whose 202 body is the cis
+# task id the composite polls via ``_OP_GET_TASK``.
+_OP_HOST_SOFTWARE_APPLY = "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true"
+# There is NO dedicated ``distributed-portgroup(s)`` list resource in the
+# REST Automation API: distributed portgroups are enumerated via the
+# generic network resource filtered to ``DISTRIBUTED_PORTGROUP`` (the
+# #1602 reconciliation lesson -- the singular ``distributed-portgroup``
+# op_id #509 declared here was absent from the pinned spec). Each summary
+# row is ``{network (id), name, type}``. Mirrors ``_read._OP_LIST_NETWORK``.
+_OP_LIST_NETWORK = "GET:/vcenter/network"
+_NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+# ``Vcenter.Vm.Hardware.Ethernet.BackingSpec.type`` value for a standard
+# portgroup -- the default backing the NIC create / repoint specs target.
+_NIC_BACKING_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
 _OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
@@ -337,6 +399,109 @@ _VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE: tuple[str, ...] = (
 )
 _VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
 
+# vim (VI-JSON) op_ids for the #2970 real-spec repoints. The pinned
+# ``vcenter.yaml`` serves NO REST path for VM snapshots, host maintenance
+# mode, DRS migration recommendations, or DVS host membership -- those
+# surfaces are vim-only in the pinned 9.0 spec (spec-verified), so the
+# affected composite steps ride the same governed vmomi seam the
+# disk-grow / clone / drs_rule writes established (#2893-#2895).
+#
+# * ``RevertToSnapshot_Task`` -- the only revert route; the snapshot
+#   *listing* is a ``RetrievePropertiesEx`` read of the VM's ``snapshot``
+#   property (``VirtualMachineSnapshotInfo.rootSnapshotList``).
+# * ``EnterMaintenanceMode_Task`` / ``ExitMaintenanceMode_Task`` -- the
+#   only maintenance routes. Both request types carry a required int
+#   ``timeout`` (``<= 0`` means no vim-side timeout).
+# * ``ReconfigureDvs_Task`` -- host removal from a DVS is a
+#   ``DVSConfigSpec.host`` member spec with ``operation="remove"``; the
+#   spec's required ``configVersion`` is read off ``config.configVersion``
+#   first (``RetrievePropertiesEx``).
+# * DRS recommendations are the ``ClusterComputeResource.drsRecommendation``
+#   property (``ClusterDrsRecommendation[]`` with the per-VM
+#   ``migrationList``), read via ``RetrievePropertiesEx``. Deprecated
+#   since VI API 2.5 in favour of the generic ``recommendation`` action
+#   list, but still served by the pinned spec and the only shape that
+#   directly carries the vm -> destination-host migration pairs.
+_OP_REVERT_TO_SNAPSHOT_TASK = "POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task"
+_OP_ENTER_MAINTENANCE_TASK = "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
+_OP_EXIT_MAINTENANCE_TASK = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
+_OP_RECONFIGURE_DVS_TASK = "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task"
+
+# vim MO/property names for the #2970 reads (``_HOST_SYSTEM_MO_TYPE`` and
+# ``_CLUSTER_COMPUTE_RESOURCE_MO_TYPE`` above are reused for the MoRefs).
+_DVS_MO_TYPE = "DistributedVirtualSwitch"
+_VM_SNAPSHOT_MO_TYPE = "VirtualMachineSnapshot"
+_PROP_SNAPSHOT = "snapshot"
+_PROP_DRS_RECOMMENDATION = "drsRecommendation"
+_PROP_DVS_CONFIG_VERSION = "config.configVersion"
+
+# Required int ``timeout`` on the maintenance request types; ``0`` defers
+# entirely to the poll's wall-clock bound below.
+_MAINTENANCE_VIM_TIMEOUT: Final[int] = 0
+
+# Wall-clock bounds for the #2970 vim task polls + the cluster.patch cis
+# task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
+# convention.
+_SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS = 600.0
+_MAINTENANCE_TASK_TIMEOUT_SECONDS = 600.0
+_DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS = 600.0
+_HOST_APPLY_TASK_TIMEOUT_SECONDS = 600.0
+
+#: vi-json sub-op manifests for the #2970 repoints (parallel to
+#: ``_VIM_SUB_OPS_VM_DISK_GROW``; named out of the ``_SUB_OPS_*`` namespace
+#: so the vcenter.yaml ingest-reconcile sweep skips them). The pinned
+#: ``vi-json.yaml`` reconcile lane introspects these to assert every
+#: declared vim path exists in the spec.
+_VIM_SUB_OPS_VM_SNAPSHOT_REVERT: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_REVERT_TO_SNAPSHOT_TASK,
+)
+_VIM_SUB_OPS_VM_MIGRATE: tuple[str, ...] = (_OP_RETRIEVE_PROPERTIES,)
+_VIM_SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_ENTER_MAINTENANCE_TASK,
+)
+_VIM_SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_ENTER_MAINTENANCE_TASK,
+    _OP_EXIT_MAINTENANCE_TASK,
+)
+_VIM_SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIGURE_DVS_TASK,
+)
+
+# Hardware write ops (#2891). Post-clone reconfigure of a VM's virtual
+# hardware, straight vSphere Automation REST. CPU/memory update and the
+# ethernet/cdrom device sub-resources send the update spec's fields at the
+# **top level** of the request body -- the modern ``/api`` surface takes the
+# ``*Spec`` directly (``Cpu.UpdateSpec`` / ``Ethernet.UpdateSpec`` / ...),
+# not the legacy ``/rest`` ``{"spec": {...}}`` envelope (#2973); the CD-ROM
+# ``disconnect`` rides an ``?action=`` suffix like the other action
+# endpoints (power / relocate / maintenance).
+_OP_UPDATE_VM_CPU = "PATCH:/vcenter/vm/{vm}/hardware/cpu"
+_OP_UPDATE_VM_MEMORY = "PATCH:/vcenter/vm/{vm}/hardware/memory"
+_OP_GET_VM_NIC = "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
+_OP_UPDATE_VM_NIC = "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
+_OP_GET_VM_CDROM = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_UPDATE_VM_CDROM = "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_DELETE_VM_CDROM = "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+
+# Guest customization (GOSC) sub-ops (#2892). Create a reusable named
+# customization spec, then apply a saved one to a VM. Both are plain
+# vCenter REST -- no vim fallback (the issue's grounded gap table).
+_OP_CREATE_CUSTOMIZATION_SPEC = "POST:/vcenter/guest/customization-specs"
+_OP_SET_VM_CUSTOMIZATION = "PUT:/vcenter/vm/{vm}/guest/customization"
+
+#: Default Microsoft time-zone index for the Windows ``GuiUnattended.time_zone``
+#: when the operator does not pin one. ``GuiUnattended.time_zone`` is a REQUIRED
+#: *integer* index in the pinned schema (``Vcenter.Guest.GuiUnattended``,
+#: vcenter.yaml:126181) -- distinct from the Linux tz-name string -- so a value
+#: is always emitted. ``85`` is GMT; operators override via ``windows_time_zone``
+#: (indices: https://support.microsoft.com/help/973627).
+_DEFAULT_WINDOWS_TIME_ZONE: Final[int] = 85
+
 
 def _power_vm_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/power``.
@@ -365,15 +530,6 @@ def _guest_power_vm_op_id(action: str) -> str:
     return f"POST:/vcenter/vm/{{vm}}/guest/power?action={action}"
 
 
-def _host_maintenance_op_id(action: str) -> str:
-    """Build the per-action canonical op_id for ``PATCH:/vcenter/host/{host}/maintenance``.
-
-    Maintenance enter / exit are two keys under ``?action=enter`` /
-    ``?action=exit``; same reasoning as :func:`_power_vm_op_id`.
-    """
-    return f"PATCH:/vcenter/host/{{host}}/maintenance?action={action}"
-
-
 # Recursive composite sub-op_id (host.evacuate -> vm.migrate). Routed
 # through ``dispatch_child`` (a registrar-guaranteed ``source_kind="composite"``
 # row), not the direct session -- per #2248 the composite->composite recursion
@@ -390,6 +546,13 @@ _COMPOSITE_OP_ID_VM_POWER = "vmware.composite.vm.power"
 _COMPOSITE_OP_ID_HOST_EVACUATE = "vmware.composite.host.evacuate"
 _COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS = "vmware.composite.host.detach_from_vds"
 _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
+_COMPOSITE_OP_ID_VM_RESIZE = "vmware.composite.vm.resize"
+_COMPOSITE_OP_ID_VM_NIC_REPOINT = "vmware.composite.vm.nic.repoint"
+_COMPOSITE_OP_ID_VM_DEVICE_CDROM = "vmware.composite.vm.device.cdrom"
+_COMPOSITE_OP_ID_GUEST_CUSTOMIZATION_SPEC_CREATE = (
+    "vmware.composite.guest.customization_spec.create"
+)
+_COMPOSITE_OP_ID_VM_CUSTOMIZE = "vmware.composite.vm.customize"
 
 # Per-composite sub-op-id tuples. Pre-#2256 these fed the L2 pre-flight
 # check that guarded a missing catalog ingest; the direct-session migration
@@ -422,22 +585,20 @@ _SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_LIST_FOLDERS,
     _OP_CREATE_VM,
     _OP_DELETE_VM,
-    _OP_ATTACH_VM_NIC,
+    _OP_CREATE_VM_NIC,
     _power_vm_op_id("start"),
 )
 _SUB_OPS_VM_CLONE: tuple[str, ...] = (
     _OP_GET_VM,
     _OP_DEPLOY_LIBRARY_VM,
-    _OP_GET_TASK,
 )
-_SUB_OPS_VM_SNAPSHOT_REVERT: tuple[str, ...] = (
-    _OP_LIST_VM_SNAPSHOTS,
-    _OP_REVERT_VM_SNAPSHOT,
+_SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
+    _OP_FIND_LIBRARY,
+    _OP_FIND_LIBRARY_ITEM,
+    _OP_DEPLOY_OVF_LIBRARY_ITEM,
+    _power_vm_op_id("start"),
 )
-_SUB_OPS_VM_MIGRATE: tuple[str, ...] = (
-    _OP_GET_DRS_RECOMMENDATIONS,
-    _OP_RELOCATE_VM,
-)
+_SUB_OPS_VM_MIGRATE: tuple[str, ...] = (_OP_RELOCATE_VM,)
 _SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
     _OP_LIST_VMS,
     *(_power_vm_op_id(action) for action in _POWER_ACTIONS),
@@ -446,19 +607,39 @@ _SUB_OPS_VM_POWER: tuple[str, ...] = tuple(dict.fromkeys(_SINGLE_POWER_VERB_OP_I
 _SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_LIST_VMS,
     _OP_COMPOSITE_VM_MIGRATE,
-    _host_maintenance_op_id("enter"),
 )
 _SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
-    _OP_LIST_PORTGROUPS,
+    _OP_LIST_NETWORK,
     _OP_LIST_VMS,
-    _OP_ATTACH_VM_NIC,
-    _OP_REMOVE_DVS_HOST,
+    _OP_LIST_VM_NICS,
+    _OP_UPDATE_VM_NIC,
 )
 _SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
-    _OP_LIST_CLUSTER_HOSTS,
-    _host_maintenance_op_id("enter"),
-    _host_maintenance_op_id("exit"),
-    _OP_HOST_PATCH,
+    _OP_LIST_HOSTS,
+    _OP_HOST_SOFTWARE_APPLY,
+    _OP_GET_TASK,
+)
+_SUB_OPS_VM_RESIZE: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_UPDATE_VM_CPU,
+    _OP_UPDATE_VM_MEMORY,
+)
+_SUB_OPS_VM_NIC_REPOINT: tuple[str, ...] = (
+    _OP_GET_VM_NIC,
+    _OP_LIST_NETWORK,
+    _OP_UPDATE_VM_NIC,
+)
+_SUB_OPS_VM_DEVICE_CDROM: tuple[str, ...] = (
+    _OP_GET_VM_CDROM,
+    _OP_UPDATE_VM_CDROM,
+    _OP_DELETE_VM_CDROM,
+    _OP_DISCONNECT_VM_CDROM,
+)
+_SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE: tuple[str, ...] = (_OP_CREATE_CUSTOMIZATION_SPEC,)
+_SUB_OPS_VM_CUSTOMIZE: tuple[str, ...] = (
+    _OP_LIST_VMS,
+    _OP_SET_VM_CUSTOMIZATION,
+    _power_vm_op_id("start"),
 )
 
 
@@ -683,9 +864,13 @@ async def _resolve_cluster_hosts(
     operator: Operator,
     cluster_moid: str,
 ) -> list[dict[str, Any]]:
-    """Resolve a cluster's host listing rows via ``GET:/vcenter/cluster/{cluster}/host``.
+    """Resolve a cluster's host listing rows via ``GET:/vcenter/host``.
 
-    Read-only single GET directly on the connector session. Shared between
+    Read-only single GET directly on the connector session, scoped to the
+    cluster via the ``Host.FilterSpec.clusters`` query filter -- the pinned
+    spec serves no per-cluster ``GET:/vcenter/cluster/{cluster}/host``
+    resource (#2970). Each ``Vcenter.Host.Summary`` row keeps the ``host``
+    moid key the callers extract. Shared between
     :func:`cluster_patch_composite` (dispatch time) and its park-time preview
     builder in :mod:`._write_preview` (#1608) — same rationale as
     :func:`_resolve_vm_list`.
@@ -694,13 +879,11 @@ async def _resolve_cluster_hosts(
     :exc:`httpx.HTTPError` on a transport fault. Non-dict rows are dropped.
     """
     listing = await _read_sub_op(
-        connector, target, operator, _OP_LIST_CLUSTER_HOSTS, {"cluster": cluster_moid}
+        connector, target, operator, _OP_LIST_HOSTS, {"filter.clusters": [cluster_moid]}
     )
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
-        raise RuntimeError(
-            f"expected list from {_OP_LIST_CLUSTER_HOSTS!r}, got {type(entries).__name__}"
-        )
+        raise RuntimeError(f"expected list from {_OP_LIST_HOSTS!r}, got {type(entries).__name__}")
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
@@ -787,13 +970,11 @@ async def vm_create_composite(
     steps.append("folder_lookup")
 
     create_spec = {
-        "spec": {
-            "name": name,
-            "guest_OS": guest_os,
-            "placement": {"folder": folder_moid},
-            "cpu": {"count": cpu_count},
-            "memory": {"size_MiB": memory_mib},
-        },
+        "name": name,
+        "guest_OS": guest_os,
+        "placement": {"folder": folder_moid},
+        "cpu": {"count": cpu_count},
+        "memory": {"size_MiB": memory_mib},
     }
     try:
         gate, create_payload = await _write_sub_op(
@@ -814,9 +995,18 @@ async def vm_create_composite(
     steps.append("create")
 
     for nic in nics:
+        # ``Ethernet.CreateSpec``: the network rides the ``backing`` spec
+        # (type + network id); a bare top-level ``network`` key exists on no
+        # NIC resource in the pinned spec (#2970).
+        nic_spec = {
+            "backing": {
+                "type": nic.get("backing_type", _NIC_BACKING_STANDARD_PORTGROUP),
+                "network": nic.get("network"),
+            }
+        }
         try:
             gate, _ = await _write_sub_op(
-                connector, target, operator, _OP_ATTACH_VM_NIC, {"vm": vm_id, "spec": nic}
+                connector, target, operator, _OP_CREATE_VM_NIC, {"vm": vm_id, **nic_spec}
             )
         except httpx.HTTPError as exc:
             await _rollback_created_vm(
@@ -864,9 +1054,14 @@ async def vm_create_composite(
 # ===========================================================================
 
 
-def _extract_clone_task_id(deploy_payload: Any) -> str | None:
-    """Pull the task id out of a deploy response in either canonical shape."""
-    unwrapped = _unwrap_value(deploy_payload)
+def _extract_cis_task_id(payload: Any) -> str | None:
+    """Pull a cis task id out of a ``vmw-task=true`` 202 response payload.
+
+    The pinned spec types the 202 body as the bare task-id string; the
+    legacy ``/rest`` mount wraps it (``{"value": ...}``) and some builds
+    key it ``{"task": ...}`` -- all three shapes are tolerated.
+    """
+    unwrapped = _unwrap_value(payload)
     if isinstance(unwrapped, dict):
         candidate = unwrapped.get("task") or unwrapped.get("value")
         if isinstance(candidate, str):
@@ -876,30 +1071,20 @@ def _extract_clone_task_id(deploy_payload: Any) -> str | None:
     return None
 
 
-def _extract_clone_vm_id(task_result_payload: Any) -> str | None:
-    """Pull the new VM id out of a SUCCEEDED clone task's ``result`` field."""
-    if isinstance(task_result_payload, str):
-        return task_result_payload
-    if isinstance(task_result_payload, dict):
-        candidate = task_result_payload.get("vm") or task_result_payload.get("id")
-        if isinstance(candidate, str):
-            return candidate
-    return None
-
-
-async def _poll_clone_task(
+async def _poll_cis_task(
     *,
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     task_id: str,
-    timeout_seconds: int,
-) -> dict[str, Any]:
-    """Poll ``GET:/cis/tasks/{task}`` until SUCCEEDED/FAILED/timeout.
+    timeout_seconds: float,
+) -> str | None:
+    """Poll ``GET:/cis/tasks/{task}`` to a terminal state; ``None`` on success.
 
-    Returns the completed-or-timeout response envelope directly (the
-    composite's outer status enum). Raises on FAILED so the dispatcher
-    can wrap as ``connector_error``.
+    Returns an operator-facing failure reason on FAILED / deadline elapse
+    so the caller can fold it into its own status envelope (the
+    cluster.patch per-host loop maps it to ``status='stopped'``).
+    Transport faults raise :exc:`httpx.HTTPError` for the caller.
     """
     deadline = time.monotonic() + timeout_seconds
     poll_interval = 1.0
@@ -911,28 +1096,16 @@ async def _poll_clone_task(
         if isinstance(task, dict):
             status = task.get("status")
             if status == "SUCCEEDED":
-                return {
-                    "status": "completed",
-                    "task_id": task_id,
-                    "vm_id": _extract_clone_vm_id(task.get("result")),
-                    "guidance": None,
-                }
+                return None
             if status == "FAILED":
-                raise RuntimeError(
-                    f"vm.clone: deploy task {task_id!r} reported FAILED: "
-                    f"{task.get('error') or '<no error reported>'}"
+                return f"cis task {task_id!r} reported FAILED: " + str(
+                    task.get("error") or "<no error reported>"
                 )
         await asyncio.sleep(poll_interval)
-
-    return {
-        "status": "timeout",
-        "task_id": task_id,
-        "vm_id": None,
-        "guidance": (
-            f"poll GET:/cis/tasks/{task_id} for final state -- the "
-            f"composite gave up after {timeout_seconds}s"
-        ),
-    }
+    return (
+        f"cis task {task_id!r} did not reach a terminal state within "
+        f"{int(timeout_seconds)}s (poll GET:/cis/tasks/{task_id} for final state)"
+    )
 
 
 async def vm_clone_composite(
@@ -942,17 +1115,17 @@ async def vm_clone_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Clone a VM from a content-library template; poll the deploy task.
+    """Clone a VM from a content-library template via the synchronous deploy.
 
-    Op-id: ``vmware.composite.vm.clone``. Long-running -- blocks for
-    up to ``timeout_seconds`` (default 600) when
-    ``wait_for_completion=True``.
+    Op-id: ``vmware.composite.vm.clone``. The pinned spec's
+    ``Vcenter.VmTemplate.LibraryItems_deploy`` is synchronous -- its 200
+    body is the deployed VM id, and no ``vmw-task=true`` variant of the
+    path exists (#2970) -- so the composite returns ``status='completed'``
+    with the new VM id directly; there is no task to poll.
     """
     source_vm = params["source_vm"]
     target_name = params["target_name"]
     library_item = params["library_item"]
-    wait_for_completion = bool(params.get("wait_for_completion", True))
-    timeout_seconds = int(params.get("timeout_seconds", 600))
 
     # Source config drives CloneSpec; the read is a no-op when the
     # source VM lookup fails (httpx.HTTPError surfaces upstream).
@@ -963,34 +1136,448 @@ async def vm_clone_composite(
         target,
         operator,
         _OP_DEPLOY_LIBRARY_VM,
-        {"library_item": library_item, "spec": {"name": target_name}},
+        {"templateLibraryItem": library_item, "spec": {"name": target_name}},
     )
     if gate is not None:
         return gate
-    task_id = _extract_clone_task_id(deploy_payload)
-    if task_id is None:
-        raise RuntimeError(f"vm.clone: deploy returned no task id (payload={deploy_payload!r})")
+    vm_id = _unwrap_value(deploy_payload)
+    if not isinstance(vm_id, str):
+        raise RuntimeError(
+            f"vm.clone: deploy returned no VM id (payload={deploy_payload!r}); the "
+            "pinned deploy operation is synchronous and its 200 body is the "
+            "deployed VirtualMachine id"
+        )
 
-    if not wait_for_completion:
-        return {
-            "status": "pending",
-            "task_id": task_id,
-            "vm_id": None,
-            "guidance": "poll GET:/cis/tasks/{task} for final state",
-        }
+    return {
+        "status": "completed",
+        "task_id": None,
+        "vm_id": vm_id,
+        "guidance": None,
+    }
 
-    return await _poll_clone_task(
-        connector=connector,
-        target=target,
-        operator=operator,
-        task_id=task_id,
-        timeout_seconds=timeout_seconds,
+
+# ===========================================================================
+# vm.deploy_from_library (OVF/OVA content-library deploy -- #2909)
+# ===========================================================================
+#
+# Retires ``govc library.deploy`` for OVF/OVA appliances (the HoloRouter OVA
+# and friends). The deploy is the synchronous
+# ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``; unlike
+# ``vm.clone`` (whose 200 body is a bare VM id) its 200 body is a
+# ``DeploymentResult`` structure, so a deploy that fails OVF / network-mapping
+# / placement validation returns ``succeeded=false`` with an error report —
+# surfaced here as a structured ``deploy_failed`` status, never a raw fault.
+# Name-based item resolution rides the content-library find actions (both in
+# the pinned ``vcenter.yaml``), un-gated reads that mutate nothing.
+
+
+def _deploy_issue(category: str, severity: str, message: str) -> dict[str, Any]:
+    """Build one issue projection ``{category, severity, message}``."""
+    return {"category": category, "severity": severity, "message": message}
+
+
+def _deploy_failure(
+    status: str,
+    *,
+    library_item_id: str | None = None,
+    candidates: list[str] | None = None,
+    issues: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a non-``deployed`` response envelope (resolution / deploy failure)."""
+    return {
+        "status": status,
+        "vm_id": None,
+        "resource_type": None,
+        "library_item_id": library_item_id,
+        "powered_on": False,
+        "issues": issues or [],
+        "candidates": candidates,
+    }
+
+
+def _ovf_message(entry: dict[str, Any]) -> str:
+    """Best human-readable message from one OVF error/warning/info entry.
+
+    An ``Vcenter.Ovf.OvfError`` carries the localizable text under
+    ``message.default_message`` (INPUT category), or under
+    ``error.messages[].default_message`` (SERVER category); a VALIDATION
+    entry may carry only a ``name``. Defensive: any missing shape yields a
+    placeholder, never a raise.
+    """
+    message = entry.get("message")
+    if isinstance(message, dict):
+        default = message.get("default_message")
+        if isinstance(default, str) and default:
+            return default
+    error = entry.get("error")
+    if isinstance(error, dict):
+        for msg in error.get("messages") or []:
+            if isinstance(msg, dict):
+                default = msg.get("default_message")
+                if isinstance(default, str) and default:
+                    return default
+    name = entry.get("name")
+    if isinstance(name, str) and name:
+        return f"invalid OVF input parameter {name!r}"
+    return "<no message reported>"
+
+
+def _extract_ovf_issues(error_report: Any) -> list[dict[str, Any]]:
+    """Flatten an OVF ``ResultInfo`` (errors / warnings / information) to issues.
+
+    Returns one projection per reported message, severity-tagged. Empty when
+    the report is missing/malformed or carries no messages — so a clean
+    deploy yields ``[]`` and a warning-only deploy still surfaces the
+    warnings on the ``deployed`` envelope.
+    """
+    if not isinstance(error_report, dict):
+        return []
+    issues: list[dict[str, Any]] = []
+    for severity, key in (("error", "errors"), ("warning", "warnings"), ("info", "information")):
+        for entry in error_report.get(key) or []:
+            if isinstance(entry, dict):
+                category = entry.get("category")
+                issues.append(
+                    _deploy_issue(
+                        category if isinstance(category, str) else "unknown",
+                        severity,
+                        _ovf_message(entry),
+                    )
+                )
+    return issues
+
+
+async def _find_content_library_ids(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    op_id: str,
+    spec: dict[str, Any],
+) -> list[str]:
+    """Issue one content-library ``?action=find`` POST as an un-gated read.
+
+    The find actions (``Content.Library_find`` / ``Content.Library.Item_find``)
+    return a bare array of id strings and mutate nothing, so they skip the
+    :func:`enforce_subop_policy` seam like the REST listing reads — but they
+    are POST-shaped, so they ride ``_post_json`` rather than :func:`_read_sub_op`
+    (which is GET-only). The ``FindSpec`` is wrapped in the ``{"spec": ...}``
+    envelope the ``/api`` protocol expects for a single structured input
+    parameter (the same wrapping the ``CreateSpec`` writes use). Transport
+    faults raise :exc:`httpx.HTTPError` for the caller.
+    """
+    method, _, path = op_id.partition(":")
+    mounted = await connector.mount_op_path(target, path, operator)
+    payload = await connector._post_json(
+        target, mounted, operator=operator, verb=method, json={"spec": spec}
     )
+    ids = _unwrap_value(payload)
+    if not isinstance(ids, list):
+        raise RuntimeError(f"expected id list from {op_id!r}, got {type(ids).__name__}")
+    return [entry for entry in ids if isinstance(entry, str)]
+
+
+async def _resolve_deploy_library_item(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    params: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Resolve the OVF library-item id from *params*.
+
+    Returns ``(item_id, None)`` on success or ``(None, envelope)`` with a
+    terminal response dict on failure (``invalid_reference`` /
+    ``library_not_found`` / ``ambiguous_library`` / ``item_not_found`` /
+    ``ambiguous_item``). ``library_item`` (an id) short-circuits; otherwise
+    ``library_item_name`` is resolved via ``Content.Library.Item_find``
+    (filtered to ``type=ovf``), optionally scoped to the library
+    ``library_name`` resolves to via ``Content.Library_find``. Ambiguity is
+    refused before any deploy so the operator re-dispatches by explicit id.
+    """
+    passthrough = params.get("library_item")
+    if isinstance(passthrough, str) and passthrough:
+        return passthrough, None
+
+    item_name = params.get("library_item_name")
+    if not isinstance(item_name, str) or not item_name:
+        return None, _deploy_failure(
+            "invalid_reference",
+            issues=[
+                _deploy_issue(
+                    "input",
+                    "error",
+                    "supply library_item (id) or library_item_name to identify the OVF item",
+                )
+            ],
+        )
+
+    library_id: str | None = None
+    library_name = params.get("library_name")
+    if isinstance(library_name, str) and library_name:
+        library_ids = await _find_content_library_ids(
+            connector, target, operator, op_id=_OP_FIND_LIBRARY, spec={"name": library_name}
+        )
+        if not library_ids:
+            return None, _deploy_failure(
+                "library_not_found",
+                issues=[
+                    _deploy_issue("input", "error", f"library {library_name!r} matched no library")
+                ],
+            )
+        if len(library_ids) > 1:
+            return None, _deploy_failure(
+                "ambiguous_library",
+                candidates=library_ids,
+                issues=[
+                    _deploy_issue(
+                        "input",
+                        "error",
+                        f"library {library_name!r} matched {len(library_ids)} libraries",
+                    )
+                ],
+            )
+        library_id = library_ids[0]
+
+    item_spec: dict[str, Any] = {"name": item_name, "type": _OVF_LIBRARY_ITEM_TYPE}
+    if library_id is not None:
+        item_spec["library_id"] = library_id
+    item_ids = await _find_content_library_ids(
+        connector, target, operator, op_id=_OP_FIND_LIBRARY_ITEM, spec=item_spec
+    )
+    if not item_ids:
+        return None, _deploy_failure(
+            "item_not_found",
+            issues=[
+                _deploy_issue("input", "error", f"OVF item {item_name!r} matched no library item")
+            ],
+        )
+    if len(item_ids) > 1:
+        return None, _deploy_failure(
+            "ambiguous_item",
+            candidates=item_ids,
+            issues=[
+                _deploy_issue(
+                    "input", "error", f"OVF item {item_name!r} matched {len(item_ids)} items"
+                )
+            ],
+        )
+    return item_ids[0], None
+
+
+def _build_ovf_deploy_body(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``{deployment_spec, target}`` OVF deploy request body.
+
+    ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
+    refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
+    map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
+    folds into a single ``PropertyParams`` entry in ``additional_parameters``.
+    ``accept_all_eula`` defaults to true (deploying a curated item accepts its
+    EULA).
+    """
+    deployment_spec: dict[str, Any] = {"accept_all_eula": bool(params.get("accept_all_eula", True))}
+    _put_if_str(deployment_spec, "name", params.get("name"))
+    network_mappings = params.get("network_mappings")
+    if isinstance(network_mappings, dict) and network_mappings:
+        deployment_spec["network_mappings"] = {str(k): str(v) for k, v in network_mappings.items()}
+    _put_if_str(deployment_spec, "storage_provisioning", params.get("storage_provisioning"))
+    _put_if_str(deployment_spec, "storage_profile_id", params.get("storage_profile"))
+    _put_if_str(deployment_spec, "default_datastore_id", params.get("datastore"))
+    ovf_properties = params.get("ovf_properties")
+    if isinstance(ovf_properties, dict) and ovf_properties:
+        deployment_spec["additional_parameters"] = [
+            {
+                "type": _OVF_PROPERTY_PARAMS_TYPE,
+                "properties": [{"id": str(k), "value": str(v)} for k, v in ovf_properties.items()],
+            }
+        ]
+
+    deploy_target: dict[str, Any] = {"resource_pool_id": params["resource_pool"]}
+    _put_if_str(deploy_target, "host_id", params.get("host"))
+    _put_if_str(deploy_target, "folder_id", params.get("folder"))
+    return {"deployment_spec": deployment_spec, "target": deploy_target}
+
+
+async def _power_on_deployed_vm(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Best-effort power-on of a freshly deployed VM; ``(powered_on, issue?)``.
+
+    A power-on fault (or, defensively, a parked gate that cannot occur once
+    the deploy write cleared the same posture) never demotes the already-
+    successful deploy — it returns ``(False, issue)`` so the caller keeps
+    ``status='deployed'`` and folds the issue into the report.
+    """
+    try:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+        )
+    except httpx.HTTPError as exc:
+        return False, _deploy_issue(
+            "power_on", "warning", f"deploy succeeded but power-on failed: {exc}"
+        )
+    if gate is not None:
+        return False, _deploy_issue(
+            "power_on", "warning", "deploy succeeded but the follow-on power-on was not authorized"
+        )
+    return True, None
+
+
+async def vm_deploy_from_library_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Deploy an OVF/OVA content-library item to a new VM.
+
+    Op-id: ``vmware.composite.vm.deploy_from_library``. Resolves the library
+    item (id passthrough or name lookup, ambiguity-refusing), issues the
+    synchronous OVF deploy through the governed direct-session seam, and maps
+    the ``DeploymentResult`` to a structured envelope: ``deployed`` on
+    ``succeeded=true``, ``deploy_failed`` on ``succeeded=false`` (with the
+    report's per-issue messages), or ``deploy_error`` when the deploy call
+    itself faults (HTTP 400/404 for invalid / missing placement resources) —
+    so a placement or network-mapping error is a structured status, never a
+    raw vendor error. With ``power_on`` the deployed VM is started best-effort.
+    """
+    item_id, resolution_error = await _resolve_deploy_library_item(
+        connector=connector, target=target, operator=operator, params=params
+    )
+    if resolution_error is not None:
+        return resolution_error
+    assert item_id is not None  # resolution_error is None ⇒ item_id resolved
+
+    deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params)}
+    try:
+        gate, deploy_payload = await _write_sub_op(
+            connector, target, operator, _OP_DEPLOY_OVF_LIBRARY_ITEM, deploy_params
+        )
+    except httpx.HTTPError as exc:
+        status, error_type = _parse_vsphere_error(exc)
+        detail = f"HTTP {status}" if status is not None else "transport fault"
+        if error_type:
+            detail += f" ({error_type})"
+        return _deploy_failure(
+            "deploy_error",
+            library_item_id=item_id,
+            issues=[
+                _deploy_issue("placement", "error", f"OVF deploy call faulted: {detail}: {exc}")
+            ],
+        )
+    if gate is not None:
+        return gate
+
+    result = _unwrap_value(deploy_payload)
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"vm.deploy_from_library: deploy returned no DeploymentResult "
+            f"(payload={deploy_payload!r}); the pinned deploy is synchronous and its "
+            "200 body is a DeploymentResult structure"
+        )
+    issues = _extract_ovf_issues(result.get("error"))
+    if not result.get("succeeded"):
+        return _deploy_failure("deploy_failed", library_item_id=item_id, issues=issues)
+
+    resource = result.get("resource_id")
+    vm_id = resource.get("id") if isinstance(resource, dict) else None
+    resource_type = resource.get("type") if isinstance(resource, dict) else None
+    if not isinstance(vm_id, str):
+        raise RuntimeError(
+            "vm.deploy_from_library: deploy reported succeeded=true but no "
+            f"resource_id.id (resource_id={resource!r})"
+        )
+
+    powered_on = False
+    if bool(params.get("power_on", False)):
+        powered_on, power_issue = await _power_on_deployed_vm(connector, target, operator, vm_id)
+        if power_issue is not None:
+            issues.append(power_issue)
+
+    return {
+        "status": "deployed",
+        "vm_id": vm_id,
+        "resource_type": resource_type if isinstance(resource_type, str) else None,
+        "library_item_id": item_id,
+        "powered_on": powered_on,
+        "issues": issues,
+        "candidates": None,
+    }
 
 
 # ===========================================================================
-# vm.snapshot.revert
+# vm.snapshot.revert (VI-JSON -- #2970)
 # ===========================================================================
+#
+# The pinned vcenter.yaml serves NO snapshot resource at all (no
+# ``GET:/vcenter/vm/{vm}/snapshot``, no ``?action=revert`` path -- the
+# #2970 reconcile finding), so both halves ride vim: the listing is a
+# ``RetrievePropertiesEx`` read of ``VirtualMachine.snapshot``
+# (``VirtualMachineSnapshotInfo.rootSnapshotList``, a recursive
+# ``VirtualMachineSnapshotTree``), and the revert is the governed
+# ``VirtualMachineSnapshot.RevertToSnapshot_Task`` write polled to a
+# terminal state -- the #2893 substrate.
+
+
+def _build_single_prop_retrieve_params(mo_type: str, moid: str, prop: str) -> dict[str, Any]:
+    """Build a ``RetrievePropertiesEx`` body reading one property of one object.
+
+    A single ``PropertyFilterSpec`` scoped directly to the managed object;
+    the singleton ``propertyCollector`` moId rides the path, so the body is
+    only the method args (the shape the typed reads + the disk-grow /
+    clone-template config reads send).
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [{"type": mo_type, "pathSet": [prop]}],
+                "objectSet": [{"obj": {"type": mo_type, "value": moid}}],
+            }
+        ],
+        "options": {},
+    }
+
+
+def _extract_single_prop(retrieve_result: Any, prop: str) -> Any:
+    """Pull one property's ``val`` off a single-object RetrievePropertiesEx result."""
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    if not isinstance(objects, list):
+        return None
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for entry in obj.get("propSet", []) or []:
+            if isinstance(entry, dict) and entry.get("name") == prop:
+                return entry.get("val")
+    return None
+
+
+def _flatten_snapshot_tree(nodes: Any) -> list[dict[str, Any]]:
+    """Flatten a ``VirtualMachineSnapshotTree`` list into ``{name, snapshot}`` rows.
+
+    Walks ``childSnapshotList`` depth-first. Each row carries the snapshot
+    display ``name`` and the ``VirtualMachineSnapshot`` moid (the MoRef's
+    ``value``) -- the same two keys the pre-#2970 REST listing rows carried,
+    so the ambiguity / not-found envelopes keep their candidate shape.
+    """
+    rows: list[dict[str, Any]] = []
+    if not isinstance(nodes, list):
+        return rows
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        moref = node.get("snapshot")
+        moid = moref.get("value") if isinstance(moref, dict) else None
+        name = node.get("name")
+        if isinstance(moid, str) and isinstance(name, str):
+            rows.append({"name": name, "snapshot": moid})
+        rows.extend(_flatten_snapshot_tree(node.get("childSnapshotList")))
+    return rows
 
 
 async def vm_snapshot_revert_composite(
@@ -1004,21 +1591,23 @@ async def vm_snapshot_revert_composite(
 
     Op-id: ``vmware.composite.vm.snapshot.revert``. Multiple snapshots
     sharing the name -> ``status='ambiguous'``; missing -> ``not_found``.
-    Revert never dispatches on either.
+    Revert never dispatches on either. The revert is a vim ``*_Task``:
+    a task fault raises (the dispatcher wraps it ``connector_error``);
+    a poll timeout returns ``status='timeout'`` with the task id.
     """
     vm_moid = params["vm"]
     snapshot_name = params["snapshot_name"]
 
-    listing = await _read_sub_op(
-        connector, target, operator, _OP_LIST_VM_SNAPSHOTS, {"vm": vm_moid}
+    tree_result = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(_VIRTUAL_MACHINE_MO_TYPE, vm_moid, _PROP_SNAPSHOT),
     )
-    entries = _unwrap_value(listing)
-    if not isinstance(entries, list):
-        raise RuntimeError(
-            f"vm.snapshot.revert: expected list from {_OP_LIST_VM_SNAPSHOTS!r}, "
-            f"got {type(entries).__name__}"
-        )
-    matches = [e for e in entries if isinstance(e, dict) and e.get("name") == snapshot_name]
+    snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
+    root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
+    entries = _flatten_snapshot_tree(root_list)
+    matches = [e for e in entries if e["name"] == snapshot_name]
     if not matches:
         return {
             "status": "not_found",
@@ -1036,23 +1625,41 @@ async def vm_snapshot_revert_composite(
                 "``snapshot_id`` explicitly to disambiguate"
             ),
         }
-    snapshot_moid = matches[0].get("snapshot")
-    if not isinstance(snapshot_moid, str):
-        return {
-            "status": "not_found",
-            "snapshot_id": None,
-            "candidates": matches,
-            "guidance": "matched snapshot row missing ``snapshot`` key",
-        }
-    gate, _ = await _write_sub_op(
+    snapshot_moid = matches[0]["snapshot"]
+    gate, task_payload = await _write_vmomi_sub_op(
         connector,
         target,
         operator,
-        _OP_REVERT_VM_SNAPSHOT,
-        {"vm": vm_moid, "snap": snapshot_moid},
+        op_id=_OP_REVERT_TO_SNAPSHOT_TASK,
+        vmomi_path=f"/{_VM_SNAPSHOT_MO_TYPE}/{snapshot_moid}/RevertToSnapshot_Task",
+        body={},
+        params={"vm": vm_moid, "snapshot_name": snapshot_name, "snapshot": snapshot_moid},
     )
     if gate is not None:
         return gate
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            f"vm.snapshot.revert: RevertToSnapshot_Task on vm {vm_moid!r} snapshot "
+            f"{snapshot_moid!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "snapshot_id": snapshot_moid,
+            "candidates": [],
+            "guidance": (
+                f"RevertToSnapshot_Task {outcome.task} did not reach a terminal state "
+                f"within {int(_SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS)}s; poll the task -- "
+                "the revert may still complete in the background"
+            ),
+        }
     return {
         "status": "reverted",
         "snapshot_id": snapshot_moid,
@@ -1067,17 +1674,28 @@ async def vm_snapshot_revert_composite(
 
 
 def _pick_drs_target_host(recs: Any, vm_moid: str) -> str | None:
-    """Walk a DRS recommendations payload for ``vm_moid``'s target host."""
+    """Walk ``ClusterComputeResource.drsRecommendation`` for ``vm_moid``'s target.
+
+    The property is a ``ClusterDrsRecommendation[]``; each recommendation
+    carries a ``migrationList`` of ``ClusterDrsMigration`` rows whose
+    ``vm`` / ``destination`` MoRefs name the VM and its recommended target
+    host (spec-verified against the pinned ``vi-json.yaml``).
+    """
     if not isinstance(recs, list):
         return None
     for rec in recs:
         if not isinstance(rec, dict):
             continue
-        if rec.get("vm") != vm_moid:
-            continue
-        candidate = rec.get("target_host") or rec.get("host")
-        if isinstance(candidate, str):
-            return candidate
+        for migration in rec.get("migrationList") or []:
+            if not isinstance(migration, dict):
+                continue
+            vm_ref = migration.get("vm")
+            if not isinstance(vm_ref, dict) or vm_ref.get("value") != vm_moid:
+                continue
+            destination = migration.get("destination")
+            candidate = destination.get("value") if isinstance(destination, dict) else None
+            if isinstance(candidate, str):
+                return candidate
     return None
 
 
@@ -1092,7 +1710,10 @@ async def vm_migrate_composite(
 
     Op-id: ``vmware.composite.vm.migrate``. ``target_host`` overrides
     the DRS lookup. No-recommendation path returns
-    ``status='no_recommendation'`` so the caller can re-dispatch.
+    ``status='no_recommendation'`` so the caller can re-dispatch. The
+    DRS lookup is a vim ``RetrievePropertiesEx`` read of the cluster's
+    ``drsRecommendation`` property -- the pinned vcenter.yaml serves no
+    DRS REST resource at all (#2970).
 
     Also the recursion target of :func:`host_evacuate_composite`: invoked
     through ``dispatch_child`` there, the dispatcher resolves this composite
@@ -1109,14 +1730,16 @@ async def vm_migrate_composite(
         target_host = explicit_target
         source = "operator"
     else:
-        recs_payload = await _read_sub_op(
-            connector,
+        recs_payload = await connector._post_vmomi_json(
             target,
-            operator,
-            _OP_GET_DRS_RECOMMENDATIONS,
-            {"cluster": cluster_moid},
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=_build_single_prop_retrieve_params(
+                _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid, _PROP_DRS_RECOMMENDATION
+            ),
         )
-        target_host = _pick_drs_target_host(_unwrap_value(recs_payload), vm_moid)
+        recommendations = _extract_single_prop(recs_payload, _PROP_DRS_RECOMMENDATION)
+        target_host = _pick_drs_target_host(recommendations, vm_moid)
         if target_host is not None:
             source = "drs"
 
@@ -1136,7 +1759,7 @@ async def vm_migrate_composite(
         target,
         operator,
         _OP_RELOCATE_VM,
-        {"vm": vm_moid, "spec": {"placement": {"host": target_host}}},
+        {"vm": vm_moid, "placement": {"host": target_host}},
     )
     if gate is not None:
         return gate
@@ -1311,6 +1934,58 @@ async def vm_power_composite(
 # ===========================================================================
 
 
+async def _host_maintenance_vim_step(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    host_moid: str,
+    op_id: str,
+) -> tuple[OperationResult | None, str | None]:
+    """Run one governed vim maintenance transition on a host, polled to terminal.
+
+    The pinned vcenter.yaml serves no host-maintenance REST path (#2970);
+    enter / exit are the vim ``HostSystem.EnterMaintenanceMode_Task`` /
+    ``ExitMaintenanceMode_Task`` methods, whose request types carry a
+    required int ``timeout`` (``<= 0`` = no vim-side bound -- the poll's
+    wall clock is the bound here). Returns ``(gate, None)`` when the
+    governance seam parks/denies the write, ``(None, reason)`` when the
+    returned Task faults or the poll deadline elapses, ``(None, None)`` on
+    success. Shared by :func:`host_evacuate_composite` (enter) and
+    :func:`cluster_patch_composite` (enter + exit).
+    """
+    method_name = op_id.rsplit("/", 1)[-1]
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=op_id,
+        vmomi_path=f"/{_HOST_SYSTEM_MO_TYPE}/{host_moid}/{method_name}",
+        body={"timeout": _MAINTENANCE_VIM_TIMEOUT},
+        params={"host": host_moid},
+    )
+    if gate is not None:
+        return gate, None
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_MAINTENANCE_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        return None, (
+            f"{method_name} on host {host_moid!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return None, (
+            f"{method_name} task {outcome.task} on host {host_moid!r} did not reach a "
+            f"terminal state within {int(_MAINTENANCE_TASK_TIMEOUT_SECONDS)}s"
+        )
+    return None, None
+
+
 def _classify_vm_migrate_outcome(
     migrate_result: OperationResult,
 ) -> tuple[bool, str]:
@@ -1393,11 +2068,21 @@ async def host_evacuate_composite(
                 "maintenance_entered": False,
             }
 
-    gate, _ = await _write_sub_op(
-        connector, target, operator, _host_maintenance_op_id("enter"), {"host": host_moid}
+    gate, reason = await _host_maintenance_vim_step(
+        connector=connector,
+        target=target,
+        operator=operator,
+        host_moid=host_moid,
+        op_id=_OP_ENTER_MAINTENANCE_TASK,
     )
     if gate is not None:
         return gate
+    if reason is not None:
+        # The maintenance-enter is the load-bearing final step; a task
+        # fault / poll timeout raises so the dispatcher wraps it
+        # ``connector_error`` (mirrors the pre-#2970 propagate-on-HTTPError
+        # semantics of the synchronous REST fiction).
+        raise RuntimeError(f"host.evacuate: {reason}")
     return {
         "status": "partial" if failed else "evacuated",
         "host": host_moid,
@@ -1412,6 +2097,51 @@ async def host_evacuate_composite(
 # ===========================================================================
 
 
+async def _repoint_vm_nics_to_fallback(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+    fallback_network: str,
+) -> tuple[OperationResult | None, str | None]:
+    """Repoint every NIC of one VM to *fallback_network* (standard portgroup).
+
+    The pinned spec serves no VM-level ``PATCH:/vcenter/vm/{vm}/network``
+    (#2970); NIC backing changes are per-adapter --
+    ``Vcenter.Vm.Hardware.Ethernet_list`` enumerates the adapters, then
+    each is updated via ``PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}``
+    with a ``STANDARD_PORTGROUP`` backing spec. Returns ``(gate, None)``
+    on a parked/denied write, ``(None, error)`` on a transport fault
+    (folded into the per-VM failure row), ``(None, None)`` on success.
+    """
+    listing = await _read_sub_op(connector, target, operator, _OP_LIST_VM_NICS, {"vm": vm_moid})
+    nic_rows = _unwrap_value(listing)
+    if not isinstance(nic_rows, list):
+        return None, f"expected list from {_OP_LIST_VM_NICS!r}, got {type(nic_rows).__name__}"
+    for row in nic_rows:
+        nic_id = row.get("nic") if isinstance(row, dict) else None
+        if not isinstance(nic_id, str):
+            continue
+        gate, _ = await _write_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_UPDATE_VM_NIC,
+            {
+                "vm": vm_moid,
+                "nic": nic_id,
+                "backing": {
+                    "type": _NIC_BACKING_STANDARD_PORTGROUP,
+                    "network": fallback_network,
+                },
+            },
+        )
+        if gate is not None:
+            return gate, None
+    return None, None
+
+
 async def host_detach_from_vds_composite(
     *,
     operator: Operator,
@@ -1423,14 +2153,24 @@ async def host_detach_from_vds_composite(
 
     Op-id: ``vmware.composite.host.detach_from_vds``. Refuses the DVS
     detach when any NIC migration failed -- vSphere would reject the
-    step-4 detach anyway.
+    detach anyway. The detach itself is the vim
+    ``DistributedVirtualSwitch.ReconfigureDvs_Task`` (host member spec
+    with ``operation="remove"``): the pinned vcenter.yaml serves no DVS
+    write path at all (#2970). The spec's required ``configVersion`` is
+    read off ``config.configVersion`` first; the returned Task is polled
+    to a terminal state (fault raises; poll timeout returns
+    ``status='timeout'`` with the task id).
     """
     host_moid = params["host"]
     dvs_moid = params["dvs"]
     fallback_network = params["fallback_network"]
 
     await _read_sub_op(
-        connector, target, operator, _OP_LIST_PORTGROUPS, {"filter.hosts": [host_moid]}
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP], "filter.hosts": [host_moid]},
     )
     vms = await _resolve_vm_list(
         connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
@@ -1443,18 +2183,21 @@ async def host_detach_from_vds_composite(
         if not isinstance(vm_moid, str):
             continue
         try:
-            gate, _ = await _write_sub_op(
-                connector,
-                target,
-                operator,
-                _OP_ATTACH_VM_NIC,
-                {"vm": vm_moid, "spec": {"network": fallback_network}},
+            gate, failure = await _repoint_vm_nics_to_fallback(
+                connector=connector,
+                target=target,
+                operator=operator,
+                vm_moid=vm_moid,
+                fallback_network=fallback_network,
             )
         except httpx.HTTPError as exc:
             migration_failures.append({"vm": vm_moid, "error": str(exc)})
             continue
         if gate is not None:
             return gate
+        if failure is not None:
+            migration_failures.append({"vm": vm_moid, "error": failure})
+            continue
         vms_migrated.append(vm_moid)
 
     if migration_failures:
@@ -1465,15 +2208,66 @@ async def host_detach_from_vds_composite(
             "vms_migrated": vms_migrated,
         }
 
-    gate, _ = await _write_sub_op(
+    # ``DVSConfigSpec.configVersion`` must echo the switch's current
+    # ``DVSConfigInfo.configVersion`` for the reconfigure to be accepted.
+    config_result = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(_DVS_MO_TYPE, dvs_moid, _PROP_DVS_CONFIG_VERSION),
+    )
+    config_version = _extract_single_prop(config_result, _PROP_DVS_CONFIG_VERSION)
+    if not isinstance(config_version, str):
+        raise RuntimeError(
+            f"host.detach_from_vds: could not read config.configVersion off dvs "
+            f"{dvs_moid!r} (payload={config_result!r})"
+        )
+
+    gate, task_payload = await _write_vmomi_sub_op(
         connector,
         target,
         operator,
-        _OP_REMOVE_DVS_HOST,
-        {"dvs": dvs_moid, "host": host_moid},
+        op_id=_OP_RECONFIGURE_DVS_TASK,
+        vmomi_path=f"/{_DVS_MO_TYPE}/{dvs_moid}/ReconfigureDvs_Task",
+        body={
+            "spec": {
+                "configVersion": config_version,
+                "host": [
+                    {
+                        "operation": "remove",
+                        "host": _moref(_HOST_SYSTEM_MO_TYPE, host_moid),
+                    }
+                ],
+            }
+        },
+        params={"dvs": dvs_moid, "host": host_moid},
     )
     if gate is not None:
         return gate
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            f"host.detach_from_vds: ReconfigureDvs_Task on dvs {dvs_moid!r} (remove host "
+            f"{host_moid!r}) faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "host": host_moid,
+            "vm_migration_failures": [],
+            "vms_migrated": vms_migrated,
+            "guidance": (
+                f"ReconfigureDvs_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS)}s; poll the task -- the "
+                "detach may still complete in the background"
+            ),
+        }
     return {
         "status": "detached",
         "host": host_moid,
@@ -1487,31 +2281,44 @@ async def host_detach_from_vds_composite(
 # ===========================================================================
 
 
-# Per-step (step-name, op_id) tuples. The op_id yields the concrete
-# ``?action=<verb>`` key per step; the patch step additionally carries a
-# ``method`` body field (the patch verb has a non-trivial body schema; the
-# maintenance verbs do not).
-_CLUSTER_PATCH_STEPS: tuple[tuple[str, str], ...] = (
-    ("maintenance_enter", _host_maintenance_op_id("enter")),
-    ("patch", _OP_HOST_PATCH),
-    ("maintenance_exit", _host_maintenance_op_id("exit")),
-)
-
-
-def _cluster_patch_step_params(
+async def _apply_host_software(
     *,
-    step: str,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     host_moid: str,
-    patch_method: str,
-) -> dict[str, Any]:
-    """Build the per-step params dict for a cluster.patch sub-op.
+) -> tuple[OperationResult | None, str | None]:
+    """Fire the per-host vLCM apply and poll its cis task to a terminal state.
 
-    Action verbs live on the op_id (``?action=enter`` / ``?action=patch`` /
-    ``?action=exit``); only the patch step adds a body-shaped ``method``.
+    ``POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true``
+    (the pinned spec's only per-host remediation path -- #2970; the
+    fictional ``POST:/vcenter/host/{host}?action=patch`` never existed).
+    An empty ``Esx.Settings.Hosts.Software.ApplySpec`` (every field
+    optional) remediates to the latest desired-state commit. The 202 body
+    is the cis task id, polled via ``GET:/cis/tasks/{task}`` before the
+    host leaves maintenance -- exiting mid-remediation would defeat the
+    sequential rolling-patch contract.
     """
-    if step == "patch":
-        return {"host": host_moid, "method": patch_method}
-    return {"host": host_moid}
+    gate, apply_payload = await _write_sub_op(
+        connector, target, operator, _OP_HOST_SOFTWARE_APPLY, {"host": host_moid, "spec": {}}
+    )
+    if gate is not None:
+        return gate, None
+    task_id = _extract_cis_task_id(apply_payload)
+    if task_id is None:
+        return None, (
+            f"software apply on {host_moid!r} returned no cis task id (payload={apply_payload!r})"
+        )
+    reason = await _poll_cis_task(
+        connector=connector,
+        target=target,
+        operator=operator,
+        task_id=task_id,
+        timeout_seconds=_HOST_APPLY_TASK_TIMEOUT_SECONDS,
+    )
+    if reason is not None:
+        return None, f"software apply on {host_moid!r} failed: {reason}"
+    return None, None
 
 
 async def _patch_one_host(
@@ -1520,25 +2327,45 @@ async def _patch_one_host(
     target: Any,
     operator: Operator,
     host_moid: str,
-    patch_method: str,
 ) -> tuple[OperationResult | None, str | None]:
-    """Sequential maintenance + patch + exit on a single host.
+    """Sequential maintenance-enter + vLCM apply + maintenance-exit on one host.
 
-    Returns ``(gate, None)`` when a step's governance seam parks/denies the
-    write (the caller returns the :class:`OperationResult` verbatim),
-    ``(None, error_reason)`` when a step's transport fails, or
-    ``(None, None)`` on full success.
+    Maintenance transitions are vim ``*_Task`` methods polled to terminal
+    (:func:`_host_maintenance_vim_step`); the patch step is the cis-task-
+    polled vLCM apply (:func:`_apply_host_software`). Returns
+    ``(gate, None)`` when a step's governance seam parks/denies the write
+    (the caller returns the :class:`OperationResult` verbatim),
+    ``(None, error_reason)`` when a step fails (transport fault, task
+    fault, or poll timeout), or ``(None, None)`` on full success.
     """
-    for step, op_id in _CLUSTER_PATCH_STEPS:
-        step_params = _cluster_patch_step_params(
-            step=step, host_moid=host_moid, patch_method=patch_method
-        )
+    steps: tuple[tuple[str, Any], ...] = (
+        ("maintenance_enter", _OP_ENTER_MAINTENANCE_TASK),
+        ("patch", None),
+        ("maintenance_exit", _OP_EXIT_MAINTENANCE_TASK),
+    )
+    for step, maintenance_op_id in steps:
         try:
-            gate, _ = await _write_sub_op(connector, target, operator, op_id, step_params)
+            if maintenance_op_id is not None:
+                gate, reason = await _host_maintenance_vim_step(
+                    connector=connector,
+                    target=target,
+                    operator=operator,
+                    host_moid=host_moid,
+                    op_id=maintenance_op_id,
+                )
+            else:
+                gate, reason = await _apply_host_software(
+                    connector=connector,
+                    target=target,
+                    operator=operator,
+                    host_moid=host_moid,
+                )
         except httpx.HTTPError as exc:
             return None, f"{step} on {host_moid!r} failed: {exc}"
         if gate is not None:
             return gate, None
+        if reason is not None:
+            return None, f"{step} on {host_moid!r} failed: {reason}"
     return None, None
 
 
@@ -1556,7 +2383,6 @@ async def cluster_patch_composite(
     at once.
     """
     cluster_moid = params["cluster"]
-    patch_method = params.get("patch_method", "default")
 
     entries = await _resolve_cluster_hosts(
         connector=connector, target=target, operator=operator, cluster_moid=cluster_moid
@@ -1574,7 +2400,6 @@ async def cluster_patch_composite(
             target=target,
             operator=operator,
             host_moid=host_moid,
-            patch_method=patch_method,
         )
         if gate is not None:
             return gate
@@ -2661,3 +3486,745 @@ async def folder_create_composite(
         "folder": new_folder_moid,
         "guidance": None,
     }
+
+
+# ===========================================================================
+# Hardware write composites (#2891): vm.resize / vm.nic.repoint /
+# vm.device.cdrom -- pure vSphere Automation REST post-clone reconfigure.
+# ===========================================================================
+
+
+async def _read_vm_info(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+) -> dict[str, Any] | None:
+    """Read a VM's config via ``GET:/vcenter/vm/{vm}`` (name, power_state, cpu, memory).
+
+    Shared seam (#1608): the ``vm.resize`` handler + preview read current
+    sizing here, and the ``vm.nic.repoint`` / ``vm.device.cdrom`` previews
+    read the VM's display ``name`` from it. One read-only GET on the
+    connector session; returns the unwrapped ``Vm.Info`` dict, or ``None``
+    when the payload is not a dict.
+    """
+    payload = await _read_sub_op(connector, target, operator, _OP_GET_VM, {"vm": vm_moid})
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _read_ethernet_nic(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+    nic_id: str,
+) -> dict[str, Any] | None:
+    """Read one vNIC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`` (mac + backing).
+
+    Shared between the ``vm.nic.repoint`` handler and its preview builder
+    (#1608). Returns the unwrapped ``Ethernet.Info`` dict or ``None``.
+    """
+    payload = await _read_sub_op(
+        connector, target, operator, _OP_GET_VM_NIC, {"vm": vm_moid, "nic": nic_id}
+    )
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _read_cdrom(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+    cdrom_id: str,
+) -> dict[str, Any] | None:
+    """Read one CD-ROM via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}`` (backing + state).
+
+    Shared between the ``vm.device.cdrom`` handler and its preview builder
+    (#1608). Returns the unwrapped ``Cdrom.Info`` dict or ``None``.
+    """
+    payload = await _read_sub_op(
+        connector, target, operator, _OP_GET_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+    )
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _resolve_distributed_portgroup(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+) -> tuple[str | None, str, list[dict[str, Any]]]:
+    """Resolve a distributed-portgroup display name to its network moid.
+
+    Reads ``GET:/vcenter/network`` filtered to ``DISTRIBUTED_PORTGROUP`` +
+    the name (the #1602 fix -- there is no dedicated portgroup list
+    resource). Returns ``(network_moid, "ok", [])`` on a unique match,
+    ``(None, "not_found", [])`` on no match, or ``(None, "ambiguous",
+    candidates)`` when the name is not unique. Shared between the
+    ``vm.nic.repoint`` handler (dispatch time) and its preview builder
+    (#1608), so the reviewer sees the same portgroup the approved dispatch
+    will bind.
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {
+            "filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP],
+            "filter.names": [portgroup_name],
+        },
+    )
+    rows = _unwrap_value(listing)
+    matches = (
+        [row for row in rows if isinstance(row, dict) and row.get("name") == portgroup_name]
+        if isinstance(rows, list)
+        else []
+    )
+    if not matches:
+        return None, "not_found", []
+    if len(matches) > 1:
+        return None, "ambiguous", matches
+    network_moid = matches[0].get("network")
+    if not isinstance(network_moid, str):
+        return None, "not_found", matches
+    return network_moid, "ok", []
+
+
+def _resize_requires_power_off(
+    *,
+    current: dict[str, Any],
+    cpu_count: int | None,
+    cores_per_socket: int | None,
+    memory_mib: int | None,
+    cpu_hot_add: bool,
+    memory_hot_add: bool,
+) -> str | None:
+    """Return a reason when a *powered-on* VM cannot take the resize live, else ``None``.
+
+    vCenter refuses (HTTP 400) a live CPU/memory change that is not a
+    hot-add: a count/size *increase* needs the matching hot-add flag; a
+    *decrease* or any ``cores_per_socket`` change is never live. Surfacing
+    this as a typed ``requires_power_off`` status (rather than letting the
+    PATCH 400) is the composite's contract. Consulted only when the VM is
+    powered on.
+    """
+    cur_count = current.get("cpu_count")
+    cur_cores = current.get("cores_per_socket")
+    cur_mem = current.get("memory_MiB")
+    if (
+        cpu_count is not None
+        and cpu_count != cur_count
+        and (not cpu_hot_add or (isinstance(cur_count, int) and cpu_count < cur_count))
+    ):
+        return "CPU count change needs hot-add (increase only) on a powered-on VM; power off first"
+    if (
+        cores_per_socket is not None
+        and isinstance(cur_cores, int)
+        and cores_per_socket != cur_cores
+    ):
+        return "cores_per_socket cannot change on a powered-on VM; power off first"
+    if (
+        memory_mib is not None
+        and memory_mib != cur_mem
+        and (not memory_hot_add or (isinstance(cur_mem, int) and memory_mib < cur_mem))
+    ):
+        return "memory change needs hot-add (increase only) on a powered-on VM; power off first"
+    return None
+
+
+async def vm_resize_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Reconfigure a VM's CPU count / cores-per-socket and/or memory.
+
+    Op-id: ``vmware.composite.vm.resize``. Reads current sizing + hot-add
+    flags via ``GET:/vcenter/vm/{vm}``, then PATCHes ``hardware/cpu``
+    and/or ``hardware/memory``. A change a powered-on VM cannot take live
+    returns ``status='requires_power_off'`` (never a raw 400); a request
+    already matching current returns ``no_change``; a CPU PATCH that lands
+    followed by a memory PATCH that faults returns ``partial``.
+    """
+    vm_moid = params["vm"]
+    req_cpu_count = params.get("cpu_count")
+    req_cores = params.get("cores_per_socket")
+    req_mem = params.get("memory_mib")
+
+    info = await _read_vm_info(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid
+    )
+    if info is None:
+        raise RuntimeError(f"vm.resize: GET:/vcenter/vm/{vm_moid} returned no VM info dict")
+    cpu_raw = info.get("cpu")
+    mem_raw = info.get("memory")
+    cpu_info = cpu_raw if isinstance(cpu_raw, dict) else {}
+    mem_info = mem_raw if isinstance(mem_raw, dict) else {}
+    power_state = info.get("power_state")
+    from_sizing = {
+        "cpu_count": cpu_info.get("count"),
+        "cores_per_socket": cpu_info.get("cores_per_socket"),
+        "memory_MiB": mem_info.get("size_MiB"),
+    }
+    base = {
+        "vm": vm_moid,
+        "name": info.get("name"),
+        "power_state": power_state,
+        "from": from_sizing,
+        "to": {"cpu_count": req_cpu_count, "cores_per_socket": req_cores, "memory_MiB": req_mem},
+    }
+
+    cpu_changes = (req_cpu_count is not None and req_cpu_count != from_sizing["cpu_count"]) or (
+        req_cores is not None and req_cores != from_sizing["cores_per_socket"]
+    )
+    mem_changes = req_mem is not None and req_mem != from_sizing["memory_MiB"]
+    if not cpu_changes and not mem_changes:
+        return {
+            **base,
+            "status": "no_change",
+            "applied": {"cpu": False, "memory": False},
+            "guidance": None,
+        }
+
+    if power_state == "POWERED_ON":
+        reason = _resize_requires_power_off(
+            current=from_sizing,
+            cpu_count=req_cpu_count,
+            cores_per_socket=req_cores,
+            memory_mib=req_mem,
+            cpu_hot_add=bool(cpu_info.get("hot_add_enabled")),
+            memory_hot_add=bool(mem_info.get("hot_add_enabled")),
+        )
+        if reason is not None:
+            return {
+                **base,
+                "status": "requires_power_off",
+                "applied": {"cpu": False, "memory": False},
+                "guidance": reason,
+            }
+
+    applied_cpu = False
+    if cpu_changes:
+        cpu_spec: dict[str, Any] = {}
+        if req_cpu_count is not None:
+            cpu_spec["count"] = req_cpu_count
+        if req_cores is not None:
+            cpu_spec["cores_per_socket"] = req_cores
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_UPDATE_VM_CPU, {"vm": vm_moid, **cpu_spec}
+        )
+        if gate is not None:
+            return gate
+        applied_cpu = True
+
+    if mem_changes:
+        try:
+            gate, _ = await _write_sub_op(
+                connector,
+                target,
+                operator,
+                _OP_UPDATE_VM_MEMORY,
+                {"vm": vm_moid, "size_MiB": req_mem},
+            )
+        except httpx.HTTPError as exc:
+            if applied_cpu:
+                return {
+                    **base,
+                    "status": "partial",
+                    "applied": {"cpu": True, "memory": False},
+                    "guidance": f"CPU applied; memory update failed: {exc}",
+                }
+            raise
+        if gate is not None:
+            return gate
+        return {
+            **base,
+            "status": "resized",
+            "applied": {"cpu": applied_cpu, "memory": True},
+            "guidance": None,
+        }
+
+    return {
+        **base,
+        "status": "resized",
+        "applied": {"cpu": applied_cpu, "memory": False},
+        "guidance": None,
+    }
+
+
+async def vm_nic_repoint_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Repoint an existing vNIC to a different distributed portgroup.
+
+    Op-id: ``vmware.composite.vm.nic.repoint``. Reads the NIC's current
+    backing + MAC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``,
+    resolves the target portgroup by name via ``GET:/vcenter/network``
+    filtered to ``DISTRIBUTED_PORTGROUP`` (the #1602 fix -- no dedicated
+    portgroup list resource), then PATCHes the NIC backing. A name that
+    resolves to zero / many portgroups refuses the repoint
+    (``not_found`` / ``ambiguous``) with no PATCH issued.
+    """
+    vm_moid = params["vm"]
+    nic_id = params["nic"]
+    portgroup_name = params["portgroup_name"]
+
+    nic_info = await _read_ethernet_nic(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid, nic_id=nic_id
+    )
+    mac_address = nic_info.get("mac_address") if nic_info else None
+    current_backing = nic_info.get("backing") if nic_info else None
+
+    network_moid, resolution, candidates = await _resolve_distributed_portgroup(
+        connector=connector, target=target, operator=operator, portgroup_name=portgroup_name
+    )
+    base = {
+        "vm": vm_moid,
+        "nic": nic_id,
+        "mac_address": mac_address,
+        "current_backing": current_backing,
+        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+    }
+    if resolution == "not_found":
+        return {
+            **base,
+            "status": "not_found",
+            "candidates": [],
+            "guidance": f"no distributed portgroup named {portgroup_name!r}",
+        }
+    if resolution == "ambiguous":
+        return {
+            **base,
+            "status": "ambiguous",
+            "candidates": candidates,
+            "guidance": "multiple distributed portgroups share the name; pass a unique name",
+        }
+
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_UPDATE_VM_NIC,
+        {
+            "vm": vm_moid,
+            "nic": nic_id,
+            "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid},
+        },
+    )
+    if gate is not None:
+        return gate
+    return {**base, "status": "repointed", "candidates": [], "guidance": None}
+
+
+async def vm_device_cdrom_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Remove / update / disconnect a VM CD-ROM device.
+
+    Op-id: ``vmware.composite.vm.device.cdrom``. Reads the device's
+    current backing + state via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``
+    (the host-local ISO path the approver needs to see), then dispatches
+    the requested ``action``: ``remove`` (DELETE the device), ``update``
+    (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
+    ``?action=disconnect``). ``update`` without a ``backing`` object
+    returns ``invalid_request`` with no write issued.
+    """
+    vm_moid = params["vm"]
+    cdrom_id = params["cdrom"]
+    action = params["action"]
+
+    cdrom_info = await _read_cdrom(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid, cdrom_id=cdrom_id
+    )
+    base = {
+        "vm": vm_moid,
+        "cdrom": cdrom_id,
+        "action": action,
+        "current_backing": cdrom_info.get("backing") if cdrom_info else None,
+        "state": cdrom_info.get("state") if cdrom_info else None,
+        "requested_backing": None,
+        "guidance": None,
+    }
+
+    if action == "remove":
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DELETE_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        )
+        if gate is not None:
+            return gate
+        return {**base, "status": "removed"}
+
+    if action == "disconnect":
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DISCONNECT_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        )
+        if gate is not None:
+            return gate
+        return {**base, "status": "disconnected"}
+
+    backing = params.get("backing")
+    if not isinstance(backing, dict):
+        return {
+            **base,
+            "status": "invalid_request",
+            "guidance": "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}",
+        }
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_UPDATE_VM_CDROM,
+        {"vm": vm_moid, "cdrom": cdrom_id, "backing": backing},
+    )
+    if gate is not None:
+        return gate
+    return {**base, "status": "updated", "requested_backing": backing}
+
+
+# ===========================================================================
+# guest.customization_spec.create + vm.customize (GOSC) (#2892)
+# ===========================================================================
+#
+# GOSC is how a cloned VM gets its network identity (hostname, per-NIC
+# static IP + gateway + DNS) and, on Windows, its sysprep identity on
+# first boot. Two composites: create a reusable named spec, then apply a
+# saved spec to a VM. Both plain REST -- no vim fallback.
+#
+# Secret hygiene (#1503) is load-bearing: the create params carry Windows
+# admin / product-key / domain-join credentials. The handler consumes
+# them into the sysprep body but they never reach a reviewer surface --
+# the op is pinned ``credential_write`` (broadcast collapses to
+# aggregate-only), the park-time preview echoes identity only
+# (:mod:`._write_preview`), and the durable audit row stores a params
+# hash. The handler builders below are the ONLY code that touches the
+# secret values.
+
+
+def _put_if_str(target: dict[str, Any], key: str, value: Any) -> None:
+    """Set ``target[key] = value`` only when *value* is a non-empty string.
+
+    Keeps the vCenter customization body free of empty / ``None`` fields
+    (the API rejects some empty-string members) and holds the builders'
+    branching down.
+    """
+    if isinstance(value, str) and value:
+        target[key] = value
+
+
+def _build_hostname_generator(hostname: str) -> dict[str, Any]:
+    """Build a FIXED ``HostnameGenerator`` for *hostname*.
+
+    vCenter models the guest host name as a generator
+    (``{type: FIXED|PREFIX|VIRTUAL_MACHINE, fixed_name, prefix}``); the
+    provisioning subset always pins an explicit name, so ``FIXED`` with
+    ``fixed_name`` is the only shape built.
+    """
+    return {"type": "FIXED", "fixed_name": hostname}
+
+
+def _build_interface(nic: dict[str, Any]) -> dict[str, Any]:
+    """Map one agent-facing NIC dict to a vCenter ``AdapterMapping``.
+
+    A NIC with an ``ip_address`` becomes a STATIC ``ipv4`` block
+    (``{type, ip_address, prefix?, gateways?}``); a NIC without one
+    becomes a DHCP adapter. Shape: ``{"adapter": {"ipv4": {...}}}``.
+    """
+    ip_address = nic.get("ip_address")
+    if isinstance(ip_address, str) and ip_address:
+        ipv4: dict[str, Any] = {"type": "STATIC", "ip_address": ip_address}
+        prefix = nic.get("prefix")
+        if isinstance(prefix, int):
+            ipv4["prefix"] = prefix
+        gateways = nic.get("gateways")
+        if isinstance(gateways, list) and gateways:
+            ipv4["gateways"] = [g for g in gateways if isinstance(g, str)]
+    else:
+        ipv4 = {"type": "DHCP"}
+    return {"adapter": {"ipv4": ipv4}}
+
+
+def _build_linux_config(params: dict[str, Any]) -> dict[str, Any]:
+    """Build ``configuration_spec.linux_config`` from the agent params.
+
+    ``hostname`` and ``domain`` are REQUIRED by the pinned
+    ``Vcenter.Guest.LinuxConfiguration`` schema (vcenter.yaml:126320), so
+    ``domain`` is always emitted (empty string when unset) -- omitting it
+    fails even a minimal Linux create. ``time_zone`` (a Linux tz-name
+    string here) is optional and dropped when absent.
+    """
+    linux_config: dict[str, Any] = {
+        "hostname": _build_hostname_generator(params["hostname"]),
+        "domain": params.get("domain") or "",
+    }
+    _put_if_str(linux_config, "time_zone", params.get("time_zone"))
+    return linux_config
+
+
+def _build_windows_sysprep(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``windows_config.sysprep`` body, consuming the secret fields.
+
+    The credential members (``gui_unattended.password``,
+    ``user_data.product_key``, ``domain.domain_password``) are read here
+    and here only -- they never leave for a reviewer / preview /
+    broadcast surface (#1503).
+
+    ``UserData`` (``full_name`` / ``organization`` / ``product_key``,
+    vcenter.yaml:126067) and ``GuiUnattended`` (``auto_logon`` /
+    ``auto_logon_count`` / ``time_zone``, vcenter.yaml:126181) fields are
+    REQUIRED by the pinned schema, so they are always emitted (empty
+    string / derived defaults) -- their omission fails every Windows
+    create. ``time_zone`` here is the REST integer MS index (not the Linux
+    tz-name string). Domain join lives under ``domain`` ->
+    ``Vcenter.Guest.Domain`` (vcenter.yaml:126104), NOT the pyvmomi
+    ``identification`` key.
+    """
+    auto_logon = bool(params.get("windows_auto_logon", False))
+    user_data: dict[str, Any] = {
+        "computer_name": _build_hostname_generator(params["hostname"]),
+        "full_name": params.get("windows_full_name") or "",
+        "organization": params.get("windows_organization") or "",
+        "product_key": params.get("windows_product_key") or "",
+    }
+
+    gui_unattended: dict[str, Any] = {
+        "auto_logon": auto_logon,
+        "auto_logon_count": 1 if auto_logon else 0,
+        "time_zone": int(params.get("windows_time_zone", _DEFAULT_WINDOWS_TIME_ZONE)),
+    }
+    _put_if_str(gui_unattended, "password", params.get("windows_admin_password"))
+
+    sysprep: dict[str, Any] = {"user_data": user_data, "gui_unattended": gui_unattended}
+
+    join_domain = params.get("windows_join_domain")
+    if isinstance(join_domain, str) and join_domain:
+        domain: dict[str, Any] = {"type": "DOMAIN", "domain": join_domain}
+        _put_if_str(domain, "domain_username", params.get("windows_domain_admin_username"))
+        _put_if_str(domain, "domain_password", params.get("windows_domain_admin_password"))
+        sysprep["domain"] = domain
+    return sysprep
+
+
+def _build_customization_create_body(params: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the ``POST:/vcenter/guest/customization-specs`` request body.
+
+    Maps the agent-facing GOSC subset onto the vCenter ``CreateSpec``
+    (``{name, description, spec}``) whose ``spec`` field is a
+    ``CustomizationSpec`` (``{configuration_spec, interfaces,
+    global_dns_settings}``). The ``CreateSpec`` fields sit at the **top
+    level** of the ``/api`` request body -- the modern surface takes the
+    ``CreateSpec`` directly (#2973), so the only ``spec`` key here is the
+    legitimate ``CustomizationSpec`` field, not a ``/rest``-style envelope.
+    """
+    if params["os_type"] == "linux":
+        configuration_spec = {"linux_config": _build_linux_config(params)}
+    else:
+        configuration_spec = {
+            "windows_config": {"reboot": "REBOOT", "sysprep": _build_windows_sysprep(params)},
+        }
+    interfaces = [
+        _build_interface(nic) for nic in params.get("interfaces") or [] if isinstance(nic, dict)
+    ]
+    customization_spec: dict[str, Any] = {
+        "configuration_spec": configuration_spec,
+        "interfaces": interfaces,
+        "global_dns_settings": {
+            "dns_servers": [s for s in params.get("dns_servers") or [] if isinstance(s, str)],
+            "dns_suffix_list": [
+                s for s in params.get("dns_suffix_list") or [] if isinstance(s, str)
+            ],
+        },
+    }
+    # ``description`` is REQUIRED on the CreateSpec (vcenter.yaml:126873), so
+    # it is always emitted (empty string when unset) -- omitting it fails
+    # even a minimal create.
+    create_spec: dict[str, Any] = {
+        "name": params["spec_name"],
+        "description": params.get("description") or "",
+        "spec": customization_spec,
+    }
+    return create_spec
+
+
+async def guest_customization_spec_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Create a reusable named guest customization (GOSC) spec.
+
+    Op-id: ``vmware.composite.guest.customization_spec.create``. Single
+    write sub-op (``POST:/vcenter/guest/customization-specs``) routed
+    through the #2254 governance seam. The Windows credential params are
+    consumed into the sysprep body by
+    :func:`_build_customization_create_body` and never surface on a
+    reviewer / preview / broadcast / audit surface (#1503) -- the op is
+    pinned ``credential_write``.
+
+    On a parked / denied gate the seam's :class:`OperationResult` returns
+    verbatim; a transport / vCenter fault propagates as the dispatcher's
+    ``connector_error``.
+    """
+    spec_name = params["spec_name"]
+    os_type = params["os_type"]
+    body = _build_customization_create_body(params)
+    gate, _ = await _write_sub_op(connector, target, operator, _OP_CREATE_CUSTOMIZATION_SPEC, body)
+    if gate is not None:
+        return gate
+    return {"status": "created", "spec_name": spec_name, "os_type": os_type}
+
+
+def _vm_customize_identity(row: dict[str, Any]) -> dict[str, Any]:
+    """Identity projection of a VM listing row for the ``ambiguous`` candidate list."""
+    return {key: row[key] for key in ("vm", "name", "power_state") if row.get(key) is not None}
+
+
+def _vm_customize_result(
+    *,
+    status: str,
+    vm: str | None,
+    name: str,
+    spec_name: str,
+    power_state: str | None,
+    applies_on: str | None,
+    guidance: str | None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical ``vm.customize`` response envelope."""
+    return {
+        "status": status,
+        "vm": vm,
+        "name": name,
+        "spec_name": spec_name,
+        "power_state": power_state,
+        "applies_on": applies_on,
+        "candidates": candidates or [],
+        "guidance": guidance,
+    }
+
+
+async def vm_customize_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Apply a saved customization spec to a VM (resolved by name); optional power-on.
+
+    Op-id: ``vmware.composite.vm.customize``. Resolves the VM by display
+    name, refuses a powered-on VM with a structured
+    ``precondition_failed`` (vCenter only accepts a pending customization
+    on a powered-off VM), then ``PUT:/vcenter/vm/{vm}/guest/customization``
+    with the named spec. When ``power_on=True`` the VM is powered on
+    afterward so the customization applies on that boot.
+
+    The single spec reference carries no secret (the secret material
+    lives in the saved spec, created separately); the write sub-ops route
+    through the #2254 governance seam.
+    """
+    vm_name = params["name"]
+    spec_name = params["spec_name"]
+    power_on = bool(params.get("power_on", False))
+
+    vms = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"names": [vm_name]}
+    )
+    if not vms:
+        return _vm_customize_result(
+            status="not_found",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance=f"no VM named {vm_name!r} resolved",
+        )
+    if len(vms) > 1:
+        return _vm_customize_result(
+            status="ambiguous",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance="multiple VMs share the requested name -- rename or clean up duplicates",
+            candidates=[_vm_customize_identity(row) for row in vms],
+        )
+    vm_row = vms[0]
+    vm_moid = vm_row.get("vm")
+    power_state = vm_row.get("power_state") if isinstance(vm_row.get("power_state"), str) else None
+    if not isinstance(vm_moid, str):
+        return _vm_customize_result(
+            status="not_found",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance="matched VM listing row missing ``vm`` key",
+        )
+    if power_state == "POWERED_ON":
+        return _vm_customize_result(
+            status="precondition_failed",
+            vm=vm_moid,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=power_state,
+            applies_on=None,
+            guidance="VM is powered on; power it off before setting a pending guest customization",
+        )
+
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_SET_VM_CUSTOMIZATION,
+        {"vm": vm_moid, "name": spec_name},
+    )
+    if gate is not None:
+        return gate
+
+    if power_on:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_moid}
+        )
+        if gate is not None:
+            return gate
+        return _vm_customize_result(
+            status="powered_on",
+            vm=vm_moid,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=power_state,
+            applies_on="next_power_on",
+            guidance=None,
+        )
+    return _vm_customize_result(
+        status="customization_set",
+        vm=vm_moid,
+        name=vm_name,
+        spec_name=spec_name,
+        power_state=power_state,
+        applies_on="next_power_on",
+        guidance=None,
+    )

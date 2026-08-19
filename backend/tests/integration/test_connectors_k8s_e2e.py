@@ -149,6 +149,13 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.configmap.list",
     "k8s.configmap.info",
     "k8s.event.list",
+    # #2830 storage + custom-resource read tier.
+    "k8s.storageclass.list",
+    "k8s.persistentvolume.list",
+    "k8s.persistentvolumeclaim.list",
+    "k8s.crd.list",
+    "k8s.cr.list",
+    "k8s.cr.info",
     "k8s.logs",
     # G3.14-T1 single-call write ops (approval-gated mutations).
     "k8s.scale",
@@ -897,6 +904,6 @@ async def test_dispatch_unknown_op_returns_dispatcher_unknown_op_envelope(
     extras = result.extras
     assert extras.get("error_code") == "unknown_op"
     # ``known_op_count`` carries the descriptor count for the triple;
-    # post-G3.14-T2 this is len(EXPECTED_OP_IDS) (25: 14 read + 10 write
-    # + 1 exec).
+    # post-#2830 this is len(EXPECTED_OP_IDS) (31: 20 read [14 + the 6
+    # storage/CR reads] + 10 write + 1 exec).
     assert extras.get("known_op_count") == len(EXPECTED_OP_IDS)

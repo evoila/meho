@@ -37,6 +37,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
+from meho_backplane.connectors._shared import credential_backend as cb
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -45,6 +46,7 @@ from meho_backplane.connectors.kubernetes import (
 from meho_backplane.connectors.kubernetes.ops_write import UnsupportedKindError
 from meho_backplane.connectors.kubernetes.ops_write_dangerous import (
     ApplyManifestError,
+    KubernetesSecretRefError,
     UndeletableKindError,
     secret_create_summary,
 )
@@ -58,6 +60,8 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.settings import get_settings
+
+from ._vault_fakes import install_fake_client
 
 # ---------------------------------------------------------------------------
 # Fixtures (mirror test_connectors_k8s_workload.py)
@@ -733,6 +737,214 @@ def test_secret_create_summary_helper_is_value_free() -> None:
     summary = secret_create_summary("s", "ns", "Opaque", ["b", "a"])
     assert summary["data_keys"] == ["a", "b"]
     assert "value" not in str(summary).lower() or "data_keys" in summary
+
+
+# ---------------------------------------------------------------------------
+# k8s.secret.create — credential-backend ref resolution (#2860)
+# ---------------------------------------------------------------------------
+
+#: The sentinel a ref resolves to. The whole point of the security assertion
+#: is that this string reaches the cluster but never the op params, the
+#: return value, or (via the credential_write pin) the broadcast.
+_SECRET_REF_SENTINEL = "vault-sourced-secret-DO-NOT-LEAK"
+
+
+def _core_v1_patch() -> Any:
+    return patch("meho_backplane.connectors.kubernetes.ops_write_dangerous.client.CoreV1Api")
+
+
+def test_secret_create_schema_exposes_ref_params_and_widened_anyof() -> None:
+    """Schema gains the four ref params; anyOf accepts inline-only, ref-only,
+    or both; additionalProperties stays closed (AC #1)."""
+    op = next(o for o in WRITE_DANGEROUS_OPS if o.op_id == "k8s.secret.create")
+    props = op.parameter_schema["properties"]
+    for key in (
+        "string_data_secret_ref",
+        "string_data_secret_mount",
+        "data_secret_ref",
+        "data_secret_mount",
+    ):
+        assert key in props, f"schema missing {key}"
+    required_sets = [set(clause["required"]) for clause in op.parameter_schema["anyOf"]]
+    assert {"string_data"} in required_sets
+    assert {"data"} in required_sets
+    assert {"string_data_secret_ref"} in required_sets
+    assert {"data_secret_ref"} in required_sets
+    assert op.parameter_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_secret_create_resolves_vault_ref_never_leaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A string_data_secret_ref is resolved server-side through the seam; the
+    value reaches the cluster but never the op params or the return value
+    (AC #2, #3) — mirrors keycloak's password_secret_ref test."""
+    fake = install_fake_client(monkeypatch, secret={"token": _SECRET_REF_SENTINEL})
+    conn = _make_connector()
+    operator = _make_operator()
+    params = {
+        "name": "argocd-spoke",
+        "namespace": "argocd",
+        "string_data_secret_ref": {"bearer": "argocd/rke2-mgmt#token"},
+    }
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        result = await conn.k8s_secret_create(operator=operator, target=_TARGET, params=params)
+    # The resolved value reached the cluster (the whole point) ...
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.string_data == {"bearer": _SECRET_REF_SENTINEL}
+    # ... but the response is key-names-only, and the value appears nowhere in
+    # the op params (what the audit row hashes) nor in the return value.
+    assert result["data_keys"] == ["bearer"]
+    assert _SECRET_REF_SENTINEL not in str(result)
+    assert _SECRET_REF_SENTINEL not in str(params)
+    # The KV-v2 read ran under the operator's own JWT (operator-context read),
+    # against the scheme-stripped, fragment-stripped logical path.
+    assert fake.auth.jwt.login_calls[-1]["jwt"] == operator.raw_jwt
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == "argocd/rke2-mgmt"
+
+
+@pytest.mark.asyncio
+async def test_secret_create_multi_key_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two refs resolve into one Secret with two keys — the ArgoCD token+CA
+    shape the issue calls out (AC #4)."""
+    install_fake_client(monkeypatch, secret={"bearer": "TOKEN-VAL", "ca": "CA-VAL"})
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        result = await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={
+                "name": "argocd-spoke",
+                "namespace": "argocd",
+                "string_data_secret_ref": {
+                    "token": "argocd/rke2-mgmt#bearer",
+                    "ca.crt": "argocd/rke2-mgmt#ca",
+                },
+            },
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.string_data == {"token": "TOKEN-VAL", "ca.crt": "CA-VAL"}
+    assert result["data_keys"] == ["ca.crt", "token"]
+
+
+@pytest.mark.asyncio
+async def test_secret_create_inline_and_ref_merged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inline string_data and a ref map merge into one Secret (AC #4)."""
+    install_fake_client(monkeypatch, secret={"password": "REF-PW"})
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        result = await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={
+                "name": "db-creds",
+                "namespace": "argocd",
+                "string_data": {"username": "admin"},
+                "string_data_secret_ref": {"password": "db/creds#password"},
+            },
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.string_data == {"username": "admin", "password": "REF-PW"}
+    assert result["data_keys"] == ["password", "username"]
+
+
+@pytest.mark.asyncio
+async def test_secret_create_data_secret_ref_merges_into_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """data_secret_ref resolves into the base64 `data` map, not string_data."""
+    install_fake_client(monkeypatch, secret={"dockercfg": "eyJhdXRocyI6e319"})
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={
+                "name": "regcred",
+                "namespace": "argocd",
+                "type": "kubernetes.io/dockerconfigjson",
+                "data_secret_ref": {".dockerconfigjson": "registry/pull#dockercfg"},
+            },
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.data == {".dockerconfigjson": "eyJhdXRocyI6e319"}
+    assert body.string_data is None
+
+
+@pytest.mark.asyncio
+async def test_secret_create_gsm_ref_resolves_through_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gsm: ref routes through the seam's scheme dispatch to the gsm backend,
+    never a Vault read — backend-agnostic parity with keycloak (AC #5)."""
+    vault_fake = install_fake_client(monkeypatch, secret={"token": "SHOULD-NOT-BE-READ"})
+
+    class _FakeGsmBackend:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def load_secret_data(
+            self,
+            secret_ref: str,
+            operator: Operator,
+            *,
+            target_name: str,
+            mount: str,
+        ) -> dict[str, object]:
+            del operator, mount
+            self.calls.append({"secret_ref": secret_ref, "target_name": target_name})
+            return {"token": "GSM-TOKEN"}
+
+    fake_backend = _FakeGsmBackend()
+    monkeypatch.setitem(cb.CREDENTIAL_BACKEND_REGISTRY, "gsm", fake_backend)
+
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        await conn.k8s_secret_create(
+            operator=_make_operator(),
+            target=_TARGET,
+            params={
+                "name": "argocd-spoke",
+                "namespace": "argocd",
+                "string_data_secret_ref": {"bearer": "gsm:my-project/argocd-token#token"},
+            },
+        )
+    body = core_cls.return_value.create_namespaced_secret.call_args.kwargs["body"]
+    assert body.string_data == {"bearer": "GSM-TOKEN"}
+    # Dispatched to the gsm backend with the scheme stripped and the fragment
+    # removed (the caller owns fragment->field selection, uniformly).
+    assert fake_backend.calls[-1]["secret_ref"] == "my-project/argocd-token"
+    # Vault was never touched — the ref was not treated as a KV-v2 path.
+    assert vault_fake.secrets.kv.v2.read_calls == []
+    assert vault_fake.auth.jwt.login_calls == []
+
+
+@pytest.mark.asyncio
+async def test_secret_create_ref_missing_field_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ref whose resolved payload lacks the requested field raises a clear,
+    value-free error (never a bare KeyError)."""
+    install_fake_client(monkeypatch, secret={"other": "x"})
+    conn = _make_connector()
+    with _patch_kubeconfig(), _core_v1_patch() as core_cls:
+        core_cls.return_value.create_namespaced_secret = AsyncMock()
+        with pytest.raises(KubernetesSecretRefError, match="no usable string value"):
+            await conn.k8s_secret_create(
+                operator=_make_operator(),
+                target=_TARGET,
+                params={
+                    "name": "x",
+                    "namespace": "argocd",
+                    "string_data_secret_ref": {"token": "argocd/spoke#token"},
+                },
+            )
 
 
 # ---------------------------------------------------------------------------

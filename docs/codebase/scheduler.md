@@ -96,14 +96,17 @@ DBOS rebase swaps only the loop module.
                   +------------------------------------------+
                   | run_one_tick()                           |
                   | 1. pg_try_advisory_lock(MEHOSCHD)        |
-                  |    (no-op on SQLite test path)           |
+                  |    on a dedicated pinned connection      |
+                  |    (db/advisory.py; no-op on SQLite)     |
                   | 2. claim_due_triggers(now=now(UTC),      |
-                  |       limit=50)                          |
+                  |       limit=50)  -- separate work        |
+                  |    session, commits per row              |
                   |    -- SELECT ... FOR UPDATE SKIP LOCKED  |
                   | 3. for each row:                         |
                   |      kind==cron: advance + invoke        |
                   |      kind==one_off: mark fired + invoke  |
-                  | 4. pg_advisory_unlock                    |
+                  | 4. pg_advisory_unlock on the SAME        |
+                  |    pinned connection                     |
                   +------------------------------------------+
                                                  |
                                                  v
@@ -380,8 +383,21 @@ Two backplane pods sharing one Postgres are coordinated by two layers:
 
 1. **Process-wide advisory lock** (`pg_try_advisory_lock(MEHOSCHD)`):
    only one replica's loop runs the tick body at a time. The losing
-   replica's `try_advisory_lock` returns `False` and the tick is skipped.
-   Non-blocking.
+   replica reads `False`, debug-logs `scheduler_tick_lock_busy`, counts
+   on `advisory_lock_busy_total{subsystem="scheduler"}`, and skips the
+   tick. Non-blocking.
+
+   **Advisory lock and unlock must run on the same connection**
+   (#3010). The lock is session-level — owned by the DBAPI connection,
+   unaffected by commit/rollback — and the tick body commits per fired
+   row, which returns the work session's pooled connection. The lock is
+   therefore hosted on a dedicated pinned connection
+   (`meho_backplane/db/advisory.py::advisory_lock`), never on the work
+   session: taken there, the first commit would strand it on an idle
+   pooled connection, the unlock would land on a different connection
+   (PG warns and returns `false`, nothing raises), and every later tick
+   drawing another connection would skip silently — the sensor runner's
+   #3010 starvation, same shape here.
 2. **Per-row claim under `FOR UPDATE SKIP LOCKED`** plus the conditional
    `UPDATE` in the advance/mark-fired step. Belt-and-braces — even if the
    advisory lock were removed, single-fire would still hold across
@@ -427,7 +443,10 @@ lock — see "Known issues / limitations" (#1502).
   so the durable `agent_run` row's provenance column reflects the
   scheduler vs. a direct REST/MCP/CLI invocation.
 - **`pg_try_advisory_lock` / `pg_advisory_unlock`** — Postgres
-  session-level advisory locks. No-op on SQLite via dialect gate.
+  session-level advisory locks, held via the shared pinned-connection
+  helper `meho_backplane/db/advisory.py::advisory_lock` (#3010: lock and
+  unlock must run on the same connection). No-op on SQLite via dialect
+  gate.
 - **`SELECT ... FOR UPDATE SKIP LOCKED`** — SQLAlchemy 2.0
   `with_for_update(skip_locked=True)`; emitted only on PG.
 
@@ -507,9 +526,10 @@ interval at the cost of one extra scan query per elapsed tick.
   the `inputs: {}` edge, which `_coerce_inputs` renders to the literal
   `"{}"` — non-whitespace, so it slips past the fire-time guard and reaches
   the model as a meaningless `"{}"` turn. `kind=event` is **exempt**: its
-  future payload-dispatch junction (`events/drain.py`, still a no-op at
-  HEAD) may legitimately derive the prompt from the matched event, so an
-  input-less event trigger stays creatable.
+  payload-dispatch junction (the event drain's subscription matcher,
+  `events/matcher.py`) derives the prompt from the matched event when the
+  trigger carries no usable `inputs`, so an input-less event trigger stays
+  creatable.
 
   The fire-time guard is retained as defense-in-depth for the paths the
   create check does not cover — an `event` trigger, or a row inserted
@@ -555,43 +575,33 @@ invalid cron expression surfaces as `invalid_arguments` at the
 boundary; an unknown `agent_definition_id` surfaces as
 `agent_definition_not_found` (422 / MCP invalid-params).
 
-### `kind=event` is refused at create until #826 (#2325)
+### `kind=event` triggers dispatch via the event drain (#2878)
 
-`kind=event` trigger creation is **refused** with a structured 422
-`event_triggers_not_implemented` (MCP invalid-params with the same
-code; UI modal banner naming #826) on every transport. The refusal
-lives in one place — `SchedulerAdminService.create` raises
-`EventTriggersNotImplementedError` before any DB write — so the wire
-schema still models the `event` kind but no `event` row is ever
-persisted.
+`kind=event` trigger creation returns **201** on every transport
+(`SchedulerAdminService.create` dispatches to `create_event_trigger`,
+which persists a row with `next_fire_at=NULL`). Such a row is invisible
+to the tick loop's `claim_due_triggers` scan — it is dispatched not on
+the clock but when a matching event lands.
 
-Why: the event-subscription matcher in
-`backend/src/meho_backplane/events/drain.py` is still the documented
-T5 no-op (it stamps `processed_at` on drained rows without consulting
-`scheduled_trigger`). Real producers already emit onto the outbox —
-`backend/src/meho_backplane/operations/agent_run.py` publishes
-agent-run terminal-transition events — so those events land in
-`event_outbox` and are silently swallowed. Accepting a trigger that
-reports `status=active` but can never fire is dishonest to the
-operator; refusing at create is the honest shape until #826 wires the
-matcher. The guard is a single create-site check (not a feature-flag
-system) and is removed in the same change that lands #826, at which
-point the `create_event_trigger` branch below the guard dispatches for
-real.
+The dispatcher is the **event drain's subscription matcher**
+(`backend/src/meho_backplane/events/matcher.py`, documented in
+[events.md](events.md)). For each drained `event_outbox` row it fires
+every active `kind=event` trigger in that tenant whose `event_filter`
+the event `payload` contains (`payload @> event_filter`), through the
+same `AgentInvoker.run_scheduled` seam the cron / one-off loop uses. The
+fired run's work_ref is `event:{event_id}:{trigger_id}`, which dedupes a
+redelivered event so it never double-fires.
 
-**Pre-existing rows.** Event triggers created `active` before this
-refusal landed are parked to `paused` by a one-shot startup reconcile
-(`reconcile_active_event_triggers` in `scheduler/loop.py`, run once at
-the top of `_scheduler_loop` before the first tick). Because an event
-trigger carries no `next_fire_at`, the tick loop's `claim_due_triggers`
-scan never sees it, so an in-loop park path would never fire — the
-reconcile is the deliberate cleanup. The park reason is logged under
-`scheduler_event_triggers_parked` (`reason=event_triggers_not_implemented:826`),
-mirroring the `_park_trigger` "reason is logged for audit" precedent
-since the row has no reason column; the parked state is visible via
-`GET /api/v1/scheduler/triggers?kind=event&status=paused` and the UI
-list. The reconcile is idempotent and removed alongside the guard when
-#826 lands.
+`kind=event` triggers are the one kind **exempt** from the create-time
+non-empty-inputs rule (`_payload_yields_prompt` in `schemas.py`): an
+input-less event trigger is creatable because the matcher synthesises a
+prompt from the matched event (untrusted-enveloped) at fire time, rather
+than requiring the operator to author one up front.
+
+Until #2878 this create was refused with `event_triggers_not_implemented`
+(#2325) and pre-existing `active` event rows were parked by a startup
+reconcile; both the create guard and the reconcile were removed when the
+matcher landed.
 
 ### Cross-tenant admin
 

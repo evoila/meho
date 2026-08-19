@@ -38,7 +38,7 @@ supported client directly and pulls **no separate `motor` dependency**.
   attributes: `product="mongodb"`, `version="7"`, `impl_id="mongodb-wire"`,
   `supported_version_range=">=5,<9"`, `priority=1` (outranks a
   `GenericRestConnector` auto-shim). Owns the connect/close lifecycle
-  (`_client` async context manager), `fingerprint`, `probe`, the eight op
+  (`_client` async context manager), `fingerprint`, `probe`, the nine op
   handlers, `register_operations`, and the `execute` dispatcher shim.
 - **`MongoOp`** (`ops.py`) — frozen dataclass carrying one op's registration
   metadata. `MONGO_OPS` is the tuple the registrar walks;
@@ -62,7 +62,7 @@ supported client directly and pulls **no separate `motor` dependency**.
   (regenerated CLI snapshot at `cli/api/openapi.json`).
 - **Lifespan** — `register_mongodb_typed_operations` (queued via
   `register_typed_op_registrar`) delegates to
-  `MongoDbConnector.register_operations`, which upserts the eight descriptors
+  `MongoDbConnector.register_operations`, which upserts the nine descriptors
   into `endpoint_descriptor`. Idempotent across restarts.
 
 ### Dispatch
@@ -84,15 +84,17 @@ Ops:
 | `mongodb.indexes` | `listIndexes` | indexes incl. TTL `expireAfterSeconds` (`database`, `collection`) |
 | `mongodb.count` | `estimatedDocumentCount` | fast metadata count, O(1) (`database`, `collection`) |
 | `mongodb.server_status` | `serverStatus` | slim projection (heavy sections suppressed) |
-| `mongodb.replica_status` | `hello` + `replSetGetStatus` | replica-set health + member roles |
+| `mongodb.replica_status` | `hello` + `replSetGetStatus` | replica-set health + member roles + per-member `lag_seconds` (secs behind primary) |
+| `mongodb.current_ops` | `currentOp` | live in-flight ops; slim projection, `command`/`originatingCommand` query text stripped |
 
 ### Read-only enforcement (fixed command set)
 
 Unlike a SQL database there is no free-form query surface at all. Every op maps
 to exactly one command in `MONGO_READ_COMMANDS` (`listDatabases`,
 `listCollections`, `dbStats`, `collStats`, `listIndexes`, `count`,
-`serverStatus`, `buildInfo`, `hello`, `replSetGetStatus`), and no op's parameter
-schema accepts a caller-supplied command name, aggregation pipeline, filter, or
+`serverStatus`, `buildInfo`, `hello`, `replSetGetStatus`, `currentOp`), and no
+op's parameter schema accepts a caller-supplied command name, aggregation
+pipeline, filter, or
 `eval` body — the only params are `database` / `collection` selectors. Read-only
 is therefore a property of the closed command set. `assert_read_command` is a
 belt-and-suspenders check the query layer runs before every command, so a future
@@ -128,8 +130,9 @@ a credentialled target on the operator-less probe path resolves here),
 Member roles are derived from `hello` (`hosts`/`passives`/`arbiters` + `primary`)
 so the fingerprint does not need the elevated `clusterMonitor` privilege
 `replSetGetStatus` requires; `mongodb.replica_status` additionally calls
-`replSetGetStatus` for each member's live `stateStr`/health, and treats the
-standalone code-76 (`NoReplicationEnabled`) as `is_replica_set=False`.
+`replSetGetStatus` for each member's live `stateStr`/health and per-member
+replication lag, and treats the standalone code-76 (`NoReplicationEnabled`) as
+`is_replica_set=False`.
 
 ## Dependencies
 
@@ -150,11 +153,30 @@ standalone code-76 (`NoReplicationEnabled`) as `is_replica_set=False`.
 - **`collStats` is deprecated** as a diagnostic command since MongoDB 6.2 but is
   still served through 8.x; if a future server removes it, `mongodb.collection_stats`
   moves to the `$collStats` aggregation stage.
+- **`mongodb.current_ops` strips the query text.** A `currentOp` operation
+  document's `command` and `originatingCommand` fields carry literal filter
+  values (and preserve a `comment` even when the command is truncated), so the op
+  returns only a curated triage-safe subset (`CURRENT_OP_SLIM_FIELDS`) — a
+  positive projection, the same discipline `postgres.activity` applies to the
+  in-flight query text, and future-proof against a new value-bearing field. It
+  issues `currentOp` with `$all: false` (excluding idle connections and internal
+  system operations; `currentOp` is deprecated as a command since 6.2 but still
+  served through 8.x), and needs the `inprog` privilege — the `clusterMonitor`
+  role `mongodb.replica_status` already assumes, so no new grant. The `$currentOp`
+  aggregation-stage variant is deliberately deferred: admitting it means adding
+  the generic `aggregate` command to the closed allowlist.
 - `serverStatus` is projected to a curated slim subset; the full internal
   metrics (`wiredTiger`, `metrics`, `locks`, `transactions`) are suppressed over
   the wire, not just dropped in code.
 - Member roles in `fingerprint` come from `hello`; a live replica set's detailed
   per-member state is on `mongodb.replica_status`.
+- `mongodb.replica_status` computes each member's `lag_seconds` from the primary's
+  and the member's `optimeDate` in the same `replSetGetStatus` response — no extra
+  round trip. It is `null` on the primary's own row, when no member is currently
+  `PRIMARY`, and for a member with no `optimeDate` (e.g. an arbiter). Like
+  `rs.printSecondaryReplicationInfo()`, it is an `optimeDate` delta, so on a quiet
+  replica set with no recent writes it can read high because the secondary has had
+  nothing new to apply — not because it is unhealthy.
 
 ## References
 

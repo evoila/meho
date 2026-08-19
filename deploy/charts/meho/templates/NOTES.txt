@@ -13,6 +13,12 @@ Resources deployed:
 {{- if .Values.networkPolicy.enabled }}
   - NetworkPolicy / {{ include "meho.fullname" . }} (default-deny + explicit egress)
 {{- end }}
+{{- if .Values.serviceMonitor.enabled }}
+  - ServiceMonitor / {{ include "meho.fullname" . }} (scrapes {{ .Values.serviceMonitor.path }} on port {{ .Values.service.portName }})
+{{- end }}
+{{- if .Values.prometheusRule.enabled }}
+  - PrometheusRule / {{ include "meho.fullname" . }} (starter alerts)
+{{- end }}
 
 Next steps:
   1. Watch the rollout:

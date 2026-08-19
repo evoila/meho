@@ -209,16 +209,51 @@ registrar is queued via `register_typed_op_registrar` in the package
   `resourceKind` / `name` / `regex` / `adapterKind` / state / status /
   health / parent / `statKey`), paginated via `page` / `pageSize` query
   params.
+- **`vrops.resource.stats`** — `GET /suite-api/api/resources/stats/latest`
+  (wave-2 sizing read, #2838). Returns the latest metric **values** vROps
+  computed for named resources — current CPU demand, memory workload,
+  capacity-remaining — the sizing / resource-pressure answer, closing the
+  gap where the backplane could find resources (`vrops.resource.query`) and
+  see alerts (`vrops.alert.list`) but never read the values vROps exists to
+  compute. `resourceId` is a **required** list (`minItems=1`, typically fed
+  from `vrops.resource.query`); the optional `statKey` list narrows to
+  specific stat keys and the optional `currentOnly` boolean reports only
+  current values. `resourceId` / `statKey` serialise to repeated query
+  params. The `required`/`minItems` schema means the dispatcher's
+  pre-execution param validation refuses an unbounded all-resource stats
+  read before the handler runs. Unlike `vrops.resource.query`'s `statKey`
+  (which filters resources by *whether* they report a stat), this op returns
+  the stat's **value**; the handler passes the payload through unparsed so
+  the vendor's `stats-of-resources` field names stay out of executable code.
 
-All three are `safety_level="safe"`, `requires_approval=False`,
+All four are `safety_level="safe"`, `requires_approval=False`,
 read-only. Each rides the connector's `OpsToken` session; `authSource`
 federation lives in the acquire body, not on the reads. `vrops.resource.query`
 encodes its `page`/`pageSize` pagination onto the request path (the base
-`_post_json` takes no `params` mapping).
+`_post_json` takes no `params` mapping); `vrops.resource.stats` threads its
+`resourceId` / `statKey` / `currentOnly` through the base `_get_json`
+`params` mapping (httpx serialises a list value to repeated pairs). Large
+stat / alert / resource sets reduce to a JSONFlux handle at the dispatch
+layer.
 
 The remaining 6 ingested-browse ops (resource list/get, alert definitions,
 symptoms, recommendations, super metrics) stay browsable until Initiative
 #2266 T7 retires the apparatus.
+
+**Spec-reconcile lane (#2984).** Every hand-coded `METHOD:/path` above — the
+four typed-read paths plus the session mint
+(`POST /suite-api/api/auth/token/acquire`) — is asserted against the pinned
+`vcf-operations-9.0` shelf spec by
+[`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`](../../backend/tests/test_connectors_vcf_operations_spec_reconcile.py)
+(the #2980 harness; parse-only, runs in the required unit sweep, uniform skip
+when the shelf is unconfigured). The lane parses
+`vcf-operations-openapi.ingestable.json` — a deterministic derivative of the
+vendor core spec pinned on the shelf, because the vendor document itself
+fails `parse_openapi`'s OpenAPI 3.0 metaschema gate (three
+`components.schemas` entries carry `"required": []`; the derivative drops
+them, a semantic no-op — recipe + sha256 in the shelf's `MANIFEST.md`). An
+operator ingesting the core spec needs the same remediation. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ### Shutdown
 
@@ -270,6 +305,7 @@ NSX / vRLI take).
 
 - **Task (skeleton)**: <https://github.com/evoila/meho/issues/829>
 - **Task (OpsToken auth rebuild)**: <https://github.com/evoila/meho/issues/2395>
+- **Task (stat/metric read for sizing)**: <https://github.com/evoila/meho/issues/2838>
 - **Parent initiative**: <https://github.com/evoila/meho/issues/369>
 - **Parent goal**: <https://github.com/evoila/meho/issues/214>
 - **Sibling skeletons (same Initiative wave)**:

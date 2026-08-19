@@ -468,6 +468,76 @@ async def test_run_one_sensor_tick_stamps_the_liveness_view() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Claim facet (#3010) — lock-miss ticks must not read fully healthy
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_lock_acquired_tick_stamps_both_facets() -> None:
+    """The default (lock held) stamps the tick and the claim together."""
+    await note_tick_completed(now=_T0)
+    liveness = sensor_runner_liveness(now=_T0 + timedelta(seconds=30))
+    assert liveness.seconds_since_last_tick == pytest.approx(30.0)
+    assert liveness.seconds_since_last_claim == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_lock_miss_tick_stamps_tick_but_not_claim() -> None:
+    """A ``lock_acquired=False`` tick keeps the loop alive without faking a claim.
+
+    #3010: a lock stranded on an idle pooled connection made every tick
+    complete (fresh tick stamp, ``stalled=False``) while zero sensors were
+    claimed for hours. The claim facet must keep measuring from the last
+    tick that actually held the lock, so the divergence is visible.
+    """
+    await note_tick_completed(now=_T0)
+    await note_tick_completed(now=_T0 + timedelta(seconds=10), lock_acquired=False)
+    await note_tick_completed(now=_T0 + timedelta(seconds=20), lock_acquired=False)
+
+    liveness = sensor_runner_liveness(now=_T0 + timedelta(seconds=25))
+    # The loop is alive: the tick stamp advanced on every completed tick.
+    assert liveness.seconds_since_last_tick == pytest.approx(5.0)
+    assert liveness.stalled is False
+    # But nothing was claimed since _T0 — the claim facet says so.
+    assert liveness.seconds_since_last_claim == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
+async def test_claim_facet_falls_back_to_watchdog_baseline() -> None:
+    """Before any lock-acquired tick, claim staleness measures from start.
+
+    Mirrors the tick facet's baseline discipline: a runner that never
+    wins the lock after process start must not hide behind a ``None``.
+    """
+    task = start_checks_watchdog()
+    try:
+        assert watchdog._BASELINE is not None
+        await note_tick_completed(
+            now=watchdog._BASELINE + timedelta(seconds=10), lock_acquired=False
+        )
+        liveness = sensor_runner_liveness(now=watchdog._BASELINE + timedelta(seconds=30))
+        assert liveness.seconds_since_last_claim == pytest.approx(30.0)
+        assert liveness.seconds_since_last_tick == pytest.approx(20.0)
+    finally:
+        await stop_checks_watchdog(task)
+
+
+def test_claim_facet_is_none_with_no_reference_at_all() -> None:
+    liveness = sensor_runner_liveness(now=_T0)
+    assert liveness.seconds_since_last_claim is None
+
+
+@pytest.mark.asyncio
+async def test_run_one_sensor_tick_stamps_the_claim_facet() -> None:
+    """The real tick seam holds the (SQLite no-op) lock and stamps the claim."""
+    assert sensor_runner_liveness().seconds_since_last_claim is None
+    await run_one_sensor_tick()
+    liveness = sensor_runner_liveness()
+    assert liveness.seconds_since_last_claim is not None
+    assert liveness.seconds_since_last_claim < 5.0
+
+
+# --------------------------------------------------------------------------- #
 # Lifecycle
 # --------------------------------------------------------------------------- #
 

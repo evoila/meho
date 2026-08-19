@@ -13,7 +13,8 @@ command reference and to unit-test with a fake client).
 Command facts are pinned to the MongoDB manual:
 ``listDatabases`` / ``listCollections`` / ``dbStats`` / ``collStats`` /
 ``listIndexes`` / ``serverStatus`` / ``buildInfo`` / ``hello`` /
-``replSetGetStatus`` (https://www.mongodb.com/docs/manual/reference/command/).
+``replSetGetStatus`` / ``currentOp``
+(https://www.mongodb.com/docs/manual/reference/command/).
 """
 
 from __future__ import annotations
@@ -31,11 +32,13 @@ from pymongo.errors import OperationFailure
 from meho_backplane.connectors.mongodb.session import DEFAULT_AUTH_SOURCE, assert_read_command
 
 __all__ = [
+    "CURRENT_OP_SLIM_FIELDS",
     "NO_REPLICATION_ENABLED_CODE",
     "SERVER_STATUS_SLIM_FIELDS",
     "SERVER_STATUS_SUPPRESSED_SECTIONS",
     "fetch_collection_stats",
     "fetch_collections",
+    "fetch_current_ops",
     "fetch_databases",
     "fetch_db_stats",
     "fetch_estimated_count",
@@ -83,6 +86,34 @@ SERVER_STATUS_SLIM_FIELDS: tuple[str, ...] = (
     "storageEngine",
     "repl",
     "ok",
+)
+
+#: The triage-safe per-operation fields kept from a ``currentOp`` document. This
+#: is a positive projection (the same "fetch, then keep only the triage-safe
+#: subset" shape as :data:`SERVER_STATUS_SLIM_FIELDS`), not a drop-list: an op
+#: document is rebuilt from only these fields, so the query-bearing fields a
+#: ``currentOp`` entry can carry — ``command`` / ``originatingCommand`` /
+#: ``query`` / ``comment`` (all of which embed literal filter values and can
+#: preserve a ``comment`` even when the command is truncated) — never reach an
+#: :class:`OperationResult`, and a future server version adding a new
+#: value-bearing field cannot leak through a stale drop-list. ``planSummary`` is
+#: kept: it reports the chosen index's key pattern (field names, already public
+#: via ``mongodb.indexes``), not the literal query values. Mirrors the
+#: query-text omission ``postgres.activity`` applies to ``pg_stat_activity``.
+CURRENT_OP_SLIM_FIELDS: tuple[str, ...] = (
+    "opid",
+    "op",
+    "ns",
+    "active",
+    "secs_running",
+    "microsecs_running",
+    "client",
+    "desc",
+    "connectionId",
+    "planSummary",
+    "numYields",
+    "waitingForLock",
+    "currentOpTime",
 )
 
 
@@ -246,6 +277,40 @@ def _members_from_hello(hello: dict[str, Any]) -> list[dict[str, str]]:
     return members
 
 
+def _primary_optime_date(members: list[Mapping[str, Any]]) -> _dt.datetime | None:
+    """Return the elected primary's ``optimeDate`` from a ``replSetGetStatus`` list.
+
+    Scans for the member whose ``stateStr`` is ``PRIMARY``; returns ``None`` when
+    no primary is currently elected or that member carries no ``optimeDate``, in
+    which case per-member replication lag is undefined.
+    """
+    for member in members:
+        if member.get("stateStr") == "PRIMARY":
+            optime = member.get("optimeDate")
+            return optime if isinstance(optime, _dt.datetime) else None
+    return None
+
+
+def _member_lag_seconds(
+    member: Mapping[str, Any], primary_optime: _dt.datetime | None
+) -> float | None:
+    """Seconds *member* trails the primary's oplog, or ``None`` when undefined.
+
+    ``None`` on the primary's own row (zero lag by definition), when no member is
+    currently ``PRIMARY``, or when *member* has no ``optimeDate`` (e.g. an
+    arbiter, which bears no data); otherwise the wall-clock delta between the
+    primary's and the member's last-applied oplog entry (``optimeDate``).
+    """
+    if member.get("stateStr") == "PRIMARY":
+        return None
+    if primary_optime is None:
+        return None
+    member_optime = member.get("optimeDate")
+    if not isinstance(member_optime, _dt.datetime):
+        return None
+    return (primary_optime - member_optime).total_seconds()
+
+
 async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict[str, Any]:
     """Return replica-set health from ``hello`` + ``replSetGetStatus``.
 
@@ -256,6 +321,11 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
     ``clusterMonitor`` privilege; on a standalone it raises
     :data:`NO_REPLICATION_ENABLED_CODE` and the connector reports
     ``is_replica_set=False`` rather than surfacing an error.
+
+    Each ``repl_set_status.members`` entry also carries ``optime_date``,
+    ``sync_source_host``, ``last_heartbeat``, and a computed ``lag_seconds`` —
+    the seconds a member trails the primary's oplog (``None`` on the primary and
+    when no primary is elected or the member holds no ``optimeDate``).
     """
     hello = await _hello(client)
     set_name = hello.get("setName")
@@ -278,6 +348,8 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
             payload["is_replica_set"] = False
             return payload
         raise
+    raw_members = status.get("members", [])
+    primary_optime = _primary_optime_date(raw_members)
     payload["repl_set_status"] = {
         "set": status.get("set"),
         "members": [
@@ -286,11 +358,47 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
                 "state": member.get("stateStr"),
                 "health": member.get("health"),
                 "uptime": member.get("uptime"),
+                "optime_date": _jsonable(member.get("optimeDate")),
+                "sync_source_host": member.get("syncSourceHost"),
+                "last_heartbeat": _jsonable(member.get("lastHeartbeat")),
+                "lag_seconds": _member_lag_seconds(member, primary_optime),
             }
-            for member in status.get("members", [])
+            for member in raw_members
         ],
     }
     return payload
+
+
+async def fetch_current_ops(client: AsyncMongoClient[dict[str, Any]]) -> dict[str, Any]:
+    """Snapshot the in-flight operations via ``currentOp``, without query text.
+
+    Issues ``{"currentOp": 1, "$all": False}`` against the ``admin`` database.
+    ``$all: False`` (the command's own default) excludes idle connections and
+    internal system operations, so the payload stays a triage-sized snapshot of
+    the operations actually running. Each returned operation is projected down to
+    :data:`CURRENT_OP_SLIM_FIELDS`, dropping the query-bearing ``command`` /
+    ``originatingCommand`` fields that can carry literal filter values or secrets
+    — the same discipline ``postgres.activity`` applies to the in-flight query
+    text. An operator finds the long-runners by sorting the result on
+    ``secs_running`` (client-side, or via ``result_query`` on a handle).
+
+    Requires the ``inprog`` privilege (the built-in ``clusterMonitor`` role) —
+    the same role ``mongodb.replica_status``'s ``replSetGetStatus`` already
+    assumes, so no new elevated grant.
+
+    ``currentOp`` is deprecated as a command since MongoDB 6.2 in favour of the
+    ``$currentOp`` aggregation stage, but is still served through MongoDB 8.x,
+    inside this connector's supported range; the single fixed command keeps the
+    closed read-command allowlist a one-entry addition rather than admitting the
+    generic ``aggregate`` command.
+    """
+    assert_read_command("currentOp")
+    result = await _admin(client).command({"currentOp": 1, "$all": False})
+    operations = [
+        {field: _jsonable(op[field]) for field in CURRENT_OP_SLIM_FIELDS if field in op}
+        for op in result.get("inprog", [])
+    ]
+    return {"operations": operations}
 
 
 async def fetch_fingerprint(

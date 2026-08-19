@@ -57,12 +57,15 @@ from kubernetes_asyncio.client.models import (
     V1IngressSpec,
     V1IngressTLS,
     V1ListMeta,
+    V1LoadBalancerIngress,
+    V1LoadBalancerStatus,
     V1ObjectMeta,
     V1ObjectReference,
     V1Service,
     V1ServiceBackendPort,
     V1ServicePort,
     V1ServiceSpec,
+    V1ServiceStatus,
 )
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -84,6 +87,7 @@ from meho_backplane.connectors.kubernetes.ops_events import (
     sort_event_rows_recent_first,
 )
 from meho_backplane.connectors.kubernetes.ops_network import (
+    K8S_SERVICE_LIST_RESPONSE_SCHEMA,
     NETWORK_OPS,
     ingress_path_row,
     ingress_row,
@@ -262,6 +266,7 @@ def _make_service(
     external_ips: list[str] | None = None,
     ports: list[V1ServicePort] | None = None,
     selector: dict[str, str] | None = None,
+    status: V1ServiceStatus | None = None,
 ) -> V1Service:
     return V1Service(
         metadata=V1ObjectMeta(name=name, namespace=namespace),
@@ -272,6 +277,7 @@ def _make_service(
             ports=ports or [],
             selector=selector or {},
         ),
+        status=status,
     )
 
 
@@ -332,6 +338,75 @@ def test_service_row_external_ips_forwarded() -> None:
         external_ips=["1.2.3.4", "5.6.7.8"],
     )
     assert service_row(svc)["external_ips"] == ["1.2.3.4", "5.6.7.8"]
+
+
+def _lb_status(*ingress: V1LoadBalancerIngress) -> V1ServiceStatus:
+    """Wrap LoadBalancer ingress entries into a ``V1ServiceStatus`` seam."""
+    return V1ServiceStatus(load_balancer=V1LoadBalancerStatus(ingress=list(ingress)))
+
+
+def test_service_row_lb_ingress_projects_ip_and_hostname_entries() -> None:
+    """A LoadBalancer with a populated ``status.loadBalancer.ingress`` surfaces
+    one ``{ip, hostname}`` entry per assignment -- the MetalLB VIP-occupancy
+    signal. Both an IP-only and a hostname-only entry are covered."""
+    svc = _make_service(
+        name="argocd-lb",
+        type_="LoadBalancer",
+        status=_lb_status(
+            V1LoadBalancerIngress(ip="10.0.0.5"),
+            V1LoadBalancerIngress(hostname="lb.evba.lab"),
+        ),
+    )
+    assert service_row(svc)["lb_ingress"] == [
+        {"ip": "10.0.0.5", "hostname": None},
+        {"ip": None, "hostname": "lb.evba.lab"},
+    ]
+
+
+def test_service_row_lb_ingress_empty_for_clusterip() -> None:
+    """A ClusterIP service (no ``status``) surfaces ``lb_ingress == []``."""
+    svc = _make_service(name="argocd-server")
+    assert service_row(svc)["lb_ingress"] == []
+
+
+def test_service_row_lb_ingress_empty_for_unassigned_loadbalancer() -> None:
+    """A LoadBalancer whose VIP is not yet assigned (``ingress=None``) surfaces
+    ``lb_ingress == []`` rather than raising on the None chain."""
+    svc = _make_service(
+        name="pending-lb",
+        type_="LoadBalancer",
+        status=V1ServiceStatus(load_balancer=V1LoadBalancerStatus(ingress=None)),
+    )
+    assert service_row(svc)["lb_ingress"] == []
+
+
+def test_service_row_validates_against_response_schema() -> None:
+    """``service_row`` output conforms to ``K8S_SERVICE_LIST_RESPONSE_SCHEMA``.
+
+    Nothing else pinned the helper against the schema, so a key added to
+    one and not the other -- the exact drift this projection widens --
+    would slip past review. Validate the ``{rows, total}`` envelope for a
+    spread of shapes (ClusterIP, ExternalName, LoadBalancer-with-VIP)
+    against the live schema; ``additionalProperties: false`` + the
+    ``required`` list (now carrying ``lb_ingress``) both bite here.
+    """
+    from jsonschema import Draft202012Validator
+
+    services = [
+        _make_service(name="clusterip", ports=[V1ServicePort(name="http", port=80)]),
+        V1Service(
+            metadata=V1ObjectMeta(name="external", namespace="default"),
+            spec=V1ServiceSpec(type="ExternalName", external_name="db.example.com"),
+        ),
+        _make_service(
+            name="argocd-lb",
+            type_="LoadBalancer",
+            status=_lb_status(V1LoadBalancerIngress(ip="10.0.0.5")),
+        ),
+    ]
+    rows = [service_row(s) for s in services]
+    payload = {"rows": rows, "total": len(rows)}
+    Draft202012Validator(K8S_SERVICE_LIST_RESPONSE_SCHEMA).validate(payload)
 
 
 # ---------------------------------------------------------------------------

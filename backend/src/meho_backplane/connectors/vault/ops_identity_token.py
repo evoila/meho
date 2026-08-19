@@ -5,7 +5,7 @@
 
 The identity surface (entity / entity-alias / group lifecycle) lives in
 :mod:`meho_backplane.connectors.vault.ops_identity`; the token surface
-(create / revoke_accessor / list_accessors) lives in
+(create / revoke_accessor / list_accessors / lookup_accessor) lives in
 :mod:`meho_backplane.connectors.vault.ops_token`. Each module owns its
 handlers, schemas import, ``when_to_use`` blurb, and per-op spec table.
 
@@ -40,6 +40,7 @@ from meho_backplane.connectors.vault.ops_token import (
     TOKEN_WHEN_TO_USE,
     vault_token_create,
     vault_token_list_accessors,
+    vault_token_lookup_accessor,
     vault_token_revoke_accessor,
 )
 from meho_backplane.operations.typed_register import register_typed_operation
@@ -56,6 +57,7 @@ __all__ = [
     "vault_identity_list",
     "vault_token_create",
     "vault_token_list_accessors",
+    "vault_token_lookup_accessor",
     "vault_token_revoke_accessor",
 ]
 

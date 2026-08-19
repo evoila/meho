@@ -115,7 +115,12 @@ _INSTANT_QUERY_OP = PrometheusOp(
         "Returns Prometheus's standard result envelope "
         "(``{resultType, result}``) where ``resultType`` is one of "
         "``vector`` / ``scalar`` / ``string`` / ``matrix``. Serves "
-        "Prometheus, Thanos Query, and Mimir/Cortex identically."
+        "Prometheus, Thanos Query, and Mimir/Cortex identically. Each vector "
+        "sample also carries a derived numeric sibling ``value_num`` (float "
+        "or null), and the envelope carries ``first_sample_value`` (float or "
+        "null), so threshold sensors can assert the observed number directly "
+        "instead of the raw JSON-string ``value`` (which stays untouched); "
+        "``NaN`` / ``+-Inf`` / unparseable derive to null."
     ),
     parameter_schema={
         "type": "object",
@@ -141,8 +146,13 @@ _INSTANT_QUERY_OP = PrometheusOp(
             "any instant PromQL expression."
         ),
         "output_shape": (
-            "``{resultType, result}``. For an instant vector, ``result`` "
-            "is a list of ``{metric: {...labels}, value: [ts, 'val']}``."
+            "``{data: {resultType, result}, first_sample_value}``. For an "
+            "instant vector, ``result`` is a list of ``{metric: {...labels}, "
+            "value: [ts, 'val'], value_num: <float|null>}`` -- ``value_num`` "
+            "is the sample value parsed to a float (``NaN`` / ``+-Inf`` / "
+            "unparseable -> null). ``first_sample_value`` (float|null) on the "
+            "envelope aliases the first sample's number for a direct "
+            "``$.first_sample_value`` threshold assertion."
         ),
     },
 )
@@ -157,7 +167,12 @@ _RANGE_QUERY_OP = PrometheusOp(
         "``end`` (RFC3339 or Unix timestamps) and ``step`` (duration or "
         "float seconds). Returns a ``matrix`` result -- one series of "
         "``[timestamp, value]`` pairs per matching label set. Use for "
-        "trends, rates, and charting over a window."
+        "trends, rates, and charting over a window. Each series also carries "
+        "``values_num`` (a list of floats/nulls parallel to ``values``), and "
+        "the envelope carries ``first_sample_value`` (float or null), so "
+        "threshold sensors can assert observed numbers directly instead of "
+        "the raw JSON-string values (which stay untouched); ``NaN`` / "
+        "``+-Inf`` / unparseable derive to null."
     ),
     parameter_schema={
         "type": "object",
@@ -185,7 +200,12 @@ _RANGE_QUERY_OP = PrometheusOp(
             "rates, deltas, anything you would chart."
         ),
         "output_shape": (
-            "``{resultType: 'matrix', result: [{metric, values: [[ts, 'val'], ...]}]}``."
+            "``{data: {resultType: 'matrix', result: [{metric, values: "
+            "[[ts, 'val'], ...], values_num: [<float|null>, ...]}]}, "
+            "first_sample_value}``. ``values_num`` parallels ``values`` per "
+            "series (``NaN`` / ``+-Inf`` / unparseable -> null); "
+            "``first_sample_value`` (float|null) is the first series' first "
+            "sample, assertable as ``$.first_sample_value``."
         ),
     },
 )

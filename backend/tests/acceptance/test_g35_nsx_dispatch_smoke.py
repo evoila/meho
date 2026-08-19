@@ -38,8 +38,11 @@ Skip conditions:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from meho_backplane.connectors.nsx import register_nsx_typed_operations
 from meho_backplane.operations.meta_tools import call_operation
 from tests.acceptance._nsx_canary_fixtures import (
     NSX_CANARY_CORE_OP_IDS,
@@ -113,6 +116,73 @@ async def test_dispatch_smoke_nsx_core_op_returns_ok(
 
     assert result["status"] == "ok", (
         f"NSX op {op_id!r} failed against the respx-mocked NSX manager at "
+        f"{ingested_nsx_canary.base_url}: {result.get('error')!r}; "
+        f"full result={result!r}"
+    )
+
+
+#: Typed (``source_kind="typed"``) NSX read op ids dispatched through the
+#: acceptance surface. Unlike the ingested :data:`SMOKE_OP_IDS` above (seeded
+#: by the fixture), these need the typed registrar run in-test to persist
+#: their descriptor rows. ``nsx.segment.list`` (#2835) hits the same
+#: ``/policy/api/v1/infra/segments`` wire route the fixture already mocks;
+#: ``nsx.transport_node.list`` (#2836) hits the same
+#: ``/api/v1/transport-nodes`` wire route the fixture already mocks;
+#: ``nsx.transport_node.state`` (#2836) hits the per-node ``/state``
+#: sub-resource the fixture mocks for ``transport-node-0``.
+TYPED_SMOKE_OP_IDS: tuple[str, ...] = (
+    "nsx.segment.list",
+    "nsx.transport_node.list",
+    "nsx.transport_node.state",
+)
+
+#: Per-typed-op params. ``nsx.transport_node.state`` needs a transport-node
+#: ``id`` -- ``transport-node-0`` is the node the fixture's ``/state`` route
+#: is registered for; list ops take no params.
+TYPED_SMOKE_PARAMS: dict[str, dict[str, object]] = {
+    "nsx.transport_node.state": {"id": "transport-node-0"},
+}
+
+
+@pytest.mark.parametrize("op_id", TYPED_SMOKE_OP_IDS, ids=lambda op: op)
+async def test_dispatch_smoke_nsx_typed_op_returns_ok(
+    op_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    ingested_nsx_canary: IngestedNsxCanary,
+) -> None:
+    """Each NSX typed read dispatches over respx and returns ``status='ok'``.
+
+    The segment (#2835) and transport-node (#2836) ops are
+    ``source_kind="typed"``: they are not
+    in the ingested :data:`SMOKE_OP_IDS` set the fixture seeds, so this test
+    runs :func:`register_nsx_typed_operations` to persist the typed
+    descriptor rows before dispatching. ``encode_endpoint_text`` is stubbed
+    so the registrar computes no real embedding -- the fastembed ONNX fetch
+    would otherwise fire under the fixture's active respx router and corrupt
+    the multi-request model download (the same hazard
+    :func:`~tests.acceptance._canary_fixtures.prewarmed_embeddings`
+    documents). Dispatch itself takes a known ``op_id`` and needs no
+    embedding; ``nsx.transport_node.state`` also carries the ``id`` of the
+    transport node the fixture's ``/state`` route is registered for.
+    """
+    monkeypatch.setattr(
+        "meho_backplane.operations.typed_register.encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    )
+    await register_nsx_typed_operations()
+
+    result = await call_operation(
+        ingested_nsx_canary.operator,
+        {
+            "connector_id": ingested_nsx_canary.connector_id,
+            "op_id": op_id,
+            "target": {"name": ingested_nsx_canary.target_name},
+            "params": TYPED_SMOKE_PARAMS.get(op_id, {}),
+        },
+    )
+
+    assert result["status"] == "ok", (
+        f"NSX typed op {op_id!r} failed against the respx-mocked NSX manager at "
         f"{ingested_nsx_canary.base_url}: {result.get('error')!r}; "
         f"full result={result!r}"
     )

@@ -5,13 +5,17 @@
 
 Coverage matrix (per Task #1391 acceptance criteria):
 
-* **All six ops dispatch live** through :func:`~meho_backplane.operations.dispatch`
+* **All seven ops dispatch live** through :func:`~meho_backplane.operations.dispatch`
   against an ``argocd-server`` target: ``argocd.app.list`` / ``argocd.app.get``
   / ``argocd.app.diff`` / ``argocd.app.resource_tree`` /
-  ``argocd.appproject.list`` / ``argocd.repo.list`` each hit the correct
-  ArgoCD path with a bearer token and return ``status="ok"`` with the payload
-  in ``OperationResult.result``. respx mocks the wire; the in-process Vault
-  fake exercises the real default credential loader.
+  ``argocd.appproject.list`` / ``argocd.repo.list`` / ``argocd.cluster.list``
+  each hit the correct ArgoCD path with a bearer token and return
+  ``status="ok"`` with the payload in ``OperationResult.result``. respx mocks
+  the wire; the in-process Vault fake exercises the real default credential
+  loader.
+* **`argocd.cluster.list` strips per-cluster credentials** — the handler
+  removes the ``config`` object (bearer token / TLS client cert) from every
+  item, and dispatches ``GET /api/v1/clusters`` with no query params.
 * **`argocd.app.diff` returns the managed-resources delta** — the same
   desired-vs-live drift ``argocd app diff <app>`` renders (each item carries
   ``liveState`` / ``targetState``).
@@ -20,7 +24,7 @@ Coverage matrix (per Task #1391 acceptance criteria):
   the optional ``project`` scoping query.
 * **Visibility to `search_operations`** — after registration the ops are
   retrievable by their connector_id.
-* **`ARGOCD_OPS` registration shape** — all six carry ``safety_level="safe"``,
+* **`ARGOCD_OPS` registration shape** — all seven carry ``safety_level="safe"``,
   ``requires_approval=False``, a ``read-only`` tag, ``additionalProperties=False``
   on the parameter schema, and non-empty ``llm_instructions``. No write op is
   registered.
@@ -241,6 +245,44 @@ _REPO_LIST_RESPONSE: dict[str, Any] = {
         }
     ],
 }
+#: A cluster-list payload with no ``config`` block — the handler returns it
+#: verbatim (nothing to strip), so it doubles as the exact-equality fixture.
+_CLUSTER_LIST_RESPONSE: dict[str, Any] = {
+    "metadata": {},
+    "items": [
+        {
+            "server": "https://10.0.4.10:6443",
+            "name": "prod-rke2",
+            "connectionState": {
+                "status": "Successful",
+                "message": "",
+                "attemptedAt": "2026-08-06T09:00:00Z",
+            },
+            "serverVersion": "1.28",
+            "info": {"applicationsCount": 12},
+        }
+    ],
+}
+#: The destination cluster's own bearer token — must never survive the handler.
+_DEST_CLUSTER_SECRET = "destination-cluster-bearer-must-not-leak"
+#: A cluster-list payload that *does* carry the credential-bearing ``config``
+#: block, so the redaction test proves the handler strips it (rather than
+#: relying on argocd-server to omit it under a broad-RBAC token).
+_CLUSTER_LIST_WITH_CONFIG_RESPONSE: dict[str, Any] = {
+    "metadata": {},
+    "items": [
+        {
+            "server": "https://10.0.4.10:6443",
+            "name": "prod-rke2",
+            "config": {
+                "bearerToken": _DEST_CLUSTER_SECRET,
+                "tlsClientConfig": {"certData": "REDACT-ME", "keyData": "REDACT-ME"},
+            },
+            "connectionState": {"status": "Successful", "message": ""},
+            "serverVersion": "1.28",
+        }
+    ],
+}
 
 
 @pytest.mark.parametrize(
@@ -270,6 +312,7 @@ _REPO_LIST_RESPONSE: dict[str, Any] = {
         ),
         ("argocd.appproject.list", {}, "GET", "/api/v1/projects", _APPPROJECT_LIST_RESPONSE),
         ("argocd.repo.list", {}, "GET", "/api/v1/repositories", _REPO_LIST_RESPONSE),
+        ("argocd.cluster.list", {}, "GET", "/api/v1/clusters", _CLUSTER_LIST_RESPONSE),
     ],
 )
 @pytest.mark.asyncio
@@ -391,6 +434,74 @@ async def test_app_get_url_encodes_name_and_forwards_project_query(
     assert route.calls[0].request.url.params.get("project") == "default"
 
 
+@pytest.mark.asyncio
+async def test_cluster_list_redacts_config_from_items(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: cluster.list strips the credential-bearing ``config`` from every item.
+
+    The upstream payload deliberately includes ``config.bearerToken`` +
+    ``tlsClientConfig`` cert/key material — proving the redaction is enforced
+    by the handler, not merely assumed of the argocd-server API.
+    """
+    await _register_ops(_stub_embedding)
+    install_fake_client(monkeypatch, secret={"token": _CANARY_TOKEN})
+
+    async with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        mock.get("/api/v1/clusters").respond(200, json=_CLUSTER_LIST_WITH_CONFIG_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="argocd.cluster.list",
+            target=_ReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    item = result.result["items"][0]
+    # The non-secret fields survive; the whole config object is gone.
+    assert item["server"] == "https://10.0.4.10:6443"
+    assert item["connectionState"]["status"] == "Successful"
+    assert item["serverVersion"] == "1.28"
+    assert "config" not in item
+    # Belt and suspenders: no config key anywhere under items[], and the
+    # destination-cluster bearer never rides back in the envelope.
+    assert all("config" not in row for row in result.result["items"])
+    assert _DEST_CLUSTER_SECRET not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_cluster_list_dispatches_with_no_query_params(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: cluster.list calls GET /api/v1/clusters with no query params.
+
+    Mirrors the appproject_list / repo_list no-param dispatch — the op lists
+    every cluster the credential can see rather than server-side scoping.
+    """
+    await _register_ops(_stub_embedding)
+    install_fake_client(monkeypatch, secret={"token": _CANARY_TOKEN})
+
+    async with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        route = mock.get("/api/v1/clusters").respond(200, json=_CLUSTER_LIST_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="argocd.cluster.list",
+            target=_ReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert route.called
+    assert route.calls[0].request.url.query == b""
+
+
 # ---------------------------------------------------------------------------
 # search_operations visibility
 # ---------------------------------------------------------------------------
@@ -424,10 +535,11 @@ _EXPECTED_OP_IDS = {
     "argocd.app.resource_tree",
     "argocd.appproject.list",
     "argocd.repo.list",
+    "argocd.cluster.list",
 }
 
 
-def test_argocd_ops_table_is_exactly_the_six_read_ops() -> None:
+def test_argocd_ops_table_is_exactly_the_seven_read_ops() -> None:
     assert {op.op_id for op in ARGOCD_OPS} == _EXPECTED_OP_IDS
 
 

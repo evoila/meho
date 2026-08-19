@@ -93,7 +93,20 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
+
+from meho_backplane.connectors.argocd.routes import (
+    APP_DELETE_ROUTE,
+    APP_GET_ROUTE,
+    APP_RESOURCE_TREE_ROUTE,
+    APP_ROLLBACK_ROUTE,
+    APP_SPEC_UPDATE_ROUTE,
+    APP_SYNC_ROUTE,
+    PROJECT_CREATE_ROUTE,
+    PROJECT_LIST_ROUTE,
+    PROJECT_UPDATE_ROUTE,
+    route_method,
+    route_path,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -125,11 +138,6 @@ _DEFAULT_POLL_TIMEOUT = 300
 
 #: Seconds between operationState polls.
 _POLL_INTERVAL = 2.0
-
-
-def _quote_name(name: Any) -> str:
-    """URL-encode an Application / project name for a path segment."""
-    return quote(str(name), safe="")
 
 
 def _project_query(params: dict[str, Any]) -> dict[str, Any]:
@@ -173,8 +181,7 @@ async def _poll_operation_state(
     on timeout — the last-observed phase with ``timed_out=True``. Mirrors
     ``vmware.composite.vm.clone``'s ``_poll_clone_task`` bound-deadline loop.
     """
-    encoded = _quote_name(name)
-    path = f"/api/v1/applications/{encoded}"
+    path = route_path(APP_GET_ROUTE, name=name)
     deadline = time.monotonic() + timeout_seconds
     last_phase: str | None = None
     last_message: str | None = None
@@ -221,7 +228,6 @@ async def argocd_app_sync(
     the final phase + message + synced revision.
     """
     name = str(params["name"])
-    encoded = _quote_name(name)
     body: dict[str, Any] = {"name": name}
     if params.get("revision"):
         body["revision"] = params["revision"]
@@ -232,7 +238,11 @@ async def argocd_app_sync(
     if params.get("project"):
         body["project"] = params["project"]
     await self._write_json(
-        target, "POST", f"/api/v1/applications/{encoded}/sync", operator=operator, json=body
+        target,
+        route_method(APP_SYNC_ROUTE),
+        route_path(APP_SYNC_ROUTE, name=name),
+        operator=operator,
+        json=body,
     )
     timeout = int(params.get("poll_timeout_seconds") or _DEFAULT_POLL_TIMEOUT)
     outcome = await _poll_operation_state(
@@ -259,7 +269,6 @@ async def argocd_app_rollback(
     terminal phase. Returns the final phase + message.
     """
     name = str(params["name"])
-    encoded = _quote_name(name)
     rollback_id = int(params["id"])
     body: dict[str, Any] = {"name": name, "id": rollback_id}
     if params.get("prune") is not None:
@@ -269,7 +278,11 @@ async def argocd_app_rollback(
     if params.get("project"):
         body["project"] = params["project"]
     await self._write_json(
-        target, "POST", f"/api/v1/applications/{encoded}/rollback", operator=operator, json=body
+        target,
+        route_method(APP_ROLLBACK_ROUTE),
+        route_path(APP_ROLLBACK_ROUTE, name=name),
+        operator=operator,
+        json=body,
     )
     timeout = int(params.get("poll_timeout_seconds") or _DEFAULT_POLL_TIMEOUT)
     outcome = await _poll_operation_state(
@@ -298,9 +311,8 @@ async def _read_app_spec(
     preview builder. Issues only ``GET /api/v1/applications/{name}`` — never
     a mutating verb.
     """
-    encoded = _quote_name(name)
     before = await self._get_json(
-        target, f"/api/v1/applications/{encoded}", operator=operator, params=query or None
+        target, route_path(APP_GET_ROUTE, name=name), operator=operator, params=query or None
     )
     return before.get("spec") if isinstance(before, dict) else None
 
@@ -318,7 +330,6 @@ async def argocd_app_set(
     ``proposed_effect`` so the reviewer sees what changed.
     """
     name = str(params["name"])
-    encoded = _quote_name(name)
     query = _project_query(params)
     before_spec = await _read_app_spec(self, operator, target, name=name, query=query)
     put_query: dict[str, Any] = dict(query)
@@ -326,8 +337,8 @@ async def argocd_app_set(
         put_query["validate"] = bool(params["validate"])
     after_spec = await self._write_json(
         target,
-        "PUT",
-        f"/api/v1/applications/{encoded}/spec",
+        route_method(APP_SPEC_UPDATE_ROUTE),
+        route_path(APP_SPEC_UPDATE_ROUTE, name=name),
         operator=operator,
         json=dict(params["spec"]),
         params=put_query or None,
@@ -352,13 +363,12 @@ async def argocd_app_refresh(
     in the op's llm_instructions). Returns the refreshed sync + health status.
     """
     name = str(params["name"])
-    encoded = _quote_name(name)
     hard = params.get("hard")
     refresh = "normal" if hard is False else "hard"
     query = _project_query(params)
     query["refresh"] = refresh
     app = await self._get_json(
-        target, f"/api/v1/applications/{encoded}", operator=operator, params=query
+        target, route_path(APP_GET_ROUTE, name=name), operator=operator, params=query
     )
     raw_status = app.get("status") if isinstance(app, dict) else None
     status: dict[str, Any] = raw_status if isinstance(raw_status, dict) else {}
@@ -413,10 +423,9 @@ async def _read_cascade_resources(
     """
     if not cascade:
         return []
-    encoded = _quote_name(name)
     tree = await self._get_json(
         target,
-        f"/api/v1/applications/{encoded}/resource-tree",
+        route_path(APP_RESOURCE_TREE_ROUTE, name=name),
         operator=operator,
         params=query or None,
     )
@@ -443,7 +452,6 @@ async def argocd_app_delete(
     app.
     """
     name = str(params["name"])
-    encoded = _quote_name(name)
     cascade = _delete_cascade_flag(params)
     query = _project_query(params)
 
@@ -458,8 +466,8 @@ async def argocd_app_delete(
         delete_query["propagationPolicy"] = propagation
     await self._write_json(
         target,
-        "DELETE",
-        f"/api/v1/applications/{encoded}",
+        route_method(APP_DELETE_ROUTE),
+        route_path(APP_DELETE_ROUTE, name=name),
         operator=operator,
         params=delete_query,
     )
@@ -500,7 +508,13 @@ async def argocd_appproject_create(
     project = dict(params["project"])
     name = _project_name(project)
     body: dict[str, Any] = {"project": project, "upsert": bool(params.get("upsert", False))}
-    await self._write_json(target, "POST", "/api/v1/projects", operator=operator, json=body)
+    await self._write_json(
+        target,
+        route_method(PROJECT_CREATE_ROUTE),
+        route_path(PROJECT_CREATE_ROUTE),
+        operator=operator,
+        json=body,
+    )
     return {"name": name, "created": True}
 
 
@@ -518,7 +532,7 @@ async def _read_project_spec(
     use to capture ``before_spec``. Issues only ``GET /api/v1/projects``;
     returns ``None`` when the project is not (yet) present.
     """
-    projects = await self._get_json(target, "/api/v1/projects", operator=operator)
+    projects = await self._get_json(target, route_path(PROJECT_LIST_ROUTE), operator=operator)
     items = projects.get("items") if isinstance(projects, dict) else None
     if isinstance(items, list):
         for item in items:
@@ -541,13 +555,16 @@ async def argocd_appproject_update(
     """
     project = dict(params["project"])
     name = _project_name(project)
-    encoded = _quote_name(name)
 
     before_spec = await _read_project_spec(self, operator, target, name=name)
 
     body: dict[str, Any] = {"project": project}
     updated = await self._write_json(
-        target, "PUT", f"/api/v1/projects/{encoded}", operator=operator, json=body
+        target,
+        route_method(PROJECT_UPDATE_ROUTE),
+        route_path(PROJECT_UPDATE_ROUTE, name=name),
+        operator=operator,
+        json=body,
     )
     after_spec = updated.get("spec") if isinstance(updated, dict) else None
     return {

@@ -16,10 +16,13 @@ layers the first two read ops onto that surface:
 
 * ``bind9.zone.list`` -- run ``named-checkconf -p`` and parse the
   canonicalised config dump into one row per ``zone "<name>"`` block.
-  Each row is ``{name, file, type}`` where ``type`` is the zone's
-  declared role (``master`` / ``slave`` / ``forward`` / ...). No
-  per-handler handle truncation -- zone counts in real deployments
-  are O(10..100) and well under any reducer threshold.
+  Each row is ``{name, file, type, view}`` where ``type`` is the
+  zone's declared role (``master`` / ``slave`` / ``forward`` / ...)
+  and ``view`` is the enclosing ``view "<name>"`` block (``None`` when
+  the zone is declared outside any view). ``view`` disambiguates
+  split-horizon deployments, where the same zone name is declared once
+  per view. No per-handler handle truncation -- zone counts in real
+  deployments are O(10..100) and well under any reducer threshold.
 * ``bind9.zone.read <zone>`` -- locate the zonefile path via
   ``named-checkconf -p`` (so the operator doesn't have to know whether
   the file is under ``/etc/bind/`` or a chrooted ``/var/cache/bind/``
@@ -159,6 +162,21 @@ _ZONE_HEADER_RE = re.compile(
     """,
     re.VERBOSE,
 )
+# ``view "<name>" <class>? { ... };`` wraps the zone blocks of any
+# split-horizon deployment. named-checkconf emits the view name quoted;
+# the bare-name alternative mirrors ``_ZONE_HEADER_RE`` as a defensive
+# fallback. bind9's grammar forbids nesting a ``view`` inside a ``view``
+# (ARM "view Statement Grammar"), so the parser tracks a single active
+# view rather than a stack.
+_VIEW_HEADER_RE = re.compile(
+    r"""
+    ^\s*view\s+
+    (?:"(?P<name_quoted>[^"]+)"|(?P<name_bare>\S+))
+    (?:\s+(?P<class>IN|HS|CH))?
+    \s*\{\s*$
+    """,
+    re.VERBOSE,
+)
 _ZONE_FILE_RE = re.compile(r'^\s*file\s+"([^"]+)"\s*;\s*$')
 _ZONE_TYPE_RE = re.compile(r"^\s*type\s+(\w+)\s*;\s*$")
 
@@ -166,19 +184,27 @@ _ZONE_TYPE_RE = re.compile(r"^\s*type\s+(\w+)\s*;\s*$")
 def parse_named_checkconf_zones(output: str) -> list[dict[str, Any]]:
     """Parse ``named-checkconf -p`` output into zone rows.
 
-    Returns one ``{"name": str, "file": str | None, "type": str | None}``
-    dict per top-level ``zone "<name>"`` block found in *output*. Pure
-    function -- given the same string, returns identical output. The
-    unit suite pins it against captured fixtures without invoking
-    ``named-checkconf`` itself.
+    Returns one ``{"name": str, "file": str | None, "type": str | None,
+    "view": str | None}`` dict per ``zone "<name>"`` block found in
+    *output*. ``view`` is the name of the enclosing ``view "<name>"``
+    block, or ``None`` when the zone is declared outside any view (a
+    deployment with no views declared -- ``named-checkconf -p`` prints
+    those zones bare at the top level and does not synthesise the
+    internal ``_default`` view). Attributing the view disambiguates
+    split-horizon deployments, where the same zone name is declared once
+    per view and the bare ``{name, file, type}`` rows are otherwise
+    indistinguishable. Pure function -- given the same string, returns
+    identical output. The unit suite pins it against captured fixtures
+    without invoking ``named-checkconf`` itself.
 
     Brace tracking is line-oriented and uses a simple depth counter:
     every ``{`` increments, every ``}`` decrements. A zone block's body
     ends when the depth returns to the level it had **before** the
-    opening ``zone "..." {`` line. This correctly handles a ``view``
-    wrapping multiple zone blocks (each zone enters at view-depth+1 and
-    closes back at view-depth), which is what bind9 emits for any
-    deployment that declares views.
+    opening ``zone "..." {`` line. The outer scan tracks the same depth
+    to recognise when the active ``view`` block closes: the view opens at
+    some depth D and stays active until a ``}`` returns the running depth
+    to D. bind9 forbids nesting a ``view`` inside a ``view``, so a single
+    active view (not a stack) is sufficient.
 
     *output* is the stdout of ``named-checkconf -p`` -- the
     canonicalised form, not the raw ``/etc/bind/named.conf`` source.
@@ -189,31 +215,53 @@ def parse_named_checkconf_zones(output: str) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     lines = output.splitlines()
+    brace_depth = 0
+    current_view: str | None = None
+    view_depth: int | None = None
     i = 0
     while i < len(lines):
         line = lines[i]
+
+        view_match = _VIEW_HEADER_RE.match(line)
+        if view_match:
+            # Enter the view: record its name and the depth we return to
+            # when its closing ``};`` lands. Views never nest, so a single
+            # active view (not a stack) is sufficient.
+            current_view = view_match.group("name_quoted") or view_match.group("name_bare")
+            view_depth = brace_depth
+            brace_depth += line.count("{") - line.count("}")
+            i += 1
+            continue
+
         match = _ZONE_HEADER_RE.match(line)
         if not match:
-            # Track depth so we can skip non-zone braces (e.g. ``options``
-            # blocks) cheaply; we only need to be at depth 0 (or a
-            # ``view`` body) when we hit a ``zone "..."`` line, but the
-            # regex anchors on the literal ``zone`` keyword so depth
-            # tracking is only required to scan *past* a zone body.
+            # Not a header line: track braces so we can tell when the
+            # active view block closes. Sibling ``options`` / ``logging``
+            # / ``key`` blocks pass through here too; their braces balance
+            # out and never drop the running depth below ``view_depth``
+            # while a view is open.
+            brace_depth += line.count("{") - line.count("}")
+            if view_depth is not None and brace_depth <= view_depth:
+                current_view = None
+                view_depth = None
             i += 1
             continue
 
         name = match.group("name_quoted") or match.group("name_bare")
-        depth = 1
+        # Skip the zone body with a local depth counter. The block is
+        # brace-balanced, so the running ``brace_depth`` is unchanged by
+        # the span we jump over and the enclosing view stays correct.
+        zone_depth = 1
         zone_file: str | None = None
         zone_type: str | None = None
         j = i + 1
-        while j < len(lines) and depth > 0:
+        while j < len(lines) and zone_depth > 0:
             inner = lines[j]
             # Track brace depth -- zone bodies can contain nested
             # ``masters`` / ``also-notify`` blocks under bind9 9.x; we
             # close the zone block only when the matching ``};`` lands.
-            depth += inner.count("{")
-            depth -= inner.count("}")
+            zone_depth += inner.count("{")
+            zone_depth -= inner.count("}")
             if zone_file is None:
                 file_match = _ZONE_FILE_RE.match(inner)
                 if file_match:
@@ -223,7 +271,7 @@ def parse_named_checkconf_zones(output: str) -> list[dict[str, Any]]:
                 if type_match:
                     zone_type = type_match.group(1)
             j += 1
-        rows.append({"name": name, "file": zone_file, "type": zone_type})
+        rows.append({"name": name, "file": zone_file, "type": zone_type, "view": current_view})
         i = j
     return rows
 
@@ -446,8 +494,18 @@ _BIND9_ZONE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "name": {"type": "string"},
                     "file": {"type": ["string", "null"]},
                     "type": {"type": ["string", "null"]},
+                    "view": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Name of the enclosing ``view`` block, or "
+                            "null when the zone is declared outside any "
+                            "view. Disambiguates split-horizon "
+                            "deployments where the same zone name is "
+                            "declared once per view."
+                        ),
+                    },
                 },
-                "required": ["name", "file", "type"],
+                "required": ["name", "file", "type", "view"],
                 "additionalProperties": False,
             },
             "description": (
@@ -483,10 +541,14 @@ BIND9_ZONE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "parameter_hints": {},
     "output_shape": (
-        "{'rows': [{name, file, type}], 'total': <int>}. ``type`` is "
-        "the zone's declared role (``master`` / ``slave`` / "
+        "{'rows': [{name, file, type, view}], 'total': <int>}. ``type`` "
+        "is the zone's declared role (``master`` / ``slave`` / "
         "``forward`` / ...); ``file`` is the zonefile path as bind9 "
-        "sees it (absolute, post-chroot resolution)."
+        "sees it (absolute, post-chroot resolution); ``view`` is the "
+        "enclosing ``view`` name or null when the zone sits outside any "
+        "view. On a split-horizon nameserver the same zone name appears "
+        "once per view -- the rows differ only by ``view`` (and possibly "
+        "``file``), so use ``view`` to tell them apart."
     ),
 }
 
@@ -583,16 +645,19 @@ ZONE_OPS: tuple[Bind9Op, ...] = (
         summary="List zones declared on the bind9 nameserver with zonefile path + role.",
         description=(
             "Runs ``named-checkconf -p`` over SSH and parses the "
-            "canonicalised config dump into one row per top-level "
+            "canonicalised config dump into one row per "
             '``zone "<name>" { ... };`` block. Each row carries the '
             "zone name, its zonefile path (the post-canonicalisation "
-            "value bind9 resolves at zone-load time), and the declared "
+            "value bind9 resolves at zone-load time), the declared "
             "role (``master`` / ``slave`` / ``forward`` / ``stub`` / "
-            "``hint`` / ...). The handler scopes itself to the active "
-            "config, not the on-disk file tree -- a fragment staged "
-            "under ``/etc/bind/`` but not yet referenced from "
-            "``named.conf`` does not appear. Read-only; safe to call on "
-            "any healthy bind9 target."
+            "``hint`` / ...), and the enclosing ``view`` name (null when "
+            "the zone is declared outside any view). ``view`` "
+            "disambiguates split-horizon deployments, where the same "
+            "zone name is declared once per view. The handler scopes "
+            "itself to the active config, not the on-disk file tree -- a "
+            "fragment staged under ``/etc/bind/`` but not yet referenced "
+            "from ``named.conf`` does not appear. Read-only; safe to "
+            "call on any healthy bind9 target."
         ),
         parameter_schema=BIND9_ZONE_LIST_PARAMETER_SCHEMA,
         response_schema=_BIND9_ZONE_LIST_RESPONSE_SCHEMA,

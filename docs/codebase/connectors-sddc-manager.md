@@ -163,7 +163,7 @@ dispatcher's #2067 recovery arm, which calls the connector's public
 | op_id | group | path |
 |---|---|---|
 | `sddc.domain.list` | `sddc-inventory` | `GET /v1/domains` |
-| `sddc.domain.status` | `sddc-inventory` | `GET /v1/domains/{id}/status` |
+| `sddc.domain.status` | `sddc-inventory` | `GET /v1/domains/{id}` |
 | `sddc.cluster.list` | `sddc-inventory` | `GET /v1/clusters` |
 | `sddc.host.list` | `sddc-inventory` | `GET /v1/hosts` |
 | `sddc.vcenter.list` | `sddc-inventory` | `GET /v1/vcenters` |
@@ -176,6 +176,24 @@ dispatcher's #2067 recovery arm, which calls the connector's public
 | `sddc.vcf_service.list` | `sddc-platform` | `GET /v1/vcf-services` |
 | `sddc.manager.list` | `sddc-platform` | `GET /v1/sddc-managers` |
 | `sddc.license.list` | `sddc-platform` | `GET /v1/license-keys` |
+
+`sddc.domain.status` reads the domain object itself: the pinned SDDC Manager
+9.0 spec serves no `/v1/domains/{id}/status` sub-resource (the #2982
+spec-reconcile finding — the original path 404s on a live 9.0 appliance), and
+the domain object's top-level `status` field carries the ACTIVE / ACTIVATING /
+UPGRADING / ERROR lifecycle state the op documents. The typed op therefore
+rides the same vendor path as the ingested `GET:/v1/domains/{id}` browse row;
+no resolver collision — typed op_ids are dotted (`sddc.domain.status`) and
+never shadow `METHOD:path` ingested rows (#1750/#1798).
+
+**Spec-reconcile lane (#2982).** Every hand-coded `METHOD:/path` above — plus
+the token mint (`POST /v1/tokens`), the profile fingerprint recipe
+(`GET /v1/releases/system`), and the probe path (`GET /v1/sddc-managers`) — is
+asserted against the pinned `sddc-manager-9.0` shelf spec by
+[`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`](../../backend/tests/test_connectors_sddc_manager_spec_reconcile.py)
+(the #2980 harness; parse-only, runs in the required unit sweep, uniform skip
+when the shelf is unconfigured). Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 **Credential-read gating (`sddc.credential.list`).** SDDC Manager is the system
 of record for nested-infra credentials; its `GET /v1/credentials` read returns

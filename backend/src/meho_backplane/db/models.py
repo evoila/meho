@@ -5316,6 +5316,181 @@ class GatewayCommand(Base):
 # ---------------------------------------------------------------------------
 
 
+class EventSource(Base):
+    """A registered external event producer authorised to publish into a tenant.
+
+    Initiative #2877 (G11.3 inbound ingest), Task #2880 (T3). The
+    tenant-scoped registry the inbound webhook path
+    (``POST /api/v1/events/ingest/{source_slug}``, #2881 -- out of scope
+    here) resolves a sender against. Webhook senders (Alertmanager,
+    Grafana, VCF Operations, Harbor, generic JSON) carry no JWT, so this
+    row is the request's whole trust context: it supplies the
+    tenant attribution ``events.publish()`` needs a real tenant FK for,
+    and its Vault-custodied secret is what the ingest endpoint verifies
+    the sender's signature/token against.
+
+    Moulded on :class:`Target` (the per-tenant registry mould #2880 cites):
+    ``name`` unique-per-tenant via a partial unique index, ``secret_ref``
+    a nullable Vault path, ``extras`` the forward-compat escape hatch,
+    ``deleted_at`` soft-delete. It differs from :class:`Target` in three
+    deliberate ways:
+
+    * ``tenant_id`` carries a **real** ``REFERENCES tenant(id)`` FK (the
+      newer :class:`Sensor` / :class:`EventOutbox` discipline) rather than
+      the v0.2 soft-FK :class:`Target` kept -- #2880's rationale states
+      ``events.publish()`` requires a real tenant FK.
+    * ``slug`` is unique **globally**, not per-tenant. It is the sole
+      routing key in the JWT-less ingest URL, so slug -> tenant resolution
+      must be unambiguous across every tenant; a per-tenant slug could not
+      be resolved without the tenant the sender cannot supply.
+    * The admin surface **writes** the auth secret to Vault at
+      ``secret_ref`` (:class:`Target` only ever references an externally
+      provisioned path). The row still stores only the path, never the
+      value (secret-broker custody discipline,
+      ``docs/codebase/connectors-secret-broker.md``).
+
+    Column notes
+    ------------
+
+    * ``kind`` -- Text NOT NULL. The producer family, a closed set
+      (``ck_event_source_kind``): ``alertmanager``, ``grafana``,
+      ``vcf-operations``, ``harbor``, ``generic-json``. Selects the
+      payload normaliser #2882 applies. A closed enum (unlike
+      :attr:`EventOutbox.event_kind`'s free text) because each kind needs
+      hand-written normaliser code, so adding one is a code change anyway.
+    * ``auth_strategy`` -- Text NOT NULL. How the ingest endpoint
+      authenticates the sender, a closed set
+      (``ck_event_source_auth_strategy``): ``hmac-sha256`` (signed body),
+      ``static-header`` (fixed bearer/API-key header), ``basic`` (HTTP
+      Basic). All three verify against the Vault secret; #2881 owns the
+      verification.
+    * ``secret_ref`` -- Text, nullable. Logical Vault KV-v2 path the auth
+      secret lives at (``tenants/<tenant_id>/event-sources/<slug>``,
+      derived, not operator-supplied). NULL only transiently before the
+      first secret write.
+    * ``status`` -- Text NOT NULL DEFAULT ``'active'``, a closed set
+      (``ck_event_source_status``): ``active`` | ``paused``. ``paused``
+      makes the ingest path reject the sender; because nothing caches the
+      row, a PATCH to ``paused`` takes effect on the ingest path's very
+      next lookup.
+    * ``extras`` -- portable JSON NOT NULL DEFAULT ``{}``. Per-source
+      tuning the ingest reads: body-size cap, rate limit, replay window,
+      dedupe config, and (for ``basic``) the non-secret username. First-
+      class columns stay minimal per #2880's explicit column list.
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the operator who
+      registered the source (:class:`Sensor` provenance discipline).
+
+    Indexes
+    -------
+
+    * ``event_source_tenant_name_idx`` -- partial **unique** b-tree on
+      ``(tenant_id, name)`` ``WHERE deleted_at IS NULL`` (live rows only,
+      so a soft-deleted tombstone frees the name for re-use, mirroring
+      ``targets_tenant_name_idx`` / #2874). Also serves the tenant-scoped
+      list query's ``WHERE tenant_id = ?`` prefix.
+    * ``event_source_slug_idx`` -- partial **unique** b-tree on ``(slug)``
+      ``WHERE deleted_at IS NULL``. Global slug uniqueness for JWT-less
+      ingest resolution; a tombstone frees the slug for re-use.
+    """
+
+    __tablename__ = "event_source"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK (#2880): tenant attribution for a
+    # JWT-less webhook is taken from this row, and events.publish()
+    # requires a valid tenant, so the integrity is DB-enforced rather
+    # than left to the application layer as Target's soft-FK does.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Globally unique URL token (not per-tenant): the sole routing key in
+    # the JWT-less ingest URL, so slug -> tenant must resolve unambiguously
+    # across all tenants. See event_source_slug_idx.
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_strategy: Mapped[str] = mapped_column(Text, nullable=False)
+    # Logical Vault KV-v2 path (no mount, no ``/data/`` segment) the auth
+    # secret is written to; never the secret value itself. Derived as
+    # ``tenants/<tenant_id>/event-sources/<slug>`` at create time.
+    secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="active",
+        server_default=sa.text("'active'"),
+    )
+    extras: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # Soft-delete timestamp. NULL -> live row; non-NULL -> wall-clock time
+    # of the DELETE call. Every read path filters ``deleted_at IS NULL``
+    # so a soft-deleted source is invisible to the resolver while the
+    # tombstone keeps the name/slug slot free for re-use (partial indexes).
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        # Partial unique index on live rows only -- mirrors
+        # targets_tenant_name_idx (migration 0072 / #2874): a soft-deleted
+        # tombstone no longer occupies the name slot, so DELETE + POST of
+        # the same name succeeds while a live duplicate still collides.
+        # The postgresql_where / sqlite_where pair keeps the predicate
+        # matched on both dialects so Alembic autogenerate stays clean.
+        Index(
+            "event_source_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text("deleted_at IS NULL"),
+            sqlite_where=sa.text("deleted_at IS NULL"),
+        ),
+        Index(
+            "event_source_slug_idx",
+            "slug",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text("deleted_at IS NULL"),
+            sqlite_where=sa.text("deleted_at IS NULL"),
+        ),
+        sa.CheckConstraint(
+            "kind IN ('alertmanager', 'grafana', 'vcf-operations', 'harbor', 'generic-json')",
+            name="ck_event_source_kind",
+        ),
+        sa.CheckConstraint(
+            "auth_strategy IN ('hmac-sha256', 'static-header', 'basic')",
+            name="ck_event_source_auth_strategy",
+        ),
+        sa.CheckConstraint(
+            "status IN ('active', 'paused')",
+            name="ck_event_source_status",
+        ),
+    )
+
+
 class EventOutbox(Base):
     """One durable MEHO-internal event ready for subscription dispatch.
 
@@ -5326,9 +5501,10 @@ class EventOutbox(Base):
     ``cancelled``; future kinds: audit predicates, connector alerts).
     A separate drain loop (:mod:`meho_backplane.events.drain`) scans the
     outbox via ``SELECT ... FOR UPDATE SKIP LOCKED``, claims unprocessed
-    rows, and dispatches them to subscribed
-    :class:`ScheduledTrigger` rows of kind ``'event'`` once the
-    subscription matcher lands (T5 #826).
+    rows, and dispatches them through the subscription matcher
+    (:mod:`meho_backplane.events.matcher`, #2878), which fires every
+    subscribed :class:`ScheduledTrigger` row of kind ``'event'`` whose
+    ``event_filter`` the payload contains.
 
     Why a transactional outbox (not raw ``LISTEN/NOTIFY``)
     ------------------------------------------------------
@@ -5366,7 +5542,7 @@ class EventOutbox(Base):
       / :attr:`ScheduledTrigger.tenant_id`.
 
     * ``event_kind`` -- Text NOT NULL. The discriminator the matcher
-      will use once the subscription-junction lands. Free-text (not a
+      keys a subscriber's filter against. Free-text (not a
       closed enum) because event kinds are added per-Initiative
       without coordinated DB migrations; the matching policy lives in
       the subscriber. v0.2 values shipped: ``agent_run.completed``.
@@ -5382,22 +5558,39 @@ class EventOutbox(Base):
       observe which replica is handling a stuck claim.
 
     * ``processed_at`` -- ``timestamptz`` nullable. Stamped after the
-      event has been dispatched (or marked no-op in v0.2 when no
-      subscriber matches). NULL means "not yet processed"; the partial
-      index keys on this column.
+      event has been dispatched to the matcher (an event that matches
+      no subscriber is still stamped, with no fire). NULL means "not
+      yet processed"; the partial index keys on this column.
 
     * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
+
+    * ``dedupe_key`` -- Text, nullable (migration 0073). Producer-
+      supplied idempotency token for at-least-once external ingest.
+      NULL for internal producers; when set it is unique per tenant
+      (see ``event_outbox_tenant_dedupe_idx``) so a retried delivery
+      collides at insert instead of double-firing a subscriber. The
+      ingest path that populates it lands in #2881.
+
+    * ``origin`` -- Text, nullable (migration 0073). Event provenance:
+      NULL = internal MEHO producer, else the external event-source id.
+      Gives audit / policy surfaces a column to key "external input" on
+      instead of parsing the free-text ``event_kind``.
 
     Indexes
     -------
 
     * ``event_outbox_tenant_unprocessed_idx`` -- b-tree on
-      ``(tenant_id, processed_at, event_id)``. Drives the future
-      tenant-scoped scan once the matcher lands.
+      ``(tenant_id, processed_at, event_id)``. Reserved for a future
+      tenant-scoped drain scan; the drain scans globally today.
     * ``event_outbox_unprocessed_idx`` -- partial b-tree on
       ``event_id`` ``WHERE processed_at IS NULL`` on PG (plain b-tree
       on SQLite). Drives the global drain scan; partial keeps the
       index size flat as processed rows are tombstoned.
+    * ``event_outbox_tenant_dedupe_idx`` -- partial **unique** b-tree
+      on ``(tenant_id, dedupe_key)`` ``WHERE dedupe_key IS NOT NULL``
+      (migration 0073, emitted on both dialects). DB-enforced
+      idempotency for external ingest; NULL-``dedupe_key`` internal
+      rows stay out of the index and are unconstrained.
     """
 
     __tablename__ = "event_outbox"
@@ -5443,6 +5636,25 @@ class EventOutbox(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # Producer-supplied idempotency token (#2879). NULL for internal
+    # producers (agent-run completion, ...); a non-NULL value is unique
+    # per tenant via ``event_outbox_tenant_dedupe_idx`` below, so a
+    # retried at-least-once delivery (webhook ingest, #2881) collides at
+    # insert instead of double-firing a subscriber.
+    dedupe_key: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # Event provenance (#2879). NULL means an internal MEHO producer; a
+    # non-NULL value is the external event-source id, so audit / policy
+    # surfaces key "external input" on this column instead of parsing the
+    # free-text ``event_kind``.
+    origin: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -5457,6 +5669,23 @@ class EventOutbox(Base):
             "event_id",
             postgresql_using="btree",
             postgresql_where=sa.text("processed_at IS NULL"),
+        ),
+        # DB-enforced idempotency for external at-least-once ingest
+        # (#2879): a duplicate ``(tenant_id, dedupe_key)`` collides at
+        # insert. Partial (``WHERE dedupe_key IS NOT NULL``) so internal
+        # producers -- which leave ``dedupe_key`` NULL -- never enter the
+        # index and stay unconstrained. Emitted on both dialects
+        # (``sqlite_where`` alongside ``postgresql_where``) so the SQLite
+        # unit-test path enforces the same partial-unique shape PG does;
+        # SQLite has supported partial indexes since 3.8.0.
+        Index(
+            "event_outbox_tenant_dedupe_idx",
+            "tenant_id",
+            "dedupe_key",
+            unique=True,
+            postgresql_using="btree",
+            postgresql_where=sa.text("dedupe_key IS NOT NULL"),
+            sqlite_where=sa.text("dedupe_key IS NOT NULL"),
         ),
     )
 

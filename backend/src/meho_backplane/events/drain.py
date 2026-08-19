@@ -10,7 +10,14 @@ event-subscription trigger. On each cadence (default 10s, settable via
 1. **Claim the process-wide advisory lock**
    (``pg_try_advisory_lock``) so only one replica's drain is running
    the tick body at a time. Mirrors the scheduler-loop precedent
-   (:mod:`meho_backplane.scheduler.loop`).
+   (:mod:`meho_backplane.scheduler.loop`). The lock lives on a
+   dedicated pinned connection
+   (:func:`meho_backplane.db.advisory.advisory_lock`, #3010) —
+   **advisory lock and unlock must run on the same connection**: the
+   tick commits mid-lock (the claim stamp, each processed stamp), and a
+   lock taken on the work session would strand on the pooled connection
+   the first commit releases, silently skipping every later drain tick
+   that draws a different connection.
 
 2. **Scan + claim unprocessed rows** via
    ``SELECT ... WHERE processed_at IS NULL ORDER BY event_id LIMIT N
@@ -18,17 +25,17 @@ event-subscription trigger. On each cadence (default 10s, settable via
    receive the same row even with the advisory-lock guard removed.
    Stamp ``claimed_at`` + ``claimed_by`` for observability.
 
-3. **Dispatch each row.** In v0.2 the subscription matcher
-   (``scheduled_trigger`` rows of ``kind='event'`` whose
-   ``event_filter`` matches the payload) is not yet built -- T5 #826's
-   admin surface ships the trigger-creation path that populates such
-   rows. The drain therefore stamps ``processed_at`` directly: the
-   event is durably consumed even though no subscriber fires. When T5
-   lands the matcher is folded in here (one ``SELECT`` against
-   ``scheduled_trigger`` per drained event) without a migration.
+3. **Dispatch each row** through the subscription matcher
+   (:mod:`meho_backplane.events.matcher`): for each claimed event it
+   fires every active ``kind='event'`` :class:`~meho_backplane.db.models.ScheduledTrigger`
+   whose ``event_filter`` is contained by the payload (``payload @>
+   event_filter``), then stamps ``processed_at``. An event that matches
+   no subscriber is still durably consumed (stamped, no fire, no log
+   noise).
 
-4. **Release the advisory lock** in a ``finally`` so a crash mid-tick
-   never strands the lock for the rest of the connection's life.
+4. **Release the advisory lock** on the same pinned connection that
+   acquired it (the helper's ``finally``) so a crash mid-tick never
+   strands the lock for the rest of the connection's life.
 
 LISTEN/NOTIFY wake hint
 =======================
@@ -71,12 +78,17 @@ The outbox row carries the durable state. On restart:
 Delivery semantics
 ==================
 
-At-least-once. A dispatch that crashes between "marked processed" and
-"side-effect committed" is acceptable; the v1 dispatch (mark
-processed, no subscriber) is idempotent by construction. When the
-T5 matcher lands the subscriber's dispatch will need to be idempotent
-or the matcher will need to record a per-subscriber dedupe key in the
-trigger's audit row. Documented as a follow-up.
+At-least-once. A fired subscriber's ``agent_run`` commits in its own
+transaction, *before* the drain stamps ``processed_at`` -- so a crash
+between the two leaves the event unprocessed and the next tick
+re-matches it. Double-firing is prevented by the matcher's
+``event:{event_id}:{trigger_id}`` work_ref dedupe
+(:mod:`meho_backplane.events.matcher`), not by exactly-once delivery:
+the redelivered event finds the first delivery's run and skips it. The
+claim stamps are committed *before* the per-event fire so the drain
+holds no open write across a subscriber's run-row commit (which lands
+in its own session); the drain advisory lock plus the ``processed_at
+IS NULL`` conditional stay the single-processing guards.
 """
 
 from __future__ import annotations
@@ -86,14 +98,25 @@ import contextlib
 import os
 import socket
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_engine, get_sessionmaker
 from meho_backplane.db.models import EVENT_OUTBOX_NOTIFY_CHANNEL, EventOutbox
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    # Type-only: the concrete import (and the matcher import in
+    # `_dispatch_event`) stay lazy so `events` -> `agent.invocation` ->
+    # `operations.agent_run` -> `events.outbox` does not close an import cycle
+    # at module-load time. Same lazy-import discipline the scheduler loop uses
+    # for its Vault-credential helpers.
+    from meho_backplane.agent.invocation import AgentInvoker
 
 __all__ = [
     "run_one_drain_tick",
@@ -125,29 +148,6 @@ def _claimer_identity() -> str:
     the offending pod / process from this stamp.
     """
     return f"{socket.gethostname()}:{os.getpid()}"
-
-
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire the process-wide PG advisory lock; ``True`` on non-PG."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(
-        text("SELECT pg_try_advisory_lock(:k)"),
-        {"k": key},
-    )
-    return bool(locked)
-
-
-async def _advisory_unlock(session: AsyncSession, key: int) -> None:
-    """Release the advisory lock; no-op on non-PG dialects."""
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(
-        text("SELECT pg_advisory_unlock(:k)"),
-        {"k": key},
-    )
 
 
 async def _claim_unprocessed(
@@ -248,46 +248,62 @@ async def _dispatch_event(
     row: EventOutbox,
     *,
     now: datetime,
+    invoker: AgentInvoker,
 ) -> bool:
-    """Dispatch one event -- v0.2 stamps processed; matcher TBD (T5).
+    """Fire every matching subscription for one event, then mark it processed.
 
-    The v0.2 dispatch path is a no-op subscriber match: the event is
-    consumed (``processed_at`` stamped) but no agent run fires
-    because the subscription junction (``scheduled_trigger`` rows of
-    ``kind='event'`` whose ``event_filter`` matches the payload) has
-    no admin-surface path to populate it until T5 #826 lands.
+    The subscription matcher (:mod:`meho_backplane.events.matcher`) fires each
+    active ``kind='event'`` trigger whose ``event_filter`` the payload contains
+    (``payload @> event_filter``) via ``AgentInvoker.run_scheduled``. Firing
+    runs first, in the matcher's own sessions (each run row commits
+    independently), so this drain session holds no open write across it; the
+    fired run's ``event:{event_id}:{trigger_id}`` work_ref makes a redelivered
+    event idempotent. Marking processed happens last -- a crash after a fire
+    but before the stamp re-delivers the event, and the work_ref dedupe skips
+    the already-fired run. An event that matches no subscriber is stamped with
+    no fire and no per-event log noise.
 
-    When T5 ships, this function gains a ``SELECT`` against
-    ``scheduled_trigger`` (``WHERE kind='event' AND status='active'
-    AND tenant_id = row.tenant_id``) and a JSONB containment match
-    against ``event_filter``. For each matching trigger, the function
-    fires the agent via the same :class:`AgentInvoker.run_scheduled`
-    path the scheduler loop uses (Hard rule: subscribers are
-    idempotent or carry a dedupe key in their audit row).
-
-    Returns ``True`` when the event was successfully dispatched and
-    marked processed; ``False`` when another drainer beat us to it.
+    Returns ``True`` when this drainer stamped ``processed_at``; ``False`` when
+    another drainer beat it to the row (the conditional stamp matched zero
+    rows).
     """
-    # v0.2 no-op match (T5 follow-up wires the junction here).
+    # Lazy import: keeps `events` -> `events.matcher` -> `scheduler.loop` ->
+    # `agent.invocation` off the module-load path (see the top-of-module
+    # TYPE_CHECKING note). Cached after the first tick.
+    from meho_backplane.events.matcher import fire_matching_triggers
+
+    await fire_matching_triggers(row, invoker)
     return await _mark_processed(session, row, now=now)
 
 
-async def run_one_drain_tick() -> int:
+async def run_one_drain_tick(invoker: AgentInvoker | None = None) -> int:
     """Execute one drain tick. Returns the number of events processed.
 
     Public so tests can drive a deterministic single-tick without the
-    cadence sleep.
+    cadence sleep. The optional *invoker* override lets tests inject a
+    deterministic :class:`AgentInvoker` over a ``FunctionModel`` so a
+    subscription fire executes end-to-end without a real LLM call (mirrors
+    :func:`meho_backplane.scheduler.loop.run_one_tick`).
     """
-    sessionmaker = get_sessionmaker()
+    if invoker is None:
+        # Lazy import (see `_dispatch_event`): the default invoker is only
+        # resolved at runtime, off the module-load path.
+        from meho_backplane.agent.invocation import get_agent_invoker
+
+        invoker = get_agent_invoker()
     processed = 0
-    async with sessionmaker() as session:
-        locked = await _try_advisory_lock(
-            session,
-            _EVENT_DRAIN_ADVISORY_LOCK_KEY,
-        )
+    # The advisory lock lives on its own pinned connection (#3010): the
+    # mid-tick commits below (claim stamps, per-row processed stamps)
+    # each return the work session's connection to the pool, so a lock
+    # taken on that session would migrate off it at the first commit and
+    # strand -- silently skipping every later drain tick that draws a
+    # different connection.
+    async with advisory_lock(_EVENT_DRAIN_ADVISORY_LOCK_KEY, subsystem="event_drain") as locked:
         if not locked:
+            _log.debug("event_drain_tick_skipped_lock_held")
             return 0
-        try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
             now = datetime.now(UTC)
             rows = await _claim_unprocessed(session, limit=_DRAIN_BATCH_LIMIT)
             if not rows:
@@ -298,23 +314,34 @@ async def run_one_drain_tick() -> int:
                 now=now,
                 claimed_by=_claimer_identity(),
             )
+            # Commit the claim stamps before dispatching: a matched
+            # subscription fires an agent run that commits in its own session,
+            # and the drain must hold no open write across that commit (the
+            # scheduler-fire precedent -- loop.py commits the trigger-state
+            # write before dispatching). The advisory lock (pinned to its own
+            # dedicated connection, which a work-session commit cannot touch)
+            # plus the ``processed_at IS NULL`` conditional in
+            # `_mark_processed` remain the single-processing guards once the
+            # claim's row locks release here.
+            await session.commit()
             for row in rows:
                 try:
-                    dispatched = await _dispatch_event(session, row, now=now)
+                    dispatched = await _dispatch_event(session, row, now=now, invoker=invoker)
                     if dispatched:
                         processed += 1
+                    # Commit each event's processed stamp on its own so the
+                    # next event's fire again finds no open write held.
+                    await session.commit()
                 except Exception:
-                    # Per-row isolation: one bad row never stalls the
-                    # tick. The row stays unprocessed (next tick
-                    # retries); the SKIP LOCKED row lock is released
-                    # on session commit.
+                    # Per-row isolation: one bad row never stalls the tick. Roll
+                    # back this row's partial work so the next row starts clean;
+                    # the row stays unprocessed and the next tick retries it
+                    # (the work_ref dedupe covers any subscriber already fired).
+                    await session.rollback()
                     _log.exception(
                         "event_drain_dispatch_failed",
                         event_id=row.event_id,
                     )
-        finally:
-            await _advisory_unlock(session, _EVENT_DRAIN_ADVISORY_LOCK_KEY)
-            await session.commit()
     return processed
 
 
@@ -445,6 +472,7 @@ async def _drain_loop() -> None:
                 raise
             except Exception:
                 _log.warning("event_drain_tick_failed", exc_info=True)
+            note_loop_tick("event_drain", interval)
     finally:
         listener_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

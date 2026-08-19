@@ -208,6 +208,316 @@ Until this section is completed, the question stands as **recorded and
 routed**, not resolved — and the `SPEC_SHELF_TOKEN` secret must not be
 provisioned.
 
+### Extension: sddc-manager / sddc-manager-9.0 (#2982)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/sddc-manager-9.0/` directory (`sddc-manager-openapi.json`, OpenAPI
+3.0.1, ~1.6 MB, 280 paths) for the sddc-manager reconcile lane
+(`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`), under
+the identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is published by VMware in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+(pinned at `85151f6b`, retrieved 2026-04-29) — the provenance note of
+record is the shelf's `sddc-manager-9.0/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics.
+
+### Signoff extension — NSX (nsx-9.0, 2026-08-18, #2981 / PR #3007)
+
+The nsx spec-reconcile lane
+(`backend/tests/test_connectors_nsx_spec_reconcile.py`) arms against
+two additional vendor-licensed artifacts, fetched by the **same**
+secret-gated sparse checkout (widened to `docs/nsx-9.0`; same
+`SPEC_SHELF_TOKEN`, no new secret) under the **same** ephemeral-use
+conditions recorded in "What CI does with the specs" above:
+
+- **What is fetched:** the shelf's `docs/nsx-9.0/` directory (~33 MB)
+  — `nsx_api.json` + `nsx_policy_api.json` (NSX Manager / Policy API
+  Swagger 2.0 documents, **served by the licensed NSX manager
+  appliance itself** at the vendor-documented
+  `GET /api/v1/spec/openapi/…` endpoints; fetched 2026-08-18 from the
+  operator's lab manager, NSX 9.1.0.0.25318225, session-auth) plus
+  their deterministic OpenAPI 3.0 conversions
+  (`*.openapi3.json`, the files the lane parses) and sidecars.
+  Provenance, sha256, and the conversion recipe: the shelf's
+  `nsx-9.0/MANIFEST.md`.
+- **Same conditions:** read-only pytest input on an ephemeral ARC
+  runner destroyed at job end; never committed to this public repo;
+  never in build artifacts or logs (the verify step prints file
+  presence only); secret withheld from fork PRs and the Dependabot
+  store; `persist-credentials: false`.
+- **Provenance difference vs vSphere, recorded for the reviewer:**
+  the vSphere specs are vendor-*published* (public
+  `vmware/vcf-api-specs`); the NSX specs are vendor-*served* — NSX
+  publishes no public artifact, and each licensed manager serves its
+  own spec to its authenticated operators. The shelf copy is the
+  operator's lawful fetch from the operator's own licensed appliance,
+  handled thereafter identically to the vSphere specs.
+
+**Attestation for the NSX extension:** completed (mirrors the #2949
+flow — attestation comment linked below).
+
+- **Reviewer:** Damir Topic (@damir-topic), maintainer/operator
+- **Date:** 2026-08-18
+- **Determination:** Attestation that fetching the pinned NSX
+  manager-served OpenAPI specs from the private spec-shelf into
+  ephemeral same-repo CI jobs, under the conditions above, is
+  acceptable under the operator's vendor license. The specs were
+  obtained from the operator's own lab NSX manager — same conditions
+  as the 2026-08-17 vSphere determination.
+- **Attestation link:**
+  <https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>
+
+**Wave-3 blanket determination:** the attestation comment above also
+records a standing blanket for the remaining wave-3 vendor-spec pins
+(initiative #2979 — e.g. vcf-automation-9.0, vcf-operations-9.0,
+hetzner-robot-2026-04, and any further vendor spec pinned to the
+operator's shelf for reconcile lanes) under identical conditions.
+Future lane tasks record a reference to that comment here instead of
+obtaining a fresh attestation; OSS-licensed specs continue to use the
+provenance-note form and need no attestation.
+
+### Extension: vcf-automation / vcf-automation-9.0 (#2983)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/vcf-automation-9.0/` directory (~3 MB; the lane parses
+`swagger-vra-sdk-go-v0.6.5/vra-iaas.json`, the tenant-plane IaaS API
+Swagger 2.0 document, 143 paths) for the vcf-automation reconcile lane
+(`backend/tests/test_connectors_vcf_automation_spec_reconcile.py`),
+### Extension: vcf-operations / vcf-operations-9.0 (#2984)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/vcf-operations-9.0/` directory (~5 MB) for the vcf-operations
+reconcile lane
+(`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`),
+under the identical ephemeral-use conditions recorded above (sparse
+read-only checkout, workspace destroyed at job end, never committed,
+never in artifacts or logs, secret withheld from fork PRs and the
+Dependabot store). No vendor-license attestation is needed for this
+extension: the spec is vendored by VMware in the **public, Apache-2.0**
+[`vmware/vra-sdk-go`](https://github.com/vmware/vra-sdk-go) repo
+(pinned at tag `v0.6.5`, commit `a886fc67`, retrieved 2026-04-30) — the
+provenance note of record is the shelf's
+`vcf-automation-9.0/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The provider (cloudapi / classic `/api/*`) plane
+pins nothing because nothing pinnable exists — that half of the lane is
+the evidenced exclusion recorded in the standard doc's
+`vcf-automation-9.0` entry.
+extension: the core (vROps Suite API) spec is published by VMware in
+the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo
+(pinned at `85151f6b`, retrieved 2026-04-29) — the provenance note of
+record is the shelf's `vcf-operations-9.0/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics; the wave-3 blanket above is not needed here. The
+file the lane parses is `vcf-operations-openapi.ingestable.json` — a
+deterministic derivative pinned next to the byte-identical vendor fetch
+(the vendor document carries three empty `required` arrays, illegal per
+the OpenAPI 3.0 metaschema, so `parse_openapi` refuses it; recipe +
+sha256 in the shelf MANIFEST — the nsx-9.0 derived-artifact shape).
+**Sequencing:** the derivative lands via consumer-repo PR
+(`claude-rdc-hetzner-dc#2534`) which must merge before this repo's
+widened verify step can pass.
+
+### Signoff extension — Hetzner Robot (hetzner-robot-2026-04, 2026-08-18, #2985)
+
+The hetzner-robot spec-reconcile lane
+(`backend/tests/test_connectors_hetzner_robot_spec_reconcile.py`) arms
+against one additional vendor-licensed artifact, fetched by the **same**
+secret-gated sparse checkout (widened to `docs/hetzner-robot-2026-04`;
+same `SPEC_SHELF_TOKEN`, no new secret) under the **same** ephemeral-use
+conditions recorded in "What CI does with the specs" above. What is
+fetched: the shelf's `docs/hetzner-robot-2026-04/` directory (~0.2 MB) —
+`webservice-en.md`, the vendor's single HTML API reference
+(<https://robot.hetzner.com/doc/webservice/en.html>) converted to
+markdown; Hetzner publishes **no machine-readable spec** for the Robot
+Webservice, so the lane extracts the documented route list from this
+page (provenance: the shelf's `hetzner-robot-2026-04/MANIFEST.md`,
+retrieved 2026-04-30). The page is vendor-published documentation with
+no explicit open license, so this extension records a reference to the
+**wave-3 blanket determination** above
+(<https://github.com/evoila/meho/issues/2981#issuecomment-5329188426>,
+which names hetzner-robot-2026-04 explicitly) instead of a fresh
+attestation.
+
+### Extension: keycloak / keycloak-26.3 (#2988)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/keycloak-26.3/` directory (`keycloak-admin-openapi.json`, OpenAPI
+3.0.3, ~0.5 MB, 247 paths — the Keycloak Admin REST API at the lab's
+deployed 26.3.3) for the keycloak reconcile lane
+(`backend/tests/test_connectors_keycloak_spec_reconcile.py`), under the
+### Extension: argocd / argocd-3.3 (#2987)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/argocd-3.3/` directory (~0.4 MB; the lane parses
+`argocd-swagger.json`, the `argocd-server` Swagger 2.0 document, 80
+paths) for the argocd reconcile lane
+(`backend/tests/test_connectors_argocd_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is a build artifact of the **public, Apache-2.0**
+[`keycloak/keycloak`](https://github.com/keycloak/keycloak) project,
+distributed on Maven Central as
+`org.keycloak:keycloak-api-docs-dist:26.3.3` (zip sha256 verified
+against Maven Central's published checksum, retrieved 2026-08-18) — the
+provenance note of record is the shelf's `keycloak-26.3/MANIFEST.md`,
+per the OSS-licensed-spec form in
+### Extension: RabbitMQ (rabbitmq-4.3, 2026-08-18, #2989)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/rabbitmq-4.3/` directory (~0.1 MB) for the rabbitmq reconcile
+lane (`backend/tests/test_connectors_rabbitmq_spec_reconcile.py`),
+under the identical ephemeral-use conditions recorded above (sparse
+read-only checkout, workspace destroyed at job end, never committed,
+never in artifacts or logs, secret withheld from fork PRs and the
+Dependabot store). No vendor-license attestation is needed for this
+extension: RabbitMQ publishes no OpenAPI for the management HTTP API
+(negative + evidence in the shelf MANIFEST), so the pinned artifacts
+are the management plugin's own HTTP API route table
+(`/api/index.html`, converted to `http-api-index.md`) and the
+shovel-management dispatcher module
+(`rabbit_shovel_mgmt_shovels.erl`, the route registry for the
+`/api/shovels[/{vhost}]` surface the core table does not document) —
+both from the **public, MPL-2.0**
+[`rabbitmq/rabbitmq-server`](https://github.com/rabbitmq/rabbitmq-server)
+repo (pinned at tag `v4.3.5`, retrieved 2026-08-18) — the provenance
+note of record is the shelf's `rabbitmq-4.3/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics.
+spec is vendored at `assets/swagger.json` in the **public, Apache-2.0**
+[`argoproj/argo-cd`](https://github.com/argoproj/argo-cd) repo (pinned
+at tag `v3.3.9`, commit `1b1bb48f`, retrieved 2026-08-18 — matching the
+newer of the lab's two deployed 3.3.x instances) — the provenance note
+of record is the shelf's `argocd-3.3/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The artifact stays Swagger 2.0 (no OpenAPI 3
+derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
+lane supplies its own extraction — the vcf-automation `vra-iaas.json`
+precedent. **Sequencing:** the pin lands via consumer-repo PR
+(`claude-rdc-hetzner-dc#2540`) which must merge before this repo's
+widened verify step can pass.
+
+### Extension: Loki (loki-3.7, 2026-08-18, #2991)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/loki-3.7/` directory (~0.06 MB) for the loki reconcile lane
+(`backend/tests/test_connectors_loki_spec_reconcile.py`), under the
+### Extension: Proxmox VE (proxmox-8.4, #2992)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/proxmox-8.4/` directory (~3.4 MB) for the proxmox reconcile lane
+(`backend/tests/test_connectors_proxmox_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension:
+Grafana Loki publishes no OpenAPI/Swagger for its HTTP API (negative +
+evidence in the shelf MANIFEST — the only `openapi`-named artifacts in
+`grafana/loki` at `v3.7.6` are the Loki Operator's CRD schemas and Go
+module names, not an HTTP API spec), so the pinned artifact is the
+vendor's own documented HTTP API reference
+(`docs/sources/reference/loki-http-api.md`, byte-identical from the
+release tag) from the **public, AGPL-3.0**
+[`grafana/loki`](https://github.com/grafana/loki) repo (pinned at tag
+`v3.7.6`, retrieved 2026-08-18 — matching the lab's deployed fleet
+Loki 3.7.6) — the provenance note of record is the shelf's
+`loki-3.7/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics; the documented-route precedent is
+`hetzner-robot-2026-04`, here from an OSS source. **Sequencing:** the
+pin lands via consumer-repo PR (`claude-rdc-hetzner-dc#2547`) which must
+merge before this repo's widened verify step can pass.
+Proxmox VE publishes no OpenAPI/Swagger for its REST API, so the pinned
+artifact is the vendor's own apidoc schema (`apidata.js`, the file the
+API viewer serves) and the lane supplies its own tree-walking extractor
+(the `rabbitmq-4.3` / `hetzner-robot-2026-04` non-OpenAPI precedent).
+`apidata.js` is a `.js` file, and per pve-docs `debian/copyright` the
+`*.js` file set is **AGPL-3.0-or-later** (the `.adoc` guide prose is
+GFDL-1.3; the schema is not) — an OSS license, so the provenance-note
+form applies: the note of record is the shelf's `proxmox-8.4/MANIFEST.md`
+(source URL + pinned `stable-bookworm` commit, sha256, the AGPL clause,
+and the latest-stable-8.x version rationale), per the OSS-licensed-spec
+form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The lab runs no Proxmox deployment, so the shelf
+pins latest stable 8.x (PVE 8.4); meho's `proxmox-api` connector
+advertises `>=7.0,<9.0`. **Sequencing:** the pin lands via consumer-repo
+PR (`claude-rdc-hetzner-dc#2546`) which must merge before this repo's
+widened verify step can pass.
+### Extension: harbor / harbor-2.12 (#2990)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/harbor-2.12/` directory (~0.3 MB; the lane parses
+`harbor-swagger.yaml`, the `harbor-core` Swagger 2.0 document, 134
+paths) for the harbor reconcile lane
+(`backend/tests/test_connectors_harbor_spec_reconcile.py`), under the
+identical ephemeral-use conditions recorded above (sparse read-only
+checkout, workspace destroyed at job end, never committed, never in
+artifacts or logs, secret withheld from fork PRs and the Dependabot
+store). No vendor-license attestation is needed for this extension: the
+spec is vendored at `api/v2.0/swagger.yaml` in the **public, Apache-2.0**
+[`goharbor/harbor`](https://github.com/goharbor/harbor) repo (pinned at
+tag `v2.12.2`, commit `73072d0d`, retrieved 2026-08-18 — matching the
+lab's deployed Harbor `v2.12.2-73072d0d`) — the provenance note of
+record is the shelf's `harbor-2.12/MANIFEST.md`, per the
+OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. The artifact stays Swagger 2.0 (no OpenAPI 3
+derivative): ingest rejects Swagger 2.0 by decision (#2090), so the
+lane supplies its own extraction — folding the document's
+`basePath: /api/v2.0` onto every path key (the argocd `argocd-swagger.json`
+precedent, reading YAML rather than JSON). **Sequencing:** the pin lands
+via consumer-repo PR (`claude-rdc-hetzner-dc#2549`) which must merge
+before this repo's widened verify step can pass.
+
+### Extension: vcf-logs (vRLI, `vcf-operations-9.0/vcf-operations-for-logs-openapi.json`, #2993)
+
+The vcf-logs (VCF Operations for Logs / vRealize Log Insight) reconcile lane
+(`backend/tests/test_connectors_vcf_logs_spec_reconcile.py`) reads the Logs
+(vRLI) OpenAPI document that **already ships** in the shelf's
+`docs/vcf-operations-9.0/` directory — the same directory the vcf-operations
+core lane (#2984) already provisions — so **no sparse-checkout widening** is
+needed; `vcf-operations-for-logs-openapi.json` is added to the fail-loud verify
+step of both Python jobs so a shelf-layout move can't silently regress the lane
+to skip. No vendor-license attestation is needed: the spec is vendored by VMware
+in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs) repo (pinned at
+`85151f6b`, retrieved 2026-04-29) — the provenance note of record is the shelf's
+`vcf-operations-9.0/MANIFEST.md`, per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics. Unlike the vcf-operations core spec, **no `.ingestable.json`
+derivative is pinned**: the vendor document fails `parse_openapi`'s OpenAPI 3.0
+metaschema gate on a malformed `securitySchemes.Bearer` (a `type: http` scheme
+carrying the apiKey-only `name`/`in` keys), but the vcf-logs reconciled paths are
+all **typed** (the version probe, the events query, the session-login POST) —
+never operator-ingested — so a repaired derivative would be a test-only artifact
+(the vcf-automation `vra-iaas.json` reasoning); the lane extracts the served set
+directly per the standard's non-OpenAPI-artifact clause. The file already being
+on the shelf, this extension arms with **no consumer-repo PR** (outcome (a) of
+#2993).
+
+**vcf-fleet (vRSLCM, #2993) — pin pending.** The paired vcf-fleet reconcile lane
+(`backend/tests/test_connectors_vcf_fleet_spec_reconcile.py`) ships **dormant**
+(outcome (b) of #2993): its vRSLCM 1.3.0 LCM REST OpenAPI (the
+`/lcm/lcops/api/v2/*` appliance-served Swagger surface — distinct from the public
+`vmware/vcf-api-specs` `fleet-lcm-openapi.yaml`, which documents the *new* VCF 9
+`/fleet-lcm/v1/*` service and serves none of the connector's paths) is not yet on
+the shelf. Its shelf pin, the `docs/vcf-fleet-9.0` sparse-checkout + verify
+widening, and a **vendor-served** signoff extension here (the nsx-9.0 form, under
+the wave-3 blanket determination above) land together with the operator's
+consumer-shelf PR — this repo change adds only the dormant lane.
+
 ## Consequences
 
 - The five real-spec lanes light up together the moment the secret exists;
@@ -219,7 +529,12 @@ provisioned.
 - The shelf's `docs/` also carries other vendor spec directories (`nsx-9.0/`,
   `sddc-manager-9.0/`, …). The same checkout could serve future sibling
   canaries by widening the `sparse-checkout` list — deliberately not done
-  here (#2949's DoD is the vCenter lanes). The G4.1 consumer-kb canary does
+  here (#2949's DoD is the vCenter lanes). *Update 2026-08-18:* the
+  first such widenings happened — `docs/sddc-manager-9.0` was added
+  for the sddc-manager reconcile lane (#2982 / PR #3008; see the
+  sddc-manager extension above) and `docs/nsx-9.0` for the nsx
+  reconcile lane (#2981 / PR #3007; see the "Signoff extension — NSX"
+  section above). The G4.1 consumer-kb canary does
   **not** light up: it resolves `<docs-root>/kb`, which does not exist under
   the shelf's `docs/` (the consumer's `kb/` is a repo-root sibling).
 - Rotation is a secret-value swap (runbook step 3); revocation (delete the

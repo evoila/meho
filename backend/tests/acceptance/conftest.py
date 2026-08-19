@@ -211,6 +211,14 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint`` (the recurring fixture gotcha #1064 / #1065).
     "event_outbox",
+    # ``event_source.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0074`` (G11.3 inbound ingest, #2880). It follows the newer
+    # ``Sensor`` / ``EventOutbox`` real-FK discipline rather than ``Target``'s
+    # soft FK, so PG rejects truncating ``tenant`` unless ``event_source`` is
+    # listed in the same statement or every PG-backed acceptance test errors
+    # at setup with ``cannot truncate a table referenced in a foreign key
+    # constraint``.
+    "event_source",
     # ``gateway_command.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
     # from migration ``0059`` (Initiative #2415 T2, #2498). Same rule: PG
     # rejects truncating ``tenant`` unless every referencing table is listed

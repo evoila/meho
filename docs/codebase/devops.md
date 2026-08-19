@@ -36,6 +36,28 @@ resources that make up a running backplane:
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
   per ADR 0005.
 
+## Log shipping (stdout → collector)
+
+The backplane emits **structured JSON logs to stdout, one object per
+line**. Application events (structlog), uvicorn runtime logs, and any
+third-party library that logs through Python's standard `logging` module
+are all routed through the same JSON pipeline
+(`meho_backplane.logging.configure_logging`, #2887). Every record carries
+an ISO 8601 UTC `timestamp`, a `level`, the event name, and — for
+anything logged inside a request — the correlating `request_id`.
+
+There is no log file and no log endpoint, and the chart ships nothing for
+log delivery: the Kubernetes node's container-stdout pathway is the
+contract. Wire the cluster's log collector (Fluent Bit / Vector /
+Promtail → Loki, or the platform equivalent) to the pod's stdout — each
+line is already collector-ready JSON, so no parser or multiline regex is
+needed. uvicorn's per-request access lines are intentionally disabled:
+the request middleware's `request_completed` / `request_failed` JSON line
+already covers them (with `request_id`), so enabling uvicorn access
+logging would only duplicate every request line. uvicorn's pre-startup
+banner (a handful of lines before the app begins serving) is the one
+exception that keeps uvicorn's own plain format.
+
 ## Chart layout
 
 ```
@@ -195,6 +217,22 @@ Ingress is permitted only from the namespace whose
 `networkPolicy.ingressControllerNamespace` (default `ingress-nginx`,
 RKE2's bundled controller).
 
+`networkPolicy.ingestAllowedNamespaces` (default `[]`) renders a
+**second** ingress rule for **in-cluster webhook senders** delivering to
+the inbound event-ingest endpoint (`POST
+/api/v1/events/ingest/{source_slug}`, #2881): each listed namespace
+becomes an OR-ed `kubernetes.io/metadata.name` peer admitted to
+`tcp/8000`, matched on the label kube-apiserver stamps on every namespace
+(Kubernetes ≥ 1.22). Empty by default, so the rule is omitted and the
+backplane stays default-deny — a sender in another namespace otherwise
+has to hair-pin through the ingress hostname. The full operator flow
+(enable the knob, register the `event_source`, custody its per-source
+secret, point the sender's webhook at the in-cluster Service URL) is the
+[In-cluster webhook senders](../deploying.md#in-cluster-webhook-senders)
+section of the deploy guide. SaaS-origin senders and the satellite-runner
+inbound listener are out of scope — they reach the endpoint through the
+ingress hostname, not this rule.
+
 The three egress CIDR fields ship **empty** in `values.yaml` and are
 required-with-shape-validation in the schema **when
 `networkPolicy.enabled: true`**. The chart will not render with the
@@ -350,6 +388,74 @@ kubectl create secret generic meho-postgres \
   --from-literal=url='postgresql+asyncpg://meho:<password>@<host>:5432/meho' \
   --namespace meho
 ```
+
+### Metrics scrape wiring (`templates/servicemonitor.yaml`, `templates/prometheusrule.yaml`)
+
+The backplane serves Prometheus exposition at an unauthenticated
+`/metrics` route (`backend/src/meho_backplane/metrics.py`, legacy
+`0.0.4` content type for universal scraper support), but nothing scrapes
+it out of the box. Two **optional, disabled-by-default** Prometheus
+Operator resources close that gap (Initiative #2884, #2885):
+
+- `serviceMonitor` (`serviceMonitor.enabled`, default `false`) renders a
+  `ServiceMonitor` (`monitoring.coreos.com/v1`) that selects **this
+  release's** backplane `Service` by its `app.kubernetes.io/name` +
+  `app.kubernetes.io/instance` labels and scrapes the named
+  `service.portName` port at `serviceMonitor.path` (default `/metrics`).
+  The broadcast subchart's Service carries a different
+  `app.kubernetes.io/name`, so it is not matched.
+- `prometheusRule` (`prometheusRule.enabled`, default `false`) renders a
+  starter `PrometheusRule` with three conservative alerts:
+  - `MehoMetricsScrapeAbsent` — `absent(up{job=<fullname>, namespace=<ns>})`;
+    fires when Prometheus has **no** target series for this release at
+    all (the ServiceMonitor was never picked up, the selector drifted, or
+    the Service was removed). A known-but-failing target surfaces as
+    `up == 0`, a separate signal the starter set does not cover.
+  - `MehoBroadcastPublishErrors` — `rate(broadcast_publish_errors_total[5m]) > 0`;
+    the fail-open broadcast publisher swallows dropped events by design
+    (`broadcast/publisher.py`), so a sustained nonzero rate is the only
+    signal that the activity feed is silently losing events.
+  - `MehoBackgroundLoopStalled` (#2888) —
+    `(time() - background_loop_last_tick_timestamp_seconds) > (N * background_loop_interval_seconds)`;
+    every one of the 13 lifespan background loops stamps
+    `background_loop_last_tick_timestamp_seconds{loop}` on each completed
+    tick (via `metrics.note_loop_tick`, called at the end of every loop
+    body incl. no-op/heartbeat ticks) and re-publishes its cadence as
+    `background_loop_interval_seconds{loop}`. That companion gauge lets one
+    rule threshold each loop at `N x its own interval`
+    (`N = prometheusRule.loopLiveness.missedTicks`) — matched element-wise
+    on the `loop` label — without the chart enumerating loop names or baking
+    in intervals that would drift from settings. A wedged or dead loop stops
+    advancing its stamp while healthy loops move on; the stamp is
+    per-process (scraped per-pod), so a single stalled replica fires without
+    healthy siblings masking it. Complements — does not replace — the
+    sensor-runner watchdog's faster in-process broadcast stall detection
+    (`checks/watchdog.py`), which is unchanged.
+
+  The rules are split into groups **by concern** (`meho.scrape`,
+  `meho.broadcast`, `meho.loops`) so follow-up tasks extend them cleanly —
+  a new alert lands as a new group, not an edit to an existing group.
+
+Both resources require the Prometheus Operator CRDs
+(`monitoring.coreos.com/v1`) to be installed in the cluster; a default
+install renders neither and is unaffected. **The `labels` knob on each is
+the discovery contract, not cosmetic**: a Prometheus custom resource only
+picks up ServiceMonitors / PrometheusRules whose labels match its
+`serviceMonitorSelector` / `ruleSelector`. On a kube-prometheus-stack
+install that selector defaults to `release: <prometheus-release>`, so
+`serviceMonitor.labels` / `prometheusRule.labels` must carry
+`release: kube-prometheus-stack` (or the site's equivalent) or the scrape
+config / rules are silently never generated. The alert `for` durations
+and `severity` labels are operator-tunable under
+`prometheusRule.scrapeAbsent` / `prometheusRule.broadcastPublishErrors` /
+`prometheusRule.loopLiveness` — the last also exposes `missedTicks`, the
+per-loop staleness multiplier `N`.
+
+Render assertions live in `backend/tests/test_chart_observability_scrape.py`
+(unit layer, skips where `helm` is absent) and in the `chart.yml`
+`validate` job (the authoritative CI gate: renders with both opt-ins on
+and greps the load-bearing fields, and re-checks the default render
+carries neither resource).
 
 ### Safe-by-default values
 
@@ -816,10 +922,31 @@ repo. `ci.yml` provisions them at runtime, gated on a secret:
   `$GITHUB_WORKSPACE/spec-shelf/docs` on both jobs. When the secret is absent
   (fork PRs, Dependabot runs, not-yet-provisioned repos) the checkout step
   skips, the directory doesn't exist, and the resolvers
-  (`backend/tests/acceptance/_vcenter_spec.py`) return `None` → the lanes
+  (`backend/tests/_spec_shelf.py`, the product-agnostic #2980 harness the
+  vcenter-specific `backend/tests/acceptance/_vcenter_spec.py` delegates its
+  shelf-root branch to) return `None` → the lanes
   `pytest.skip()` exactly as before the wiring. When the secret exists, all
   five lanes run for real, and a fail-loud verify step turns any shelf-layout
   drift into a job failure instead of a silent regression to lane-skip.
+- Lane placement (#2980): the seconds-cheap reconcile lanes run armed in
+  the unit sweep; the canary's full-ingest tests run armed only in
+  `python-integration` — its pytest step selects
+  `tests/acceptance/test_g07_vsphere_canary.py` explicitly, and the unit
+  sweep opts out via `MEHO_SKIP_SPEC_INGEST_TESTS=1` (a collection-time
+  `skipif` marker on the canary's full-ingest tests, backstopped in its
+  shared `_canary_corpus` fixture and its `vcenter_spec_path` fixture).
+  The armed cost is amortised: the ~164 s two-spec ingest runs ONCE per
+  module via the module-scoped `_canary_corpus` fixture (PR #2995 — the
+  original per-test-ingest shape was 25 ingests and timeout-killed the
+  60-min integration cap on its first armed run). Rationale + rule +
+  the shared-corpus pattern for future heavy lanes:
+  [`spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md)
+  §Lane placement.
+- Per-vendor reconcile lanes beyond vCenter (#2981-#2993) extend the same
+  wiring — one `sparse-checkout` line + one verify line per product dir,
+  same `SPEC_SHELF_TOKEN`, never a new secret. Standard + extension
+  mechanics + red-lane protocol:
+  [`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 - The `secrets` context is unavailable in step-level `if:`, so the gate is
   the job-env boolean `SPEC_SHELF_TOKEN_PRESENT` — presence only, never the
   token value.
@@ -1227,8 +1354,9 @@ when application code is the only delta.
 
 ## Known gaps (filled by sibling tasks)
 
-- HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
-  — deferred to v0.2. v0.1 is single-replica per Goal #11 scope.
+- HPA / PDB / topologySpreadConstraints — deferred to v0.2. v0.1 is
+  single-replica per Goal #11 scope. (ServiceMonitor + PrometheusRule
+  shipped in #2885 — see "Metrics scrape wiring" under Chart contract.)
 - Broadcast subchart HA (Sentinel/Cluster), persistence, auth —
   deferred to v0.2 per ADR 0005.
 - `broadcast.externalEndpoint` opt-out for operators with a managed

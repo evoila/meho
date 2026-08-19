@@ -120,7 +120,7 @@ func newOperationCallCmd() *cobra.Command {
 			"a dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho hetzner-robot operation call GET:/server --target rdc-robot\n" +
-			"  meho hetzner-robot operation call GET:/query --target rdc-robot --json",
+			"  meho hetzner-robot operation call GET:/rdns --target rdc-robot --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

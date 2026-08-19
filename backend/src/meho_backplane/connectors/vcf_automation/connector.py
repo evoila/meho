@@ -753,7 +753,7 @@ class VcfAutomationConnector(HttpConnector):
         target: VcfAutomationTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """``vcfa.provider.region.list`` — ``GET /cloudapi/1.0.0/regions`` (provider plane)."""
+        """``vcfa.provider.region.list`` — ``GET /cloudapi/vcf/regions`` (provider plane)."""
         return await self._request_json(
             target,
             "GET",

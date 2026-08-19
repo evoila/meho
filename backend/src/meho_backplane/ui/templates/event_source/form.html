@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block page_title %}{{ "New" if mode == "create" else "Edit" }} Event Source &middot; MEHO{% endblock %}
+
+{% block content %}
+<section class="max-w-2xl space-y-4">
+  <h1 class="text-2xl font-semibold">
+    {{ "New event source" if mode == "create" else "Edit event source" }}
+  </h1>
+
+  {% if error %}
+    <div class="alert alert-error" role="alert" data-write-error><span>{{ error }}</span></div>
+  {% endif %}
+
+  <form method="post"
+        action="{{ '/ui/event-sources' if mode == 'create' else '/ui/event-sources/' + (values.get('slug', '') | urlencode) + '/edit' }}"
+        class="space-y-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="form-control">
+      <span class="label-text">Name</span>
+      {% if mode == "create" %}
+        <input type="text" name="name" required maxlength="200"
+               value="{{ values.get('name', '') }}" class="input input-bordered input-sm"
+               placeholder="Prod Alertmanager" />
+      {% else %}
+        <input type="text" value="{{ values.get('name', '') }}"
+               class="input input-bordered input-sm" disabled />
+      {% endif %}
+    </label>
+
+    <label class="form-control">
+      <span class="label-text">Slug (URL routing token)</span>
+      {% if mode == "create" %}
+        <input type="text" name="slug" required maxlength="100"
+               pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
+               value="{{ values.get('slug', '') }}"
+               class="input input-bordered input-sm font-mono" placeholder="prod-alertmanager" />
+        <span class="text-xs opacity-60 mt-1">Lowercase, digits, hyphen. Globally unique; immutable after creation.</span>
+      {% else %}
+        <input type="text" value="{{ values.get('slug', '') }}"
+               class="input input-bordered input-sm font-mono" disabled />
+      {% endif %}
+    </label>
+
+    <div class="grid gap-3 md:grid-cols-3">
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        <select name="kind" class="select select-bordered select-sm" required>
+          {% for k in kind_options %}
+            <option value="{{ k }}" {{ "selected" if values.get('kind') == k else "" }}>{{ k }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Auth strategy</span>
+        <select name="auth_strategy" class="select select-bordered select-sm" required>
+          {% for a in auth_options %}
+            <option value="{{ a }}" {{ "selected" if values.get('auth_strategy') == a else "" }}>{{ a }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="form-control">
+        <span class="label-text">Status</span>
+        <select name="status" class="select select-bordered select-sm" required>
+          {% for s in status_options %}
+            <option value="{{ s }}" {{ "selected" if values.get('status') == s else "" }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <label class="form-control">
+      <span class="label-text">Extras (JSON object, optional)</span>
+      <textarea name="extras" class="textarea textarea-bordered font-mono text-sm min-h-[6rem]"
+                placeholder='{"rate_limit": 60, "body_cap": 1048576}'>{{ values.get('extras', '') }}</textarea>
+      <span class="text-xs opacity-60 mt-1">Body cap, rate limit, replay window, dedupe config the ingest path reads.</span>
+    </label>
+
+    <label class="form-control">
+      <span class="label-text">
+        Auth secret
+        {% if mode == "edit" %}(leave blank to keep the current secret){% else %}(optional){% endif %}
+      </span>
+      <input type="password" name="secret" autocomplete="off" class="input input-bordered input-sm"
+             placeholder="written to Vault; never displayed" />
+      <span class="text-xs opacity-60 mt-1">Custodied in Vault — never stored in the database or shown again.</span>
+    </label>
+
+    <div class="flex gap-2 pt-2">
+      <button type="submit" class="btn btn-sm btn-primary" data-action="submit">
+        {{ "Create" if mode == "create" else "Save" }}
+      </button>
+      <a href="/ui/event-sources" class="btn btn-sm btn-ghost">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

@@ -321,14 +321,14 @@ not one of the 9.
 | `harbor.about` | `harbor-system` | `GET /api/v2.0/systeminfo` |
 | `harbor.health` | `harbor-system` | `GET /api/v2.0/health` |
 | `harbor.project.list` | `harbor-projects` | `GET /api/v2.0/projects` |
-| `harbor.project.info` | `harbor-projects` | `GET /api/v2.0/projects/{project_name}` |
+| `harbor.project.info` | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}` |
 | `harbor.repository.list` | `harbor-repositories` | `GET /api/v2.0/projects/{project_name}/repositories` |
 | `harbor.repository.info` | `harbor-repositories` | `GET /api/v2.0/projects/{project_name}/repositories/{repository_name}` |
 | `harbor.artifact.list` | `harbor-artifacts` | `GET …/repositories/{repository_name}/artifacts` |
 | `harbor.artifact.info` | `harbor-artifacts` | `GET …/artifacts/{reference}` |
 | `harbor.robot.list` | `harbor-robots` | `GET /api/v2.0/robots` |
 | `harbor.artifact.vulnerabilities` *(standalone typed read, #2857)* | `harbor-artifacts` | `GET …/artifacts/{reference}/additions/vulnerabilities` |
-| `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name}/summary` |
+| `harbor.project.summary` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/projects/{project_name_or_id}/summary` |
 | `harbor.quota.list` *(standalone typed read, #2858)* | `harbor-projects` | `GET /api/v2.0/quotas?reference=project` |
 
 **Quota lives on the summary endpoint, not on `Project`**: `harbor.project.info`
@@ -344,6 +344,27 @@ only exposes secrets in the `POST` create response, and the read handler
 returns Harbor's list payload verbatim. The unit and acceptance tests assert
 this invariant explicitly.
 
+**Spec-reconcile lane (#2990).** Every request path the connector dispatches
+is declared once as a `_*_PATH` template constant in
+[`_paths.py`](../../backend/src/meho_backplane/connectors/harbor/_paths.py)
+(hoisted out of inline f-strings by #2990); each handler builds its concrete
+path via `fill_path` (or uses a placeholder-free constant directly), and the
+single `encode_segment` helper percent-encodes caller-controlled segments — so
+these constants ARE the dispatched surface. The lane
+[`test_connectors_harbor_spec_reconcile.py`](../../backend/tests/test_connectors_harbor_spec_reconcile.py)
+(parse-only, in the required unit sweep; uniform skip when the shelf is
+unconfigured) introspects those live constants and asserts all 14 hand-coded
+`METHOD:/path` op_ids are served by the pinned `harbor-2.12` shelf spec
+(`harbor-swagger.yaml` — `goharbor/harbor@v2.12.2` `api/v2.0/swagger.yaml`,
+Apache-2.0). The spec is Swagger 2.0 (ingest rejects it, #2090), so the lane
+extracts its own served set and folds the document's `basePath: /api/v2.0`
+onto every path key; template placeholders carry the vendor's own parameter
+names (`{project_name_or_id}` on the project detail / `/summary` routes,
+`{project_name}` / `{repository_name}` / `{reference}` on the repository
+sub-tree, `{robot_id}` on robot-delete). All 14 were served on the first armed
+run — no repoints, no exclusions. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
+
 ## Tests
 
 - `tests/test_connectors_harbor_typed_reads.py` — unit tests (SQLite): each read
@@ -351,6 +372,11 @@ this invariant explicitly.
   forwarding, `source_kind="typed"`, the robot id/secret invariant,
   `classify_op == "read"`, and the registration-shape invariants (safe,
   no-approval, read-only tag, `llm_instructions` canonical keys, no write op).
+- `tests/test_connectors_harbor_spec_reconcile.py` — the #2990 real-spec
+  reconcile lane: introspects the `_paths` template constants and asserts every
+  hand-coded `METHOD:/path` is served by the pinned `harbor-2.12` Swagger 2.0
+  spec (basePath-folded); the two offline guards (constant-set + op_id manifest)
+  run unconditionally, the armed assertion skips clean without the shelf.
 - `tests/acceptance/_harbor_canary_fixtures.py` — shared fixtures: runs the
   typed registrar, seeds a `Target`, respx-mocks the Harbor REST surface, and
   stubs the credentials loader.

@@ -350,13 +350,11 @@ async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
     ]
     # Folder GET forwards the name filter as a query param; bare on /api (#2298).
     assert conn.calls[0]["query"] == {"names": ["Prod"]}
-    # Create body carries the spec; folder moid resolved in.
-    assert conn.calls[1]["body"]["spec"]["placement"]["folder"] == "folder-7"
-    # NIC create body is the Ethernet.CreateSpec: the network rides the
-    # backing spec (#2970); vm rides the path, not the body.
-    assert conn.calls[2]["body"] == {
-        "spec": {"backing": {"type": "STANDARD_PORTGROUP", "network": "net-3"}}
-    }
+    # Create body is the VM.CreateSpec at the top level (#2973); folder moid resolved in.
+    assert conn.calls[1]["body"]["placement"]["folder"] == "folder-7"
+    # NIC create body is the Ethernet.CreateSpec at the top level (#2973): the
+    # network rides the backing spec (#2970); vm rides the path, not the body.
+    assert conn.calls[2]["body"] == {"backing": {"type": "STANDARD_PORTGROUP", "network": "net-3"}}
     # Power POST carries no body (action rides the path).
     assert conn.calls[3]["body"] is None
 
@@ -1025,7 +1023,7 @@ async def test_vm_migrate_drs_recommendation_dispatches_relocate(gate: _GateReco
         "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
     ]
     assert conn.calls[0]["path"] == "/api/vcenter/vm/vm-1?action=relocate"
-    assert conn.calls[0]["body"] == {"spec": {"placement": {"host": "host-A"}}}
+    assert conn.calls[0]["body"] == {"placement": {"host": "host-A"}}
     assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}?action=relocate"]
 
 
@@ -1478,7 +1476,7 @@ async def test_host_detach_from_vds_happy_path(gate: _GateRecorder) -> None:
         "/api/vcenter/vm/vm-2/hardware/ethernet/4001",
     ]
     assert nic_patches[0]["body"] == {
-        "spec": {"backing": {"type": "STANDARD_PORTGROUP", "network": "standard-net"}}
+        "backing": {"type": "STANDARD_PORTGROUP", "network": "standard-net"}
     }
     # The DVS detach is the vim ReconfigureDvs_Task: configVersion echoed,
     # host member spec with operation=remove.
@@ -3050,8 +3048,8 @@ async def test_vm_resize_powered_off_patches_cpu_and_memory(gate: _GateRecorder)
     cpu_call = next(c for c in conn.calls if c["path"].endswith("/hardware/cpu"))
     mem_call = next(c for c in conn.calls if c["path"].endswith("/hardware/memory"))
     assert cpu_call["method"] == "PATCH"
-    assert cpu_call["body"] == {"spec": {"count": 4, "cores_per_socket": 2}}
-    assert mem_call["body"] == {"spec": {"size_MiB": 8192}}
+    assert cpu_call["body"] == {"count": 4, "cores_per_socket": 2}
+    assert mem_call["body"] == {"size_MiB": 8192}
 
 
 @pytest.mark.asyncio
@@ -3209,7 +3207,7 @@ async def test_vm_nic_repoint_happy_path(gate: _GateRecorder) -> None:
     assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"]
     patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
     assert patch_call["body"] == {
-        "spec": {"backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-9"}}
+        "backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-9"}
     }
     # The portgroup resolve used the corrected /vcenter/network path (#1602 fix).
     net_read = next(c for c in conn.calls if c["path"] == "/api/vcenter/network")
@@ -3343,7 +3341,7 @@ async def test_vm_device_cdrom_update_patches_backing(gate: _GateRecorder) -> No
     assert out["requested_backing"] == {"type": "CLIENT_DEVICE"}
     assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"]
     patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
-    assert patch_call["body"] == {"spec": {"backing": {"type": "CLIENT_DEVICE"}}}
+    assert patch_call["body"] == {"backing": {"type": "CLIENT_DEVICE"}}
 
 
 @pytest.mark.asyncio
@@ -3402,7 +3400,7 @@ async def test_guest_customization_spec_create_linux_body(gate: _GateRecorder) -
     assert [(c["method"], c["path"]) for c in conn.calls] == [
         ("POST", "/api/vcenter/guest/customization-specs"),
     ]
-    body = conn.calls[0]["body"]["spec"]
+    body = conn.calls[0]["body"]
     assert body["name"] == "gosc-lin"
     assert body["description"] == "web tier"
     linux = body["spec"]["configuration_spec"]["linux_config"]
@@ -3460,9 +3458,7 @@ async def test_guest_customization_spec_create_windows_sysprep_body(gate: _GateR
         },
         connector=conn,  # type: ignore[arg-type]
     )
-    sysprep = conn.calls[0]["body"]["spec"]["spec"]["configuration_spec"]["windows_config"][
-        "sysprep"
-    ]
+    sysprep = conn.calls[0]["body"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]
     assert sysprep["user_data"]["computer_name"] == {"type": "FIXED", "fixed_name": "win-01"}
     assert sysprep["user_data"]["product_key"] == "KEY-123"
     assert sysprep["user_data"]["organization"] == "evoila"
@@ -3716,8 +3712,9 @@ def test_gosc_create_body_conforms_to_pinned_customization_spec_schema(
     ``GuiUnattended``) that ``_put_if_str`` used to drop.
     """
     body = _write._build_customization_create_body(params)
-    # The connector wraps the CreateSpec under the request-body ``spec`` key.
-    Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA).validate(body["spec"])
+    # The builder returns the CreateSpec at the top level of the request body (#2973);
+    # the only ``spec`` key is the inner CustomizationSpec field, not a /rest envelope.
+    Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA).validate(body)
 
 
 def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() -> None:
@@ -3730,12 +3727,12 @@ def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() ->
     """
     validator = Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA)
     good = _write._build_customization_create_body(_GOSC_WINDOWS_DOMAIN_JOIN)
-    validator.validate(good["spec"])  # sanity: the corrected body is valid.
+    validator.validate(good)  # sanity: the corrected body is valid.
 
     # B1 regression: the pyvmomi ``identification`` block is not a
     # WindowsSysprep property -> additionalProperties rejects it.
     b1 = copy.deepcopy(good)
-    b1_sysprep = b1["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]
+    b1_sysprep = b1["spec"]["configuration_spec"]["windows_config"]["sysprep"]
     b1_sysprep.pop("domain", None)
     b1_sysprep["identification"] = {
         "joined_domain": "corp.test",
@@ -3743,22 +3740,22 @@ def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() ->
         "domain_admin_password": "pw-join",
     }
     with pytest.raises(ValidationError):
-        validator.validate(b1["spec"])
+        validator.validate(b1)
 
     # B2 regression: GuiUnattended.auto_logon_count is required -> dropping it
     # (as the old _put_if_str-built body did) fails.
     b2 = copy.deepcopy(good)
-    del b2["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]["gui_unattended"][
+    del b2["spec"]["configuration_spec"]["windows_config"]["sysprep"]["gui_unattended"][
         "auto_logon_count"
     ]
     with pytest.raises(ValidationError):
-        validator.validate(b2["spec"])
+        validator.validate(b2)
 
     # B2 regression: CreateSpec.description is required -> dropping it fails.
     b3 = copy.deepcopy(good)
-    del b3["spec"]["description"]
+    del b3["description"]
     with pytest.raises(ValidationError):
-        validator.validate(b3["spec"])
+        validator.validate(b3)
 
 
 @pytest.mark.asyncio
@@ -3816,7 +3813,7 @@ async def test_vm_customize_powered_off_sets_customization(gate: _GateRecorder) 
     ]
     # The resolve read forwards the name filter; PUT body is the named spec ref.
     assert conn.calls[0]["query"] == {"names": ["app"]}
-    assert conn.calls[1]["body"] == {"spec": {"name": "gosc-lin"}}
+    assert conn.calls[1]["body"] == {"name": "gosc-lin"}
     # Only the PUT was gated (the resolve GET is never gated).
     assert gate.gated_op_ids == ["PUT:/vcenter/vm/{vm}/guest/customization"]
     assert out["status"] == "customization_set"

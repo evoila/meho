@@ -353,6 +353,113 @@ each lives inline in
   Applied to **both** the backplane container and the migration Job
   container.
 
+## In-cluster webhook senders
+
+MEHO accepts inbound events from external producers — Alertmanager,
+Grafana, Harbor, VCF Operations, or any `generic-json` webhook — at the
+JWT-less ingest endpoint `POST /api/v1/events/ingest/{source_slug}`
+(#2881). Each producer is a registered `event_source` (#2880),
+authenticated per-source against a Vault-custodied shared secret. This
+section wires an **in-cluster** sender (one running in another namespace
+of the same cluster) end to end. SaaS-origin senders and the
+satellite-runner inbound listener are out of scope here — both reach the
+endpoint through the ingress hostname of step 1.
+
+### 1. Reach the endpoint — two paths
+
+The backplane is internal-only; it is never publicly exposed. A sender
+reaches the ingest endpoint one of two ways:
+
+- **Ingress hostname (default).** Point the sender's webhook at
+  `https://<ingress.host>/api/v1/events/ingest/<slug>` on the cluster's
+  internal DNS. This needs **no** NetworkPolicy change — the chart's
+  default-deny policy already admits the ingress-controller namespace,
+  and the request arrives through the ingress like any other. Prefer this
+  unless you have a reason not to round-trip through the ingress.
+- **Direct to the Service (opt-in NetworkPolicy).** With
+  `networkPolicy.enabled: true` (the default), tcp/8000 ingress is
+  admitted **only** from the ingress-controller namespace, so a sender in
+  another namespace cannot dial the Service directly. List its namespace
+  in `networkPolicy.ingestAllowedNamespaces` to render an additional
+  ingress rule admitting it, then point the webhook at the in-cluster
+  Service URL
+  `http://<release>.<meho-namespace>.svc.cluster.local:8000/api/v1/events/ingest/<slug>`
+  (the `ClusterIP` Service is named after the Helm release and listens on
+  `service.port`, default 8000). The knob is a list of namespace names;
+  the rendered rule OR-s them:
+
+  ```yaml
+  networkPolicy:
+    ingestAllowedNamespaces:
+      - monitoring   # e.g. Alertmanager / Grafana
+      - harbor
+  ```
+
+  Default empty — the backplane stays default-deny until you opt a
+  namespace in. When `networkPolicy.enabled: false` (a mesh-level policy
+  is enforced upstream) the knob is a no-op; add the equivalent admit
+  rule to that policy instead. See
+  [`codebase/devops.md`](codebase/devops.md#networkpolicy) for the
+  rendered-rule detail.
+
+### 2. Register the source + custody its secret
+
+Register the source once with the CLI. The backplane writes the auth
+secret to Vault under **your** operator identity and persists only the
+derived path (`tenants/<tenant_id>/event-sources/<slug>`, KV-v2 field
+`secret`) on the row — the value never lands in the database, a log line,
+or an audit row.
+
+```bash
+# The secret is NEVER a flag — pipe it via stdin (or MEHO_EVENT_SOURCE_SECRET).
+printf '%s' "$SIGNING_KEY" | meho event-source add alertmanager-prod \
+  --name "Alertmanager (prod)" \
+  --kind alertmanager \
+  --auth-strategy hmac-sha256 \
+  --secret-stdin
+```
+
+- `--kind` selects the producer family: `alertmanager` | `grafana` |
+  `vcf-operations` | `harbor` | `generic-json`.
+- `--auth-strategy` picks how the sender is authenticated — all three
+  verify against the Vault secret:
+  - `hmac-sha256` — the sender signs the raw body with the shared key.
+    The generic scheme sends the hex signature in `X-Meho-Signature` and
+    a unix timestamp in `X-Meho-Timestamp` (bound into the signature and
+    gated by a 300 s replay window). A vendor with different header names
+    (Grafana's `X-Grafana-Alerting-Signature`) overrides them via
+    `--extras`, not a code change.
+  - `static-header` — a fixed header (default `Authorization`) carries a
+    shared token compared against the secret (Harbor).
+  - `basic` — HTTP Basic; the non-secret username goes in
+    `--extras '{"basic_username":"…"}'` and the password is the Vault
+    secret (Alertmanager `http_config`).
+- **Rotate** with `meho event-source update <slug> --secret-stdin` — a
+  new KV-v2 version at the same path, read on the ingest path's next
+  lookup, zero downtime. **Pause** with `--status paused` (rejected on
+  the next request; a paused *or* missing source both return a uniform
+  `404`).
+- Per-source tuning rides on `--extras` (a JSON object): `max_body_bytes`
+  (clamped ≤ 256 KiB), `rate_per_minute`, `replay_window_seconds`
+  (≤ 3600), `require_timestamp`, and the `*_header` / `basic_username`
+  names above.
+
+Reading the secret on the ingest path needs a Vault client identity — the
+same background-dispatch service principal the sensor check-runner uses
+([`checkRunner.*`](#per-operator-wif-and-background-dispatch-2642)). With
+none configured the Vault read fails and ingest fails closed (`503`).
+
+### 3. Point the sender at the webhook
+
+Configure the sender's webhook receiver at the URL from step 1 and its
+auth material to match the strategy from step 2 (the same signing key /
+token / password you custodied). On success the endpoint returns `202`
+(accepted) or `200` (idempotent duplicate); a bad signature is `401`, an
+oversize body `413`, a throttled burst `429`. The event lands one
+`event_outbox` row that the drain + subscription matcher route to
+`kind=event` scheduler triggers — see [`codebase/events.md`](codebase/events.md)
+for the internal path.
+
 ## See also
 
 - [`codebase/devops.md`](codebase/devops.md) — chart internals, migration

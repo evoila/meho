@@ -7,10 +7,10 @@ Two Robot acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.hetzner_robot.HetznerRobotConnector` instance
 with a stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 11 curated
+:class:`~meho_backplane.db.models.Target` row, the 10 curated
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
 :data:`~meho_backplane.connectors.hetzner_robot.core_ops.ROBOT_CORE_OPS`, and a
-:mod:`respx`-mocked Hetzner Robot REST surface answering each of the 11 curated
+:mod:`respx`-mocked Hetzner Robot REST surface answering each of the 10 curated
 read ops.
 
 Hetzner Robot uses HTTP Basic auth on every request — no session establish
@@ -24,7 +24,7 @@ The full Hetzner Robot spec ingest via :class:`IngestionPipelineService`
 needs the Robot OpenAPI spec reachable on the CI runner plus a live LLM
 for the grouping pass. Until the spec-shelf is wired to the meho-runners
 pool, the dispatch leg is exercised against a minimal direct-insert path
-that seeds the 11 curated endpoint_descriptor rows by hand. Same pattern
+that seeds the 10 curated endpoint_descriptor rows by hand. Same pattern
 :mod:`tests.acceptance._harbor_canary_fixtures` and
 :mod:`tests.acceptance._sddc_canary_fixtures` established.
 
@@ -125,12 +125,6 @@ ROBOT_FORCE_HANDLE_LIST_OP_ID: str = "GET:/server"
 #: Smoke-test path parameters for ``ROBOT_FORCE_HANDLE_LIST_OP_ID``.
 #: ``GET:/server`` takes no path parameters — empty dict is correct.
 ROBOT_FORCE_HANDLE_PARAMS: dict[str, str] = {}
-
-#: Synthetic query/account-info response.
-ROBOT_CANARY_QUERY: dict[str, object] = {
-    "api_version": "1.0",
-    "account_id": "robot-canary-account",
-}
 
 #: Synthetic server list — 3 dedicated servers.
 ROBOT_CANARY_SERVERS: list[dict[str, object]] = [
@@ -329,7 +323,7 @@ class IngestedRobotCanary:
 
 
 async def _insert_robot_descriptors() -> None:
-    """Seed the 11 curated Robot core ops + their groups as enabled rows.
+    """Seed the 10 curated Robot core ops + their groups as enabled rows.
 
     One :class:`OperationGroup` per entry in :data:`ROBOT_CORE_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
@@ -389,7 +383,7 @@ def _param_schema_for(path: str) -> dict[str, object]:
     """Build a minimal ``parameter_schema`` for each ``{var}`` in *path*.
 
     Mirrors :func:`tests.acceptance._harbor_canary_fixtures._param_schema_for`.
-    Robot paths carry path variables like ``{server-ip}`` and ``{id}``.
+    Robot paths carry path variables like ``{server-ip}`` and ``{vswitch-id}``.
     """
     placeholders = _PATH_VAR_RE.findall(path)
     if not placeholders:
@@ -411,14 +405,13 @@ async def _robot_credentials_loader(
 
 
 def _register_robot_routes(mock: respx.MockRouter) -> None:
-    """Register the 11 Robot read-op routes on *mock*.
+    """Register the 10 Robot read-op routes on *mock*.
 
     Robot uses HTTP Basic on every request — no session establish call
     is needed. Each route returns a pre-seeded JSON body. Templated
     paths are registered for specific parameter values the smoke test
-    uses (server-ip="1.2.3.1", id=4321).
+    uses (server-ip="1.2.3.1", vswitch-id=4321).
     """
-    mock.get("/query").respond(200, json=ROBOT_CANARY_QUERY)
     mock.get("/server").respond(200, json=ROBOT_CANARY_SERVERS)
     mock.get("/server/1.2.3.1").respond(200, json=ROBOT_CANARY_SERVER_DETAIL)
     mock.get("/ip").respond(200, json=ROBOT_CANARY_IPS)
@@ -432,20 +425,17 @@ def _register_robot_routes(mock: respx.MockRouter) -> None:
 
 
 def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
-    """Register the 11 Robot sandbox routes — every path returns 200 + empty array.
+    """Register the 10 Robot sandbox routes — every path returns 200 + empty array.
 
     Mirrors the Hetzner Robot consumer sandbox behaviour:
     ``https://robot-sandbox.hetzner.com`` returns HTTP 200 with empty JSON
-    arrays (``[]``) for every read endpoint when called with any valid Basic
-    credential. The sandbox op for ``GET:/query`` returns ``{}`` (an empty
-    object, not an array) because the Robot Webservice query endpoint returns
-    an object shape. All other read ops return ``[]``.
+    arrays (``[]``) for every list endpoint when called with any valid Basic
+    credential; single-resource reads return ``{}``.
 
     Operators use the sandbox before they have a production Robot account;
     the MEHO op surface must tolerate empty-array responses gracefully
     (``status='ok'``, empty ``result``) without crashing.
     """
-    mock.get("/query").respond(200, json={})
     mock.get("/server").respond(200, json=[])
     mock.get("/server/1.2.3.1").respond(200, json={})
     mock.get("/ip").respond(200, json=[])
@@ -481,7 +471,7 @@ async def ingested_robot_canary(
     Setup mirrors :func:`tests.acceptance._harbor_canary_fixtures.ingested_harbor_canary`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 11 curated Robot core ops.
+       rows for the 10 curated Robot core ops.
     2. Seed a :class:`Target` with ``product="hetzner"`` and the
        :data:`ROBOT_CANARY_FINGERPRINT` so the resolver binds
        :class:`HetznerRobotConnector`.
@@ -557,11 +547,11 @@ async def ingested_robot_canary_sandbox(
     """Yield a dispatcher-ready Robot setup where every op returns 200 + empty arrays.
 
     Models the Hetzner Robot consumer sandbox
-    (``https://robot-sandbox.hetzner.com``): all 11 read endpoints respond
-    with HTTP 200 + empty JSON arrays (``[]``) or empty objects (``{}``) for
-    the query endpoint. Operators who run against the sandbox before they
-    have a production Robot account should receive ``status='ok'`` with an
-    empty result — not a parse crash.
+    (``https://robot-sandbox.hetzner.com``): all 10 read endpoints respond
+    with HTTP 200 + empty JSON arrays (``[]``) for lists or empty objects
+    (``{}``) for single-resource reads. Operators who run against the
+    sandbox before they have a production Robot account should receive
+    ``status='ok'`` with an empty result — not a parse crash.
 
     Setup is identical to :func:`ingested_robot_canary` except:
 

@@ -102,6 +102,18 @@ from meho_backplane.connectors._shared.vault_creds import (
     load_vault_secret_data,
     strip_credential_value,
 )
+from meho_backplane.connectors.keycloak._paths import (
+    _ADMIN_REALM_PATH,
+    _ADMIN_REALMS_PATH,
+    _CLIENT_PATH,
+    _CLIENT_PROTOCOL_MAPPERS_PATH,
+    _CLIENT_SCOPES_PATH,
+    _CLIENTS_PATH,
+    _USER_RESET_PASSWORD_PATH,
+    _USER_ROLE_MAPPINGS_REALM_PATH,
+    _USERS_PATH,
+    fill_path,
+)
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -262,7 +274,7 @@ async def keycloak_realm_create(
     realm_name = str(representation.get("realm") or params.get("realm") or "").strip()
     representation.setdefault("realm", realm_name)
     result = await self._write_admin(
-        target, "POST", "/admin/realms", operator=operator, json=representation
+        target, "POST", _ADMIN_REALMS_PATH, operator=operator, json=representation
     )
     return {
         "realm": realm_name,
@@ -290,7 +302,7 @@ async def keycloak_realm_update(
     await self._write_admin(
         target,
         "PUT",
-        f"/admin/realms/{realm_name}",
+        fill_path(_ADMIN_REALM_PATH, {"realm": realm_name}),
         operator=operator,
         json=representation,
         idempotent_conflict=False,
@@ -325,7 +337,7 @@ async def keycloak_client_create(
     result = await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/clients",
+        fill_path(_CLIENTS_PATH, {"realm": realms.managed_realm}),
         operator=operator,
         json=representation,
     )
@@ -378,7 +390,10 @@ async def keycloak_client_update(
     await self._write_admin(
         target,
         "PUT",
-        f"/admin/realms/{realms.managed_realm}/clients/{quote_segment(uuid)}",
+        fill_path(
+            _CLIENT_PATH,
+            {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
+        ),
         operator=operator,
         json=representation,
         idempotent_conflict=False,
@@ -406,7 +421,7 @@ async def keycloak_client_scope_create(
     result = await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/client-scopes",
+        fill_path(_CLIENT_SCOPES_PATH, {"realm": realms.managed_realm}),
         operator=operator,
         json=representation,
     )
@@ -454,7 +469,10 @@ async def keycloak_protocol_mapper_create(
     result = await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/clients/{quote_segment(uuid)}/protocol-mappers/models",
+        fill_path(
+            _CLIENT_PROTOCOL_MAPPERS_PATH,
+            {"realm": realms.managed_realm, "client-uuid": quote_segment(uuid)},
+        ),
         operator=operator,
         json=representation,
     )
@@ -503,7 +521,7 @@ async def keycloak_user_create(
     result = await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/users",
+        fill_path(_USERS_PATH, {"realm": realms.managed_realm}),
         operator=operator,
         json=representation,
     )
@@ -551,7 +569,10 @@ async def keycloak_user_reset_password(
     await self._write_admin(
         target,
         "PUT",
-        f"/admin/realms/{realms.managed_realm}/users/{quote_segment(uuid)}/reset-password",
+        fill_path(
+            _USER_RESET_PASSWORD_PATH,
+            {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+        ),
         operator=operator,
         json=credential,
         idempotent_conflict=False,
@@ -608,7 +629,10 @@ async def keycloak_role_mapping_assign(
     await self._write_admin(
         target,
         "POST",
-        f"/admin/realms/{realms.managed_realm}/users/{quote_segment(uuid)}/role-mappings/realm",
+        fill_path(
+            _USER_ROLE_MAPPINGS_REALM_PATH,
+            {"realm": realms.managed_realm, "user-id": quote_segment(uuid)},
+        ),
         operator=operator,
         json=role_reprs,  # type: ignore[arg-type]  # KC accepts a JSON array body here
         idempotent_conflict=False,

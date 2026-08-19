@@ -330,6 +330,50 @@ def test_advisory_lock_key_differs_from_scheduler() -> None:
     assert 0 <= _SENSOR_RUNNER_ADVISORY_LOCK_KEY <= 0x7FFF_FFFF_FFFF_FFFF
 
 
+@pytest.mark.asyncio
+async def test_lock_miss_tick_logs_and_skips_claim_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock-miss tick is visible and never stamps the claim facet (#3010).
+
+    The stranded-lock incident was invisible precisely because the miss
+    path was a silent ``return 0`` and ``note_tick_completed`` stamped it
+    healthy. The tick must log ``sensor_tick_lock_busy``, dispatch
+    nothing, keep the tick stamp advancing (loop liveness), and leave the
+    claim stamp untouched.
+    """
+    from contextlib import asynccontextmanager
+
+    from meho_backplane.checks.watchdog import sensor_runner_liveness
+
+    sensor_id = await _create_interval_sensor()
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    @asynccontextmanager
+    async def _held_elsewhere(key: int, *, subsystem: str) -> Any:
+        assert key == _SENSOR_RUNNER_ADVISORY_LOCK_KEY
+        assert subsystem == "sensor_runner"
+        yield False
+
+    monkeypatch.setattr("meho_backplane.checks.runner.advisory_lock", _held_elsewhere)
+
+    with structlog.testing.capture_logs() as logs:
+        dispatched = await run_one_sensor_tick()
+
+    assert dispatched == 0
+    assert [e for e in logs if e["event"] == "sensor_tick_lock_busy"]
+    liveness = sensor_runner_liveness()
+    # Loop liveness still stamps (the multi-replica contract) …
+    assert liveness.seconds_since_last_tick is not None
+    # … but the claim facet does not pretend anything was claimed.
+    assert liveness.seconds_since_last_claim is None
+    # The due row was untouched — the next lock-winning tick claims it.
+    row = await _get_sensor(sensor_id)
+    fire_at = _aware(row.next_fire_at)
+    assert fire_at is not None
+    assert fire_at <= datetime.now(UTC)
+
+
 # --------------------------------------------------------------------------- #
 # Cadence advance (value-assert, deterministic fire_instant)
 # --------------------------------------------------------------------------- #

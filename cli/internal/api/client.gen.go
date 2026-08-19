@@ -248,6 +248,28 @@ const (
 	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
+// Defines values for EventSourceAuthStrategy.
+const (
+	EventSourceAuthStrategyBasic        EventSourceAuthStrategy = "basic"
+	EventSourceAuthStrategyHmacSha256   EventSourceAuthStrategy = "hmac-sha256"
+	EventSourceAuthStrategyStaticHeader EventSourceAuthStrategy = "static-header"
+)
+
+// Defines values for EventSourceKind.
+const (
+	EventSourceKindAlertmanager  EventSourceKind = "alertmanager"
+	EventSourceKindGenericJson   EventSourceKind = "generic-json"
+	EventSourceKindGrafana       EventSourceKind = "grafana"
+	EventSourceKindHarbor        EventSourceKind = "harbor"
+	EventSourceKindVcfOperations EventSourceKind = "vcf-operations"
+)
+
+// Defines values for EventSourceStatus.
+const (
+	EventSourceStatusActive EventSourceStatus = "active"
+	EventSourceStatusPaused EventSourceStatus = "paused"
+)
+
 // Defines values for GatewayResultBodyOutcome.
 const (
 	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
@@ -498,6 +520,7 @@ const (
 	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
 	TargetCreateProductRke2       TargetCreateProduct = "rke2"
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductTempo      TargetCreateProduct = "tempo"
 	TargetCreateProductVault      TargetCreateProduct = "vault"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
@@ -1517,6 +1540,26 @@ type BaselineMetricsOverride struct {
 	Kind         *string `json:"kind,omitempty"`
 	Mrr          float32 `json:"mrr"`
 	PrecisionAt5 float32 `json:"precision_at_5"`
+}
+
+// BodyCreateUiEventSourcesPost defines model for Body__create_ui_event_sources_post.
+type BodyCreateUiEventSourcesPost struct {
+	AuthStrategy string  `json:"auth_strategy"`
+	Extras       *string `json:"extras,omitempty"`
+	Kind         string  `json:"kind"`
+	Name         string  `json:"name"`
+	Secret       *string `json:"secret,omitempty"`
+	Slug         string  `json:"slug"`
+	Status       *string `json:"status,omitempty"`
+}
+
+// BodyEditUiEventSourcesSlugEditPost defines model for Body__edit_ui_event_sources__slug__edit_post.
+type BodyEditUiEventSourcesSlugEditPost struct {
+	AuthStrategy string  `json:"auth_strategy"`
+	Extras       *string `json:"extras,omitempty"`
+	Kind         string  `json:"kind"`
+	Secret       *string `json:"secret,omitempty"`
+	Status       string  `json:"status"`
 }
 
 // BodyAnnotateUiTopologyEdgesPost defines model for Body_annotate_ui_topology_edges_post.
@@ -4142,6 +4185,211 @@ type EvalResult struct {
 // EvalResultOverallVerdict defines model for EvalResult.OverallVerdict.
 type EvalResultOverallVerdict string
 
+// EventIngestResponse Accepted (“202“) or deduplicated (“200“) acknowledgement.
+//
+// “event_id“ is the “event_outbox“ row id the delivery landed on (the
+// original row's id on a duplicate); “None“ only in the rare race where a
+// duplicate collided but the original row was concurrently removed.
+type EventIngestResponse struct {
+	Deduplicated bool `json:"deduplicated"`
+	EventId      *int `json:"event_id"`
+}
+
+// EventSource Full read shape. Maps 1:1 to the live “event_source“ columns.
+//
+// Frozen. Carries “secret_ref“ (the Vault *path*) but never the secret
+// value -- there is no “secret“ field on any read model.
+type EventSource struct {
+	// AuthStrategy How the ingest endpoint (#2881) authenticates the sender.
+	//
+	// All three verify against the source's Vault secret. Values mirror the
+	// ``ck_event_source_auth_strategy`` CHECK constraint.
+	//
+	// * ``hmac-sha256`` -- the sender signs the body with a shared key.
+	// * ``static-header`` -- a fixed bearer / API-key header value.
+	// * ``basic`` -- HTTP Basic (the non-secret username lives in ``extras``;
+	//   the password is the Vault secret).
+	AuthStrategy EventSourceAuthStrategy `json:"auth_strategy"`
+	CreatedAt    time.Time               `json:"created_at"`
+	CreatedBySub string                  `json:"created_by_sub"`
+	DeletedAt    *time.Time              `json:"deleted_at"`
+	Extras       map[string]interface{}  `json:"extras"`
+	Id           openapi_types.UUID      `json:"id"`
+
+	// Kind Producer family. Selects the payload normaliser (#2882) at ingest.
+	//
+	// A closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s
+	// free text) because each kind needs hand-written normaliser code, so
+	// adding one is a code change regardless. Values mirror the
+	// ``ck_event_source_kind`` CHECK constraint.
+	Kind      EventSourceKind `json:"kind"`
+	Name      string          `json:"name"`
+	SecretRef *string         `json:"secret_ref"`
+	Slug      string          `json:"slug"`
+
+	// Status Registry status. Values mirror the ``ck_event_source_status`` CHECK.
+	//
+	// ``paused`` makes the ingest path reject the sender; because nothing
+	// caches the row, a PATCH to ``paused`` takes effect on the ingest
+	// path's very next lookup (#2880 acceptance criterion 1).
+	Status    EventSourceStatus  `json:"status"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt time.Time          `json:"updated_at"`
+}
+
+// EventSourceAuthStrategy How the ingest endpoint (#2881) authenticates the sender.
+//
+// All three verify against the source's Vault secret. Values mirror the
+// “ck_event_source_auth_strategy“ CHECK constraint.
+//
+//   - “hmac-sha256“ -- the sender signs the body with a shared key.
+//   - “static-header“ -- a fixed bearer / API-key header value.
+//   - “basic“ -- HTTP Basic (the non-secret username lives in “extras“;
+//     the password is the Vault secret).
+type EventSourceAuthStrategy string
+
+// EventSourceCreate POST body. “name“ and “slug“ are immutable after creation.
+//
+// “secret“ is the optional auth secret to custody in Vault. When
+// present the create handler writes it to the derived per-tenant Vault
+// path and persists that path as “secret_ref“; when absent the source
+// is registered with no secret (“secret_ref“ NULL) and the ingest path
+// (#2881) fails closed until a later PATCH sets one. The value is a
+// write-only :class:`~pydantic.SecretStr` -- it never appears on a read
+// model, in a log line, or in an audit row.
+type EventSourceCreate struct {
+	// AuthStrategy How the ingest endpoint (#2881) authenticates the sender.
+	//
+	// All three verify against the source's Vault secret. Values mirror the
+	// ``ck_event_source_auth_strategy`` CHECK constraint.
+	//
+	// * ``hmac-sha256`` -- the sender signs the body with a shared key.
+	// * ``static-header`` -- a fixed bearer / API-key header value.
+	// * ``basic`` -- HTTP Basic (the non-secret username lives in ``extras``;
+	//   the password is the Vault secret).
+	AuthStrategy EventSourceAuthStrategy `json:"auth_strategy"`
+	Extras       *map[string]interface{} `json:"extras,omitempty"`
+
+	// Kind Producer family. Selects the payload normaliser (#2882) at ingest.
+	//
+	// A closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s
+	// free text) because each kind needs hand-written normaliser code, so
+	// adding one is a code change regardless. Values mirror the
+	// ``ck_event_source_kind`` CHECK constraint.
+	Kind   EventSourceKind `json:"kind"`
+	Name   string          `json:"name"`
+	Secret *string         `json:"secret"`
+	Slug   string          `json:"slug"`
+
+	// Status Registry status. Values mirror the ``ck_event_source_status`` CHECK.
+	//
+	// ``paused`` makes the ingest path reject the sender; because nothing
+	// caches the row, a PATCH to ``paused`` takes effect on the ingest
+	// path's very next lookup (#2880 acceptance criterion 1).
+	Status *EventSourceStatus `json:"status,omitempty"`
+}
+
+// EventSourceKind Producer family. Selects the payload normaliser (#2882) at ingest.
+//
+// A closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s
+// free text) because each kind needs hand-written normaliser code, so
+// adding one is a code change regardless. Values mirror the
+// “ck_event_source_kind“ CHECK constraint.
+type EventSourceKind string
+
+// EventSourceListResponse “{items, next_cursor}“ list envelope (api-shape-conventions §2).
+//
+// “next_cursor“ is the last row's “name“ when a further page exists,
+// “None“ when this page exhausted the tenant's live sources.
+type EventSourceListResponse struct {
+	Items      []EventSourceSummary `json:"items"`
+	NextCursor *string              `json:"next_cursor"`
+}
+
+// EventSourceStatus Registry status. Values mirror the “ck_event_source_status“ CHECK.
+//
+// “paused“ makes the ingest path reject the sender; because nothing
+// caches the row, a PATCH to “paused“ takes effect on the ingest
+// path's very next lookup (#2880 acceptance criterion 1).
+type EventSourceStatus string
+
+// EventSourceSummary Narrow list-row shape. Frozen; omits “extras“ to keep lists small.
+type EventSourceSummary struct {
+	// AuthStrategy How the ingest endpoint (#2881) authenticates the sender.
+	//
+	// All three verify against the source's Vault secret. Values mirror the
+	// ``ck_event_source_auth_strategy`` CHECK constraint.
+	//
+	// * ``hmac-sha256`` -- the sender signs the body with a shared key.
+	// * ``static-header`` -- a fixed bearer / API-key header value.
+	// * ``basic`` -- HTTP Basic (the non-secret username lives in ``extras``;
+	//   the password is the Vault secret).
+	AuthStrategy EventSourceAuthStrategy `json:"auth_strategy"`
+	CreatedAt    time.Time               `json:"created_at"`
+	CreatedBySub string                  `json:"created_by_sub"`
+	DeletedAt    *time.Time              `json:"deleted_at"`
+	Id           openapi_types.UUID      `json:"id"`
+
+	// Kind Producer family. Selects the payload normaliser (#2882) at ingest.
+	//
+	// A closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s
+	// free text) because each kind needs hand-written normaliser code, so
+	// adding one is a code change regardless. Values mirror the
+	// ``ck_event_source_kind`` CHECK constraint.
+	Kind      EventSourceKind `json:"kind"`
+	Name      string          `json:"name"`
+	SecretRef *string         `json:"secret_ref"`
+	Slug      string          `json:"slug"`
+
+	// Status Registry status. Values mirror the ``ck_event_source_status`` CHECK.
+	//
+	// ``paused`` makes the ingest path reject the sender; because nothing
+	// caches the row, a PATCH to ``paused`` takes effect on the ingest
+	// path's very next lookup (#2880 acceptance criterion 1).
+	Status    EventSourceStatus  `json:"status"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt time.Time          `json:"updated_at"`
+}
+
+// EventSourceUpdate PATCH body. Every field optional; “name“ / “slug“ are absent.
+//
+// “name“ and “slug“ are immutable (rename or re-slug = delete +
+// re-create) because “slug“ is a live routing key external senders are
+// already pointed at. Sending “secret“ rotates the Vault secret in
+// place at the source's existing “secret_ref“ -- a new KV-v2 version at
+// the same path, so the ingest path reads the new value on its next
+// lookup with no downtime (#2880 acceptance criterion 2). Omitting
+// “secret“ leaves the stored secret untouched.
+type EventSourceUpdate struct {
+	// AuthStrategy How the ingest endpoint (#2881) authenticates the sender.
+	//
+	// All three verify against the source's Vault secret. Values mirror the
+	// ``ck_event_source_auth_strategy`` CHECK constraint.
+	//
+	// * ``hmac-sha256`` -- the sender signs the body with a shared key.
+	// * ``static-header`` -- a fixed bearer / API-key header value.
+	// * ``basic`` -- HTTP Basic (the non-secret username lives in ``extras``;
+	//   the password is the Vault secret).
+	AuthStrategy *EventSourceAuthStrategy `json:"auth_strategy,omitempty"`
+	Extras       *map[string]interface{}  `json:"extras"`
+
+	// Kind Producer family. Selects the payload normaliser (#2882) at ingest.
+	//
+	// A closed set (unlike :attr:`~meho_backplane.db.models.EventOutbox.event_kind`'s
+	// free text) because each kind needs hand-written normaliser code, so
+	// adding one is a code change regardless. Values mirror the
+	// ``ck_event_source_kind`` CHECK constraint.
+	Kind   *EventSourceKind `json:"kind,omitempty"`
+	Secret *string          `json:"secret"`
+
+	// Status Registry status. Values mirror the ``ck_event_source_status`` CHECK.
+	//
+	// ``paused`` makes the ingest path reject the sender; because nothing
+	// caches the row, a PATCH to ``paused`` takes effect on the ingest
+	// path's very next lookup (#2880 acceptance criterion 1).
+	Status *EventSourceStatus `json:"status,omitempty"`
+}
+
 // FingerprintResult Connector fingerprint per consumer-needs L95.
 type FingerprintResult struct {
 	Build       *string                 `json:"build"`
@@ -4331,6 +4579,15 @@ type HealthResponse struct {
 	// always a number. The value is per-process: each replica reports its
 	// own loop, which is exactly the failure mode observed (one process's
 	// loop coroutine going quiet).
+	//
+	// ``seconds_since_last_claim`` (#3010) measures from the last tick
+	// that actually **held** the runner's advisory lock. It diverges from
+	// ``seconds_since_last_tick`` when the loop is alive but never winning
+	// the lock — the stranded-lock starvation ``stalled`` is structurally
+	// blind to (every tick completes; nothing is ever claimed). Per-process
+	// and informational: on a multi-replica deploy only the lock-winning
+	// replica's claim stamp advances, so alert on the minimum across
+	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
@@ -4805,6 +5062,15 @@ type LivenessResponse struct {
 	// always a number. The value is per-process: each replica reports its
 	// own loop, which is exactly the failure mode observed (one process's
 	// loop coroutine going quiet).
+	//
+	// ``seconds_since_last_claim`` (#3010) measures from the last tick
+	// that actually **held** the runner's advisory lock. It diverges from
+	// ``seconds_since_last_tick`` when the loop is alive but never winning
+	// the lock — the stranded-lock starvation ``stalled`` is structurally
+	// blind to (every tick completes; nothing is ever claimed). Per-process
+	// and informational: on a multi-replica deploy only the lock-winning
+	// replica's claim stamp advances, so alert on the minimum across
+	// replicas, not per pod.
 	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 }
 
@@ -6603,7 +6869,17 @@ type SensorResultReadState string
 // always a number. The value is per-process: each replica reports its
 // own loop, which is exactly the failure mode observed (one process's
 // loop coroutine going quiet).
+//
+// “seconds_since_last_claim“ (#3010) measures from the last tick
+// that actually **held** the runner's advisory lock. It diverges from
+// “seconds_since_last_tick“ when the loop is alive but never winning
+// the lock — the stranded-lock starvation “stalled“ is structurally
+// blind to (every tick completes; nothing is ever claimed). Per-process
+// and informational: on a multi-replica deploy only the lock-winning
+// replica's claim stamp advances, so alert on the minimum across
+// replicas, not per pod.
 type SensorRunnerStatus struct {
+	SecondsSinceLastClaim *float32 `json:"seconds_since_last_claim"`
 	SecondsSinceLastTick  *float32 `json:"seconds_since_last_tick"`
 	StallThresholdSeconds float32  `json:"stall_threshold_seconds"`
 	Stalled               bool     `json:"stalled"`
@@ -8208,6 +8484,34 @@ type ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams stru
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListEventSourcesApiV1EventSourcesGetParams defines parameters for ListEventSourcesApiV1EventSourcesGet.
+type ListEventSourcesApiV1EventSourcesGetParams struct {
+	Status        *EventSourceStatus `form:"status,omitempty" json:"status,omitempty"`
+	Limit         *int               `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string            `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string            `json:"authorization,omitempty"`
+}
+
+// CreateEventSourceApiV1EventSourcesPostParams defines parameters for CreateEventSourceApiV1EventSourcesPost.
+type CreateEventSourceApiV1EventSourcesPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteEventSourceApiV1EventSourcesSlugDeleteParams defines parameters for DeleteEventSourceApiV1EventSourcesSlugDelete.
+type DeleteEventSourceApiV1EventSourcesSlugDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DescribeEventSourceApiV1EventSourcesSlugGetParams defines parameters for DescribeEventSourceApiV1EventSourcesSlugGet.
+type DescribeEventSourceApiV1EventSourcesSlugGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UpdateEventSourceApiV1EventSourcesSlugPatchParams defines parameters for UpdateEventSourceApiV1EventSourcesSlugPatch.
+type UpdateEventSourceApiV1EventSourcesSlugPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
 type FeedEndpointApiV1FeedGetParams struct {
 	// OpClass Filter by event op_class.
@@ -9120,6 +9424,12 @@ type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 // CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
 
+// CreateEventSourceApiV1EventSourcesPostJSONRequestBody defines body for CreateEventSourceApiV1EventSourcesPost for application/json ContentType.
+type CreateEventSourceApiV1EventSourcesPostJSONRequestBody = EventSourceCreate
+
+// UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody defines body for UpdateEventSourceApiV1EventSourcesSlugPatch for application/json ContentType.
+type UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody = EventSourceUpdate
+
 // ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody defines body for ReportCommandResultApiV1GatewayRunnerResultPost for application/json ContentType.
 type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayResultBody
 
@@ -9425,6 +9735,12 @@ type UiCorpusCollectionProbeUiCorpusCollectionsCollectionKeyProbePostJSONRequest
 
 // CorpusSearchUiCorpusSearchPostFormdataRequestBody defines body for CorpusSearchUiCorpusSearchPost for application/x-www-form-urlencoded ContentType.
 type CorpusSearchUiCorpusSearchPostFormdataRequestBody = BodyCorpusSearchUiCorpusSearchPost
+
+// CreateUiEventSourcesPostFormdataRequestBody defines body for CreateUiEventSourcesPost for application/x-www-form-urlencoded ContentType.
+type CreateUiEventSourcesPostFormdataRequestBody = BodyCreateUiEventSourcesPost
+
+// EditUiEventSourcesSlugEditPostFormdataRequestBody defines body for EditUiEventSourcesSlugEditPost for application/x-www-form-urlencoded ContentType.
+type EditUiEventSourcesSlugEditPostFormdataRequestBody = BodyEditUiEventSourcesSlugEditPost
 
 // KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody defines body for KbEditorPreviewUiKbEditorPreviewPost for application/x-www-form-urlencoded ContentType.
 type KbEditorPreviewUiKbEditorPreviewPostFormdataRequestBody = BodyKbEditorPreviewUiKbEditorPreviewPost
@@ -11065,6 +11381,28 @@ type ClientInterface interface {
 	// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost request
 	ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListEventSourcesApiV1EventSourcesGet request
+	ListEventSourcesApiV1EventSourcesGet(ctx context.Context, params *ListEventSourcesApiV1EventSourcesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateEventSourceApiV1EventSourcesPostWithBody request with any body
+	CreateEventSourceApiV1EventSourcesPostWithBody(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateEventSourceApiV1EventSourcesPost(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, body CreateEventSourceApiV1EventSourcesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteEventSourceApiV1EventSourcesSlugDelete request
+	DeleteEventSourceApiV1EventSourcesSlugDelete(ctx context.Context, slug string, params *DeleteEventSourceApiV1EventSourcesSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DescribeEventSourceApiV1EventSourcesSlugGet request
+	DescribeEventSourceApiV1EventSourcesSlugGet(ctx context.Context, slug string, params *DescribeEventSourceApiV1EventSourcesSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateEventSourceApiV1EventSourcesSlugPatchWithBody request with any body
+	UpdateEventSourceApiV1EventSourcesSlugPatchWithBody(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateEventSourceApiV1EventSourcesSlugPatch(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestEventApiV1EventsIngestSourceSlugPost request
+	IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11789,6 +12127,28 @@ type ClientInterface interface {
 	CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListUiEventSourcesGet request
+	ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateUiEventSourcesPostWithBody request with any body
+	CreateUiEventSourcesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateUiEventSourcesPostWithFormdataBody(ctx context.Context, body CreateUiEventSourcesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// NewFormUiEventSourcesNewGet request
+	NewFormUiEventSourcesNewGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteUiEventSourcesSlugDeletePost request
+	DeleteUiEventSourcesSlugDeletePost(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditFormUiEventSourcesSlugEditGet request
+	EditFormUiEventSourcesSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditUiEventSourcesSlugEditPostWithBody request with any body
+	EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// KbIndexUiKbGet request
 	KbIndexUiKbGet(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13237,6 +13597,102 @@ func (c *Client) EnableCollectionEndpointApiV1DocCollectionsCollectionKeyEnableP
 
 func (c *Client) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePost(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRequest(c.Server, collectionKey, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListEventSourcesApiV1EventSourcesGet(ctx context.Context, params *ListEventSourcesApiV1EventSourcesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListEventSourcesApiV1EventSourcesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateEventSourceApiV1EventSourcesPostWithBody(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateEventSourceApiV1EventSourcesPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateEventSourceApiV1EventSourcesPost(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, body CreateEventSourceApiV1EventSourcesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateEventSourceApiV1EventSourcesPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteEventSourceApiV1EventSourcesSlugDelete(ctx context.Context, slug string, params *DeleteEventSourceApiV1EventSourcesSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteEventSourceApiV1EventSourcesSlugDeleteRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DescribeEventSourceApiV1EventSourcesSlugGet(ctx context.Context, slug string, params *DescribeEventSourceApiV1EventSourcesSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDescribeEventSourceApiV1EventSourcesSlugGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateEventSourceApiV1EventSourcesSlugPatchWithBody(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateEventSourceApiV1EventSourcesSlugPatchRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateEventSourceApiV1EventSourcesSlugPatch(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateEventSourceApiV1EventSourcesSlugPatchRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestEventApiV1EventsIngestSourceSlugPost(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestEventApiV1EventsIngestSourceSlugPostRequest(c.Server, sourceSlug)
 	if err != nil {
 		return nil, err
 	}
@@ -16537,6 +16993,102 @@ func (c *Client) CorpusSearchUiCorpusSearchPostWithBody(ctx context.Context, con
 
 func (c *Client) CorpusSearchUiCorpusSearchPostWithFormdataBody(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCorpusSearchUiCorpusSearchPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListUiEventSourcesGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListUiEventSourcesGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateUiEventSourcesPostWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateUiEventSourcesPostRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateUiEventSourcesPostWithFormdataBody(ctx context.Context, body CreateUiEventSourcesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateUiEventSourcesPostRequestWithFormdataBody(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) NewFormUiEventSourcesNewGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewNewFormUiEventSourcesNewGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteUiEventSourcesSlugDeletePost(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteUiEventSourcesSlugDeletePostRequest(c.Server, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditFormUiEventSourcesSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditFormUiEventSourcesSlugEditGetRequest(c.Server, slug)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditUiEventSourcesSlugEditPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditUiEventSourcesSlugEditPostRequestWithBody(c.Server, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditUiEventSourcesSlugEditPostWithFormdataBody(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(c.Server, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -22354,6 +22906,351 @@ func NewProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRequest(
 			req.Header.Set("authorization", headerParam0)
 		}
 
+	}
+
+	return req, nil
+}
+
+// NewListEventSourcesApiV1EventSourcesGetRequest generates requests for ListEventSourcesApiV1EventSourcesGet
+func NewListEventSourcesApiV1EventSourcesGetRequest(server string, params *ListEventSourcesApiV1EventSourcesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/event-sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateEventSourceApiV1EventSourcesPostRequest calls the generic CreateEventSourceApiV1EventSourcesPost builder with application/json body
+func NewCreateEventSourceApiV1EventSourcesPostRequest(server string, params *CreateEventSourceApiV1EventSourcesPostParams, body CreateEventSourceApiV1EventSourcesPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateEventSourceApiV1EventSourcesPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateEventSourceApiV1EventSourcesPostRequestWithBody generates requests for CreateEventSourceApiV1EventSourcesPost with any type of body
+func NewCreateEventSourceApiV1EventSourcesPostRequestWithBody(server string, params *CreateEventSourceApiV1EventSourcesPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/event-sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteEventSourceApiV1EventSourcesSlugDeleteRequest generates requests for DeleteEventSourceApiV1EventSourcesSlugDelete
+func NewDeleteEventSourceApiV1EventSourcesSlugDeleteRequest(server string, slug string, params *DeleteEventSourceApiV1EventSourcesSlugDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/event-sources/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDescribeEventSourceApiV1EventSourcesSlugGetRequest generates requests for DescribeEventSourceApiV1EventSourcesSlugGet
+func NewDescribeEventSourceApiV1EventSourcesSlugGetRequest(server string, slug string, params *DescribeEventSourceApiV1EventSourcesSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/event-sources/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUpdateEventSourceApiV1EventSourcesSlugPatchRequest calls the generic UpdateEventSourceApiV1EventSourcesSlugPatch builder with application/json body
+func NewUpdateEventSourceApiV1EventSourcesSlugPatchRequest(server string, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateEventSourceApiV1EventSourcesSlugPatchRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewUpdateEventSourceApiV1EventSourcesSlugPatchRequestWithBody generates requests for UpdateEventSourceApiV1EventSourcesSlugPatch with any type of body
+func NewUpdateEventSourceApiV1EventSourcesSlugPatchRequestWithBody(server string, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/event-sources/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewIngestEventApiV1EventsIngestSourceSlugPostRequest generates requests for IngestEventApiV1EventsIngestSourceSlugPost
+func NewIngestEventApiV1EventsIngestSourceSlugPostRequest(server string, sourceSlug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "source_slug", runtime.ParamLocationPath, sourceSlug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/events/ingest/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -32965,6 +33862,215 @@ func NewCorpusSearchUiCorpusSearchPostRequestWithBody(server string, contentType
 	return req, nil
 }
 
+// NewListUiEventSourcesGetRequest generates requests for ListUiEventSourcesGet
+func NewListUiEventSourcesGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCreateUiEventSourcesPostRequestWithFormdataBody calls the generic CreateUiEventSourcesPost builder with application/x-www-form-urlencoded body
+func NewCreateUiEventSourcesPostRequestWithFormdataBody(server string, body CreateUiEventSourcesPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewCreateUiEventSourcesPostRequestWithBody(server, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewCreateUiEventSourcesPostRequestWithBody generates requests for CreateUiEventSourcesPost with any type of body
+func NewCreateUiEventSourcesPostRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewNewFormUiEventSourcesNewGetRequest generates requests for NewFormUiEventSourcesNewGet
+func NewNewFormUiEventSourcesNewGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources/new")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewDeleteUiEventSourcesSlugDeletePostRequest generates requests for DeleteUiEventSourcesSlugDeletePost
+func NewDeleteUiEventSourcesSlugDeletePostRequest(server string, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources/%s/delete", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEditFormUiEventSourcesSlugEditGetRequest generates requests for EditFormUiEventSourcesSlugEditGet
+func NewEditFormUiEventSourcesSlugEditGetRequest(server string, slug string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources/%s/edit", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody calls the generic EditUiEventSourcesSlugEditPost builder with application/x-www-form-urlencoded body
+func NewEditUiEventSourcesSlugEditPostRequestWithFormdataBody(server string, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewEditUiEventSourcesSlugEditPostRequestWithBody(server, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewEditUiEventSourcesSlugEditPostRequestWithBody generates requests for EditUiEventSourcesSlugEditPost with any type of body
+func NewEditUiEventSourcesSlugEditPostRequestWithBody(server string, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/event-sources/%s/edit", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewKbIndexUiKbGetRequest generates requests for KbIndexUiKbGet
 func NewKbIndexUiKbGetRequest(server string, params *KbIndexUiKbGetParams) (*http.Request, error) {
 	var err error
@@ -38013,6 +39119,28 @@ type ClientWithResponsesInterface interface {
 	// ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse request
 	ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostWithResponse(ctx context.Context, collectionKey string, params *ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostParams, reqEditors ...RequestEditorFn) (*ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse, error)
 
+	// ListEventSourcesApiV1EventSourcesGetWithResponse request
+	ListEventSourcesApiV1EventSourcesGetWithResponse(ctx context.Context, params *ListEventSourcesApiV1EventSourcesGetParams, reqEditors ...RequestEditorFn) (*ListEventSourcesApiV1EventSourcesGetResponse, error)
+
+	// CreateEventSourceApiV1EventSourcesPostWithBodyWithResponse request with any body
+	CreateEventSourceApiV1EventSourcesPostWithBodyWithResponse(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateEventSourceApiV1EventSourcesPostResponse, error)
+
+	CreateEventSourceApiV1EventSourcesPostWithResponse(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, body CreateEventSourceApiV1EventSourcesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateEventSourceApiV1EventSourcesPostResponse, error)
+
+	// DeleteEventSourceApiV1EventSourcesSlugDeleteWithResponse request
+	DeleteEventSourceApiV1EventSourcesSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteEventSourceApiV1EventSourcesSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEventSourceApiV1EventSourcesSlugDeleteResponse, error)
+
+	// DescribeEventSourceApiV1EventSourcesSlugGetWithResponse request
+	DescribeEventSourceApiV1EventSourcesSlugGetWithResponse(ctx context.Context, slug string, params *DescribeEventSourceApiV1EventSourcesSlugGetParams, reqEditors ...RequestEditorFn) (*DescribeEventSourceApiV1EventSourcesSlugGetResponse, error)
+
+	// UpdateEventSourceApiV1EventSourcesSlugPatchWithBodyWithResponse request with any body
+	UpdateEventSourceApiV1EventSourcesSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error)
+
+	UpdateEventSourceApiV1EventSourcesSlugPatchWithResponse(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error)
+
+	// IngestEventApiV1EventsIngestSourceSlugPostWithResponse request
+	IngestEventApiV1EventsIngestSourceSlugPostWithResponse(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error)
+
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -38737,6 +39865,28 @@ type ClientWithResponsesInterface interface {
 	CorpusSearchUiCorpusSearchPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
 
 	CorpusSearchUiCorpusSearchPostWithFormdataBodyWithResponse(ctx context.Context, body CorpusSearchUiCorpusSearchPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CorpusSearchUiCorpusSearchPostResponse, error)
+
+	// ListUiEventSourcesGetWithResponse request
+	ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error)
+
+	// CreateUiEventSourcesPostWithBodyWithResponse request with any body
+	CreateUiEventSourcesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiEventSourcesPostResponse, error)
+
+	CreateUiEventSourcesPostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiEventSourcesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiEventSourcesPostResponse, error)
+
+	// NewFormUiEventSourcesNewGetWithResponse request
+	NewFormUiEventSourcesNewGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*NewFormUiEventSourcesNewGetResponse, error)
+
+	// DeleteUiEventSourcesSlugDeletePostWithResponse request
+	DeleteUiEventSourcesSlugDeletePostWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*DeleteUiEventSourcesSlugDeletePostResponse, error)
+
+	// EditFormUiEventSourcesSlugEditGetWithResponse request
+	EditFormUiEventSourcesSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*EditFormUiEventSourcesSlugEditGetResponse, error)
+
+	// EditUiEventSourcesSlugEditPostWithBodyWithResponse request with any body
+	EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
+
+	EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error)
 
 	// KbIndexUiKbGetWithResponse request
 	KbIndexUiKbGetWithResponse(ctx context.Context, params *KbIndexUiKbGetParams, reqEditors ...RequestEditorFn) (*KbIndexUiKbGetResponse, error)
@@ -40649,6 +41799,143 @@ func (r ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListEventSourcesApiV1EventSourcesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EventSourceListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListEventSourcesApiV1EventSourcesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListEventSourcesApiV1EventSourcesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateEventSourceApiV1EventSourcesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *EventSource
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateEventSourceApiV1EventSourcesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateEventSourceApiV1EventSourcesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteEventSourceApiV1EventSourcesSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteEventSourceApiV1EventSourcesSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteEventSourceApiV1EventSourcesSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DescribeEventSourceApiV1EventSourcesSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EventSource
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DescribeEventSourceApiV1EventSourcesSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DescribeEventSourceApiV1EventSourcesSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateEventSourceApiV1EventSourcesSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EventSource
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateEventSourceApiV1EventSourcesSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateEventSourceApiV1EventSourcesSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type IngestEventApiV1EventsIngestSourceSlugPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON202      *EventIngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestEventApiV1EventsIngestSourceSlugPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestEventApiV1EventsIngestSourceSlugPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -44667,6 +45954,139 @@ func (r CorpusSearchUiCorpusSearchPostResponse) StatusCode() int {
 	return 0
 }
 
+type ListUiEventSourcesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r ListUiEventSourcesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListUiEventSourcesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateUiEventSourcesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateUiEventSourcesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateUiEventSourcesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type NewFormUiEventSourcesNewGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r NewFormUiEventSourcesNewGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r NewFormUiEventSourcesNewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteUiEventSourcesSlugDeletePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteUiEventSourcesSlugDeletePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteUiEventSourcesSlugDeletePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditFormUiEventSourcesSlugEditGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditFormUiEventSourcesSlugEditGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditFormUiEventSourcesSlugEditGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditUiEventSourcesSlugEditPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditUiEventSourcesSlugEditPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditUiEventSourcesSlugEditPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type KbIndexUiKbGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -47545,6 +48965,76 @@ func (c *ClientWithResponses) ProbeCollectionEndpointApiV1DocCollectionsCollecti
 	return ParseProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostResponse(rsp)
 }
 
+// ListEventSourcesApiV1EventSourcesGetWithResponse request returning *ListEventSourcesApiV1EventSourcesGetResponse
+func (c *ClientWithResponses) ListEventSourcesApiV1EventSourcesGetWithResponse(ctx context.Context, params *ListEventSourcesApiV1EventSourcesGetParams, reqEditors ...RequestEditorFn) (*ListEventSourcesApiV1EventSourcesGetResponse, error) {
+	rsp, err := c.ListEventSourcesApiV1EventSourcesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListEventSourcesApiV1EventSourcesGetResponse(rsp)
+}
+
+// CreateEventSourceApiV1EventSourcesPostWithBodyWithResponse request with arbitrary body returning *CreateEventSourceApiV1EventSourcesPostResponse
+func (c *ClientWithResponses) CreateEventSourceApiV1EventSourcesPostWithBodyWithResponse(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateEventSourceApiV1EventSourcesPostResponse, error) {
+	rsp, err := c.CreateEventSourceApiV1EventSourcesPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateEventSourceApiV1EventSourcesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateEventSourceApiV1EventSourcesPostWithResponse(ctx context.Context, params *CreateEventSourceApiV1EventSourcesPostParams, body CreateEventSourceApiV1EventSourcesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateEventSourceApiV1EventSourcesPostResponse, error) {
+	rsp, err := c.CreateEventSourceApiV1EventSourcesPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateEventSourceApiV1EventSourcesPostResponse(rsp)
+}
+
+// DeleteEventSourceApiV1EventSourcesSlugDeleteWithResponse request returning *DeleteEventSourceApiV1EventSourcesSlugDeleteResponse
+func (c *ClientWithResponses) DeleteEventSourceApiV1EventSourcesSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteEventSourceApiV1EventSourcesSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteEventSourceApiV1EventSourcesSlugDeleteResponse, error) {
+	rsp, err := c.DeleteEventSourceApiV1EventSourcesSlugDelete(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteEventSourceApiV1EventSourcesSlugDeleteResponse(rsp)
+}
+
+// DescribeEventSourceApiV1EventSourcesSlugGetWithResponse request returning *DescribeEventSourceApiV1EventSourcesSlugGetResponse
+func (c *ClientWithResponses) DescribeEventSourceApiV1EventSourcesSlugGetWithResponse(ctx context.Context, slug string, params *DescribeEventSourceApiV1EventSourcesSlugGetParams, reqEditors ...RequestEditorFn) (*DescribeEventSourceApiV1EventSourcesSlugGetResponse, error) {
+	rsp, err := c.DescribeEventSourceApiV1EventSourcesSlugGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDescribeEventSourceApiV1EventSourcesSlugGetResponse(rsp)
+}
+
+// UpdateEventSourceApiV1EventSourcesSlugPatchWithBodyWithResponse request with arbitrary body returning *UpdateEventSourceApiV1EventSourcesSlugPatchResponse
+func (c *ClientWithResponses) UpdateEventSourceApiV1EventSourcesSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error) {
+	rsp, err := c.UpdateEventSourceApiV1EventSourcesSlugPatchWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateEventSourceApiV1EventSourcesSlugPatchWithResponse(ctx context.Context, slug string, params *UpdateEventSourceApiV1EventSourcesSlugPatchParams, body UpdateEventSourceApiV1EventSourcesSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error) {
+	rsp, err := c.UpdateEventSourceApiV1EventSourcesSlugPatch(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse(rsp)
+}
+
+// IngestEventApiV1EventsIngestSourceSlugPostWithResponse request returning *IngestEventApiV1EventsIngestSourceSlugPostResponse
+func (c *ClientWithResponses) IngestEventApiV1EventsIngestSourceSlugPostWithResponse(ctx context.Context, sourceSlug string, reqEditors ...RequestEditorFn) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error) {
+	rsp, err := c.IngestEventApiV1EventsIngestSourceSlugPost(ctx, sourceSlug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestEventApiV1EventsIngestSourceSlugPostResponse(rsp)
+}
+
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
 func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
 	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
@@ -49918,6 +51408,76 @@ func (c *ClientWithResponses) CorpusSearchUiCorpusSearchPostWithFormdataBodyWith
 		return nil, err
 	}
 	return ParseCorpusSearchUiCorpusSearchPostResponse(rsp)
+}
+
+// ListUiEventSourcesGetWithResponse request returning *ListUiEventSourcesGetResponse
+func (c *ClientWithResponses) ListUiEventSourcesGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListUiEventSourcesGetResponse, error) {
+	rsp, err := c.ListUiEventSourcesGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListUiEventSourcesGetResponse(rsp)
+}
+
+// CreateUiEventSourcesPostWithBodyWithResponse request with arbitrary body returning *CreateUiEventSourcesPostResponse
+func (c *ClientWithResponses) CreateUiEventSourcesPostWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateUiEventSourcesPostResponse, error) {
+	rsp, err := c.CreateUiEventSourcesPostWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateUiEventSourcesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateUiEventSourcesPostWithFormdataBodyWithResponse(ctx context.Context, body CreateUiEventSourcesPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*CreateUiEventSourcesPostResponse, error) {
+	rsp, err := c.CreateUiEventSourcesPostWithFormdataBody(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateUiEventSourcesPostResponse(rsp)
+}
+
+// NewFormUiEventSourcesNewGetWithResponse request returning *NewFormUiEventSourcesNewGetResponse
+func (c *ClientWithResponses) NewFormUiEventSourcesNewGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*NewFormUiEventSourcesNewGetResponse, error) {
+	rsp, err := c.NewFormUiEventSourcesNewGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseNewFormUiEventSourcesNewGetResponse(rsp)
+}
+
+// DeleteUiEventSourcesSlugDeletePostWithResponse request returning *DeleteUiEventSourcesSlugDeletePostResponse
+func (c *ClientWithResponses) DeleteUiEventSourcesSlugDeletePostWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*DeleteUiEventSourcesSlugDeletePostResponse, error) {
+	rsp, err := c.DeleteUiEventSourcesSlugDeletePost(ctx, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteUiEventSourcesSlugDeletePostResponse(rsp)
+}
+
+// EditFormUiEventSourcesSlugEditGetWithResponse request returning *EditFormUiEventSourcesSlugEditGetResponse
+func (c *ClientWithResponses) EditFormUiEventSourcesSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*EditFormUiEventSourcesSlugEditGetResponse, error) {
+	rsp, err := c.EditFormUiEventSourcesSlugEditGet(ctx, slug, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditFormUiEventSourcesSlugEditGetResponse(rsp)
+}
+
+// EditUiEventSourcesSlugEditPostWithBodyWithResponse request with arbitrary body returning *EditUiEventSourcesSlugEditPostResponse
+func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error) {
+	rsp, err := c.EditUiEventSourcesSlugEditPostWithBody(ctx, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditUiEventSourcesSlugEditPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body EditUiEventSourcesSlugEditPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*EditUiEventSourcesSlugEditPostResponse, error) {
+	rsp, err := c.EditUiEventSourcesSlugEditPostWithFormdataBody(ctx, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditUiEventSourcesSlugEditPostResponse(rsp)
 }
 
 // KbIndexUiKbGetWithResponse request returning *KbIndexUiKbGetResponse
@@ -53279,6 +54839,197 @@ func ParseProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePostRespon
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListEventSourcesApiV1EventSourcesGetResponse parses an HTTP response from a ListEventSourcesApiV1EventSourcesGetWithResponse call
+func ParseListEventSourcesApiV1EventSourcesGetResponse(rsp *http.Response) (*ListEventSourcesApiV1EventSourcesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListEventSourcesApiV1EventSourcesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EventSourceListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateEventSourceApiV1EventSourcesPostResponse parses an HTTP response from a CreateEventSourceApiV1EventSourcesPostWithResponse call
+func ParseCreateEventSourceApiV1EventSourcesPostResponse(rsp *http.Response) (*CreateEventSourceApiV1EventSourcesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateEventSourceApiV1EventSourcesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest EventSource
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteEventSourceApiV1EventSourcesSlugDeleteResponse parses an HTTP response from a DeleteEventSourceApiV1EventSourcesSlugDeleteWithResponse call
+func ParseDeleteEventSourceApiV1EventSourcesSlugDeleteResponse(rsp *http.Response) (*DeleteEventSourceApiV1EventSourcesSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteEventSourceApiV1EventSourcesSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDescribeEventSourceApiV1EventSourcesSlugGetResponse parses an HTTP response from a DescribeEventSourceApiV1EventSourcesSlugGetWithResponse call
+func ParseDescribeEventSourceApiV1EventSourcesSlugGetResponse(rsp *http.Response) (*DescribeEventSourceApiV1EventSourcesSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DescribeEventSourceApiV1EventSourcesSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EventSource
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse parses an HTTP response from a UpdateEventSourceApiV1EventSourcesSlugPatchWithResponse call
+func ParseUpdateEventSourceApiV1EventSourcesSlugPatchResponse(rsp *http.Response) (*UpdateEventSourceApiV1EventSourcesSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateEventSourceApiV1EventSourcesSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EventSource
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestEventApiV1EventsIngestSourceSlugPostResponse parses an HTTP response from a IngestEventApiV1EventsIngestSourceSlugPostWithResponse call
+func ParseIngestEventApiV1EventsIngestSourceSlugPostResponse(rsp *http.Response) (*IngestEventApiV1EventsIngestSourceSlugPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestEventApiV1EventsIngestSourceSlugPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest EventIngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
@@ -58337,6 +60088,163 @@ func ParseCorpusSearchUiCorpusSearchPostResponse(rsp *http.Response) (*CorpusSea
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListUiEventSourcesGetResponse parses an HTTP response from a ListUiEventSourcesGetWithResponse call
+func ParseListUiEventSourcesGetResponse(rsp *http.Response) (*ListUiEventSourcesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListUiEventSourcesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseCreateUiEventSourcesPostResponse parses an HTTP response from a CreateUiEventSourcesPostWithResponse call
+func ParseCreateUiEventSourcesPostResponse(rsp *http.Response) (*CreateUiEventSourcesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateUiEventSourcesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseNewFormUiEventSourcesNewGetResponse parses an HTTP response from a NewFormUiEventSourcesNewGetWithResponse call
+func ParseNewFormUiEventSourcesNewGetResponse(rsp *http.Response) (*NewFormUiEventSourcesNewGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &NewFormUiEventSourcesNewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseDeleteUiEventSourcesSlugDeletePostResponse parses an HTTP response from a DeleteUiEventSourcesSlugDeletePostWithResponse call
+func ParseDeleteUiEventSourcesSlugDeletePostResponse(rsp *http.Response) (*DeleteUiEventSourcesSlugDeletePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteUiEventSourcesSlugDeletePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditFormUiEventSourcesSlugEditGetResponse parses an HTTP response from a EditFormUiEventSourcesSlugEditGetWithResponse call
+func ParseEditFormUiEventSourcesSlugEditGetResponse(rsp *http.Response) (*EditFormUiEventSourcesSlugEditGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditFormUiEventSourcesSlugEditGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditUiEventSourcesSlugEditPostResponse parses an HTTP response from a EditUiEventSourcesSlugEditPostWithResponse call
+func ParseEditUiEventSourcesSlugEditPostResponse(rsp *http.Response) (*EditUiEventSourcesSlugEditPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditUiEventSourcesSlugEditPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

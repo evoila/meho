@@ -90,6 +90,196 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connectors — Grafana Tempo read-only connector (#2903)
+
+- **Grafana Tempo typed connector — 6 read-only ops, dispatches on a fresh boot** (#2903 / PR #3042): `TempoConnector` (`backend/src/meho_backplane/connectors/tempo/`), a hand-rolled `HttpConnector` subclass registered via `register_connector_v2` under `(product="tempo", version="2.x", impl_id="tempo-api")` plus the `("tempo", "", "")` wildcard fallback. Six typed operations upsert into `endpoint_descriptor` at lifespan via `register_typed_operation`, grouped `tempo-search` / `tempo-metadata` / `tempo-metrics`: `tempo.search` (`GET /api/search`, TraceQL or tag filters), `tempo.trace` (`GET /api/traces/{id}`), `tempo.search_tags` (`GET /api/v2/search/tags`), `tempo.search_tag_values` (`GET /api/v2/search/tag/{tag}/values`), `tempo.metrics_query_range` (`GET /api/metrics/query_range`, requires the target's metrics-generator local-blocks processor), and the gated `tempo.get` passthrough — all `safety_level="safe"`, `requires_approval=False`. Read-only by construction: every op issues a GET, and the passthrough runs through `assert_tempo_read_only` (`read_only.py`), a GET-only `/api`-scoped gate; Tempo exposes no operator-facing write API (ingest is an OTLP push from collectors), so no write op — and no DB migration — ships. Closes the tracing pillar alongside loki-api (#2235) and prometheus-api (#2234).
+- **Optional auth live, per-call multi-tenancy** (#2903 / PR #3042): the credential path is wired, not stubbed — `auth_headers` performs the live operator-context Vault KV-v2 read via `load_vault_secret_data`, so `operations/call` executes end-to-end on a freshly booted backplane. `secret_ref=None` sends no `Authorization` header (the port-forward case on `:3200`); a `token` field yields Bearer, `username`+`password` yields Basic, and any other secret shape fails closed with `VaultCredentialsReadError`. Every op accepts an optional `tenant` selector rendered into Tempo's `X-Scope-OrgID` header; a tenant-less `401` against a multi-tenant Tempo surfaces `TempoTenantRequiredError` instead of a bare 401. `fingerprint()`/`probe()` stay unauthenticated and tenant-free (`GET /api/status/buildinfo`, `/ready`, best-effort `/api/echo`; `vendor="grafana"`). The new `tempo` product token enters the `TargetCreate.product` enum; CLI OpenAPI snapshot (`cli/api/openapi.json`) and generated Go client (`cli/internal/api/client.gen.go`) regenerated. A wire-path-pinning unit guard ships now; the shelf-backed spec-reconcile lane (a pinned `tempo-2.x` reference) is a follow-up, per the loki #2991 : #2235 split. Doc: `docs/codebase/connectors-tempo.md`.
+
+### Fixed — coverage-job pytest hang no longer cancels the CI run (#2865)
+
+- The push-only `python-coverage` job (the SonarCloud coverage producer)
+  could hang in its pytest step and flip the whole CI run conclusion to
+  `cancelled` — twice on the v0.28.0 cut (run 31199593016) — because a
+  wedged runner never reached the #2806 step `timeout-minutes`, and a
+  `cancelled` conclusion leaks past the job's `continue-on-error` and
+  suppresses the downstream SonarCloud `workflow_run`. The step now runs
+  under pytest-timeout (`--timeout=300 --timeout-method=signal
+  --max-worker-restart=0`), an in-process per-test guard: a hang dies as a
+  pytest-timeout *failure* carrying the offending test's traceback — which
+  `continue-on-error` absorbs, so the run stays `success` — fast, with no
+  xdist worker-crash re-run multiplication. The pytest output is uploaded
+  as a `coverage-pytest-log` artifact so the next hang says *where* it
+  hung, and the step/job `timeout-minutes` are re-documented as the
+  layer-2/3 backstops behind the new in-process guard. No operator-facing
+  behaviour changes; this only hardens release-cut CI.
+
+### Added — keycloak real-spec reconcile lane (#2988)
+
+- Every hand-coded `METHOD:/path` the keycloak connector dispatches —
+  18 reconciled op_ids across the 8 read ops, 9 write ops, the
+  fingerprint probe, and the name→UUID resolver reads — is now
+  asserted against the pinned `keycloak-26.3` shelf spec
+  (`keycloak-admin-openapi.json`, the vendor's Admin REST API OpenAPI
+  at the lab's deployed Keycloak 26.3.3; Apache-2.0, from Maven
+  Central `org.keycloak:keycloak-api-docs-dist:26.3.3`) on every PR
+  via the #2980 harness
+  (`backend/tests/test_connectors_keycloak_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). To make the enumeration introspectable, every request
+  path moved out of inline f-strings into the `_*_PATH` template
+  constants of `connectors/keycloak/_paths.py` (placeholders carry the
+  spec's own parameter names; handlers fill them via the fail-loud
+  `fill_path`) — wire requests are byte-identical. Two dispatched
+  paths are pinned as evidenced exclusions (the OIDC token mint and
+  `GET /admin/serverinfo` — both outside the Admin REST OpenAPI's
+  scope by construction), with an armed tripwire that forces their
+  promotion the day a newer pinned spec serves them. First armed run:
+  all 18 served, no repoints needed. CI's secret-gated spec-shelf
+  checkout is widened to `docs/keycloak-26.3` in both Python jobs.
+
+### Breaking changes — hetzner-robot `about` op + CLI verb removed (#2985 / #3014)
+
+- `hetzner-robot.about` (`GET:/query`) and the `meho hetzner-robot
+  about` CLI verb are removed. The op dispatched `GET /query` — an
+  endpoint the Hetzner Robot Webservice does not serve, so every live
+  call 404s — and the vendor documents no identity/version-class
+  endpoint anywhere in the API, so there is no path to repoint it to
+  (removal per the #2970 never-invent-a-path protocol; the op only
+  ever "worked" against mocks). Migration: for a
+  cheapest-authenticated-probe / first-call check, use
+  `meho hetzner-robot server list` (`GET:/server` — the connector's
+  actual fingerprint/first-probe op); the G3.7 canary's audit-row
+  carrier re-anchors to `GET:/key`. Re-ingesting
+  `hetzner_robot_minimal.yaml` also renames the vswitch op_ids
+  `…/{id}` → `…/{vswitch-id}` to match the vendor doc's path
+  templates — wire requests are byte-identical, only the op_id
+  strings agents and operators reference change.
+
+### Added — argocd real-spec reconcile lane (#2987)
+
+- Every hand-coded `METHOD:/path` the argocd connector dispatches (the
+  seven curated reads, the seven approval-gated writes, the
+  unauthenticated `GET /api/version` fingerprint/probe) is now asserted
+  against the pinned `argocd-3.3` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_argocd_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). The connector's path literals are hoisted into a
+  single route table (`connectors/argocd/routes.py`, fourteen
+  `"METHOD:/path"` constants) that both dispatch and the lane derive
+  from, so the reconcile introspects live constants rather than a
+  mirror. The pinned spec is ArgoCD's own `assets/swagger.json`
+  (Apache-2.0, tag `v3.3.9` — the newer of the lab's two deployed
+  3.3.x instances); it is Swagger 2.0, so the lane supplies its own
+  extraction per the standard's non-OpenAPI clause (ingest rejects
+  Swagger 2.0 by decision #2090). CI's secret-gated spec-shelf
+  checkout is widened to `docs/argocd-3.3` in both Python jobs. First
+  reconcile surfaced three findings, all vendor template-segment
+  renames adopted in the same PR per the #2970 protocol
+  (`{applicationName}` on `managed-resources` / `resource-tree`,
+  `{project.metadata.name}` on the project-update PUT) — wire requests
+  are byte-identical; no endpoint fictions, no repoints.
+
+### Added — hetzner-robot real-spec reconcile lane (#2985 / #3014)
+
+- Every hand-coded `METHOD:/path` the hetzner-robot connector
+  dispatches (the 10 curated core ops, the `hetzner_robot_minimal.yaml`
+  ingest verbs, the inline `GET /server` fingerprint probe) is now
+  asserted against the pinned `hetzner-robot-2026-04` vendor doc on
+  every PR via the #2980 harness
+  (`backend/tests/test_connectors_hetzner_robot_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). Hetzner publishes no machine-readable spec for the
+  Robot Webservice, so the lane extracts the documented route list
+  from the shelf's markdown-converted API reference (105 routes in
+  the 2026-04 snapshot, plus `@deprecated` alternative rows) and pins
+  the exact three deprecated-only `{server-ip}` routes the connector
+  still serves as a bidirectional tripwire. CI's secret-gated
+  spec-shelf checkout is widened to `docs/hetzner-robot-2026-04` in
+  both Python jobs. First armed run surfaced the `GET:/query` fiction
+  and the `{vswitch-id}` template drift, both fixed in the same PR
+  per the #2970 protocol — see the Breaking-changes entry above.
+
+### Added — vcf-automation real-spec reconcile lane + region-list repoint (#2983)
+
+- Every hand-coded `METHOD:/path` the vcf-automation connector
+  dispatches (the seven typed-op paths, the two per-plane login POSTs,
+  the two fingerprint probes) is now swept by the #2980-harness lane
+  (`backend/tests/test_connectors_vcf_automation_spec_reconcile.py` —
+  parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). VCFA's shelf is a mosaic, so the lane splits by
+  plane: the tenant half asserts against the pinned Apache-2.0
+  `vra-iaas.json` (Swagger 2.0; lane-supplied extraction per the
+  standard's non-OpenAPI clause), the provider half is an evidenced
+  exclusion (no pinnable wire spec exists — recorded in
+  `docs/decisions/spec-reconcile-guards-standard.md`). CI's
+  secret-gated spec-shelf checkout is widened to
+  `docs/vcf-automation-9.0` in both Python jobs. First run surfaced
+  one real finding, fixed per the #2970 protocol:
+  `vcfa.provider.region.list` targeted `GET /cloudapi/1.0.0/regions`,
+  which VCFA 9.0 404s (Region moved to the `vcf/` cloudapi prefix) —
+  repointed to `GET /cloudapi/vcf/regions` per the pinned
+  go-vcloud-director v3.0.0 endpoint map and the shelf's live-probe
+  record.
+### Added — vcf-operations real-spec reconcile lane (#2984)
+
+- Every hand-coded `METHOD:/path` the vcf-operations connector dispatches
+  (the four typed-read paths from #2303/#2838 and the
+  `POST /suite-api/api/auth/token/acquire` session mint) is now asserted
+  against the pinned `vcf-operations-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_vcf_operations_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/vcf-operations-9.0` in both Python jobs. First armed run surfaced
+  one real finding — the vendor-published core spec itself fails the ingest
+  metaschema gate (three `"required": []` schema entries, illegal per
+  OpenAPI 3.0), so an operator ingest fails identically; the shelf now pins
+  a deterministic ingest-consumable derivative
+  (`vcf-operations-openapi.ingestable.json`, recipe + sha256 in the shelf
+  MANIFEST) that the lane parses. All five op_ids are served; no path
+  repoints were needed.
+
+### Fixed — sensor-runner advisory lock leaked onto idle pooled connections, silently starving evaluations (#3010)
+
+- Every background tick loop (sensor runner, agent scheduler, event
+  drain, agent-run reaper, gateway dead-man sweeper) took its
+  `pg_try_advisory_lock` on the tick's pooled work session and committed
+  inside the locked region — each commit returns the session's
+  connection, so the `finally` unlock landed on a *different* connection
+  (PG warns `you don't own a lock`, returns `false`, nothing raises) and
+  the lock stranded on an idle pooled connection. Every later tick that
+  drew any other connection silently claimed nothing: a 300 s sensor
+  recorded 75–118 evaluations/day (expected 288) while the #2763
+  watchdog read healthy. Locks now live on a dedicated pinned connection
+  (`meho_backplane/db/advisory.py::advisory_lock`) so work-session
+  commits can never move them; the invariant — advisory lock and unlock
+  must run on the same connection — is documented on the runner and
+  scheduler pages and regression-tested against real PG (`pg_locks`
+  probes, cross-connection-commit shape).
+- Lock-miss ticks are visible: structured skip logs per subsystem
+  (`sensor_tick_lock_busy`, `scheduler_tick_lock_busy`, …), a new
+  `advisory_lock_busy_total{subsystem}` Prometheus counter, and the
+  `sensor_runner` health facet gains `seconds_since_last_claim` — a
+  claim-based liveness number that keeps growing when the loop ticks
+  without ever winning the lock, the signature `seconds_since_last_tick`
+  was structurally blind to.
+
+### Added — sddc-manager real-spec reconcile lane (#2982)
+
+- Every hand-coded `METHOD:/path` the sddc-manager connector dispatches
+  (the 14 typed-read paths, the `POST /v1/tokens` session mint, the
+  profile fingerprint's `GET /v1/releases/system`) is now asserted
+  against the pinned `sddc-manager-9.0` spec on every PR via the #2980
+  harness (`backend/tests/test_connectors_sddc_manager_spec_reconcile.py`
+  — parse-only, required unit sweep, uniform skip when the shelf is
+  unconfigured). CI's secret-gated spec-shelf checkout is widened to
+  `docs/sddc-manager-9.0` in both Python jobs. First armed run surfaced
+  one real finding, fixed in the same PR per the #2970 protocol:
+  `sddc.domain.status` targeted `GET /v1/domains/{id}/status`, which the
+  pinned 9.0 spec does not serve — repointed to `GET /v1/domains/{id}`,
+  whose domain object carries the top-level `status` lifecycle field the
+  op documents (the op now returns the full domain object; `status`
+  stays top-level).
+
 ### Added — holodeck deploy-lifecycle typed ops: `config.apply` / `instance.start` / `instance.status` / `router.patch` (#2908)
 
 - The `holodeck` connector gains four typed ops that make the consumer's

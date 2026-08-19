@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
@@ -484,3 +485,68 @@ async def test_drain_claim_stamps_claimed_at_and_by() -> None:
     assert claimed_at >= before
     assert row.claimed_by is not None
     assert ":" in row.claimed_by, "claimed_by should be 'hostname:pid'"
+
+
+# ---------------------------------------------------------------------------
+# origin + dedupe_key (#2879 substrate, consumed by the #2881 ingest path)
+# ---------------------------------------------------------------------------
+
+
+async def test_publish_sets_origin_and_dedupe_key() -> None:
+    """The two ingest columns round-trip when the producer supplies them."""
+    await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await publish(
+            session,
+            tenant_id=_TENANT_A,
+            event_kind="external.alertmanager.alert",
+            payload={"k": "v"},
+            origin="src-123",
+            dedupe_key="src-123:abc",
+        )
+        await session.commit()
+
+    rows = await _all_outbox_rows()
+    assert len(rows) == 1
+    assert rows[0].origin == "src-123"
+    assert rows[0].dedupe_key == "src-123:abc"
+
+
+async def test_publish_defaults_origin_and_dedupe_key_to_null() -> None:
+    """Internal producers leave both columns NULL (behaviour-preserving)."""
+    await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await publish(session, tenant_id=_TENANT_A, event_kind="agent_run.completed", payload={})
+        await session.commit()
+
+    rows = await _all_outbox_rows()
+    assert rows[0].origin is None
+    assert rows[0].dedupe_key is None
+
+
+async def test_duplicate_dedupe_key_raises_integrity_error() -> None:
+    """A second (tenant, dedupe_key) collides at flush -- the ingest 200 hook."""
+    await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await publish(
+            session,
+            tenant_id=_TENANT_A,
+            event_kind="external.x.y",
+            payload={},
+            dedupe_key="dupe-1",
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with sessionmaker() as session:
+            await publish(
+                session,
+                tenant_id=_TENANT_A,
+                event_kind="external.x.y",
+                payload={},
+                dedupe_key="dupe-1",
+            )
+            await session.commit()

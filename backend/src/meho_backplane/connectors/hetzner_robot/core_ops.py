@@ -3,7 +3,7 @@
 
 """Hetzner Robot read-only v0.2 core — curated operator-enabled subset.
 
-This module names the **11 read-only Hetzner Robot operations** the
+This module names the **10 read-only Hetzner Robot operations** the
 curated Robot read core enables out of the much larger Robot Webservice
 REST corpus the G0.7 spec-ingestion pipeline lands under
 ``connector_id="hetzner-rest-2026.04"``. The curation is two-layered:
@@ -14,7 +14,7 @@ REST corpus the G0.7 spec-ingestion pipeline lands under
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`ROBOT_CORE_OPS` — the 11 ``EndpointDescriptor.op_id`` strings
+* :data:`ROBOT_CORE_OPS` — the 10 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -49,32 +49,40 @@ registry lookup (``(product, version, impl_id)`` triple) under the same
 token — the row-level product key and the registry key now agree. Same
 short token the SDDC Manager precedent uses (``"sddc"``).
 
-The 11 ops (paths cross-checked against the Hetzner Robot Webservice API
-at https://robot.hetzner.com/doc/webservice/en.html):
+The 10 ops (paths reconciled against the pinned Hetzner Robot Webservice
+reference — https://robot.hetzner.com/doc/webservice/en.html — by
+``tests/test_connectors_hetzner_robot_spec_reconcile.py``; the
+``{server-ip}`` paths are the vendor's documented deprecated
+IP-addressed alternatives to the ``{server-number}`` routes):
 
-1.  ``GET:/query`` — ``hetzner-robot.about`` — API version + account info.
-2.  ``GET:/server`` — ``hetzner-robot.server.list`` — dedicated-server
+1.  ``GET:/server`` — ``hetzner-robot.server.list`` — dedicated-server
     inventory for the account (server number, IP, product, datacenter).
-3.  ``GET:/server/{server-ip}`` — ``hetzner-robot.server.info`` — single
+2.  ``GET:/server/{server-ip}`` — ``hetzner-robot.server.info`` — single
     dedicated server detail.
-4.  ``GET:/ip`` — ``hetzner-robot.ip.list`` — all IP addresses assigned to
+3.  ``GET:/ip`` — ``hetzner-robot.ip.list`` — all IP addresses assigned to
     the account with their lock and traffic status.
-5.  ``GET:/subnet`` — ``hetzner-robot.subnet.list`` — all subnets assigned
+4.  ``GET:/subnet`` — ``hetzner-robot.subnet.list`` — all subnets assigned
     to the account with gateway and IP version.
-6.  ``GET:/vswitch`` — ``hetzner-robot.vswitch.list`` — all vSwitches with
+5.  ``GET:/vswitch`` — ``hetzner-robot.vswitch.list`` — all vSwitches with
     their server and VLAN memberships.
-7.  ``GET:/vswitch/{id}`` — ``hetzner-robot.vswitch.info`` — single vSwitch
-    detail including all member servers and VLANs.
-8.  ``GET:/failover`` — ``hetzner-robot.failover.list`` — all failover IPs
+6.  ``GET:/vswitch/{vswitch-id}`` — ``hetzner-robot.vswitch.info`` — single
+    vSwitch detail including all member servers and VLANs.
+7.  ``GET:/failover`` — ``hetzner-robot.failover.list`` — all failover IPs
     and their active routing target.
-9.  ``GET:/rdns`` — ``hetzner-robot.rdns.list`` — all reverse DNS entries
+8.  ``GET:/rdns`` — ``hetzner-robot.rdns.list`` — all reverse DNS entries
     (PTR records) set on the account's IPs.
-10. ``GET:/firewall/{server-ip}`` — ``hetzner-robot.firewall.get`` — the
+9.  ``GET:/firewall/{server-ip}`` — ``hetzner-robot.firewall.get`` — the
     per-server packet-filter firewall (active status, whitelist-Hetzner-
     services flag, and ordered input/output rule set) for one dedicated
     server addressed by its primary IP.
-11. ``GET:/key`` — ``hetzner-robot.ssh_key.list`` — all SSH public keys
+10. ``GET:/key`` — ``hetzner-robot.ssh_key.list`` — all SSH public keys
     registered in the Robot portal for the account.
+
+``GET:/query`` (``hetzner-robot.about``) was removed by #2985: the
+reconcile lane proved the Robot Webservice serves no such endpoint —
+the reference documents no version/about surface at all — so every
+live dispatch would have 404'd. The cheapest authenticated probe is
+``GET:/server`` (the fingerprint/probe endpoint of record).
 
 Path families and group_keys
 -----------------------------
@@ -89,7 +97,7 @@ Curation application
 --------------------
 
 :func:`apply_robot_core_curation` is the operator-review-time substrate
-call that makes exactly the 11 curated ops dispatchable. Mirrors
+call that makes exactly the 10 curated ops dispatchable. Mirrors
 :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
 verbatim, threading the "enable group but pin non-core ops disabled" needle
 via the audit-log-driven operator-override exclusion.
@@ -208,13 +216,12 @@ class RobotCoreOp:
 #: **Order is load-bearing.** Each rule is checked via exact match or
 #: proper ``prefix/``-anchored prefix so that ``/ip`` never falsely
 #: matches ``/ip_address``.  More-specific prefixes must precede
-#: less-specific ones where overlap exists (e.g. ``/vswitch/{id}``
+#: less-specific ones where overlap exists (e.g. ``/vswitch/{vswitch-id}``
 #: before ``/vswitch``). The rules encode every root-level path the
-#: 11 curated ops use; paths outside these prefixes are un-curated
+#: 10 curated ops use; paths outside these prefixes are un-curated
 #: and stay ``is_enabled=False`` after :func:`apply_robot_core_curation`
 #: runs.
 ROBOT_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
-    ("/query", "robot-about"),
     # Server family
     ("/server", "robot-servers"),
     # Networking — IP, subnet, vSwitch, failover, rDNS, firewall
@@ -236,7 +243,7 @@ def classify_robot_op(op_id: str) -> str:
     helper strips the verb and matches the path against
     :data:`ROBOT_PATH_RULES` in order.
 
-    Only ``GET`` verbs are considered curated (all 11 core ops are
+    Only ``GET`` verbs are considered curated (all 10 core ops are
     read-only). A non-GET op or a path outside the curated families
     returns ``"none"`` — those rows stay ``is_enabled=False``.
 
@@ -281,20 +288,10 @@ def _instructions(
     }
 
 
-#: Operator-reviewed ``when_to_use`` hints for the 4 Hetzner Robot groups
+#: Operator-reviewed ``when_to_use`` hints for the 3 Hetzner Robot groups
 #: the read-only v0.2 core spans. Every hint is one complete sentence the
 #: agent reads verbatim — vague hints poison ``search_operations`` ranking.
 ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
-    RobotCoreGroup(
-        group_key="robot-about",
-        name="Hetzner Robot (about)",
-        when_to_use=(
-            "Use this group to read Hetzner Robot API-level information: the "
-            "API version and the account-level summary. The lightweight probe "
-            "surface the agent calls first to confirm the Robot Webservice is "
-            "reachable and to determine which account is configured."
-        ),
-    ),
     RobotCoreGroup(
         group_key="robot-servers",
         name="Hetzner Robot Dedicated Servers",
@@ -335,44 +332,14 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
 )
 
 
-#: The 11 curated read-only Hetzner Robot core ops. Each entry carries
+#: The 10 curated read-only Hetzner Robot core ops. Each entry carries
 #: the op_id (``GET:/path`` form), the curated group assignment, and the
 #: operator-reviewed ``llm_instructions`` blob.
 #:
-#: Paths cross-checked against the Hetzner Robot Webservice API at
-#: https://robot.hetzner.com/doc/webservice/en.html.
+#: Paths reconciled against the pinned Hetzner Robot Webservice reference
+#: (https://robot.hetzner.com/doc/webservice/en.html) by
+#: ``tests/test_connectors_hetzner_robot_spec_reconcile.py``.
 ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
-    # ---- About ----
-    RobotCoreOp(
-        op_id="GET:/query",
-        group_key="robot-about",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to read the Hetzner Robot API version and high-level account "
-                "summary. Use as the first probe when connecting to a new Robot "
-                "target to confirm reachability and identify the account. Returns "
-                "API version and account information. "
-                "CRITICAL — 401 IP-BLOCK WARNING: Hetzner Robot blocks the "
-                "source IP for 10 minutes after 3 consecutive 401 responses from "
-                "the same IP. MEHO runs on a shared egress IP — a misconfigured "
-                "Webservice-user credential will lock out ALL operators for 10 "
-                "minutes. The connector raises auth_failed on the FIRST 401 and "
-                "NEVER retries. If you receive an auth_failed error, do NOT "
-                "retry immediately — fix the Webservice-user credentials at the "
-                "target's Vault path first."
-            ),
-            output_shape=(
-                "Object with api_version (string) and account-level summary fields "
-                "including the account identifier and any quota information the "
-                "Robot Webservice exposes at this endpoint."
-            ),
-            next_step=(
-                "Proceed to hetzner-robot.server.list for the dedicated-server "
-                "inventory, or to hetzner-robot.ip.list for the network resource "
-                "overview."
-            ),
-        ),
-    ),
     # ---- Servers ----
     RobotCoreOp(
         op_id="GET:/server",
@@ -510,14 +477,14 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
         ),
     ),
     RobotCoreOp(
-        op_id="GET:/vswitch/{id}",
+        op_id="GET:/vswitch/{vswitch-id}",
         group_key="robot-networking",
         llm_instructions=_instructions(
             when_to_call=(
                 "Call to read the full detail of one vSwitch by its numeric ID. "
-                "Requires id obtained from hetzner-robot.vswitch.list. Returns "
-                "the same fields as the list op plus any additional VLAN or "
-                "server membership detail the list view may omit."
+                "Requires vswitch-id obtained from hetzner-robot.vswitch.list. "
+                "Returns the same fields as the list op plus any additional VLAN "
+                "or server membership detail the list view may omit."
             ),
             output_shape=(
                 "vSwitch object with id, name, vlan (VLAN ID int), cancelled "
@@ -654,12 +621,12 @@ async def apply_robot_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 11-op read core against an ingested Robot connector.
+    """Apply the curated 10-op read core against an ingested Robot connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 11 ops in :data:`ROBOT_CORE_OPS` are dispatchable
+    the 10 ops in :data:`ROBOT_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 4 curated groups land
+    ``is_enabled=False``. The 3 curated groups land
     ``review_status='enabled'`` so the agent's
     :func:`~meho_backplane.operations.meta_tools.search_operations`
     surfaces the core ops; non-curated groups are left untouched

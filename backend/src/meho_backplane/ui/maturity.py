@@ -81,6 +81,9 @@ SURFACE_FEATURE: dict[str, str] = {
     "checks": "sensors",
     "sensors": "sensors",
     "runners": "satellite_gateway",
+    # event_source registry (#2880): the inbound producer side of the
+    # event -> kind=event ScheduledTrigger substrate (#2877).
+    "event-source": "scheduler",
     "operations": "write_surfaces",
     "keycloak": "auth_tenancy",
     "vault": "write_surfaces",

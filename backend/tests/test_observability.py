@@ -14,6 +14,9 @@ Covers Task #20 acceptance criteria:
   the structured log.
 * Sensitive request headers (``Authorization``, ``Cookie``,
   ``X-API-Key``) never leak into logs.
+* Standard-library ``logging`` records (uvicorn / third-party libs)
+  are bridged into the same JSON pipeline with ``request_id``
+  correlation and locals-stripped tracebacks (#2887).
 
 The tests redirect structlog's logger factory to a per-test
 :class:`io.StringIO` buffer rather than touching ``sys.stdout`` —
@@ -26,11 +29,13 @@ seam.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
 import platform
 import re
+import sys
 from collections.abc import Iterator
 from uuid import UUID
 
@@ -406,3 +411,175 @@ def test_http_requests_total_increments_per_request(client: TestClient) -> None:
     )
     assert after is not None
     assert after - before == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# stdlib logging bridge (#2887)
+# ---------------------------------------------------------------------------
+
+
+def _reset_logging_tree() -> None:
+    """Undo :func:`configure_logging`'s global mutations after a test.
+
+    ``configure_logging`` installs a root-logger handler and re-points
+    the uvicorn loggers; without an explicit reset those escape into
+    later tests. Only the bridge's own named handler is removed, so
+    pytest's ``caplog`` handler is left untouched.
+    """
+    from meho_backplane.logging import _STDLIB_BRIDGE_HANDLER_NAME
+
+    structlog.reset_defaults()
+    structlog.contextvars.clear_contextvars()
+    root = logging.getLogger()
+    for handler in [h for h in root.handlers if h.name == _STDLIB_BRIDGE_HANDLER_NAME]:
+        root.removeHandler(handler)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers = []
+        lg.propagate = True
+
+
+def _bridged_stdlib_logger(name: str) -> logging.Logger:
+    """Return a stdlib logger guaranteed enabled for the bridge test.
+
+    Heavy libraries imported during the test session call
+    ``logging.config.dictConfig(disable_existing_loggers=True)``, which
+    flips ``disabled=True`` on unrelated pre-existing loggers (``httpx``,
+    ``sqlalchemy.engine``, ...). Production is unaffected — uvicorn's own
+    dictConfig uses ``disable_existing_loggers=False`` and the backplane
+    calls no dictConfig — so re-enabling here keeps the test deterministic
+    without masking any real bridge behaviour.
+    """
+    logger = logging.getLogger(name)
+    logger.disabled = False
+    return logger
+
+
+@contextlib.contextmanager
+def _stdlib_bridge_capture(monkeypatch: pytest.MonkeyPatch) -> Iterator[io.StringIO]:
+    """Run the *production* ``configure_logging`` with stdout captured.
+
+    Unlike ``log_buffer`` (which repoints only structlog's own factory),
+    this exercises the real
+    :func:`meho_backplane.logging.configure_logging` end to end —
+    including the stdlib-logging bridge it installs on the root logger —
+    with ``sys.stdout`` swapped for an in-memory buffer. The bridge
+    handler resolves ``sys.stdout`` per emit, so the swap is seen.
+
+    Deliberately a context manager called *inside* the test body rather
+    than a fixture: pytest's capture manager re-installs its own stdout
+    at every setup/call/teardown boundary, so a ``sys.stdout`` swap done
+    in fixture setup is stranded before the test emits. Swapping in the
+    same phase as the log call keeps the buffer live.
+    """
+    from meho_backplane.logging import configure_logging
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    configure_logging(level=logging.INFO)
+    try:
+        yield buf
+    finally:
+        _reset_logging_tree()
+
+
+def test_stdlib_logger_warning_carries_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stdlib ``logging`` warning inside a request context emits one
+    JSON line with level, timestamp, and the request's ``request_id``.
+
+    This is Initiative #2884's stated success criterion for the bridge:
+    third-party libraries (uvicorn / httpx / SQLAlchemy / ...) log
+    through :mod:`logging`, and those records must land as the same
+    correlated JSON as structlog-native lines.
+    """
+    with _stdlib_bridge_capture(monkeypatch) as buf:
+        # The middleware binds ``request_id`` on request entry; emulate
+        # that bound context, then log through *stdlib* logging from
+        # outside the meho namespace with lazy %-args (as a well-behaved
+        # library does).
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id="req-2887-abc")
+        _bridged_stdlib_logger("httpx").warning("connection retry %d", 3)
+        lines = _read_log_lines(buf)
+
+    assert len(lines) == 1, f"expected exactly one JSON line, got {lines!r}"
+    record = lines[0]
+    assert record["level"] == "warning"
+    assert record["event"] == "connection retry 3"
+    assert record["request_id"] == "req-2887-abc"
+    # ISO 8601 UTC timestamp (structlog's ``TimeStamper(utc=True)``).
+    assert isinstance(record["timestamp"], str) and record["timestamp"].endswith("Z")
+
+
+def test_stdlib_exception_strips_frame_locals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bridged ``logging.exception`` renders a structured, locals-stripped
+    traceback — CWE-532 protection extends to stdlib records too.
+
+    Mirrors the structlog-native guarantee proven in
+    ``test_secret_leak_checks``: a secret held only as a frame local on
+    the failing traceback must not reach the log line.
+    """
+    secret_canary = "STDLIB-FRAME-LOCAL-SECRET-2887"
+
+    def _raise_holding_secret() -> None:
+        agent_client_secret = secret_canary  # noqa: F841 — the frame local under test
+        raise RuntimeError("stdlib boom")
+
+    with _stdlib_bridge_capture(monkeypatch) as buf:
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id="req-2887-exc")
+        try:
+            _raise_holding_secret()
+        except RuntimeError:
+            _bridged_stdlib_logger("sqlalchemy.engine").exception("query_failed")
+        captured = buf.getvalue()
+
+    assert "query_failed" in captured, "expected the stdlib exception to be logged"
+    assert secret_canary not in captured, (
+        f"frame-local secret leaked into the bridged stdlib exception log:\n{captured}"
+    )
+    record = json.loads(captured.splitlines()[-1])
+    assert record["request_id"] == "req-2887-exc"
+    # Structured frames, not the ``"exc_info": true`` literal or a
+    # plain-text traceback appended by the base logging.Formatter.
+    assert isinstance(record["exception"], list) and record["exception"]
+
+
+def test_uvicorn_access_dropped_error_bridged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """configure_logging overrides uvicorn's own log config.
+
+    uvicorn applies its dictConfig at server startup (before the FastAPI
+    lifespan runs ``configure_logging``), pinning handlers on its loggers
+    with ``propagate=False``. The bridge must win: access logs are
+    dropped (``request_completed`` already covers per-request lines) and
+    error/startup logs route into the JSON root handler.
+    """
+    # Simulate uvicorn's server-startup dictConfig state (its own
+    # handlers + propagate=False). ``disabled=False`` guards against a
+    # heavy test-session import having disabled these loggers, so the
+    # emits below stay non-vacuous.
+    seed = logging.NullHandler()
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers = [seed]
+        lg.propagate = False
+        lg.disabled = False
+
+    with _stdlib_bridge_capture(monkeypatch) as buf:
+        access = logging.getLogger("uvicorn.access")
+        assert access.propagate is False
+        assert access.handlers == []  # dropped, not bridged
+
+        for name in ("uvicorn", "uvicorn.error"):
+            lg = logging.getLogger(name)
+            assert lg.propagate is True  # routed to the JSON root handler
+            assert lg.handlers == []
+
+        # End to end: a runtime uvicorn.error line lands as JSON; an
+        # access line does not surface at all.
+        logging.getLogger("uvicorn.error").warning("bind_failed")
+        logging.getLogger("uvicorn.access").info('127.0.0.1 - "GET / HTTP/1.1" 200')
+        events = [str(record.get("event", "")) for record in _read_log_lines(buf)]
+
+    assert "bind_failed" in events
+    assert all("GET /" not in event for event in events)

@@ -36,6 +36,28 @@ resources that make up a running backplane:
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
   per ADR 0005.
 
+## Log shipping (stdout → collector)
+
+The backplane emits **structured JSON logs to stdout, one object per
+line**. Application events (structlog), uvicorn runtime logs, and any
+third-party library that logs through Python's standard `logging` module
+are all routed through the same JSON pipeline
+(`meho_backplane.logging.configure_logging`, #2887). Every record carries
+an ISO 8601 UTC `timestamp`, a `level`, the event name, and — for
+anything logged inside a request — the correlating `request_id`.
+
+There is no log file and no log endpoint, and the chart ships nothing for
+log delivery: the Kubernetes node's container-stdout pathway is the
+contract. Wire the cluster's log collector (Fluent Bit / Vector /
+Promtail → Loki, or the platform equivalent) to the pod's stdout — each
+line is already collector-ready JSON, so no parser or multiline regex is
+needed. uvicorn's per-request access lines are intentionally disabled:
+the request middleware's `request_completed` / `request_failed` JSON line
+already covers them (with `request_id`), so enabling uvicorn access
+logging would only duplicate every request line. uvicorn's pre-startup
+banner (a handful of lines before the app begins serving) is the one
+exception that keeps uvicorn's own plain format.
+
 ## Chart layout
 
 ```

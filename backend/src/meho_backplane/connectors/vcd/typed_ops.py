@@ -253,10 +253,10 @@ VCD_TYPED_OPS: tuple[VcloudDirectorTypedOp, ...] = (
         handler_attr="task_list",
         summary="List recent asynchronous tasks.",
         description=(
-            "Lists recent tasks via GET /api/query?type=task&format=records — 'what is "
+            "Lists recent tasks via GET /api/query?type=adminTask&format=records — 'what is "
             "vCD doing / just did', used to confirm the estate is quiescent before a "
             "migration cutover. Returns the query-service {record: []} envelope; each "
-            "TaskRecord carries name, status, objectName, orgName, startDate/endDate, "
+            "AdminTaskRecord carries name, status, objectName, orgName, startDate/endDate, "
             "ownerName. A large list is reduced to a JSONFlux handle. Dispatches with "
             "zero catalog ingest. safety_level=safe, read-only."
         ),

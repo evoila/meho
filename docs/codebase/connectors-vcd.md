@@ -54,7 +54,8 @@ core reads, both authenticated by the one minted provider Bearer JWT:
 - **Classic `/api/query`** — the uniform, provider/System-scoped inventory
   mechanism. One path, one paging model, a `type=` selector per entity (the
   `go-vcloud-director` SDK's canonical `adminOrgVdc` / `adminVApp` / `adminVM` /
-  `adminCatalog` admin query types, plus `edgeGateway` / `task`), `format=records`.
+  `adminCatalog` / `adminTask` admin query types, plus `edgeGateway` — no admin
+  variant; a System admin sees all), `format=records`.
 
 The two surfaces need **different `Accept` media types** (vCD content
 negotiation): `accept_for_path` returns the versioned `application/*+json` form
@@ -124,10 +125,13 @@ served by vCD 10.5/10.6), overridable per target via `extras["vcd_api_version"]`
 version *negotiation* (read the max non-deprecated version from `/api/versions`)
 is a documented follow-up.
 
-A raw 401 (expired token) propagates to the dispatcher's credential-recovery arm,
-which calls `invalidate_credentials` (evicts the cached JWT) and re-dispatches
-once — the `fleet-lcm` pattern, so there is no in-connector retry loop and the
-base transport's tenacity retry (5xx / connection only) stays intact.
+A raw 401 (expired token) propagates to the dispatcher's session-recovery arm,
+which — because the connector advertises an `invalidate_session` hook (the
+SDDC Manager / NSX session-minting precedent, #2067) — evicts the cached JWT and
+re-dispatches once, so the retry re-mints. There is no in-connector retry loop,
+and the base transport's tenacity retry (5xx / connection only) stays intact.
+(`invalidate_credentials` is also implemented — the #2396 establish-failure
+companion — but the data-path 401 recovery is keyed on `invalidate_session`.)
 
 ### Fingerprint / probe
 

@@ -522,6 +522,7 @@ const (
 	TargetCreateProductSddc       TargetCreateProduct = "sddc"
 	TargetCreateProductTempo      TargetCreateProduct = "tempo"
 	TargetCreateProductVault      TargetCreateProduct = "vault"
+	TargetCreateProductVcd        TargetCreateProduct = "vcd"
 	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
 	TargetCreateProductVmware     TargetCreateProduct = "vmware"
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"

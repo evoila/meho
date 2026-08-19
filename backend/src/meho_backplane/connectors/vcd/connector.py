@@ -17,7 +17,9 @@ Why typed (not generic / ingested)
 
 Broadcom publishes no committable OpenAPI for vCD's full REST surface — the
 classic ``/api/*`` query service is bundled into the UI JS at build time, and
-the appliance serves no ``/cloudapi/1.0.0/openapi*`` (probed: 404). This is the
+the appliance serves no ``/cloudapi/1.0.0/openapi*`` (evidenced 404 on the same
+vCloud-Director-derived surface via the VCFA 9.0.2 Holodeck probe — no
+vCD-specific appliance probe was run; live-verify is the deferred tail). This is the
 CLAUDE.md postulate-1 "no usable spec → typed" case, the same posture the
 ``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with. The
 spec-reconcile lane is therefore a **manifest pin + evidenced exclusion** (see
@@ -34,10 +36,10 @@ the JWT in the ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` **response header**; every
 subsequent read sends ``Authorization: Bearer <jwt>``. The token is minted lazily
 on first use, cached per tenant-unique ``(tenant_id, target.id)`` key
 (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`) under a
-lock, and re-minted on a 401 via the dispatcher's credential-recovery arm
-(:meth:`invalidate_credentials`, #2396) — the ``fleet-lcm`` pattern, so no
-in-connector retry loop is needed and the base transport's tenacity retry (5xx /
-connection only) stays intact.
+lock, and re-minted on a 401 via the dispatcher's session-recovery arm
+(:meth:`invalidate_session`, #2067) — the SDDC Manager / NSX session-minting
+pattern, so no in-connector retry loop is needed and the base transport's
+tenacity retry (5xx / connection only) stays intact.
 
 The one provider token authenticates **both** REST surfaces vCD exposes; they
 differ only in the ``Accept`` media type, which :meth:`_vcd_get` derives from
@@ -75,7 +77,7 @@ provider/System-scoped so one session sees the whole estate:
   classic query service (``GET /api/query?type=adminOrgVdc|adminVApp|adminVM|
   adminCatalog&format=records``), the ``go-vcloud-director`` admin query types.
 * ``vcd.edge-gateway.list`` — ``GET /api/query?type=edgeGateway``.
-* ``vcd.task.list`` — ``GET /api/query?type=task``.
+* ``vcd.task.list`` — ``GET /api/query?type=adminTask``.
 
 All read-only, ``safety_level=safe``, ungated; registered as
 ``source_kind="typed"`` (:mod:`.typed_ops` / :mod:`.typed_reads`, per-op
@@ -269,8 +271,8 @@ class VcloudDirectorConnector(HttpConnector):
         transport's ``extra_headers`` seam, so the base tenacity retry (5xx /
         connection) and the ``auth_headers`` mint both stay in force. A raw 401
         (expired token) propagates as :class:`httpx.HTTPStatusError` to the
-        dispatcher's credential-recovery arm, which evicts the token via
-        :meth:`invalidate_credentials` (#2396) and re-dispatches once.
+        dispatcher's session-recovery arm, which evicts the token via
+        :meth:`invalidate_session` (#2067) and re-dispatches once.
         """
         accept = accept_for_path(path, self._api_version(target))
         return await self._request_json(
@@ -457,19 +459,42 @@ class VcloudDirectorConnector(HttpConnector):
 
         return await vcd_task_list_impl(self, operator, target, params)
 
-    async def invalidate_credentials(self, target: VcloudDirectorTargetLike) -> None:
-        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+    async def invalidate_session(self, target: VcloudDirectorTargetLike) -> None:
+        """Public duck-typed session-eviction hook for the dispatch path (#2067).
 
-        Drops the cached provider JWT for *target* so the next credential read
-        re-mints a fresh session. The dispatcher calls this hook on an
-        establish-auth failure (a data-path 401 from an expired token) and
-        re-dispatches once, so an out-of-band credential restage — or a simply
-        expired session — converges on the next dispatch without a backplane
-        restart. The ``fleet-lcm`` credential-recovery pattern.
+        **The load-bearing 401-recovery hook.** On an auth-class status (vCD's
+        ``401`` from an expired minted JWT), the dispatcher's data-path recovery
+        arm calls this hook — keyed on ``invalidate_session``, *not*
+        ``invalidate_credentials`` — then re-dispatches the op once
+        (:func:`~meho_backplane.operations.dispatcher._retry_after_session_invalidation`).
+        Dropping the cached JWT here makes the retry's
+        :meth:`auth_headers` cache-miss and re-mint a fresh session, so a
+        mid-session token expiry self-heals on the next dispatch without a
+        backplane restart — the SDDC Manager / NSX session-minting precedent (a
+        connector *without* this hook falls straight through to
+        ``connector_auth_failed`` and wedges on the stale token, dispatcher.py
+        #2067). Holds :attr:`_session_lock` so a concurrent re-establish doesn't
+        race the eviction.
         """
-        cache_key = target_cache_key(target)
+        await self._evict_session_token(target)
+
+    async def invalidate_credentials(self, target: VcloudDirectorTargetLike) -> None:
+        """Establish-auth-failure companion hook (#2396).
+
+        The dispatcher calls this on an establish-time
+        :class:`~meho_backplane.connectors._shared.vcf_auth.ConnectorAuthError`
+        (a provider-login 401/403). vCD re-reads Vault on every mint, so it keeps
+        no separate credential-bytes cache to evict (contrast SDDC Manager); the
+        only per-target state is the JWT, so this also drops it — a no-op when
+        the establish already failed before caching, harmless otherwise. Kept so
+        the connector advertises both dispatch-path recovery hooks.
+        """
+        await self._evict_session_token(target)
+
+    async def _evict_session_token(self, target: VcloudDirectorTargetLike) -> None:
+        """Drop the cached provider JWT for *target* under the session lock."""
         async with self._session_lock:
-            self._session_tokens.pop(cache_key, None)
+            self._session_tokens.pop(target_cache_key(target), None)
 
     async def aclose(self) -> None:
         """Clear cached session tokens, then tear down the httpx pool.

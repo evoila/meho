@@ -34,6 +34,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy import select
@@ -194,7 +195,7 @@ _DISPATCH_CASES: list[tuple[str, str, str | None, Any]] = [
     ("vcd.vm.list", "/api/query", "adminVM", {"record": [{"name": "vm-a"}]}),
     ("vcd.catalog.list", "/api/query", "adminCatalog", {"record": [{"name": "cat-a"}]}),
     ("vcd.edge-gateway.list", "/api/query", "edgeGateway", {"record": [{"name": "edge-a"}]}),
-    ("vcd.task.list", "/api/query", "task", {"record": [{"name": "task-a"}]}),
+    ("vcd.task.list", "/api/query", "adminTask", {"record": [{"name": "task-a"}]}),
 ]
 
 
@@ -237,6 +238,55 @@ async def test_each_typed_op_dispatches_zero_catalog(
         assert data_req.url.params["format"] == "records"
     else:
         assert data_req.headers["Accept"] == "application/json;version=38.0"
+
+
+@pytest.mark.asyncio
+async def test_data_path_401_remints_via_dispatcher(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """A data-path 401 (expired JWT) self-heals via the dispatcher's session-recovery arm.
+
+    The load-bearing 401-recovery proof — the coverage the isolated eviction
+    tests can't give. A stale minted JWT gets a 401 on the data read; the
+    dispatcher evicts it via the connector's ``invalidate_session`` hook and
+    re-dispatches once; the retry re-mints a fresh session and the op succeeds.
+    Without ``invalidate_session`` on the connector this would fall through to
+    ``connector_auth_failed`` and wedge on the stale token (dispatcher #2067) —
+    so a green here proves the hook is wired to the arm the 401 path actually
+    calls, not the establish-only ``invalidate_credentials``.
+    """
+    await _register_and_resolve()
+
+    async with respx.mock(base_url=_VCD_BASE_URL) as mock:
+        login = mock.post(_LOGIN_PATH).mock(
+            side_effect=[
+                httpx.Response(200, headers={_TOKEN_HEADER: "jwt-stale"}),
+                httpx.Response(200, headers={_TOKEN_HEADER: "jwt-fresh"}),
+            ]
+        )
+        orgs = mock.get("/cloudapi/1.0.0/orgs").mock(
+            side_effect=[
+                httpx.Response(401),
+                httpx.Response(200, json={"values": [{"name": "System"}]}),
+            ]
+        )
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=VCD_CONNECTOR_ID,
+            op_id="vcd.org.list",
+            target=_VcdReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result == {"values": [{"name": "System"}]}
+    # Minted once, 401'd, re-minted, retried once → exactly 2 logins + 2 data GETs.
+    assert login.call_count == 2
+    assert orgs.call_count == 2
+    # The first data GET carried the stale token; the retry carried the fresh one.
+    assert orgs.calls[0].request.headers["Authorization"] == "Bearer jwt-stale"
+    assert orgs.calls[1].request.headers["Authorization"] == "Bearer jwt-fresh"
 
 
 # ---------------------------------------------------------------------------

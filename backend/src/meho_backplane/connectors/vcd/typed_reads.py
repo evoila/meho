@@ -27,7 +27,7 @@ The 7-read set (each path pinned by :mod:`tests.test_connectors_vcd_spec_reconci
   classic query service ``GET /api/query`` with ``type=adminOrgVdc`` /
   ``adminVApp`` / ``adminVM`` / ``adminCatalog`` and ``format=records``.
 * ``vcd.edge-gateway.list`` — ``GET /api/query?type=edgeGateway``.
-* ``vcd.task.list`` — ``GET /api/query?type=task``.
+* ``vcd.task.list`` — ``GET /api/query?type=adminTask``.
 
 **Pagination note.** The cloudapi collection returns ``{resultTotal, pageCount,
 page, pageSize, values: []}``; the query service returns ``{...QueryResultRecords,
@@ -46,10 +46,10 @@ from meho_backplane.connectors.vcd._paths import (
     _ORGS_PATH,
     _QT_ADMIN_CATALOG,
     _QT_ADMIN_ORG_VDC,
+    _QT_ADMIN_TASK,
     _QT_ADMIN_VAPP,
     _QT_ADMIN_VM,
     _QT_EDGE_GATEWAY,
-    _QT_TASK,
     _QUERY_PATH,
     QUERY_RECORDS_FORMAT,
 )
@@ -192,14 +192,17 @@ async def vcd_task_list_impl(
     target: VcloudDirectorTargetLike,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """``vcd.task.list`` — ``GET /api/query?type=task&format=records``.
+    """``vcd.task.list`` — ``GET /api/query?type=adminTask&format=records``.
 
     Lists recent asynchronous tasks across the instance — 'what is vCD doing /
-    just did'. Returns the query-service record envelope; each ``TaskRecord``
-    carries ``name``, ``status``, ``objectName``, ``orgName``, ``startDate`` /
-    ``endDate``, and ``ownerName``. A large list is reduced to a JSONFlux handle.
+    just did'. Uses the system-admin ``adminTask`` type (not the org-scoped
+    ``task``) so a provider session sees tasks across every org — the whole-estate
+    view the migration-quiescence check needs. Returns the query-service record
+    envelope; each ``AdminTaskRecord`` carries ``name``, ``status``,
+    ``objectName``, ``orgName``, ``startDate`` / ``endDate``, and ``ownerName``.
+    A large list is reduced to a JSONFlux handle.
     """
     del params  # schema declares the param object empty
     return await connector._vcd_get(
-        target, _QUERY_PATH, operator=operator, params=_query_params(_QT_TASK)
+        target, _QUERY_PATH, operator=operator, params=_query_params(_QT_ADMIN_TASK)
     )

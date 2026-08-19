@@ -8,7 +8,9 @@ customers *from* (initiative `evoila/meho#3056
 <https://github.com/evoila/meho/issues/3056>`_, task #3057). Broadcom publishes
 **no committable OpenAPI** for vCD's full REST surface — the classic ``/api/*``
 query service is bundled into the UI JS at build time and the appliance serves
-no ``/cloudapi/1.0.0/openapi*`` (probed: 404) — so the connector is a **typed**
+no ``/cloudapi/1.0.0/openapi*`` (evidenced 404 on the same vCloud-Director-derived
+surface via the VCFA 9.0.2 Holodeck probe; no vCD-specific probe run) — so the
+connector is a **typed**
 read core (CLAUDE.md postulate 1: "no usable spec → typed"), the same shape the
 ``fleet-lcm`` (#3047) and ``vcf-automation`` provider-plane cores ship with.
 
@@ -70,14 +72,17 @@ _ORGS_PATH = "/cloudapi/1.0.0/orgs"
 _QUERY_PATH = "/api/query"
 
 # -- Query-service selectors (go-vcloud-director SDK canonical constants) ----
-# Admin variants so a provider/System session enumerates every org's resources
-# (the migration-inventory contract: see the whole estate, not one tenant).
+# System-admin ("admin*") variants so a provider/System session enumerates every
+# org's resources (the migration-inventory contract: see the whole estate, not
+# one tenant). ``edgeGateway`` has no admin variant — a System admin sees all
+# edge gateways via the plain type — but ``task`` does, so tasks use ``adminTask``
+# (the cross-org, all-tenants view) to match the whole-estate contract.
 _QT_ADMIN_ORG_VDC = "adminOrgVdc"
 _QT_ADMIN_VAPP = "adminVApp"
 _QT_ADMIN_VM = "adminVM"
 _QT_ADMIN_CATALOG = "adminCatalog"
 _QT_EDGE_GATEWAY = "edgeGateway"
-_QT_TASK = "task"
+_QT_ADMIN_TASK = "adminTask"
 
 #: Query-service response format. ``records`` returns flattened attribute rows
 #: (names, status, hrefs) — the right shape for inventory + JSONFlux drill-in;

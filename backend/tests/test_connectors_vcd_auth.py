@@ -426,9 +426,19 @@ async def test_session_establish_rejects_empty_operator_jwt() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("hook_name", ["invalidate_session", "invalidate_credentials"])
 @pytest.mark.asyncio
-async def test_invalidate_credentials_evicts_token_forcing_remint() -> None:
-    """invalidate_credentials drops the cached token so the next call re-mints (dispatcher arm)."""
+async def test_eviction_hook_drops_token_forcing_remint(hook_name: str) -> None:
+    """Both dispatch-path eviction hooks drop the cached JWT so the next auth_headers re-mints.
+
+    ``invalidate_session`` is the hook the dispatcher's data-path 401 recovery arm
+    calls (#2067 — proven end-to-end in
+    ``test_data_path_401_remints_via_dispatcher``); ``invalidate_credentials`` is
+    the establish-failure companion (#2396). vCD keeps only the minted-JWT cache,
+    so both evict it. This also pins that ``invalidate_session`` exists — its
+    absence was a latent permanent-wedge bug (the data-path 401 arm is keyed on
+    ``invalidate_session``, not ``invalidate_credentials``).
+    """
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vcd-a.test.invalid") as mock:
@@ -439,7 +449,7 @@ async def test_invalidate_credentials_evicts_token_forcing_remint() -> None:
             ]
         )
         h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-        await connector.invalidate_credentials(_TARGET_A)
+        await getattr(connector, hook_name)(_TARGET_A)
         assert connector._session_tokens == {}
         h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 

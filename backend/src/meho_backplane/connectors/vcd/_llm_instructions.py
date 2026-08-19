@@ -145,7 +145,7 @@ _TASK_LIST_INSTRUCTIONS: dict[str, object] = {
         "cutover, or to find the task behind a resource in an unexpected state."
     ),
     "output_shape": (
-        "Query-service record envelope {record: [TaskRecord, ...], total, page, "
+        "Query-service record envelope {record: [AdminTaskRecord, ...], total, page, "
         "pageSize}. Each record carries name (the operation), status (running / "
         "success / error), objectName (the affected entity), orgName, startDate "
         "/ endDate, and ownerName. A large list is reduced to a JSONFlux handle."

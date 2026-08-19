@@ -6,12 +6,15 @@
 // v0.5 ships the operator-facing alias verbs over the 8 enabled vROps
 // read-only core ops (G3.6-T2 #833), each pre-baking
 // connector_id="vrops-rest-9.0" so operators don't type the connector
-// ID on every dispatch:
+// ID on every dispatch. Verbs whose backend read went typed dispatch
+// the dotted typed op_id (#2355 — ingested METHOD:/path op_ids no
+// longer resolve on a zero-catalog boot); the rest keep their
+// ingested op_ids until a typed counterpart ships:
 //
-//   - `meho vcf-operations about [--target T]`                   — GET:/suite-api/api/versions/current
+//   - `meho vcf-operations about [--target T]`                   — vrops.liveness
 //   - `meho vcf-operations resource list [--target T] [--params J]` — GET:/suite-api/api/resources
 //   - `meho vcf-operations resource get <id> [--target T]`        — GET:/suite-api/api/resources/{id}
-//   - `meho vcf-operations alert list [--target T] [--params J]`  — GET:/suite-api/api/alerts
+//   - `meho vcf-operations alert list [--target T] [--params J]`  — vrops.alert.list
 //   - `meho vcf-operations alertdefinition list [--target T] [--params J]` — GET:/suite-api/api/alertdefinitions
 //   - `meho vcf-operations symptom list [--target T] [--params J]` — GET:/suite-api/api/symptoms
 //   - `meho vcf-operations recommendation list [--target T] [--params J]` — GET:/suite-api/api/recommendations

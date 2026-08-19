@@ -50,6 +50,7 @@ from meho_backplane.connectors.holodeck.ops_write import (
     HolodeckWriteSafetyError,
     bound_backup_path,
     bound_image_tar,
+    resolve_backup_dir,
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -173,6 +174,37 @@ def test_bound_backup_path_rejects_escape(path: str) -> None:
 def test_bound_backup_path_rejects_non_string() -> None:
     with pytest.raises(HolodeckWriteSafetyError):
         bound_backup_path(None)
+
+
+# ---------------------------------------------------------------------------
+# resolve_backup_dir -- the shared root-default + bound resolver reused by
+# backups.prune (write) and backups.list (read, #2847)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_backup_dir_none_defaults_to_root() -> None:
+    """Param omitted -> the backups root (the prune/list default)."""
+    assert resolve_backup_dir(None) == "/var/backups"
+
+
+def test_resolve_backup_dir_root_itself_stays_root() -> None:
+    """The root is the default, not an escape -- returned as-is, not rejected."""
+    assert resolve_backup_dir("/var/backups") == "/var/backups"
+
+
+def test_resolve_backup_dir_sub_path_is_bounded() -> None:
+    assert resolve_backup_dir("daily") == "/var/backups/daily"
+    assert resolve_backup_dir("/var/backups/a/b") == "/var/backups/a/b"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/shadow", "../etc/passwd", "/var/backups/../etc", "daily/../../etc"],
+)
+def test_resolve_backup_dir_delegates_escape_rejection_to_bound_backup_path(path: str) -> None:
+    """The single safety bound stays ``bound_backup_path`` -- an escape raises."""
+    with pytest.raises(HolodeckWriteSafetyError):
+        resolve_backup_dir(path)
 
 
 # ---------------------------------------------------------------------------

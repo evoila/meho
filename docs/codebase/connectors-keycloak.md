@@ -14,7 +14,8 @@ verbs + onboarding docs. G3.13-T4 (#1406) adds the **nine approval-gated
 write ops** (realm/client/client-scope/protocol-mapper/user/role-mapping
 creates + updates + reset-password) that retire the consumer's five
 Keycloak bootstrap scripts; `idp.create` is deferred (not exercised by
-those scripts).
+those scripts). #2843 extends the read surface to **eight** by adding the
+`role` group (`role.list` + `role.users`) for realm-role access review.
 
 Registry v2 triple: `(product="keycloak", version="26.x",
 impl_id="keycloak-admin")`, plus the `(keycloak, "", "")` wildcard so a
@@ -26,7 +27,8 @@ fresh target with no asserted version still resolves.
   `HttpConnector` subclass. Holds a per-target admin-token cache with
   TTL-driven refresh and an injectable admin-credential loader. Exposes a
   thin bound-method shim per read op (`realm_get`, `client_list`,
-  `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`) and
+  `client_get`, `client_scope_list`, `user_list`, `role_mapping_get`,
+  `role_list`, `role_users`) and
   per write op (`realm_create`/`realm_update`, `client_create`/
   `client_update`, `client_scope_create`, `protocol_mapper_create`,
   `user_create`/`user_reset_password`, `role_mapping_assign`), the
@@ -35,7 +37,7 @@ fresh target with no asserted version still resolves.
   `_find_client_uuid` / `_find_user_uuid` / `_find_realm_role` name→UUID
   resolvers.
 - `KeycloakOp` + `READ_OPS` (`connectors/keycloak/ops_read.py`) — the
-  op-metadata dataclass and the six-op read registration table (the bind9 /
+  op-metadata dataclass and the eight-op read registration table (the bind9 /
   pfSense `ops`-table precedent). `WHEN_TO_USE_BY_GROUP` maps each op
   group to its curated selection blurb.
 - `WRITE_OPS` + the write handlers (`connectors/keycloak/ops_write.py`) —
@@ -155,9 +157,9 @@ rejects a whitespace-only secret rather than setting an empty password.
   name→UUID (and role-name→representation) resolvers the write handlers
   call before keying a mutation on the object's UUID.
 
-## Read ops (G3.13-T2)
+## Read ops (G3.13-T2, extended by #2843)
 
-Six `safety_level="safe"` / `requires_approval=False` read ops, all
+Eight `safety_level="safe"` / `requires_approval=False` read ops, all
 tagged `read-only`, all dispatching via the admin-auth path. The realm is
 the target's `managed_realm` (no per-op realm param):
 
@@ -169,10 +171,17 @@ the target's `managed_realm` (no per-op realm param):
 | `keycloak.client_scope.list` | `GET .../client-scopes` | `{rows, total}` |
 | `keycloak.user.list` | `GET .../users` (`?username=`/`?max=`) | `{rows, total}`, no credentials |
 | `keycloak.role_mapping.get` | `GET .../users/{id}/role-mappings` | realm + client role mappings |
+| `keycloak.role.list` | `GET .../roles` | `{rows, total}` — realm role catalogue |
+| `keycloak.role.users` | `GET .../roles/{role-name}/users` | `{rows, total}`, no credentials — role members |
 
 `client.get` / `role_mapping.get` take the **internal UUID** (`id`), not
 the human `clientId` / `username` — discover it via the matching `.list`
-op first.
+op first. `role.users` is the exception: it keys on the role **name**
+(from `role.list`), not a UUID. `role.list` + `role.users` are the
+access-review pair — "which realm roles exist?" and "who holds role X?" —
+the reverse direction of the per-user `role_mapping.get`. Keycloak returns
+`role.users` sorted by username, its default first page (100 members); a
+larger role is capped at that page.
 
 ### Secret redaction
 
@@ -264,6 +273,28 @@ through to the generic params-echo
 default. The builders are pure (no connector I/O) and so fail-soft by
 construction; see [`approvals.md`](approvals.md) "`proposed_effect` builder
 hook" for the registry contract.
+
+**Spec-reconcile lane (#2988).** Every request path the connector dispatches
+lives as a `_*_PATH` template constant in
+`backend/src/meho_backplane/connectors/keycloak/_paths.py` (hoisted out of
+inline f-strings by #2988); handlers fill a template via `fill_path`, whose
+placeholder names are byte-for-byte the pinned spec's own parameter names
+(`{realm}`, `{client-uuid}`, `{user-id}`, `{role-name}`). The lane
+[`backend/tests/test_connectors_keycloak_spec_reconcile.py`](../../backend/tests/test_connectors_keycloak_spec_reconcile.py)
+(the #2980 harness; parse-only, runs in the required unit sweep, uniform
+skip when the shelf is unconfigured) introspects those live constants and
+asserts all 18 reconciled `METHOD:/path` op_ids are served by the pinned
+`keycloak-26.3` shelf spec (`keycloak-admin-openapi.json` — the vendor's
+Admin REST API OpenAPI at the lab's deployed 26.3.3, from Maven Central
+`org.keycloak:keycloak-api-docs-dist:26.3.3`, Apache-2.0). Two dispatched
+paths are pinned as evidenced exclusions rather than reconciled — the OIDC
+token mint (`POST /realms/{realm}/protocol/openid-connect/token`; specified
+by OAuth 2.0 / OIDC discovery, not the Admin REST OpenAPI) and
+`GET /admin/serverinfo` (unmodeled by the published spec; already
+best-effort in `fingerprint`) — and an armed test asserts they stay
+unserved, so a future spec pin that begins serving one forces its promotion
+into the reconciled set. Standard:
+[`docs/decisions/spec-reconcile-guards-standard.md`](../decisions/spec-reconcile-guards-standard.md).
 
 ## Target configuration
 

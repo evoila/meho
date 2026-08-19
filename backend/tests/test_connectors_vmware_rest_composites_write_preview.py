@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 9 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 18 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,8 +19,14 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 9 write composites register a builder (4 live-read + 5 param
-   echo); the wiring test pins the full set.
+4. All 18 write composites register a builder (10 live-read + 8 param
+   echo); the wiring test pins the full set. ``vm.disk.grow`` is a
+   single-entity live-read builder — its from→to capacity delta is a live
+   vCenter read. ``vm.clone_from_template`` is a param-echo builder — its
+   params fully name the blast radius (secret-bearing GOSC contents are
+   never echoed). ``guest.customization_spec.create`` is a param-echo
+   builder (IDENTITY fields only, #1503); ``vm.customize`` is a live-read
+   builder.
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
@@ -33,12 +39,14 @@ the park-time listing reads run directly on it.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 
 import meho_backplane.operations._audit as audit_module
@@ -66,13 +74,23 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
     {
         "vmware.composite.vm.create",
         "vmware.composite.vm.clone",
+        "vmware.composite.vm.deploy_from_library",
+        "vmware.composite.vm.clone_from_template",
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",
         "vmware.composite.vm.power.bulk",
+        "vmware.composite.vm.disk.grow",
+        "vmware.composite.vm.resize",
+        "vmware.composite.vm.nic.repoint",
+        "vmware.composite.vm.device.cdrom",
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
+        "vmware.composite.cluster.drs_rule.create",
+        "vmware.composite.folder.create",
+        "vmware.composite.guest.customization_spec.create",
+        "vmware.composite.vm.customize",
     }
 )
 
@@ -232,7 +250,7 @@ class _RecordingConnector:
 
 
 async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> _RecordingConnector:
-    """Register the connector + 14 composites and seed the recording instance."""
+    """Register the connector + 17 composites and seed the recording instance."""
     register_connector_v2(
         product="vmware",
         version="9.0",
@@ -283,13 +301,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 9 write composites register a builder (criterion 4)
+# Wiring — all 18 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
-def test_all_nine_write_composites_register_a_preview_builder() -> None:
+def test_all_nineteen_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 19
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -311,11 +330,13 @@ def _make_preview_ctx(params: dict[str, Any], *, connector_instance: Any = None)
 
 
 async def test_live_read_builders_decline_without_a_connector_instance() -> None:
-    """The four fan-out builders decline (return None) when no connector resolved.
+    """The live-read builders decline (return None) when no connector resolved.
 
     Post-#2256 the live-read builders resolve their blast radius on the
     connector session; with ``connector_instance=None`` there is nothing to
     read, so they decline to the identifier-only default rather than raise.
+    Covers the four fan-out builders, the cluster.drs_rule.create builder,
+    and the three #2891 hardware builders.
     """
     for builder, params in (
         (_write_preview._vm_power_bulk_preview, {"action": "stop"}),
@@ -325,6 +346,24 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
             {"host": "host-1", "dvs": "dvs-1", "fallback_network": "net"},
         ),
         (_write_preview._cluster_patch_preview, {"cluster": "domain-c1"}),
+        (
+            _write_preview._cluster_drs_rule_create_preview,
+            {
+                "cluster": "domain-c1",
+                "rule_name": "keep-apart",
+                "rule_type": "anti_affinity",
+                "vms": ["web-01", "web-02"],
+            },
+        ),
+        (_write_preview._vm_resize_preview, {"vm": "vm-1", "cpu_count": 4}),
+        (
+            _write_preview._vm_nic_repoint_preview,
+            {"vm": "vm-1", "nic": "4000", "portgroup_name": "pg"},
+        ),
+        (
+            _write_preview._vm_device_cdrom_preview,
+            {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+        ),
     ):
         assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
 
@@ -377,7 +416,6 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
                 "source_vm": "vm-1",
                 "target_name": "vm-clone",
                 "library_item": "lib-1",
-                "wait_for_completion": False,
             }
         )
     )
@@ -385,7 +423,116 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
         "source_vm": "vm-1",
         "target_name": "vm-clone",
         "library_item": "lib-1",
-        "wait_for_completion": False,
+    }
+
+
+async def test_vm_deploy_from_library_preview_echoes_deploy_coordinates() -> None:
+    """The deploy echo names the blast radius — item, placement, mappings — no I/O."""
+    preview = await _write_preview._vm_deploy_from_library_preview(
+        _make_preview_ctx(
+            {
+                "library_item_name": "holorouter-ova",
+                "library_name": "lab-templates",
+                "name": "router-01",
+                "resource_pool": "resgroup-8",
+                "host": "host-19",
+                "folder": "group-v10",
+                "datastore": "datastore-15",
+                "network_mappings": {"nat": "dvportgroup-42"},
+                "storage_provisioning": "thin",
+                "ovf_properties": {"guestinfo.password": "s3cret", "guestinfo.hostname": "r1"},
+                "power_on": True,
+            }
+        )
+    )
+    assert preview == {
+        "library_item": None,
+        "library_item_name": "holorouter-ova",
+        "library_name": "lab-templates",
+        "name": "router-01",
+        "resource_pool": "resgroup-8",
+        "host": "host-19",
+        "folder": "group-v10",
+        "datastore": "datastore-15",
+        "network_mappings": {"nat": "dvportgroup-42"},
+        "storage_provisioning": "thin",
+        # Only property IDs — never the (possibly secret) values (#1503).
+        "ovf_property_keys": ["guestinfo.hostname", "guestinfo.password"],
+        "power_on": True,
+    }
+
+
+async def test_vm_deploy_from_library_preview_defaults_optional_fields() -> None:
+    """id passthrough + only the required resource_pool → optional fields default cleanly."""
+    preview = await _write_preview._vm_deploy_from_library_preview(
+        _make_preview_ctx({"library_item": "li-ovf", "resource_pool": "resgroup-8"})
+    )
+    assert preview == {
+        "library_item": "li-ovf",
+        "library_item_name": None,
+        "library_name": None,
+        "name": None,
+        "resource_pool": "resgroup-8",
+        "host": None,
+        "folder": None,
+        "datastore": None,
+        "network_mappings": {},
+        "storage_provisioning": None,
+        "ovf_property_keys": [],
+        "power_on": False,
+    }
+
+
+async def test_vm_clone_from_template_preview_echoes_clone_coordinates() -> None:
+    """The clone-coordinates echo names the full blast radius, minus GOSC secrets."""
+    preview = await _write_preview._vm_clone_from_template_preview(
+        _make_preview_ctx(
+            {
+                "source_template": "ubuntu-2404-template",
+                "new_vm_name": "web-01",
+                "folder": "group-v10",
+                "resource_pool": "resgroup-8",
+                "datastore": "datastore-15",
+                "host": "host-19",
+                "power_on": True,
+                "customization_spec_name": "linux-web-gosc",
+            }
+        )
+    )
+    assert preview == {
+        "source_template": "ubuntu-2404-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": "host-19",
+        "power_on": True,
+        "customization_spec_name": "linux-web-gosc",
+    }
+
+
+async def test_vm_clone_from_template_preview_defaults_optional_fields_to_none() -> None:
+    """Only the required placement params supplied → host / customization echo as None."""
+    preview = await _write_preview._vm_clone_from_template_preview(
+        _make_preview_ctx(
+            {
+                "source_template": "ubuntu-2404-template",
+                "new_vm_name": "web-01",
+                "folder": "group-v10",
+                "resource_pool": "resgroup-8",
+                "datastore": "datastore-15",
+            }
+        )
+    )
+    assert preview == {
+        "source_template": "ubuntu-2404-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": None,
+        "power_on": False,
+        "customization_spec_name": None,
     }
 
 
@@ -432,13 +579,115 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     """Missing required params decline (→ identifier-only default), never raise."""
     assert await _write_preview._vm_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_clone_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_deploy_from_library_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_clone_from_template_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_snapshot_revert_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_migrate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_power_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_power_bulk_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_evacuate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_detach_from_vds_preview(_make_preview_ctx({})) is None
+
+
+# ===========================================================================
+# GOSC create preview — IDENTITY-only echo, never secret material (#1503)
+# ===========================================================================
+
+
+async def test_guest_customization_spec_create_preview_echoes_identity_only() -> None:
+    """The create preview surfaces the blast radius without any credential value.
+
+    Given a Windows spec carrying an admin password, a product key, and a
+    domain-join password, the builder returns ONLY the identity keys — no
+    secret field name and no secret value appears anywhere in the output.
+    """
+    preview = await _write_preview._guest_customization_spec_create_preview(
+        _make_preview_ctx(
+            {
+                "spec_name": "gosc-win",
+                "os_type": "windows",
+                "hostname": "win-01",
+                "interfaces": [
+                    {"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]},
+                    {},  # DHCP NIC — no ip_address
+                ],
+                "windows_admin_password": "pw-admin-SECRET",
+                "windows_product_key": "KEY-SECRET",
+                "windows_domain_admin_password": "pw-join-SECRET",
+            }
+        )
+    )
+    assert preview == {
+        "spec_name": "gosc-win",
+        "os_type": "windows",
+        "hostname_scheme": "FIXED:win-01",
+        "nic_count": 2,
+        "static_ip_summary": ["10.0.0.5"],
+    }
+    # Defence in depth: no secret value bled into the serialised preview.
+    blob = json.dumps(preview)
+    assert "SECRET" not in blob
+
+
+async def test_guest_customization_spec_create_preview_declines_on_malformed() -> None:
+    """Missing spec_name / os_type declines (→ identifier-only default), never raises."""
+    assert (
+        await _write_preview._guest_customization_spec_create_preview(_make_preview_ctx({})) is None
+    )
+    assert (
+        await _write_preview._guest_customization_spec_create_preview(
+            _make_preview_ctx({"spec_name": "x"})
+        )
+        is None
+    )
+
+
+# ===========================================================================
+# vm.customize preview — live-read power state, no secret (spec-name reference)
+# ===========================================================================
+
+
+async def test_vm_customize_preview_resolves_power_state() -> None:
+    """With a connector, the preview live-reads the VM to surface moid + power state."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+    }
+    preview = await _write_preview._vm_customize_preview(
+        _make_preview_ctx({"name": "app", "spec_name": "gosc-lin"}, connector_instance=recorder)
+    )
+    assert preview == {
+        "vm": "vm-7",
+        "name": "app",
+        "spec_name": "gosc-lin",
+        "power_state": "POWERED_OFF",
+        "applies_on": "next_power_on",
+    }
+    # The preview issued exactly the one resolution read.
+    assert [c[0] for c in recorder.calls] == ["GET"]
+
+
+async def test_vm_customize_preview_echoes_without_connector() -> None:
+    """No connector → name + spec echo with power_state unknown (still no secret)."""
+    preview = await _write_preview._vm_customize_preview(
+        _make_preview_ctx({"name": "app", "spec_name": "gosc-lin"}, connector_instance=None)
+    )
+    assert preview == {
+        "vm": None,
+        "name": "app",
+        "spec_name": "gosc-lin",
+        "power_state": None,
+        "applies_on": "next_power_on",
+    }
+
+
+async def test_vm_customize_preview_declines_on_malformed() -> None:
+    """Missing name / spec_name declines (→ identifier-only default), never raises."""
+    assert await _write_preview._vm_customize_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_customize_preview(_make_preview_ctx({"name": "app"})) is None
     assert await _write_preview._cluster_patch_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._folder_create_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._cluster_drs_rule_create_preview(_make_preview_ctx({})) is None
 
 
 # ===========================================================================
@@ -622,7 +871,9 @@ async def test_cluster_patch_park_resolves_host_set(
     stub_embedding_service: AsyncMock,
 ) -> None:
     recorder = await _bootstrap_registry(stub_embedding_service)
-    recorder.responses["/vcenter/cluster/domain-c1/host"] = {
+    # #2970: cluster hosts resolve via the cluster-filtered Host_list --
+    # the pinned spec serves no per-cluster /vcenter/cluster/{c}/host.
+    recorder.responses["/vcenter/host"] = {
         "value": [
             {"host": "host-1", "name": "esx-1"},
             {"host": "host-2", "name": "esx-2"},
@@ -635,7 +886,6 @@ async def test_cluster_patch_park_resolves_host_set(
         "op_class": "write",
         "preview": {
             "cluster": "domain-c1",
-            "patch_method": "default",
             "resolved": [
                 {"host": "host-1", "name": "esx-1"},
                 {"host": "host-2", "name": "esx-2"},
@@ -646,7 +896,7 @@ async def test_cluster_patch_park_resolves_host_set(
         "safety_level": "dangerous",
     }
     # Only the host listing fired — no maintenance / patch sub-ops.
-    assert recorder.specs == ["/vcenter/cluster/domain-c1/host"]
+    assert recorder.specs == ["/vcenter/host"]
 
 
 # ===========================================================================
@@ -680,3 +930,513 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
         "safety_level": "dangerous",
     }
     assert recorder.calls == []
+
+
+# ===========================================================================
+# vm.disk.grow — the from→to capacity delta preview (live-read, #2893)
+# ===========================================================================
+
+
+_TEN_GIB = 10 * 1024**3
+_TWENTY_GIB = 20 * 1024**3
+
+
+async def test_disk_grow_park_carries_from_to_capacity_delta(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked row's preview names the current→requested delta (the decision)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-1/hardware/disk/2000"] = {
+        "label": "Hard disk 1",
+        "type": "SCSI",
+        "capacity": _TEN_GIB,
+    }
+    recorder.responses["/vcenter/vm/vm-1"] = {"name": "web-01"}
+
+    _, row = await _park(
+        "vmware.composite.vm.disk.grow",
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+    )
+
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.disk.grow") == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-01",
+            "disk": "2000",
+            "disk_label": "Hard disk 1",
+            "current_capacity_bytes": _TEN_GIB,
+            "requested_capacity_bytes": _TWENTY_GIB,
+            "delta_bytes": _TWENTY_GIB - _TEN_GIB,
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Two read-only GETs: the disk detail (load-bearing) + the VM name
+    # (cosmetic). No ReconfigVM_Task mutation fires on the park path.
+    assert recorder.read_calls == [
+        ("/vcenter/vm/vm-1/hardware/disk/2000", None),
+        ("/vcenter/vm/vm-1", None),
+    ]
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_disk_grow_preview_failure_parks_with_unavailable_marker(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failing disk read parks with identifiers + an explicit marker (#1628).
+
+    The current capacity is the load-bearing half of the delta, so a disk
+    read that faults makes the blast radius unknowable — the park is honest
+    about it rather than showing a bare identifier default.
+    """
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-1/hardware/disk/2000"] = "disk detail unavailable"
+
+    target = _FakeVmwareTarget()
+    _, row = await _park(
+        "vmware.composite.vm.disk.grow",
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        target=target,
+    )
+
+    effect = row.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.disk.grow"
+    assert effect["target_id"] == str(target.id)
+    assert effect["preview_unavailable"] is True
+    assert "disk detail unavailable" in effect["preview_error"]
+    assert "preview" not in effect
+
+
+async def test_disk_grow_preview_declines_without_a_connector_instance() -> None:
+    """A live-read builder with no resolved connector declines to the identifier default."""
+    assert (
+        await _write_preview._vm_disk_grow_preview(
+            _make_preview_ctx(
+                {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+                connector_instance=None,
+            )
+        )
+        is None
+    )
+
+
+async def test_disk_grow_preview_declines_on_malformed_params() -> None:
+    """Missing / wrong-typed params decline (→ identifier-only default), never raise."""
+    recorder = _RecordingConnector()
+    for params in (
+        {},
+        {"vm": "vm-1", "disk": "2000"},  # no capacity
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": "20g"},  # non-int
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": True},  # bool is not a capacity
+    ):
+        assert (
+            await _write_preview._vm_disk_grow_preview(
+                _make_preview_ctx(params, connector_instance=recorder)
+            )
+            is None
+        )
+
+
+async def test_disk_grow_preview_vm_name_is_best_effort() -> None:
+    """A VM-name read fault nulls the name but still builds the delta preview."""
+
+    class _DiskOkVmFailConnector(_RecordingConnector):
+        async def _get_json(
+            self, target: Any, path: str, *, operator: Any, params: Any = None
+        ) -> Any:
+            spec = self._spec(path)
+            self.calls.append(("GET", spec, params))
+            if spec.endswith("/hardware/disk/2000"):
+                return {"label": "Hard disk 1", "capacity": _TEN_GIB}
+            # The VM summary read faults — best-effort nulls the name.
+            request = httpx.Request("GET", f"https://vc{path}")
+            raise httpx.HTTPStatusError(
+                "boom", request=request, response=httpx.Response(500, request=request)
+            )
+
+    preview = await _write_preview._vm_disk_grow_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+            connector_instance=_DiskOkVmFailConnector(),
+        )
+    )
+    assert preview is not None
+    assert preview["name"] is None
+    assert preview["disk_label"] == "Hard disk 1"
+    assert preview["current_capacity_bytes"] == _TEN_GIB
+    assert preview["delta_bytes"] == _TWENTY_GIB - _TEN_GIB
+
+
+# ===========================================================================
+# cluster.drs_rule.create — the capped VM fan-out + cluster-name preview (#2895)
+# ===========================================================================
+
+
+async def test_drs_rule_create_park_carries_capped_vm_fanout(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked row's preview names the cluster + resolved VM set (fan-out pattern)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
+        "value": [
+            {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+            {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_OFF"},
+        ]
+    }
+    recorder.responses["/vcenter/cluster/domain-c1"] = {"name": "prod-cluster"}
+
+    _, row = await _park(
+        "vmware.composite.cluster.drs_rule.create",
+        {
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.cluster.drs_rule.create"
+    ) == {
+        "op_class": "write",
+        "preview": {
+            "cluster": "domain-c1",
+            "cluster_name": "prod-cluster",
+            "rule_type": "anti_affinity",
+            "rule_name": "keep-apart",
+            "enabled": True,
+            "resolved": [
+                {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+                {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_OFF"},
+            ],
+            "total_resolved": 2,
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # The VM resolution is load-bearing (first read); the cluster name is a
+    # second best-effort GET. No ReconfigureComputeResource_Task mutation fires.
+    assert recorder.read_calls[0][0] == "/vcenter/vm"
+    assert ("/vcenter/cluster/domain-c1", None) in recorder.read_calls
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_drs_rule_create_preview_caps_resolved_at_twenty(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A rule over >20 VMs caps ``resolved`` at 20 but keeps the true ``total_resolved``."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": f"vm-{i}", "name": f"web-{i}"} for i in range(25)]
+    }
+    _, row = await _park(
+        "vmware.composite.cluster.drs_rule.create",
+        {
+            "cluster": "domain-c1",
+            "rule_name": "spread",
+            "rule_type": "anti_affinity",
+            "vms": [f"web-{i}" for i in range(25)],
+        },
+    )
+    preview = row.proposed_effect["preview"]
+    assert len(preview["resolved"]) == 20
+    assert preview["total_resolved"] == 25
+
+
+async def test_folder_create_preview_echoes_parent_and_new_name() -> None:
+    """folder.create preview is a param echo — parent + new folder name, no I/O."""
+    preview = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder": "prod", "folder_name": "cluster-nodes"})
+    )
+    assert preview == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}
+
+
+# ===========================================================================
+# #2891 hardware-write builders — live-read from->to diffs (builder-direct)
+# ===========================================================================
+
+
+async def test_vm_resize_preview_live_reads_current_sizing() -> None:
+    """The resize preview pairs the live-read current sizing with the request."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "cpu": {"count": 2, "cores_per_socket": 1},
+            "memory": {"size_MiB": 2048},
+        }
+    }
+    preview = await _write_preview._vm_resize_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "power_state": "POWERED_OFF",
+        "current": {"cpu_count": 2, "cores_per_socket": 1, "memory_MiB": 2048},
+        "requested": {"cpu_count": 4, "cores_per_socket": None, "memory_MiB": 8192},
+    }
+    assert recorder.specs == ["/vcenter/vm/vm-1"]
+
+
+async def test_vm_nic_repoint_preview_reads_backing_and_resolves_portgroup() -> None:
+    """The NIC preview surfaces the from->to network pair the reviewer needs."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {
+                        "type": "DISTRIBUTED_PORTGROUP",
+                        "network": "dvportgroup-1",
+                        "network_name": "old-net",
+                    },
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "dvportgroup-9",
+                        "name": "prod-net",
+                        "type": "DISTRIBUTED_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "nic": "4000",
+        "mac_address": "00:50:56:aa:bb:cc",
+        "current_backing": {
+            "type": "DISTRIBUTED_PORTGROUP",
+            "network": "dvportgroup-1",
+            "network_name": "old-net",
+        },
+        "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+    }
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
+    """The CD-ROM preview surfaces the host-local ISO backing + state to the approver."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+                    "state": "CONNECTED",
+                }
+            },
+        }
+    )
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cdrom": "16000", "action": "remove"}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "cdrom": "16000",
+        "action": "remove",
+        "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+        "state": "CONNECTED",
+    }
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_hardware_builders_decline_on_malformed_params() -> None:
+    """Missing required params decline (→ identifier-only default), even with a connector."""
+    recorder = _RecordingConnector()
+    assert (
+        await _write_preview._vm_resize_preview(_make_preview_ctx({}, connector_instance=recorder))
+        is None
+    )
+    assert (
+        await _write_preview._vm_nic_repoint_preview(
+            _make_preview_ctx({"vm": "vm-1", "nic": "4000"}, connector_instance=recorder)
+        )
+        is None
+    )
+    assert (
+        await _write_preview._vm_device_cdrom_preview(
+            _make_preview_ctx({"vm": "vm-1", "cdrom": "16000"}, connector_instance=recorder)
+        )
+        is None
+    )
+    # Declined before issuing any read.
+    assert recorder.calls == []
+
+
+# ===========================================================================
+# #2891 hardware writes — park path carries the from->to diff (criterion 3)
+# ===========================================================================
+
+
+async def test_vm_resize_park_carries_sizing_from_to_diff(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked resize row names the current + requested sizing (from->to)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "cpu": {"count": 1, "cores_per_socket": 1},
+            "memory": {"size_MiB": 1024},
+        }
+    }
+
+    _, row = await _park(
+        "vmware.composite.vm.resize", {"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192}
+    )
+
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.resize") == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "current": {"cpu_count": 1, "cores_per_socket": 1, "memory_MiB": 1024},
+            "requested": {"cpu_count": 4, "cores_per_socket": None, "memory_MiB": 8192},
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only the read-only VM info GET fired — no CPU / memory PATCH.
+    assert recorder.specs == ["/vcenter/vm/vm-1"]
+
+
+async def test_vm_nic_repoint_park_carries_network_from_to_pair(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked NIC row names the current backing + resolved target portgroup."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {"mac_address": "aa:bb", "backing": {"type": "STANDARD_PORTGROUP"}}
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "dvportgroup-9",
+                        "name": "prod-net",
+                        "type": "DISTRIBUTED_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.nic.repoint",
+        {"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"},
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.vm.nic.repoint"
+    ) == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "nic": "4000",
+            "mac_address": "aa:bb",
+            "current_backing": {"type": "STANDARD_PORTGROUP"},
+            "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only read-only resolution GETs fired — no NIC PATCH.
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_device_cdrom_park_carries_current_backing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked CD-ROM row names the current backing (host-local ISO) + action."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+                    "state": "CONNECTED",
+                }
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.device.cdrom",
+        {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.vm.device.cdrom"
+    ) == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "cdrom": "16000",
+            "action": "remove",
+            "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+            "state": "CONNECTED",
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only the read-only backing GETs fired — no DELETE.
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_vm_resize_preview_failure_parks_with_unavailable_marker(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failing VM-info read parks with identifiers + the preview_unavailable marker (#1628)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-1"] = "vCenter VM read unavailable"
+
+    target = _FakeVmwareTarget()
+    _, row = await _park(
+        "vmware.composite.vm.resize",
+        {"vm": "vm-1", "cpu_count": 4},
+        target=target,
+    )
+
+    effect = row.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.resize"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target.id)
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_unavailable"] is True
+    assert "GET:/vcenter/vm/vm-1" in effect["preview_error"]
+    assert "preview" not in effect

@@ -146,6 +146,8 @@ async def publish(
     tenant_id: uuid.UUID,
     event_kind: str,
     payload: dict[str, object] | None = None,
+    origin: str | None = None,
+    dedupe_key: str | None = None,
 ) -> EventOutbox:
     """Append one ``event_outbox`` row in *session*'s open transaction.
 
@@ -169,14 +171,33 @@ async def publish(
         payload: Event-specific data the subscriber's filter matches
             against. ``None`` is normalised to ``{}`` so the
             ``NOT NULL`` column always carries a valid JSON object.
+        origin: Event provenance (migration ``0073``). ``None`` for the
+            internal MEHO producers (agent-run completion, ...); the
+            external event-source id for the #2881 inbound ingest path.
+            Gives audit / policy surfaces a column to key "external
+            input" on without parsing the free-text ``event_kind``.
+        dedupe_key: Producer-supplied idempotency token (migration
+            ``0073``). ``None`` for internal producers. When set, the
+            ``event_outbox_tenant_dedupe_idx`` partial unique index makes
+            a duplicate ``(tenant_id, dedupe_key)`` collide at flush with
+            an :class:`~sqlalchemy.exc.IntegrityError` instead of
+            double-firing a subscriber; the ingest endpoint maps that
+            collision to an idempotent ``200``.
 
     Returns:
         The inserted, flushed :class:`EventOutbox` row.
+
+    Raises:
+        IntegrityError: When *dedupe_key* collides with an existing
+            ``(tenant_id, dedupe_key)`` row. Propagates verbatim so the
+            caller can map it to an idempotent acknowledgement.
     """
     row = EventOutbox(
         tenant_id=tenant_id,
         event_kind=event_kind,
         payload=payload if payload is not None else {},
+        origin=origin,
+        dedupe_key=dedupe_key,
     )
     session.add(row)
     await session.flush()

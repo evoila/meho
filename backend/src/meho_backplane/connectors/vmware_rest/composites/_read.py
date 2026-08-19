@@ -151,31 +151,54 @@ __all__ = [
 # guard can assert the composite hits the same canonical paths the vCenter
 # catalog would emit.
 _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
-_OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"
+# The pinned vcenter.yaml serves NO cluster DRS REST resource at all: the
+# ``GET:/vcenter/cluster/{cluster}/drs`` path #508 declared was unserved
+# (the #2970 adjacent finding, fixed in #2986). DRS state is a vim-only
+# surface, so the composite reads it through the PropertyCollector
+# singleton (``configurationEx.drsConfig`` + optional
+# ``drsRecommendation``) -- the same vim seam the vm.migrate DRS lookup
+# uses (#2970).
+_OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 _OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
 _OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric"
 _OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
 _OP_LIST_DATASTORES = "GET:/vcenter/datastore"
 _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
 _OP_LIST_VMS = "GET:/vcenter/vm"
-# vSphere Automation REST keys the distributed-switch listing under the
-# *plural* resource path (a preview feature on the appliance-served
-# ``vcenter.yaml``); the singular ``distributed-switch`` spelling that
-# G3.1-T5 #508 shipped does not exist in the spec and never resolved
-# against a real ingest (#1602). The DVS-list response carries a
-# ``vds``/``distributed_switch`` moid per entry, which drives the
-# ``dvs_index`` enrichment below.
-_OP_LIST_DVS = "GET:/vcenter/network/distributed-switches"
-# There is NO dedicated ``distributed-portgroup(s)`` list resource in
-# the REST Automation API: distributed portgroups are enumerated via the
-# generic network resource filtered to ``DISTRIBUTED_PORTGROUP`` (the
-# singular ``distributed-portgroup`` op_id #508 declared was absent from
-# every ingest -- #1602). The generic ``Network`` summary returns only
+# There is NO distributed-switch list resource in the pinned REST spec at
+# all: the plural ``distributed-switches`` path #1602 repointed to exists
+# only under ``/vcenter/namespace-management/networks/nsx/`` (NSX-scoped)
+# in the canonical ``vcenter.yaml`` -- the #2970 real-spec reconcile
+# finding. The audit's DVS-list step is therefore dropped (see the
+# handler's degradation note); enumerating switches is a vim-only surface.
+# There is likewise NO dedicated ``distributed-portgroup(s)`` list
+# resource: distributed portgroups are enumerated via the generic network
+# resource filtered to ``DISTRIBUTED_PORTGROUP`` (the singular
+# ``distributed-portgroup`` op_id #508 declared was absent from every
+# ingest -- #1602). The generic ``Network`` summary returns only
 # ``{network (id), name, type}`` -- it carries no parent-DVS field, so
 # the per-portgroup ``dvs``/``dvs_name`` enrichment is best-effort (see
 # the handler note).
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+
+# vim constants for the cluster DRS read. The PropertyCollector is a vim
+# singleton whose moId is the literal ``propertyCollector`` -- the
+# concrete value the ``{moId}`` path template takes at call time (the
+# same convention the typed reads and write composites use).
+_PROPERTY_COLLECTOR_MOID = "propertyCollector"
+_CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
+# Nested vim property path for the cluster's DRS configuration:
+# ``ClusterConfigInfoEx.drsConfig`` is a ``ClusterDrsConfigInfo``
+# (``enabled`` / ``defaultVmBehavior`` / ``vmotionRate`` / ...),
+# spec-verified against the pinned vi-json.yaml.
+_PROP_DRS_CONFIG = "configurationEx.drsConfig"
+# The cluster's current DRS recommendation list
+# (``ClusterDrsRecommendation[]``). Deprecated in the vim API since
+# VI 2.5 but served by the pinned spec and the only surface carrying the
+# vm -> destination migration pairs -- the #2970 / PR #2974 decision the
+# vm.migrate DRS lookup already relies on.
+_PROP_DRS_RECOMMENDATION = "drsRecommendation"
 
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
@@ -183,12 +206,15 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # missing catalog ingest; the direct-session migration removed that
 # coupling (the composites no longer need ingested descriptor rows), so
 # the tuples now serve as the canonical sub-op-path manifest the
-# ingest-reconcile acceptance guard
-# (``tests/acceptance/test_portgroup_audit_op_id_reconcile.py``) checks
-# against the vCenter spec.
+# spec-reconcile lanes check against the pinned specs: the exhaustive
+# read lane
+# (``tests/test_connectors_vmware_rest_composites_read_reconcile.py``,
+# #2986 -- every ``_OP_*`` constant, GET legs vs vcenter.yaml, POST legs
+# vs vi-json.yaml) plus the portgroup-audit acceptance guard
+# (``tests/acceptance/test_portgroup_audit_op_id_reconcile.py``).
 _SUB_OPS_CLUSTER_DRS_RECS: tuple[str, ...] = (
     _OP_GET_CLUSTER,
-    _OP_GET_CLUSTER_DRS,
+    _OP_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_EVENT_TAIL: tuple[str, ...] = (_OP_POST_QUERY_EVENTS,)
 _SUB_OPS_PERFORMANCE_SUMMARY: tuple[str, ...] = (
@@ -201,7 +227,6 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
     _OP_LIST_VMS,
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
-    _OP_LIST_DVS,
     _OP_LIST_NETWORK,
     _OP_LIST_VMS,
 )
@@ -261,7 +286,8 @@ async def _read_sub_op(
     ``GET`` legs are vSphere Automation ``/vcenter/*`` paths, mounted on
     ``/api`` / ``/rest`` via :meth:`VmwareRestConnector.mount_op_path`.
     ``POST`` legs are vmomi (VI-JSON) methods (``QueryEvents`` /
-    ``QueryAvailablePerfMetric`` / ``QueryPerf``); they route through
+    ``QueryAvailablePerfMetric`` / ``QueryPerf`` /
+    ``RetrievePropertiesEx``); they route through
     :meth:`VmwareRestConnector._post_vmomi_json`, which mounts them on the
     documented VI-JSON base ``/sdk/vim25/{release}`` (single ``/api``
     fallback) so they resolve on vCenter 8.0.x instead of 404ing (#2466) —
@@ -283,6 +309,49 @@ async def _read_sub_op(
     return await connector._post_vmomi_json(target, path, operator=operator, json=body)
 
 
+def _build_cluster_props_retrieve_body(cluster_moid: str, path_set: list[str]) -> dict[str, Any]:
+    """Build a ``RetrievePropertiesEx`` body reading cluster properties.
+
+    One ``PropertyFilterSpec`` scoped directly to the cluster's MoRef;
+    the singleton ``propertyCollector`` moId rides the path, so the body
+    is only the method args -- the same shape the write composites'
+    config reads send.
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [{"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "pathSet": path_set}],
+                "objectSet": [
+                    {"obj": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid}}
+                ],
+            }
+        ],
+        "options": {},
+    }
+
+
+def _extract_object_props(retrieve_result: Any) -> dict[str, Any]:
+    """Flatten a single-object ``RetrievePropertiesEx`` result to ``{name: val}``.
+
+    vim omits unset properties from ``propSet`` (they surface in
+    ``missingSet`` instead), so callers treat an absent key as "property
+    not set on this object" and fall back to their documented defaults.
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    props: dict[str, Any] = {}
+    if not isinstance(objects, list):
+        return props
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for entry in obj.get("propSet", []) or []:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if isinstance(name, str):
+                props[name] = entry.get("val")
+    return props
+
+
 async def cluster_drs_recommendations_composite(
     *,
     operator: Operator,
@@ -297,26 +366,31 @@ async def cluster_drs_recommendations_composite(
     Sub-ops read directly on the connector session (sequential):
 
     1. ``GET:/vcenter/cluster/{cluster}`` -- cluster summary (name,
-       resource pool, default host, DRS-enabled flag).
-    2. ``GET:/vcenter/cluster/{cluster}/drs`` -- DRS configuration
-       (enabled, automation level, migration threshold).
+       resource pool, HA/DRS-enabled flags).
+    2. ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (vi-json)
+       -- the cluster's DRS configuration
+       (``ClusterComputeResource.configurationEx.drsConfig``, a
+       ``ClusterDrsConfigInfo``: ``enabled``, ``defaultVmBehavior``,
+       ``vmotionRate``, ...) plus, when
+       ``include_recommendations_history=True``, the cluster's current
+       ``drsRecommendation`` list in the same read. The pinned
+       ``vcenter.yaml`` serves no cluster DRS REST resource at all (the
+       ``GET:/vcenter/cluster/{cluster}/drs`` path #508 declared was
+       unserved -- the #2970 adjacent finding, fixed here per #2986);
+       vim is the only DRS surface, mirroring the vm.migrate DRS
+       lookup.
 
     Returns
     -------
     dict[str, Any]
-        ``{"cluster": <summary dict>, "drs": <drs config dict>,
-        "recommendations_history": <optional list>}``. The
+        ``{"cluster": <summary dict>, "drs": <ClusterDrsConfigInfo
+        dict>, "recommendations_history": <optional list>}``. ``drs``
+        is ``{}`` when the property is unset on the target. The
         ``recommendations_history`` key appears only when the operator
-        sets ``include_recommendations_history=True``; otherwise it is
-        omitted.
-
-    The ``include_recommendations_history`` flag is a placeholder for
-    a future Task that adds a third sub-op (DRS recommendations list).
-    The vSphere REST surface does not expose a stable
-    "recommendations" endpoint in 9.0; the issue body's "DRS state read
-    + performance read + format" hint is satisfied by reading the
-    cluster summary plus the DRS config -- the format/aggregation is
-    what differentiates the composite from a raw GET.
+        sets ``include_recommendations_history=True``; it carries the
+        cluster's current ``ClusterDrsRecommendation`` rows (empty list
+        when DRS has none pending) -- the key name predates the vim
+        switch and is retained for envelope stability.
     """
     cluster_moid = params["cluster"]
     include_history = bool(params.get("include_recommendations_history", False))
@@ -324,26 +398,28 @@ async def cluster_drs_recommendations_composite(
     cluster_result = await _read_sub_op(
         connector, target, operator, _OP_GET_CLUSTER, path_params={"cluster": cluster_moid}
     )
-    drs_result = await _read_sub_op(
-        connector, target, operator, _OP_GET_CLUSTER_DRS, path_params={"cluster": cluster_moid}
+    path_set = [_PROP_DRS_CONFIG]
+    if include_history:
+        path_set.append(_PROP_DRS_RECOMMENDATION)
+    retrieve_result = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_RETRIEVE_PROPERTIES,
+        path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+        body=_build_cluster_props_retrieve_body(cluster_moid, path_set),
     )
+    props = _extract_object_props(retrieve_result)
+    drs_config = props.get(_PROP_DRS_CONFIG)
     out: dict[str, Any] = {
         "cluster": _unwrap_value(cluster_result),
-        "drs": _unwrap_value(drs_result),
+        "drs": drs_config if isinstance(drs_config, dict) else {},
     }
     if include_history:
-        # Surface the history slice from the DRS payload when present.
-        # vSphere 9.0 returns ``{"drs_config": ..., "history": [...]}``;
-        # the key is absent on legacy targets. Empty list rather than
-        # None keeps the operator-visible shape stable.
-        drs_payload = out["drs"]
-        history = drs_payload.get("history", []) if isinstance(drs_payload, dict) else []
-        # Guard against non-list ``history`` values (e.g. a target that
-        # returns the field as a scalar / dict). ``list(history)`` would
-        # iterate keys on a dict or fail on a scalar; the contract is
-        # "always a list when surfaced", so coerce to an empty list when
-        # the payload disagrees.
-        out["recommendations_history"] = history if isinstance(history, list) else []
+        recommendations = props.get(_PROP_DRS_RECOMMENDATION)
+        out["recommendations_history"] = (
+            recommendations if isinstance(recommendations, list) else []
+        )
     return out
 
 
@@ -644,26 +720,18 @@ async def network_portgroup_audit_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any]:
-    """Audit distributed portgroups with parent DVS + connected-VM aggregation.
+    """Audit distributed portgroups with connected-VM aggregation.
 
     Op-id: ``vmware.composite.network.portgroup.audit``.
 
     Sub-ops read directly on the connector session:
 
-    1. ``GET:/vcenter/network/distributed-switches`` -- list DVS
-       entries (filtered to ``filter_dvs`` via the resource's
-       ``filter.vdses`` query when supplied). Drives the DVS index
-       used to enrich each portgroup with its switch name.
-    2. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
+    1. ``GET:/vcenter/network`` with ``filter.types=[DISTRIBUTED_PORTGROUP]``
        -- list distributed portgroups. The REST Automation API has no
        dedicated distributed-portgroup resource; portgroups are
        enumerated through the generic ``Network`` resource filtered to
-       the ``DISTRIBUTED_PORTGROUP`` type (#1602). ``filter_dvs`` is
-       *not* applied here -- the generic ``Network`` FilterSpec exposes
-       ``types``/``names``/``networks``/``datacenters``/``folders`` but
-       no per-DVS filter, so DVS scoping narrows the index (and thus the
-       enriched ``dvs_name``) rather than the portgroup set.
-    3. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
+       the ``DISTRIBUTED_PORTGROUP`` type (#1602).
+    2. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
        VMs connected to the portgroup. Drives the ``vm_count`` +
        ``vm_names`` aggregation.
 
@@ -674,39 +742,26 @@ async def network_portgroup_audit_composite(
         "dvs_name": <str|None>, "type": ..., "vm_count": ...,
         "vm_names": [...]}, ...]}``.
 
-    The generic ``Network`` summary carries only ``{network (id), name,
-    type}`` -- it has no parent-DVS reference -- so ``dvs``/``dvs_name``
-    are best-effort: populated when the upstream payload happens to
-    expose a ``vds``/``distributed_switch`` field (e.g. a richer target
-    or a future spec revision), ``None`` otherwise.
+    Degradation note (#2970): the pre-#2970 step 1 listed distributed
+    switches via ``GET:/vcenter/network/distributed-switches`` to build a
+    moid->name index for ``dvs_name`` enrichment -- but the pinned
+    ``vcenter.yaml`` serves that path only under the NSX-scoped
+    ``/vcenter/namespace-management/`` tree, so the step 404s on a real
+    vCenter 9.0 and is dropped. ``dvs_name`` is therefore always ``None``
+    (it already was in practice: the generic ``Network`` summary carries
+    only ``{network (id), name, type}`` -- no parent-DVS reference to
+    join on -- so the index was never consulted with a hit). ``dvs``
+    stays best-effort: populated when the upstream payload happens to
+    expose a ``vds``/``distributed_switch`` field, ``None`` otherwise.
+    ``filter_dvs`` only ever scoped that index, so it is accepted but
+    inert -- see the parameter schema note.
     """
-    filter_dvs = params.get("filter_dvs")
     include_disconnected = bool(params.get("include_disconnected_vms", False))
-
-    dvs_query: dict[str, Any] = {}
-    if isinstance(filter_dvs, str):
-        dvs_query["filter.vdses"] = [filter_dvs]
-
-    dvs_listing = await _read_sub_op(connector, target, operator, _OP_LIST_DVS, query=dvs_query)
-    dvs_entries = _unwrap_value(dvs_listing)
-    if not isinstance(dvs_entries, list):
-        dvs_entries = []
-    # Build a moid->name lookup so the per-portgroup row carries the
-    # DVS name in addition to its id.
-    dvs_index: dict[str, str | None] = {}
-    for entry in dvs_entries:
-        if not isinstance(entry, dict):
-            continue
-        dvs_id = entry.get("vds") or entry.get("distributed_switch")
-        if isinstance(dvs_id, str):
-            name = entry.get("name") if isinstance(entry.get("name"), str) else None
-            dvs_index[dvs_id] = name
 
     # Distributed portgroups come from the generic network resource
     # filtered to the DISTRIBUTED_PORTGROUP type -- there is no
-    # standalone distributed-portgroup list endpoint. ``filter_dvs`` has
-    # no analogue on this FilterSpec, so it is deliberately not threaded
-    # in here (it scopes the DVS index above instead).
+    # standalone distributed-portgroup list endpoint (and no DVS list
+    # resource at all; see the degradation note above).
     pg_query: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
 
     pg_listing = await _read_sub_op(connector, target, operator, _OP_LIST_NETWORK, query=pg_query)
@@ -744,7 +799,11 @@ async def network_portgroup_audit_composite(
                 "id": pg_id,
                 "name": entry.get("name"),
                 "dvs": dvs_ref_str,
-                "dvs_name": dvs_index.get(dvs_ref_str) if dvs_ref_str else None,
+                # Always None post-#2970: the DVS-list step that built the
+                # moid->name index is not served by the pinned spec (see
+                # the handler degradation note). Key retained for
+                # response-envelope stability.
+                "dvs_name": None,
                 "type": entry.get("type"),
                 "vm_count": len(vm_names),
                 "vm_names": vm_names,

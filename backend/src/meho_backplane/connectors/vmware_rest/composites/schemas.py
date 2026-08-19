@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 15 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 23 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -25,9 +25,15 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 9 write composites inherit T4's
+  each. The 18 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509, plus single-VM ``vm.power`` / #2301). The schema
+  (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
+  VI-JSON ``vm.disk.grow`` / #2893, the folder-template
+  ``vm.clone_from_template`` / #2894, the vim cluster / inventory
+  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895,
+  the #2891 hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
+  ``vm.device.cdrom``, and the two GOSC composites
+  ``guest.customization_spec.create`` / ``vm.customize`` / #2892). The schema
   text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
@@ -40,6 +46,8 @@ from typing import Any
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
+    "CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
@@ -47,6 +55,10 @@ __all__ = [
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "EVENT_TAIL_PARAMETER_SCHEMA",
     "EVENT_TAIL_RESPONSE_SCHEMA",
+    "FOLDER_CREATE_PARAMETER_SCHEMA",
+    "FOLDER_CREATE_RESPONSE_SCHEMA",
+    "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
+    "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
     "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
     "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
@@ -55,16 +67,28 @@ __all__ = [
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA",
+    "VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA",
     "VM_CLONE_PARAMETER_SCHEMA",
     "VM_CLONE_RESPONSE_SCHEMA",
     "VM_CREATE_PARAMETER_SCHEMA",
     "VM_CREATE_RESPONSE_SCHEMA",
+    "VM_CUSTOMIZE_PARAMETER_SCHEMA",
+    "VM_CUSTOMIZE_RESPONSE_SCHEMA",
+    "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
+    "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
+    "VM_DISK_GROW_PARAMETER_SCHEMA",
+    "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
+    "VM_NIC_REPOINT_PARAMETER_SCHEMA",
+    "VM_NIC_REPOINT_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
     "VM_POWER_BULK_RESPONSE_SCHEMA",
     "VM_POWER_PARAMETER_SCHEMA",
     "VM_POWER_RESPONSE_SCHEMA",
+    "VM_RESIZE_PARAMETER_SCHEMA",
+    "VM_RESIZE_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -72,10 +96,13 @@ __all__ = [
 
 #: ``vmware.composite.cluster.drs_recommendations`` parameter schema.
 #:
-#: Reads cluster summary + DRS state (optionally surfacing
-#: ``recommendations_history`` from the DRS payload when present). The
-#: composite dispatches one ``GET:/vcenter/cluster/{cluster}`` and one
-#: ``GET:/vcenter/cluster/{cluster}/drs`` to a single target.
+#: Reads cluster summary + DRS state (optionally surfacing the cluster's
+#: current DRS recommendation list). The composite dispatches one
+#: ``GET:/vcenter/cluster/{cluster}`` plus one vi-json
+#: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` (reading
+#: ``ClusterComputeResource.configurationEx.drsConfig`` and, on request,
+#: ``drsRecommendation``) to a single target -- the pinned vcenter.yaml
+#: serves no cluster DRS REST resource (#2986).
 CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -92,10 +119,12 @@ CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "When true, the handler will also surface the historical "
-                "recommendation summary from the DRS sub-op response. "
-                "Read-only on either setting; the flag toggles aggregation "
-                "shape, not the underlying calls."
+                "When true, the handler also reads the cluster's current "
+                "DRS recommendation list (the vim ``drsRecommendation`` "
+                "property) in the same RetrievePropertiesEx call and "
+                "surfaces it as ``recommendations_history``. Read-only "
+                "on either setting; the flag widens the property read, "
+                "never adds a mutating call."
             ),
         },
     },
@@ -251,12 +280,13 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Optional Distributed-Virtual-Switch managed-object ID. "
-                "When supplied, scopes the distributed-switch listing "
-                "(and thus the parent-DVS name enrichment) to this DVS. "
-                "Distributed portgroups are listed via the generic "
-                "network resource, which has no per-DVS filter, so the "
-                "returned portgroup set is not narrowed by this value."
+                "Accepted but inert (#2970 degradation): this only ever "
+                "scoped the distributed-switch listing that fed the "
+                "``dvs_name`` enrichment, and the pinned vcenter.yaml "
+                "serves no DVS list resource, so that step was dropped. "
+                "The generic network resource has no per-DVS filter "
+                "either, so the returned portgroup set was never "
+                "narrowed by this value."
             ),
         },
         "include_disconnected_vms": {
@@ -314,18 +344,21 @@ CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
         "drs": {
             "type": "object",
             "description": (
-                "DRS configuration payload from "
-                "``GET:/vcenter/cluster/{cluster}/drs`` (vSphere REST "
-                "owns the inner shape)."
+                "DRS configuration payload: the cluster's vim "
+                "``configurationEx.drsConfig`` (``ClusterDrsConfigInfo`` "
+                "-- the vim API owns the inner shape) read via "
+                "``RetrievePropertiesEx``; ``{}`` when the property is "
+                "unset on the target."
             ),
         },
         "recommendations_history": {
             "type": "array",
             "items": {"type": "object"},
             "description": (
-                "Optional history slice surfaced from the DRS payload "
-                "when ``include_recommendations_history=True``. Always "
-                "a list when present; absent otherwise."
+                "Optional list of the cluster's current DRS "
+                "recommendations (vim ``drsRecommendation`` rows) when "
+                "``include_recommendations_history=True``. Always a "
+                "list when present; absent otherwise."
             ),
         },
     },
@@ -517,9 +550,10 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
                     "dvs_name": {
                         "type": ["string", "null"],
                         "description": (
-                            "Parent DVS display name resolved via the "
-                            "DVS listing; ``null`` when the parent DVS "
-                            "is unknown or unnamed."
+                            "Always ``null`` (#2970 degradation): the "
+                            "DVS listing that resolved display names is "
+                            "not served by the pinned spec. Key retained "
+                            "for response-envelope stability."
                         ),
                     },
                     "type": {
@@ -550,7 +584,7 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 # Write composites (G3.1-T6 / #509)
 # ===========================================================================
 #
-# The 9 write composites inherit T4's ``safety_level="dangerous"`` +
+# The 13 write composites inherit T4's ``safety_level="dangerous"`` +
 # ``requires_approval=True`` defaults. The registrar passes those
 # explicitly anyway to keep the policy posture obvious at the call site
 # alongside the read overrides.
@@ -607,14 +641,30 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": "Network moid the NIC attaches to.",
                     },
+                    "backing_type": {
+                        "type": "string",
+                        "enum": [
+                            "STANDARD_PORTGROUP",
+                            "DISTRIBUTED_PORTGROUP",
+                            "OPAQUE_NETWORK",
+                        ],
+                        "default": "STANDARD_PORTGROUP",
+                        "description": (
+                            "``Ethernet.BackingSpec.type`` for the NIC's "
+                            "network backing. Defaults to a standard "
+                            "portgroup."
+                        ),
+                    },
                 },
                 "required": ["network"],
             },
             "default": [],
             "description": (
                 "Per-NIC spec. Each entry drives a "
-                "``PATCH:/vcenter/vm/{vm}/network`` after the VM is "
-                "created. Empty list creates the VM with no NICs."
+                "``POST:/vcenter/vm/{vm}/hardware/ethernet`` adapter "
+                "create (the network rides the ``backing`` spec) after "
+                "the VM is created. Empty list creates the VM with no "
+                "NICs."
             ),
         },
         "power_on_after_create": {
@@ -634,9 +684,10 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.vm.clone`` parameter schema.
 #:
-#: Orchestrates a content-library deploy. Long-running: blocks until
-#: the vSphere task completes or ``timeout_seconds`` elapses. The
-#: caller can opt into fire-and-forget via ``wait_for_completion=False``.
+#: Orchestrates a content-library deploy. The pinned spec's deploy
+#: operation is synchronous (its 200 body is the deployed VM id -- no
+#: ``vmw-task=true`` variant exists, #2970), so there is no task wait to
+#: configure.
 VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -657,32 +708,123 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Content-library template item id. Passed to "
-                "``POST:/vcenter/vm-template/library-items?action=deploy``."
-            ),
-        },
-        "wait_for_completion": {
-            "type": "boolean",
-            "default": True,
-            "description": (
-                "When true (default), block on the vSphere task until "
-                "``timeout_seconds`` elapses. When false, return "
-                "immediately with the task id for caller-side polling."
-            ),
-        },
-        "timeout_seconds": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 600,
-            "description": (
-                "Upper bound on the task wait when "
-                "``wait_for_completion=True``. On timeout the composite "
-                "returns ``status='timeout'`` with the task id; the "
-                "task itself may still complete in the background."
+                "Content-library template item id. Rides the deploy path as "
+                "``POST:/vcenter/vm-template/library-items/"
+                "{templateLibraryItem}?action=deploy``."
             ),
         },
     },
     "required": ["source_vm", "target_name", "library_item"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.clone_from_template`` parameter schema.
+#:
+#: Clones a **folder VM template** (a marked-as-template VM) via vim
+#: ``VirtualMachine.CloneVM_Task`` — the path ``vm.clone`` (content-library
+#: only) cannot serve. Placement moids (``folder`` / ``resource_pool`` /
+#: ``datastore`` / ``host``) are vim MoRef values the operator resolves from
+#: list ops; ``source_template`` is a display **name** resolved to a moid at
+#: dispatch time and asserted to be a template before any clone fires.
+VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "source_template": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the source **folder VM template** (a "
+                "marked-as-template VM). Resolved to a moid via "
+                "``GET:/vcenter/vm?filter.names=`` and asserted to carry "
+                "``config.template=true`` (PropertyCollector read) before any "
+                "clone is issued — a non-template source is refused with "
+                "``status='not_a_template'``, an unknown name with "
+                "``'template_not_found'``, an ambiguous name with "
+                "``'ambiguous_template'``."
+            ),
+        },
+        "new_vm_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Display name for the newly cloned virtual machine.",
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Destination VM ``Folder`` moid (e.g. 'group-v42'). The "
+                "``CloneVM_Task`` ``folder`` argument — where the new VM is "
+                "placed in the inventory tree."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "``ResourcePool`` moid the clone attaches to (e.g. "
+                "'resgroup-8'). Required by vim for a template→VM clone — it "
+                "determines the compute resources available to the clone. For "
+                "a DRS cluster, pass the cluster's root resource pool moid."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "``Datastore`` moid the clone's files are copied to (e.g. "
+                "'datastore-15'). Always required — it names where the new "
+                "VM lands on physical storage."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional ``HostSystem`` moid to pin the clone onto a specific "
+                "host (e.g. 'host-19'). When unset the resource pool (and DRS, "
+                "if enabled) place the VM."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Power the clone on after creation (``CloneSpec.powerOn``). "
+                "When a customization spec is applied, the first power-on "
+                "completes the guest customization; defaults to false."
+            ),
+        },
+        "customization_spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional name of an existing guest OS customization "
+                "specification (GOSC, e.g. one created by "
+                "``vmware.composite.guest.customization_spec.create``). "
+                "Resolved to its full ``CustomizationSpec`` via vim "
+                "``CustomizationSpecManager.GetCustomizationSpec`` and applied "
+                "inline in the clone (``CloneSpec.customization``), so the "
+                "clone yields a customized VM without a separate customize "
+                "dispatch. Secret-bearing customization fields are never "
+                "echoed onto the approval preview — only the spec name is."
+            ),
+        },
+        "customization_spec_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "CustomizationSpecManager",
+            "description": (
+                "vim ``CustomizationSpecManager`` singleton moid used to "
+                "resolve ``customization_spec_name``. Defaults to the standard "
+                "``ServiceContent.customizationSpecManager`` value; overridable "
+                "for a deploy whose singleton moid differs (mirrors the "
+                "performance composite's ``perf_manager_moid``). Ignored when "
+                "``customization_spec_name`` is unset."
+            ),
+        },
+    },
+    "required": ["source_template", "new_vm_name", "folder", "resource_pool", "datastore"],
     "additionalProperties": False,
 }
 
@@ -895,19 +1037,138 @@ CLUSTER_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": "Cluster moid.",
         },
-        "patch_method": {
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.disk.grow`` parameter schema.
+#:
+#: Grow-only virtual-disk capacity change via vim ``ReconfigVM_Task`` (the
+#: pinned 9.0 REST spec's ``Disk.UpdateSpec`` carries only ``backing`` — no
+#: capacity field, so vim is the sole write path). A request ``<=`` the
+#: current capacity is refused (``status="invalid_shrink"``) before any
+#: write. ``disk`` is the REST disk id (== the vim ``VirtualDevice.key``).
+VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
             "type": "string",
             "minLength": 1,
-            "default": "default",
+            "description": "Managed-object ID of the VM owning the disk (e.g. 'vm-42').",
+        },
+        "disk": {
+            "type": "string",
+            "minLength": 1,
             "description": (
-                "Patch backend selector. The handler forwards the "
-                "string verbatim to the per-host patch sub-op so vendor "
-                "patch flows can dispatch into ``vlcm`` / ``vum`` / "
-                "``firmware`` without changing the composite's contract."
+                "Virtual disk identifier — the REST "
+                "``com.vmware.vcenter.vm.hardware.Disk`` id, which is the "
+                "string form of the vim ``VirtualDevice.key`` (e.g. '2000'). "
+                "The handler matches it against the VM's "
+                "``config.hardware.device`` list to select the VirtualDisk to edit."
+            ),
+        },
+        "capacity_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Requested new disk capacity in bytes. Grow-only: a value "
+                "less than or equal to the disk's current capacity is refused "
+                "with ``status='invalid_shrink'`` before any reconfigure is "
+                "issued (vSphere rejects a shrink)."
             ),
         },
     },
-    "required": ["cluster"],
+    "required": ["vm", "disk", "capacity_bytes"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.cluster.drs_rule.create`` parameter schema.
+#:
+#: Add a DRS affinity / anti-affinity rule by *explicit VM list* via vim
+#: ``ClusterComputeResource.ReconfigureComputeResource_Task`` (no cluster-rules
+#: REST path exists; the tag-based compute-policies surface is semantically
+#: wrong — tag-scoped, not an explicit VM list). Rule names are the
+#: idempotence key: a duplicate returns ``status='rule_exists'`` before any
+#: write. VM names resolve to MoRefs scoped to the cluster; fewer than two
+#: resolve → ``status='insufficient_vms'``.
+CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ClusterComputeResource moid the rule is added to (e.g. 'domain-c1').",
+        },
+        "rule_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new rule. Rule names are the idempotence key — a "
+                "name already present on the cluster returns "
+                "``status='rule_exists'`` before any write, not a raw vim "
+                "``DuplicateName`` fault."
+            ),
+        },
+        "rule_type": {
+            "type": "string",
+            "enum": ["affinity", "anti_affinity"],
+            "description": (
+                "``'affinity'`` keeps the VMs on the same host "
+                "(``ClusterAffinityRuleSpec``); ``'anti_affinity'`` keeps them "
+                "on separate hosts (``ClusterAntiAffinityRuleSpec``)."
+            ),
+        },
+        "vms": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 2,
+            "description": (
+                "Display names of the VMs the rule governs. Resolved to MoRefs "
+                "scoped to the cluster (a name not naming a VM in the cluster is "
+                "dropped); fewer than two resolve → ``status='insufficient_vms'``."
+            ),
+        },
+        "enabled": {
+            "type": "boolean",
+            "default": True,
+            "description": "Whether the rule is enabled on creation. Defaults to true.",
+        },
+    },
+    "required": ["cluster", "rule_name", "rule_type", "vms"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.folder.create`` parameter schema.
+#:
+#: Create a VM folder under a named parent via the **synchronous** vim
+#: ``Folder.CreateFolder`` (``/vcenter/folder`` is GET-only, so vim is the
+#: sole write path). The parent is resolved by display name among the
+#: ``VIRTUAL_MACHINE`` folders; no match → ``status='parent_not_found'``,
+#: more than one → ``status='ambiguous_parent'``.
+FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "parent_folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the parent VM folder the new folder is created "
+                "under. Resolved to its moid via ``GET:/vcenter/folder`` filtered "
+                "to VIRTUAL_MACHINE folders; an ambiguous or unknown name is "
+                "refused with a structured status before any write."
+            ),
+        },
+        "folder_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new sub-folder to create under the parent.",
+        },
+    },
+    "required": ["parent_folder", "folder_name"],
     "additionalProperties": False,
 }
 
@@ -975,35 +1236,119 @@ VM_CLONE_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["completed", "pending", "timeout"],
+            "enum": ["completed"],
             "description": (
-                "``'completed'`` when the deploy task finished and "
-                "wait_for_completion was true; ``'pending'`` when "
-                "wait_for_completion was false (caller-side polling); "
-                "``'timeout'`` when wait_for_completion expired."
+                "``'completed'`` -- the synchronous deploy returned the "
+                "new VM id. Deploy failures raise and surface as "
+                "``connector_error`` rather than a status."
             ),
         },
         "task_id": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
-                "vSphere task id from the deploy. Always present so callers can poll independently."
+                "Always ``null``: the pinned deploy operation is "
+                "synchronous (no cis task). Key retained for "
+                "response-envelope stability (#2970)."
             ),
         },
         "vm_id": {
             "type": ["string", "null"],
+            "description": "Deployed VM moid (the deploy operation's 200 body).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "``null`` on ``status='completed'``.",
+        },
+    },
+    "required": ["status", "task_id"],
+}
+
+
+#: ``vmware.composite.vm.clone_from_template`` response schema.
+VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "cloned",
+                "template_not_found",
+                "ambiguous_template",
+                "not_a_template",
+                "timeout",
+            ],
             "description": (
-                "New VM moid surfaced when the task completed. ``null`` on pending/timeout."
+                "``'cloned'`` — the CloneVM_Task reached terminal success; "
+                "``'template_not_found'`` — the source name matched no VM; "
+                "``'ambiguous_template'`` — the name matched more than one VM; "
+                "``'not_a_template'`` — the source resolved but is not a "
+                "marked-as-template VM (``config.template`` is not true); "
+                "``'timeout'`` — the clone task did not reach a terminal state "
+                "within the poll bound (it may still complete in the "
+                "background). A vim task *fault* raises (wrapped "
+                "``connector_error``), it is not a status here."
+            ),
+        },
+        "source_template": {
+            "type": "string",
+            "description": "The source template display name that was requested.",
+        },
+        "source_template_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The resolved source VM moid; ``null`` on ``template_not_found`` "
+                "/ ``ambiguous_template`` (nothing uniquely resolved)."
+            ),
+        },
+        "new_vm_name": {
+            "type": "string",
+            "description": "The requested display name for the clone.",
+        },
+        "new_vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The cloned VM's moid, read from the CloneVM_Task result on "
+                "success; ``null`` on every non-``cloned`` status."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "description": "The destination folder moid the clone was placed in.",
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "CloneVM_Task moid — present once the clone write was issued "
+                "(``cloned`` / ``timeout``); ``null`` on the pre-write "
+                "refusals (``template_not_found`` / ``ambiguous_template`` / "
+                "``not_a_template``)."
+            ),
+        },
+        "customization_spec_name": {
+            "type": ["string", "null"],
+            "description": (
+                "Echo of the applied GOSC spec name, or ``null`` when the "
+                "clone requested no inline customization."
+            ),
+        },
+        "candidates": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "On ``ambiguous_template``, the moids the name matched so the "
+                "operator can re-issue against an unambiguous template; "
+                "``null`` otherwise."
             ),
         },
         "guidance": {
             "type": ["string", "null"],
             "description": (
-                "Operator-facing next-step hint on non-completed "
-                "statuses; ``null`` when ``status='completed'``."
+                "Operator-facing next-step hint on non-``cloned`` statuses; "
+                "``null`` when ``status='cloned'``."
             ),
         },
     },
-    "required": ["status", "task_id"],
+    "required": ["status", "source_template", "new_vm_name"],
 }
 
 
@@ -1013,11 +1358,14 @@ VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["reverted", "ambiguous", "not_found"],
+            "enum": ["reverted", "ambiguous", "not_found", "timeout"],
             "description": (
                 "``'reverted'`` on a successful revert; "
                 "``'ambiguous'`` when multiple snapshots share the "
-                "name; ``'not_found'`` when no snapshot matches."
+                "name; ``'not_found'`` when no snapshot matches; "
+                "``'timeout'`` when the RevertToSnapshot_Task poll "
+                "deadline elapsed (the revert may still complete in "
+                "the background)."
             ),
         },
         "snapshot_id": {
@@ -1219,16 +1567,23 @@ HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["detached", "incomplete"],
+            "enum": ["detached", "incomplete", "timeout"],
             "description": (
                 "``'detached'`` -- every NIC migrated and the host "
                 "removed from the DVS; ``'incomplete'`` -- one or more "
-                "NIC migrations failed, the DVS detach was skipped."
+                "NIC migrations failed, the DVS detach was skipped; "
+                "``'timeout'`` -- the ReconfigureDvs_Task poll deadline "
+                "elapsed (the detach may still complete in the "
+                "background)."
             ),
         },
         "host": {
             "type": "string",
             "description": "Host moid the operator targeted.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": ("Operator hint on ``timeout``; absent/``null`` otherwise."),
         },
         "vm_migration_failures": {
             "type": "array",
@@ -1301,4 +1656,1041 @@ CLUSTER_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
         "patched_hosts",
         "remaining_hosts",
     ],
+}
+
+
+#: ``vmware.composite.vm.disk.grow`` response schema.
+VM_DISK_GROW_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["grown", "invalid_shrink", "disk_not_found", "timeout"],
+            "description": (
+                "``'grown'`` — the ReconfigVM_Task edit reached terminal "
+                "success; ``'invalid_shrink'`` — the requested capacity was "
+                "``<=`` the current size (refused before any write); "
+                "``'disk_not_found'`` — no VirtualDisk with the given key (or "
+                "no readable capacity) on the VM; ``'timeout'`` — the "
+                "reconfigure task did not reach a terminal state within the "
+                "poll bound (it may still complete in the background)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the disk belongs to."},
+        "disk": {"type": "string", "description": "Disk id (== vim device key) the grow targeted."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigVM_Task moid — present once the write was issued "
+                "(``grown`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "from_capacity_bytes": {
+            "type": ["integer", "null"],
+            "description": (
+                "The disk's capacity in bytes before the grow; ``null`` on ``disk_not_found``."
+            ),
+        },
+        "to_capacity_bytes": {
+            "type": "integer",
+            "description": "The requested capacity in bytes.",
+        },
+        "delta_bytes": {
+            "type": ["integer", "null"],
+            "description": (
+                "``to_capacity_bytes - from_capacity_bytes`` (positive on a "
+                "grow, ``<= 0`` on ``invalid_shrink``); ``null`` on ``disk_not_found``."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``grown`` status; ``null`` on a grow."
+            ),
+        },
+    },
+    "required": ["status", "vm", "disk", "to_capacity_bytes"],
+}
+
+
+#: ``vmware.composite.cluster.drs_rule.create`` response schema.
+CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "rule_exists", "insufficient_vms", "timeout"],
+            "description": (
+                "``'created'`` — the ReconfigureComputeResource_Task add reached "
+                "terminal success; ``'rule_exists'`` — a rule with this name is "
+                "already present (idempotence key; refused before any write); "
+                "``'insufficient_vms'`` — fewer than two of the requested VM names "
+                "resolved to a VM in the cluster (refused before any write); "
+                "``'timeout'`` — the reconfigure task did not reach a terminal "
+                "state within the poll bound (it may still complete in the "
+                "background)."
+            ),
+        },
+        "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
+        "rule_name": {"type": "string", "description": "Name of the rule."},
+        "rule_type": {
+            "type": "string",
+            "enum": ["affinity", "anti_affinity"],
+            "description": "Rule kind requested.",
+        },
+        "enabled": {"type": "boolean", "description": "Whether the rule was created enabled."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigureComputeResource_Task moid — present once the write was "
+                "issued (``created`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "resolved_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": "The ``[{vm, name}]`` MoRefs the rule references, resolved from names.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "cluster", "rule_name", "rule_type"],
+}
+
+
+#: ``vmware.composite.folder.create`` response schema.
+FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "parent_not_found", "ambiguous_parent"],
+            "description": (
+                "``'created'`` — the synchronous CreateFolder returned the new "
+                "folder MoRef; ``'parent_not_found'`` — the parent name matched no "
+                "VM folder; ``'ambiguous_parent'`` — it matched more than one "
+                "(both refused before any write)."
+            ),
+        },
+        "parent_folder": {
+            "type": "string",
+            "description": "The parent folder display name the operator supplied.",
+        },
+        "parent_folder_id": {
+            "type": ["string", "null"],
+            "description": "Resolved parent folder moid; ``null`` on a resolution refusal.",
+        },
+        "new_folder_name": {"type": "string", "description": "The requested new folder name."},
+        "folder": {
+            "type": ["string", "null"],
+            "description": (
+                "The new folder's moid — CreateFolder is synchronous and returns "
+                "the MoRef directly (no task poll). ``null`` on a resolution refusal."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "parent_folder", "new_folder_name"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Hardware write composites (#2891) -- parameter + response schemas
+# ---------------------------------------------------------------------------
+#
+# Three pure-REST hardware writes from the #2859 provisioning flow:
+# reconfigure CPU/memory (a freshly-cloned VM is stuck at the template's
+# sizing), repoint a vNIC to a different distributed portgroup, and
+# remove/edit/disconnect a CD-ROM (a template shipping a host-local-ISO
+# CD-ROM pins every clone to one host and blocks vMotion). Each is
+# ``dangerous`` / ``requires_approval=True`` like the other write
+# composites.
+
+
+#: ``vmware.composite.vm.resize`` parameter schema.
+#:
+#: Reads current sizing, then PATCHes CPU and/or memory. At least one of
+#: ``cpu_count`` / ``cores_per_socket`` / ``memory_mib`` must be present
+#: (``anyOf``). A change a powered-on VM cannot take live (no hot-add, a
+#: decrease, or any cores_per_socket change) returns
+#: ``status='requires_power_off'`` rather than a raw vCenter 400.
+VM_RESIZE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid to resize.",
+        },
+        "cpu_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New total vCPU count. Omit to leave CPU count unchanged. "
+                "On a powered-on VM an increase requires CPU hot-add; a "
+                "decrease requires power off (surfaced as "
+                "``status='requires_power_off'``, never a raw 400)."
+            ),
+        },
+        "cores_per_socket": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New cores-per-socket. The total vCPU count must be a "
+                "multiple of this value. Not hot-changeable -- a change on "
+                "a powered-on VM returns ``status='requires_power_off'``."
+            ),
+        },
+        "memory_mib": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New memory size in MiB (maps to the vSphere ``size_MiB`` "
+                "field). Omit to leave memory unchanged. On a powered-on VM "
+                "an increase requires memory hot-add; a decrease requires "
+                "power off (``status='requires_power_off'``)."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "anyOf": [
+        {"required": ["cpu_count"]},
+        {"required": ["cores_per_socket"]},
+        {"required": ["memory_mib"]},
+    ],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.nic.repoint`` parameter schema.
+#:
+#: Repoints an existing vNIC to a different distributed portgroup,
+#: resolved by display name via
+#: ``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`` (there is
+#: no dedicated portgroup list resource -- the #1602 reconciliation
+#: lesson). Ambiguous / missing names refuse the repoint.
+VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid owning the vNIC.",
+        },
+        "nic": {
+            "type": "string",
+            "minLength": 1,
+            "description": "vNIC device id (e.g. ``4000``) to repoint.",
+        },
+        "portgroup_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the target distributed portgroup. "
+                "Resolved to its network moid via "
+                "``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP``. "
+                "A name matching zero portgroups returns "
+                "``status='not_found'``; more than one returns "
+                "``status='ambiguous'`` with the candidates listed."
+            ),
+        },
+    },
+    "required": ["vm", "nic", "portgroup_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.device.cdrom`` parameter schema.
+#:
+#: Verb-driven CD-ROM edit: ``remove`` (DELETE the device), ``update``
+#: (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
+#: ``?action=disconnect``; the device stays but the guest sees it
+#: unplugged). The resolution read surfaces the current backing (the
+#: host-local ISO path the approver needs to see) into the preview.
+VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid owning the CD-ROM device.",
+        },
+        "cdrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "CD-ROM device id (e.g. ``16000``).",
+        },
+        "action": {
+            "type": "string",
+            "enum": ["remove", "update", "disconnect"],
+            "description": (
+                "``remove`` -> ``DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``; "
+                "``update`` -> ``PATCH`` the backing (requires ``backing``); "
+                "``disconnect`` -> ``POST ?action=disconnect`` (the device "
+                "stays, the guest sees it unplugged)."
+            ),
+        },
+        "backing": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": (
+                "New CD-ROM backing spec when ``action='update'`` (e.g. "
+                '``{"type": "CLIENT_DEVICE"}`` to un-pin a host-local '
+                "ISO backing). Ignored for ``remove`` / ``disconnect``."
+            ),
+        },
+    },
+    "required": ["vm", "cdrom", "action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.resize`` response schema.
+VM_RESIZE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["resized", "requires_power_off", "no_change", "partial"],
+            "description": (
+                "``'resized'`` -- every requested dimension applied; "
+                "``'requires_power_off'`` -- the VM is powered on and the "
+                "change cannot be made live (no hot-add, a decrease, or a "
+                "cores_per_socket change); ``'no_change'`` -- the requested "
+                "values already match current; ``'partial'`` -- CPU applied "
+                "but the memory PATCH failed."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the resize targeted."},
+        "name": {
+            "type": ["string", "null"],
+            "description": "VM display name read from ``GET:/vcenter/vm/{vm}``.",
+        },
+        "power_state": {
+            "type": ["string", "null"],
+            "description": "VM power state at read time (e.g. ``POWERED_ON`` / ``POWERED_OFF``).",
+        },
+        "applied": {
+            "type": "object",
+            "properties": {
+                "cpu": {"type": "boolean"},
+                "memory": {"type": "boolean"},
+            },
+            "required": ["cpu", "memory"],
+            "description": "Which dimensions the composite actually PATCHed.",
+        },
+        "from": {
+            "type": "object",
+            "properties": {
+                "cpu_count": {"type": ["integer", "null"]},
+                "cores_per_socket": {"type": ["integer", "null"]},
+                "memory_MiB": {"type": ["integer", "null"]},
+            },
+            "description": "Current sizing read before the change.",
+        },
+        "to": {
+            "type": "object",
+            "properties": {
+                "cpu_count": {"type": ["integer", "null"]},
+                "cores_per_socket": {"type": ["integer", "null"]},
+                "memory_MiB": {"type": ["integer", "null"]},
+            },
+            "description": "Requested sizing (``null`` for dimensions left unchanged).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Next-step hint on ``requires_power_off`` / ``partial``; ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm", "applied", "from", "to"],
+}
+
+
+#: ``vmware.composite.vm.nic.repoint`` response schema.
+VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["repointed", "not_found", "ambiguous"],
+            "description": (
+                "``'repointed'`` -- the NIC backing was PATCHed to the "
+                "target portgroup; ``'not_found'`` -- no distributed "
+                "portgroup matched ``portgroup_name``; ``'ambiguous'`` -- "
+                "more than one did (candidates listed, no PATCH issued)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid owning the NIC."},
+        "nic": {"type": "string", "description": "vNIC device id repointed."},
+        "mac_address": {
+            "type": ["string", "null"],
+            "description": (
+                "NIC MAC address read from ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``."
+            ),
+        },
+        "current_backing": {
+            "type": ["object", "null"],
+            "description": "The NIC's backing before the repoint (type, network, network_name).",
+        },
+        "requested_backing": {
+            "type": "object",
+            "properties": {
+                "portgroup_id": {"type": ["string", "null"]},
+                "portgroup_name": {"type": "string"},
+            },
+            "required": ["portgroup_id", "portgroup_name"],
+            "description": "The target distributed portgroup (moid resolved from the name).",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Matching portgroup rows when ``status='ambiguous'`` (empty otherwise).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Disambiguation hint on ``not_found`` / ``ambiguous``; ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm", "nic", "requested_backing"],
+}
+
+
+#: ``vmware.composite.vm.device.cdrom`` response schema.
+VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["removed", "updated", "disconnected", "invalid_request"],
+            "description": (
+                "``'removed'`` -- the device was deleted; ``'updated'`` -- "
+                "its backing was PATCHed; ``'disconnected'`` -- the device "
+                "was disconnected in-guest; ``'invalid_request'`` -- "
+                "``action='update'`` without a ``backing`` object (no write "
+                "issued)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid owning the CD-ROM."},
+        "cdrom": {"type": "string", "description": "CD-ROM device id acted on."},
+        "action": {
+            "type": "string",
+            "enum": ["remove", "update", "disconnect"],
+            "description": "The verb requested.",
+        },
+        "current_backing": {
+            "type": ["object", "null"],
+            "description": (
+                "The CD-ROM backing read before the change (the host-local "
+                "ISO path the approver needs to see)."
+            ),
+        },
+        "state": {
+            "type": ["string", "null"],
+            "description": (
+                "Connection state at read time (e.g. ``CONNECTED`` / ``NOT_CONNECTED``)."
+            ),
+        },
+        "requested_backing": {
+            "type": ["object", "null"],
+            "description": "Echoed target backing when ``action='update'``; ``null`` otherwise.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Hint on ``invalid_request``; ``null`` otherwise.",
+        },
+    },
+    "required": ["status", "vm", "cdrom", "action"],
+}
+
+
+# ===========================================================================
+# Guest customization (GOSC) composites (#2892)
+# ===========================================================================
+#
+# Two write composites cover guest OS customization -- how a cloned VM
+# gets its hostname, per-NIC static IP + gateway + DNS, and (on Windows)
+# its sysprep identity on first boot. Both are dangerous / approval-gated.
+#
+# Secret hygiene (#1503) is load-bearing here: the create schema carries
+# Windows admin / product-key / domain-join credentials, and those values
+# must never reach a reviewer, preview, broadcast, or audit surface. The
+# op is pinned ``credential_write`` in ``broadcast/events.py`` (params
+# collapse to aggregate-only on the feed) and its park-time preview
+# builder echoes IDENTITY fields only (``_write_preview``); the durable
+# audit row stores only a params hash. See the connector doc for the
+# full three-surface argument.
+
+
+#: ``vmware.composite.guest.customization_spec.create`` parameter schema.
+#:
+#: Creates a reusable named GuestOS customization spec via
+#: ``POST:/vcenter/guest/customization-specs``. The agent-facing shape is
+#: the tractable provisioning subset (hostname + per-NIC static IP +
+#: DNS, linux or windows/sysprep) -- not the full vendor
+#: ``CustomizationSpec`` surface. The handler maps it onto the vCenter
+#: ``CreateSpec`` (``{name, description, spec}``) whose ``spec`` is a
+#: ``CustomizationSpec`` (``{configuration_spec, interfaces,
+#: global_dns_settings}``).
+#:
+#: The ``windows_*`` credential fields (``windows_admin_password`` /
+#: ``windows_product_key`` / ``windows_domain_admin_password``) are
+#: SECRET: they are consumed by the handler into the sysprep body but
+#: never echoed onto any reviewer / preview / broadcast / audit surface
+#: (#1503). The op is pinned ``credential_write`` so the broadcast feed
+#: collapses these params to aggregate-only.
+GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name for the new customization spec (``CreateSpec.name``). "
+                "This is the name a later ``vmware.composite.vm.customize`` "
+                "(or a clone's ``guest_customization_spec``) references."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "default": "",
+            "description": "Free-text description stored on the spec (``CreateSpec.description``).",
+        },
+        "os_type": {
+            "type": "string",
+            "enum": ["linux", "windows"],
+            "description": (
+                "Selects the guest OS branch: ``linux`` builds "
+                "``configuration_spec.linux_config``; ``windows`` builds "
+                "``configuration_spec.windows_config`` with a sysprep body."
+            ),
+        },
+        "hostname": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Guest host name. Mapped to a FIXED "
+                "``HostnameGenerator`` (``{type: FIXED, fixed_name: "
+                "<hostname>}``) on ``linux_config.hostname`` / the Windows "
+                "``user_data.computer_name``."
+            ),
+        },
+        "domain": {
+            "type": "string",
+            "default": "",
+            "description": "DNS domain for the guest (``linux_config.domain``).",
+        },
+        "time_zone": {
+            "type": "string",
+            "description": (
+                "Guest time zone (a tz-database name on Linux, e.g. "
+                "``Europe/Vienna``). Omitted from the body when absent."
+            ),
+        },
+        "interfaces": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ip_address": {
+                        "type": "string",
+                        "description": (
+                            "Static IPv4 address for this NIC. Omit the "
+                            "field to configure the NIC for DHCP instead."
+                        ),
+                    },
+                    "prefix": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 32,
+                        "description": "Subnet prefix length for the static IPv4 address.",
+                    },
+                    "gateways": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Default gateway IPs for this NIC.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "default": [],
+            "description": (
+                "Per-NIC IP settings in adapter order. Each entry maps to a "
+                "``CustomizationSpec.interfaces`` ``AdapterMapping`` "
+                "(``{adapter: {ipv4: {type, ip_address, prefix, gateways}}}``). "
+                "An entry with no ``ip_address`` yields a DHCP adapter; the "
+                "empty list leaves adapters unconfigured."
+            ),
+        },
+        "dns_servers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "Global DNS server IPs (``global_dns_settings.dns_servers``).",
+        },
+        "dns_suffix_list": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "Global DNS search suffixes (``global_dns_settings.dns_suffix_list``).",
+        },
+        "windows_admin_password": {
+            "type": "string",
+            "description": (
+                "SECRET. Local Administrator password for the Windows "
+                "guest (``windows_config.sysprep.gui_unattended.password``). "
+                "Never serialized to any reviewer / preview / broadcast / "
+                "audit surface (#1503)."
+            ),
+        },
+        "windows_product_key": {
+            "type": "string",
+            "description": (
+                "SECRET. Windows product / license key "
+                "(``windows_config.sysprep.user_data.product_key``). Never "
+                "serialized to any reviewer-facing surface (#1503)."
+            ),
+        },
+        "windows_organization": {
+            "type": "string",
+            "description": "Windows registered organization (``user_data.organization``).",
+        },
+        "windows_full_name": {
+            "type": "string",
+            "description": "Windows registered owner name (``user_data.full_name``).",
+        },
+        "windows_join_domain": {
+            "type": "string",
+            "description": (
+                "Active Directory domain the Windows guest joins "
+                "(``sysprep.domain.domain`` with ``sysprep.domain.type = DOMAIN``)."
+            ),
+        },
+        "windows_domain_admin_username": {
+            "type": "string",
+            "description": (
+                "Domain account used for the join (``sysprep.domain.domain_username``)."
+            ),
+        },
+        "windows_domain_admin_password": {
+            "type": "string",
+            "description": (
+                "SECRET. Password for the domain-join account "
+                "(``sysprep.domain.domain_password``). Never serialized to any "
+                "reviewer-facing surface (#1503)."
+            ),
+        },
+        "windows_auto_logon": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Whether the Windows guest auto-logs-on after customization. "
+                "Also drives the required ``gui_unattended.auto_logon_count`` "
+                "(``1`` when true, else ``0``)."
+            ),
+        },
+        "windows_time_zone": {
+            "type": "integer",
+            "default": 85,
+            "description": (
+                "Windows guest time zone as a Microsoft time-zone index "
+                "(``gui_unattended.time_zone``; a REQUIRED integer, distinct "
+                "from the Linux ``time_zone`` tz-name string). Defaults to "
+                "``85`` (GMT). See https://support.microsoft.com/help/973627."
+            ),
+        },
+    },
+    "required": ["spec_name", "os_type", "hostname"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.guest.customization_spec.create`` response schema.
+GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created"],
+            "description": (
+                "``'created'`` -- the spec was created via "
+                "``POST:/vcenter/guest/customization-specs``. Transport / "
+                "vCenter faults surface as the dispatcher's "
+                "``connector_error`` rather than a business status."
+            ),
+        },
+        "spec_name": {
+            "type": "string",
+            "description": (
+                "Name of the created spec -- echoed back so the caller can "
+                "chain it into ``vmware.composite.vm.customize`` or a "
+                "clone's ``guest_customization_spec``."
+            ),
+        },
+        "os_type": {
+            "type": "string",
+            "enum": ["linux", "windows"],
+            "description": "The guest OS branch the spec was built for.",
+        },
+    },
+    "required": ["status", "spec_name", "os_type"],
+}
+
+
+#: ``vmware.composite.vm.customize`` parameter schema.
+#:
+#: Applies a saved customization spec to a VM (resolved by display name)
+#: via ``PUT:/vcenter/vm/{vm}/guest/customization``. vCenter only accepts
+#: a pending customization on a powered-off VM; the composite pre-checks
+#: the resolved power state and refuses a powered-on VM with a structured
+#: ``precondition_failed`` status rather than letting the PUT 400.
+VM_CUSTOMIZE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "VM display name. Resolved via "
+                "``GET:/vcenter/vm?filter.names=...`` to the moid + power "
+                "state; multiple matches return ``status='ambiguous'``."
+            ),
+        },
+        "spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the saved customization spec to apply "
+                "(``Customization.SetSpec.name``). Typically the "
+                "``spec_name`` from a prior "
+                "``guest.customization_spec.create``."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, power the VM on via "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` after setting "
+                "the pending customization, so it applies on that boot. "
+                "Default false leaves the VM powered off."
+            ),
+        },
+    },
+    "required": ["name", "spec_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.customize`` response schema.
+VM_CUSTOMIZE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "customization_set",
+                "powered_on",
+                "not_found",
+                "ambiguous",
+                "precondition_failed",
+            ],
+            "description": (
+                "``'customization_set'`` -- the pending customization was "
+                "set (VM left powered-off); ``'powered_on'`` -- set then "
+                "powered on so it applies this boot; ``'not_found'`` / "
+                "``'ambiguous'`` -- name did not resolve to exactly one VM; "
+                "``'precondition_failed'`` -- the VM is powered on and must "
+                "be powered off first."
+            ),
+        },
+        "vm": {
+            "type": ["string", "null"],
+            "description": "Resolved VM moid; ``null`` on ``not_found`` / ``ambiguous``.",
+        },
+        "name": {"type": "string", "description": "VM display name the caller supplied."},
+        "spec_name": {"type": "string", "description": "Customization spec name applied."},
+        "power_state": {
+            "type": ["string", "null"],
+            "description": (
+                "Resolved power state at dispatch time (``POWERED_ON`` / "
+                "``POWERED_OFF`` / ``SUSPENDED``); ``null`` when the VM did "
+                "not resolve."
+            ),
+        },
+        "applies_on": {
+            "type": ["string", "null"],
+            "description": (
+                "``'next_power_on'`` once the customization is set; ``null`` when nothing was set."
+            ),
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Identity projections of the matched VMs when ``status='ambiguous'``.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Human-readable next step on a non-success status; ``null`` otherwise.",
+        },
+    },
+    "required": ["status", "name", "spec_name"],
+}
+
+
+#: ``vmware.composite.vm.deploy_from_library`` parameter schema.
+#:
+#: Deploys an OVF/OVA content-library item to a new VM via the synchronous
+#: ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``. The
+#: library item is referenced either by ``library_item`` (id passthrough) or
+#: by ``library_item_name`` (resolved via ``POST:/content/library/item?action=find``,
+#: optionally scoped by ``library_name`` through
+#: ``POST:/content/library?action=find``) with ambiguity refused before any
+#: deploy. ``resource_pool`` is the one required placement (the vendor's
+#: ``DeploymentTarget.resource_pool_id`` is required); ``host`` / ``folder`` /
+#: ``datastore`` refine it. ``network_mappings`` is the OVF-network-key →
+#: portgroup-moid map the OVF descriptor's NetworkSection identifiers key
+#: into (spec: ``ResourcePoolDeploymentSpec.network_mappings`` is a map, not
+#: an array).
+VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_item": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Content-library OVF/OVA item id (passthrough). Rides the deploy "
+                "path as ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}"
+                "?action=deploy``. Supply this **or** ``library_item_name`` — not "
+                "both needed; ``library_item`` wins when both are present."
+            ),
+        },
+        "library_item_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "OVF/OVA item display name, resolved to an id via "
+                "``POST:/content/library/item?action=find`` (filtered to "
+                "``type='ovf'``). A name matching no item returns "
+                "``status='item_not_found'``, more than one "
+                "``status='ambiguous_item'`` with the candidate ids — no deploy "
+                "fires. Ignored when ``library_item`` is given."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional library display name that scopes the "
+                "``library_item_name`` lookup to one library. Resolved to a "
+                "library id via ``POST:/content/library?action=find``; an unknown "
+                "name returns ``status='library_not_found'`` and an ambiguous one "
+                "``status='ambiguous_library'`` before any item lookup."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Target ``ResourcePool`` moid — the deploy target's required "
+                "``resource_pool_id``. When it is a stand-alone host or a "
+                "DRS-enabled cluster the server picks the host itself unless "
+                "``host`` is pinned."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional target ``HostSystem`` moid (``DeploymentTarget.host_id``). "
+                "Must be a member of the cluster owning ``resource_pool``."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional destination VM ``Folder`` moid "
+                "(``DeploymentTarget.folder_id``); the server chooses one if absent."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional default ``Datastore`` moid "
+                "(``ResourcePoolDeploymentSpec.default_datastore_id``) for OVF "
+                "storage sections without an explicit mapping."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional display name for the deployed VM; the server uses the "
+                "OVF descriptor's name when omitted."
+            ),
+        },
+        "network_mappings": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Map of OVF NetworkSection identifier → target ``Network`` moid "
+                "(portgroup). Sent verbatim as "
+                "``ResourcePoolDeploymentSpec.network_mappings`` (a map in the "
+                "pinned 9.0 spec). Keys the OVF descriptor does not declare come "
+                "back as a structured ``deploy_failed`` issue, not a raw fault."
+            ),
+        },
+        "storage_provisioning": {
+            "type": "string",
+            "enum": ["thin", "thick", "eagerZeroedThick"],
+            "description": (
+                "Optional default disk provisioning for all OVF storage sections "
+                "(``ResourcePoolDeploymentSpec.storage_provisioning``)."
+            ),
+        },
+        "storage_profile": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional default ``StorageProfile`` id "
+                "(``ResourcePoolDeploymentSpec.storage_profile_id``)."
+            ),
+        },
+        "ovf_properties": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Optional OVF product-section properties as ``{property_id: value}``. "
+                "Folded into a single ``PropertyParams`` entry in "
+                "``ResourcePoolDeploymentSpec.additional_parameters``. Property "
+                "values may be secret (e.g. appliance passwords), so the "
+                "park-time preview echoes only the property **ids**, never the "
+                "values."
+            ),
+        },
+        "accept_all_eula": {
+            "type": "boolean",
+            "description": (
+                "Whether to accept all EULAs declared by the OVF package "
+                "(``ResourcePoolDeploymentSpec.accept_all_eula``). Defaults to "
+                "``true`` — deploying a curated library item accepts its EULA; a "
+                "package with an unaccepted EULA returns ``status='deploy_failed'``."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "description": (
+                "Power the deployed VM on afterward via "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` (OVF deploy itself "
+                "never powers on). Best-effort: a power-on fault leaves "
+                "``status='deployed'`` with ``powered_on=false`` and an issue."
+            ),
+        },
+    },
+    "required": ["resource_pool"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.deploy_from_library`` response schema.
+VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "deployed",
+                "deploy_failed",
+                "deploy_error",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "item_not_found",
+                "ambiguous_item",
+            ],
+            "description": (
+                "``'deployed'`` — the OVF deploy report returned "
+                "``succeeded=true`` and a resource id; ``'deploy_failed'`` — the "
+                "report returned ``succeeded=false`` (network-mapping / placement "
+                "/ EULA / descriptor validation), with per-issue messages under "
+                "``issues``; ``'deploy_error'`` — the deploy call itself faulted "
+                "(HTTP 400/404 for invalid or missing placement resources), "
+                "surfaced as a structured message rather than a raw vendor error; "
+                "``'invalid_reference'`` — neither ``library_item`` nor "
+                "``library_item_name`` was supplied; ``'library_not_found'`` / "
+                "``'ambiguous_library'`` — the ``library_name`` lookup matched "
+                "zero / many libraries; ``'item_not_found'`` / ``'ambiguous_item'`` "
+                "— the ``library_item_name`` lookup matched zero / many items. "
+                "Every non-``deployed`` status is reached before or without a "
+                "successful mutation."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Deployed resource moid (``DeploymentResult.resource_id.id``); "
+                "``null`` unless ``status='deployed'``."
+            ),
+        },
+        "resource_type": {
+            "type": ["string", "null"],
+            "description": (
+                "``'VirtualMachine'`` or ``'VirtualApp'`` "
+                "(``DeploymentResult.resource_id.type``); ``null`` unless deployed."
+            ),
+        },
+        "library_item_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The library-item id the deploy used — the passthrough id, or the "
+                "id resolved from ``library_item_name``. ``null`` when resolution "
+                "failed before deploy."
+            ),
+        },
+        "powered_on": {
+            "type": "boolean",
+            "description": (
+                "Whether the follow-on power-on succeeded. Always ``false`` when "
+                "``power_on`` was not requested or the deploy did not succeed."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Per-issue projections ``{category, severity, message}`` drawn "
+                "from the OVF deploy report (errors / warnings / information) or "
+                "the resolution / power-on failure. Empty on a clean deploy."
+            ),
+        },
+        "candidates": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "Candidate ids on ``ambiguous_item`` (library-item ids) or "
+                "``ambiguous_library`` (library ids); ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm_id", "powered_on", "issues"],
 }

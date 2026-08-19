@@ -68,6 +68,7 @@ EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
         "meho_topology_create_node",
         "meho_topology_delete_node",
         "meho_topology_unannotate",
+        "meho_targets_register",
         "preview_operation",
         "query_audit",
         "query_topology",

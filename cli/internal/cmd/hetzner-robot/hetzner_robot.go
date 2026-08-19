@@ -7,18 +7,22 @@
 // ops, each pre-baking connector_id="hetzner-rest-2026.04" so operators
 // don't type the connector ID on every dispatch:
 //
-//   - `meho hetzner-robot about [--target T]`               — GET:/query
 //   - `meho hetzner-robot server list [--target T]`         — GET:/server
 //   - `meho hetzner-robot server info <server-ip>`          — GET:/server/{server-ip}
 //   - `meho hetzner-robot ip list [--target T]`             — GET:/ip
 //   - `meho hetzner-robot subnet list [--target T]`         — GET:/subnet
 //   - `meho hetzner-robot vswitch list [--target T]`        — GET:/vswitch
-//   - `meho hetzner-robot vswitch info <id>`                — GET:/vswitch/{id}
+//   - `meho hetzner-robot vswitch info <vswitch-id>`        — GET:/vswitch/{vswitch-id}
 //   - `meho hetzner-robot failover list [--target T]`       — GET:/failover
 //   - `meho hetzner-robot rdns list [--target T]`           — GET:/rdns
+//   - `meho hetzner-robot firewall get <server-ip>`         — GET:/firewall/{server-ip}
 //   - `meho hetzner-robot ssh-key list [--target T]`        — GET:/key
 //   - `meho hetzner-robot operation search "<query>"`       — search pre-scoped
 //   - `meho hetzner-robot operation call <op_id> ...`       — call pre-scoped
+//
+// The former `about` verb (GET:/query) was removed by #2985: the
+// spec-reconcile lane proved the Robot Webservice serves no such
+// endpoint. Use `server list` as the cheapest authenticated probe.
 //
 // Every verb POSTs to `/api/v1/operations/call` (or GETs
 // `/api/v1/operations/search` for the search wrapper) with
@@ -81,13 +85,13 @@ func NewRootCmd() *cobra.Command {
 			"narrow-waist meta-tool contract.",
 		SilenceUsage: true,
 	}
-	cmd.AddCommand(newAboutCmd())
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newIPCmd())
 	cmd.AddCommand(newSubnetCmd())
 	cmd.AddCommand(newVswitchCmd())
 	cmd.AddCommand(newFailoverCmd())
 	cmd.AddCommand(newRdnsCmd())
+	cmd.AddCommand(newFirewallCmd())
 	cmd.AddCommand(newSSHKeyCmd())
 	cmd.AddCommand(newOperationCmd())
 	return cmd

@@ -82,10 +82,10 @@ from meho_backplane.db.models import (
 from meho_backplane.events.outbox import publish as publish_event
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
-#: Subscribers (``scheduled_trigger`` rows of ``kind='event'``) match
-#: against this discriminator. v0.2 ships the producer; the
-#: subscription matcher follows in T5 #826's admin surface. The
-#: ``<resource>.<action>`` shape mirrors the audit-trail convention.
+#: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
+#: fires ``scheduled_trigger`` rows of ``kind='event'`` whose ``event_filter``
+#: is contained by the event ``payload`` (below). The ``<resource>.<action>``
+#: shape mirrors the audit-trail convention.
 AGENT_RUN_COMPLETED_EVENT_KIND: Final[str] = "agent_run.completed"
 
 __all__ = [
@@ -533,10 +533,10 @@ async def transition(
     # G11.3-T3 #824: emit ``agent_run.completed`` onto the transactional
     # outbox in the same session as the status write. The outbox row
     # commits with the status change so a producer rollback discards
-    # both. Subscribers (``scheduled_trigger`` rows of ``kind='event'``)
-    # consume the event via the drain loop; v0.2 ships the producer
-    # only -- the subscription matcher lands in T5 #826's admin
-    # surface follow-up. The payload carries the fields a subscriber's
+    # both. The drain loop's subscription matcher
+    # (:mod:`meho_backplane.events.matcher`) consumes the event and fires
+    # each ``kind='event'`` trigger whose ``event_filter`` this payload
+    # contains. The payload carries the fields a subscriber's
     # JSONB filter needs to match against: the run id (so a
     # cheap-to-deep escalation pattern can fire the next agent against
     # a specific prior run), the tenant id (subscribers are

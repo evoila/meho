@@ -29,6 +29,7 @@ exercises the real credential loader. Mirrors
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -285,6 +286,7 @@ def test_every_op_is_safe_read_only_with_closed_schema() -> None:
         "mongodb.count",
         "mongodb.server_status",
         "mongodb.replica_status",
+        "mongodb.current_ops",
     }
     for op in MONGO_OPS:
         assert op.safety_level == "safe", op.op_id
@@ -313,6 +315,7 @@ def test_read_command_allowlist_is_the_closed_fixed_set() -> None:
                 "buildInfo",
                 "hello",
                 "replSetGetStatus",
+                "currentOp",
             }
         )
         == MONGO_READ_COMMANDS
@@ -473,7 +476,9 @@ async def test_replica_status_standalone_reports_not_replica_set(
 async def test_replica_status_replica_set_returns_member_roles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A replica set surfaces member roles from hello + replSetGetStatus."""
+    """A replica set surfaces member roles + per-member lag from replSetGetStatus."""
+    primary_optime = dt.datetime(2026, 8, 12, 12, 0, 0, tzinfo=dt.UTC)
+    secondary_optime = primary_optime - dt.timedelta(seconds=12)
     admin = _FakeDb(
         command_responses={
             "hello": {
@@ -486,8 +491,23 @@ async def test_replica_status_replica_set_returns_member_roles(
             "replSetGetStatus": {
                 "set": "rs0",
                 "members": [
-                    {"name": "m1:27017", "stateStr": "PRIMARY", "health": 1, "uptime": 500},
-                    {"name": "m2:27017", "stateStr": "SECONDARY", "health": 1, "uptime": 490},
+                    {
+                        "name": "m1:27017",
+                        "stateStr": "PRIMARY",
+                        "health": 1,
+                        "uptime": 500,
+                        "optimeDate": primary_optime,
+                        "syncSourceHost": "",
+                    },
+                    {
+                        "name": "m2:27017",
+                        "stateStr": "SECONDARY",
+                        "health": 1,
+                        "uptime": 490,
+                        "optimeDate": secondary_optime,
+                        "syncSourceHost": "m1:27017",
+                        "lastHeartbeat": primary_optime,
+                    },
                 ],
             },
         }
@@ -501,7 +521,111 @@ async def test_replica_status_replica_set_returns_member_roles(
     assert result["primary"] == "m1:27017"
     roles = {m["host"]: m["role"] for m in result["members"]}
     assert roles == {"m1:27017": "primary", "m2:27017": "secondary"}
-    assert result["repl_set_status"]["members"][0]["state"] == "PRIMARY"
+
+    members = {m["name"]: m for m in result["repl_set_status"]["members"]}
+    assert members["m1:27017"]["state"] == "PRIMARY"
+    # Primary carries no lag by definition; the secondary trails by the fixture delta.
+    assert members["m1:27017"]["lag_seconds"] is None
+    assert members["m2:27017"]["lag_seconds"] == 12.0
+    # optimeDate / lastHeartbeat round-trip through _jsonable as ISO-8601; sync source projected.
+    assert members["m2:27017"]["optime_date"] == secondary_optime.isoformat()
+    assert members["m2:27017"]["last_heartbeat"] == primary_optime.isoformat()
+    assert members["m2:27017"]["sync_source_host"] == "m1:27017"
+
+
+@pytest.mark.asyncio
+async def test_replica_status_lag_is_null_without_primary_or_optime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lag_seconds is null when no member is PRIMARY and for a member with no optimeDate."""
+    admin = _FakeDb(
+        command_responses={
+            "hello": {
+                "isWritablePrimary": False,
+                "setName": "rs0",
+                "primary": None,
+                "me": "m1:27017",
+                "hosts": ["m1:27017"],
+                "arbiters": ["arb:27017"],
+            },
+            "replSetGetStatus": {
+                "set": "rs0",
+                "members": [
+                    {
+                        "name": "m1:27017",
+                        "stateStr": "SECONDARY",
+                        "health": 1,
+                        "uptime": 500,
+                        "optimeDate": dt.datetime(2026, 8, 12, 12, 0, 0, tzinfo=dt.UTC),
+                    },
+                    {"name": "arb:27017", "stateStr": "ARBITER", "health": 1, "uptime": 480},
+                ],
+            },
+        }
+    )
+    client = _FakeClient(default=admin)
+    _patch_client(monkeypatch, client)
+
+    result = await MongoDbConnector().replica_status(_make_operator(), _MongoTarget(), {})
+    members = {m["name"]: m for m in result["repl_set_status"]["members"]}
+    # No elected primary -> lag undefined for every member; the arbiter also has no optimeDate.
+    assert members["m1:27017"]["lag_seconds"] is None
+    assert members["arb:27017"]["lag_seconds"] is None
+    assert members["arb:27017"]["optime_date"] is None
+    assert members["arb:27017"]["last_heartbeat"] is None
+
+
+@pytest.mark.asyncio
+async def test_current_ops_omits_command_and_query_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: mongodb.current_ops returns ops but never the query-bearing fields.
+
+    The currentOp ``command`` / ``originatingCommand`` documents carry literal
+    filter values (and preserve a ``comment`` even when truncated), so the slim
+    projection strips them — mirroring ``postgres.activity``'s query-text
+    omission (:func:`test_activity_omits_query_text`).
+    """
+    admin = _FakeDb(
+        command_responses={
+            "currentOp": {
+                "inprog": [
+                    {
+                        "opid": 12345,
+                        "op": "query",
+                        "ns": "app.events",
+                        "active": True,
+                        "secs_running": 87,
+                        "microsecs_running": 87_000_000,
+                        "client": "10.0.0.5:51000",
+                        "desc": "conn42",
+                        "connectionId": 42,
+                        "planSummary": "COLLSCAN",
+                        "numYields": 3,
+                        "waitingForLock": False,
+                        "currentOpTime": "2026-08-12T10:00:00.000+00:00",
+                        # The query-bearing documents that must be stripped:
+                        "command": {"find": "events", "filter": {"token": "s3cr3t"}},
+                        "originatingCommand": {"aggregate": "events", "pipeline": []},
+                    }
+                ],
+                "ok": 1.0,
+            }
+        }
+    )
+    client = _FakeClient(default=admin)
+    _patch_client(monkeypatch, client)
+
+    result = await MongoDbConnector().current_ops(_make_operator(), _MongoTarget(), {})
+    op = result["operations"][0]
+    # The triage-safe fields survive the projection...
+    assert op["opid"] == 12345
+    assert op["secs_running"] == 87
+    assert op["ns"] == "app.events"
+    # ...but neither query-bearing document reaches the result.
+    assert "command" not in op
+    assert "originatingCommand" not in op
+    assert client.closed is True
 
 
 @pytest.mark.asyncio

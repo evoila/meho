@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block page_title %}Event Sources &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Event Sources</h1>
+      <p class="text-sm opacity-70">
+        External producers authorised to publish inbound events into your tenant.
+      </p>
+    </div>
+    {% if is_tenant_admin %}
+      <a href="/ui/event-sources/new" class="btn btn-sm btn-primary" data-action="new-event-source">
+        New event source
+      </a>
+    {% endif %}
+  </header>
+
+  <div id="event-source-table">
+    {% if items %}
+      <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+        <table class="table table-zebra">
+          <thead>
+            <tr>
+              <th scope="col">Slug</th>
+              <th scope="col">Name</th>
+              <th scope="col">Kind</th>
+              <th scope="col">Auth</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in items %}
+              <tr>
+                <td class="font-mono break-all" data-slug="{{ item.slug }}">{{ item.slug }}</td>
+                <td>{{ item.name }}</td>
+                <td><span class="badge badge-outline badge-sm">{{ item.kind.value }}</span></td>
+                <td>{{ item.auth_strategy.value }}</td>
+                <td>
+                  <span class="badge badge-sm {{ 'badge-success' if item.status.value == 'active' else 'badge-warning' }}">
+                    {{ item.status.value }}
+                  </span>
+                </td>
+                <td class="text-right whitespace-nowrap">
+                  {% if is_tenant_admin %}
+                    <a href="/ui/event-sources/{{ item.slug | urlencode }}/edit" class="btn btn-ghost btn-xs">Edit</a>
+                    <form method="post" action="/ui/event-sources/{{ item.slug | urlencode }}/delete"
+                          class="inline" onsubmit="return confirm('Delete event source {{ item.slug }}?');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-ghost btn-xs text-error">Delete</button>
+                    </form>
+                  {% else %}
+                    <span class="opacity-50 text-xs">read-only</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="rounded-box border border-base-300 bg-base-100 p-8 text-center opacity-70">
+        No event sources registered in this tenant.
+      </div>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

@@ -152,11 +152,17 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
-| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector + `label_selector`. |
+| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
 | `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
+| `k8s.storageclass.list` | safe  | `StorageV1Api.list_storage_class()` -- name / provisioner / `is_default` (GA `storageclass.kubernetes.io/is-default-class` annotation) / reclaim_policy / volume_binding_mode / allow_expansion. Cluster-scoped, no params. (`ops_storage.py`) |
+| `k8s.persistentvolume.list` | safe | `CoreV1Api.list_persistent_volume()` -- name / phase / capacity / storage_class / claim_ref (`namespace/name`) / access_modes / reclaim_policy. Cluster-scoped, no params. (`ops_storage.py`) |
+| `k8s.persistentvolumeclaim.list` | safe | `CoreV1Api.list_namespaced_persistent_volume_claim()` / `list_persistent_volume_claim_for_all_namespaces()` -- name / namespace / status / capacity (`status.capacity.storage`) / storage_class / volume_name / access_modes. `namespace` XOR `all_namespaces`. Backs `k8s.ls /<ns>/persistentvolumeclaims`. (`ops_storage.py`) |
+| `k8s.crd.list`         | safe   | `ApiextensionsV1Api.list_custom_resource_definition()` -- group / kind / plural / scope / versions (`{name, served, storage}`). Discovery op for the generic CR reads. (`ops_customresource.py`) |
+| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. (`ops_customresource.py`) |
+| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 
@@ -240,7 +246,7 @@ the same pattern `ops_workload.py` / `ops_logs.py` use. Every op is
 | `k8s.cordon`           | caution   | `CoreV1Api.patch_node(spec.unschedulable)`; `uncordon=true` reverses. Eviction-free. |
 | `k8s.apply`            | dangerous | Server-side apply over `DynamicClient.server_side_apply` (`field_manager="meho"`), GVK resolved per manifest doc from discovery. `dry_run="server"` -> API `?dryRun=All` (mutates nothing, returns the would-be object). |
 | `k8s.delete`           | dangerous | Kind dispatch **scoped to pod/job/replicaset in v1** (namespace/PVC/PV rejected); explicit `propagation_policy` / `grace_period_seconds`. |
-| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). |
+| `k8s.secret.create`    | dangerous | `CoreV1Api.create_namespaced_secret`; values written but never echoed (response is key-names only). Values may be inline (`string_data` / `data`) or ref-sourced (`string_data_secret_ref` / `data_secret_ref`, resolved server-side through the credential-backend seam). |
 | `k8s.job.create`       | dangerous | `BatchV1Api.create_namespaced_job` from a spec body; response is identity only. |
 
 **Secret redaction reuses the shipped `credential_write` op-class
@@ -252,6 +258,43 @@ material in `params`). `classify_op` returns `credential_write`, so
 `{op_class, result_status}` -- the secret never reaches the SSE stream or
 a Slack mirror. The handlers also return value-free summaries, so the
 `OperationResult` itself carries no secret.
+
+**`k8s.secret.create` ref-valued params (#2860).** Redaction keeps a
+secret off audit/broadcast once it is *in* `params`, but an agent driving
+the op still had to put the value there -- and an inline value transits
+the caller's context (the model API) before MEHO ever sees it. To close
+that leak vector, `k8s.secret.create` accepts ref-valued siblings that are
+resolved **server-side, mid-dispatch**, so a Vault/GSM-resident value
+materialises into the Secret without the value ever entering the caller's
+context (the same pattern as keycloak's `password_secret_ref`, #2401):
+
+- `string_data_secret_ref` / `data_secret_ref` -- a
+  `{secret-key: "<scheme>:<vault-or-gsm-path>#<field>"}` map. Each ref is
+  read under the operator's identity via
+  [`load_vault_secret_data`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
+  (the same credential-backend seam the kubeconfig loader rides -- no new
+  connector dependency), and the resolved key/value is merged into
+  `string_data` (plaintext) / `data` (base64) respectively.
+- `string_data_secret_mount` / `data_secret_mount` -- the Vault KV-v2
+  mount for the corresponding ref map (default `secret`; backends without
+  a mount concept, e.g. GSM, ignore it).
+- The `anyOf` widens so a call may supply inline maps, ref maps, or both
+  (merged into one Secret; refs win a key collision). Multi-key Secrets
+  (the ArgoCD spoke token + CA case) work natively -- one ref per key.
+- The optional `#<field>` fragment on a ref names which field of the
+  resolved payload to use (default: the Secret key). It is split off in
+  the connector *before* the seam read -- a Vault KV-v2 path cannot carry
+  a `#` (hvac would 404), so the caller owns fragment->field selection
+  uniformly across the `vault:` and `gsm:` schemes. Backend-agnostic for
+  free: the seam dispatches on scheme, so a `gsm:` ref resolves on a GSM
+  deployment with no extra connector code.
+
+The redaction above is unchanged and still applies: the op stays pinned in
+`_CREDENTIAL_WRITE_OPS`, and only the *ref* (never a value) is ever in
+`params`, so the audit row hashes a path and the broadcast stays
+aggregate-only. A resolved payload missing the requested field raises
+`KubernetesSecretRefError` (never a bare `KeyError`, never echoing a
+value).
 
 **`k8s.apply` dry-run preview.** The op supports `dry_run="server"` (maps
 to the API's `?dryRun=All`) so the would-be object is returned without
@@ -341,6 +384,40 @@ configmap when?". v0.2 classifies `info` as `op_class=read`; G6.3 may
 upgrade specific configmap-name patterns (managed-by
 `secret-translator`, names matching `*-secret-config`) to
 `sensitive-read`.
+
+### Storage + custom-resource read tier (#2830, `ops_storage.py` / `ops_customresource.py`)
+
+Six safe reads that close the pre-flight sizing gap (the RDC Hetzner
+consumer session that fell back to raw kubectl):
+
+- **Storage** (`ops_storage.py`): `k8s.storageclass.list`,
+  `k8s.persistentvolume.list`, `k8s.persistentvolumeclaim.list`. The two
+  cluster-scoped list ops (StorageClass, PV) take no parameters (the
+  `k8s.node.list` shape); PVC adopts the shared `namespace` XOR
+  `all_namespaces` selector. `is_default` reads the GA
+  `storageclass.kubernetes.io/is-default-class` annotation; PVC/PV
+  capacity is the `storage` quantity plucked from `status.capacity` /
+  `spec.capacity`; a PV's `claim_ref` renders as `namespace/name`.
+- **Custom resources** (`ops_customresource.py`): `k8s.crd.list` is the
+  discovery op (group / version / plural / scope / versions), and
+  `k8s.cr.list` / `k8s.cr.info` read objects generically over
+  `CustomObjectsApi` (namespaced call when a `namespace` is supplied,
+  cluster call otherwise). CustomObjectsApi returns plain dicts, so the
+  projection walks dict keys. Result size is bounded: the projection
+  keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
+  at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
+  is `true` and the excerpt is a preview (not parseable JSON). The
+  verbose `managedFields` / `annotations` metadata blocks are dropped.
+
+This tier also retires the `cluster_kinds` **dead-end advertisements**:
+`k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
+root output (and the namespace walk counted `persistentvolumeclaims`)
+with no op behind them. The op ids are exactly
+`k8s.storageclass.list` / `k8s.persistentvolume.list` /
+`k8s.persistentvolumeclaim.list` so the `k8s.ls` singular-normalisation
+map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
+`k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
+`unknown_op` envelope.
 
 ## Control flow
 

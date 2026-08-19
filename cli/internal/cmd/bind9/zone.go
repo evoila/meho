@@ -42,7 +42,7 @@ func newZoneListCmd() *cobra.Command {
 		Long: "list dispatches bind9.zone.list against the connector_id=\n" +
 			"\"bind9-ssh-9.x\" connector. Returns one row per zone declared\n" +
 			"in the active configuration (parsed from `named-checkconf -p`).\n" +
-			"The human render shows name / type / file columns; --json emits\n" +
+			"The human render shows name / type / view / file columns; --json emits\n" +
 			"the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho bind9 zone list --target vcf-router-bind9\n" +
@@ -74,7 +74,9 @@ func runZoneList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneO
 }
 
 // printZoneList renders the zone list. Each row carries `{name,
-// file, type}` per `_BIND9_ZONE_LIST_RESPONSE_SCHEMA`.
+// file, type, view}` per `_BIND9_ZONE_LIST_RESPONSE_SCHEMA`. The
+// `view` column is blank for zones declared outside any view; on a
+// split-horizon nameserver it disambiguates rows that share a name.
 func printZoneList(w io.Writer, r *CallResult) {
 	fmt.Fprintf(w, "%s bind9.zone.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
@@ -90,14 +92,16 @@ func printZoneList(w io.Writer, r *CallResult) {
 		fmt.Fprintln(w, "  (0 zones)")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-10s %s\n", "name", "type", "file")
+	fmt.Fprintf(w, "%-40s %-10s %-24s %s\n", "name", "type", "view", "file")
 	for _, row := range rows {
 		name := stringField(row, "name")
 		zoneType := stringField(row, "type")
+		view := stringField(row, "view")
 		file := stringField(row, "file")
-		fmt.Fprintf(w, "%-40s %-10s %s\n",
+		fmt.Fprintf(w, "%-40s %-10s %-24s %s\n",
 			truncate(name, 40),
 			truncate(zoneType, 10),
+			truncate(view, 24),
 			file,
 		)
 	}

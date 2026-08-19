@@ -10,7 +10,7 @@ pre-recorded fixture responses — no Docker dependency, no live pfSense.
 Acceptance criteria verified (Issue #850)
 ==========================================
 
-(a) All 8 pfSense ops dispatch through ``call_operation`` and return
+(a) All 9 pfSense ops dispatch through ``call_operation`` and return
     ``status="ok"`` results against the fake-shell server.
 (b) This file passes in the ``meho-runners`` CI lane with no Docker
     dependency (asyncssh in-process server; SQLite via the autouse
@@ -43,6 +43,8 @@ Fixture responses reproduce realistic but minimal pfSense 2.7 output:
 - ``ifconfig -a``      → 2-interface output
 - ``cat /cf/conf/config.xml`` → minimal config.xml snippet (gateways +
   version) used by both ``gateway.list`` and ``config.show``
+- ``cat /var/dhcpd/var/db/dhcpd.leases`` → 2-lease ISC dhcpd DB
+  (one active, one past-``ends`` → expired) used by ``dhcp.leases``
 """
 
 from __future__ import annotations
@@ -133,6 +135,30 @@ _FIXTURE_CONFIG_XML = """\
 </pfsense>
 """
 
+_FIXTURE_DHCP_LEASES = """\
+# The format of this file is documented in the dhcpd.leases(5) manual page.
+lease 192.168.1.100 {
+  starts 3 2026/08/12 10:00:00;
+  ends 5 2099/01/01 00:00:00;
+  binding state active;
+  hardware ethernet 08:00:27:aa:bb:cc;
+  client-hostname "lab-vm-01";
+}
+lease 192.168.1.150 {
+  starts 3 2000/01/01 08:00:00;
+  ends 3 2000/01/01 09:00:00;
+  binding state active;
+  hardware ethernet 08:00:27:44:55:66;
+}
+"""
+
+# Live ``dpinger`` view for the single WAN_DHCP gateway in the config
+# fixture above -- monitor IP matches so the merge lands on that row.
+_FIXTURE_GATEWAY_STATUS = """\
+Name      Monitor        Source        Delay     StdDev    Loss    Status  Substatus
+WAN_DHCP  192.168.1.254  192.168.1.1   0.651ms   0.112ms   0.0%    online  none
+"""
+
 # Map SSH command string → pre-recorded stdout.
 _FIXTURE_RESPONSES: dict[str, str] = {
     "cat /etc/version": _FIXTURE_VERSION,
@@ -141,6 +167,8 @@ _FIXTURE_RESPONSES: dict[str, str] = {
     "pfctl -sn": _FIXTURE_PFCTL_SN,
     "ifconfig -a": _FIXTURE_IFCONFIG,
     "cat /cf/conf/config.xml": _FIXTURE_CONFIG_XML,
+    "cat /var/dhcpd/var/db/dhcpd.leases": _FIXTURE_DHCP_LEASES,
+    "pfSsh.php playback gatewaystatus": _FIXTURE_GATEWAY_STATUS,
 }
 
 # ---------------------------------------------------------------------------
@@ -265,6 +293,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "pfsense.interface.list",
     "pfsense.gateway.list",
     "pfsense.config.show",
+    "pfsense.dhcp.leases",
 )
 
 # ---------------------------------------------------------------------------
@@ -377,11 +406,11 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 8 pfSense ops are registered in PFSENSE_OPS."""
+    """All 9 pfSense ops are registered in PFSENSE_OPS."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
     missing = set(EXPECTED_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 8, f"Expected 8 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 9, f"Expected 9 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_all_safe_and_no_approval_required() -> None:
@@ -404,7 +433,7 @@ def test_pfsense_ops_parameter_schemas_are_empty() -> None:
 
 
 def test_pfsense_ops_all_have_llm_instructions() -> None:
-    """All 8 ops carry non-empty llm_instructions for agent discoverability."""
+    """All 9 ops carry non-empty llm_instructions for agent discoverability."""
     for op in PFSENSE_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions
@@ -424,6 +453,7 @@ def test_pfsense_ops_correct_group_keys() -> None:
         "pfsense.interface.list": "network",
         "pfsense.gateway.list": "network",
         "pfsense.config.show": "config",
+        "pfsense.dhcp.leases": "dhcp",
     }
     op_by_id = {op.op_id: op for op in PFSENSE_OPS}
     for op_id, expected_group in expected_groups.items():
@@ -596,6 +626,11 @@ async def test_pfsense_e2e_gateway_list_dispatches_ok(
     assert len(rows) == 1
     assert rows[0]["name"] == "WAN_DHCP"
     assert rows[0]["defaultgw"] is True
+    # Live dpinger health merged from the second command.
+    assert rows[0]["status"] == "online"
+    assert rows[0]["delay_ms"] == 0.651
+    assert rows[0]["loss_pct"] == 0.0
+    assert rows[0]["substatus"] == "none"
 
 
 @pytest.mark.asyncio
@@ -758,7 +793,7 @@ async def test_pfsense_e2e_all_ops_write_audit_rows(
     pfsense_e2e: _PfsenseE2EBundle,
     captured_events: list[Any],
 ) -> None:
-    """All 8 pfSense ops each produce an audit row after dispatch.
+    """All 9 pfSense ops each produce an audit row after dispatch.
 
     Dispatches every op in EXPECTED_OP_IDS and asserts that each one
     inserted at least one ``DISPATCH`` AuditLog row.

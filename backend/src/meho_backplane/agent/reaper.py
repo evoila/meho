@@ -48,6 +48,13 @@ session-level advisory lock on a fixed key, acquired non-blocking,
 elects one replica per tick. The replica that loses the race skips
 the sweep entirely; the next cadence is its chance to re-elect.
 
+The lock is hosted on a dedicated pinned connection
+(:func:`meho_backplane.db.advisory.advisory_lock`, #3010) -- **advisory
+lock and unlock must run on the same connection**. The tick commits its
+transitions before unlocking; a lock taken on the work session would
+strand on the pooled connection that commit releases, and every later
+tick drawing a different connection would skip the sweep silently.
+
 On SQLite (the dev / test path) the lock is a no-op: the test process
 is single-replica so there is nothing to elect.
 
@@ -103,9 +110,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentRun,
@@ -113,6 +121,7 @@ from meho_backplane.db.models import (
     AuditLog,
     ScheduledTriggerInFlightPolicy,
 )
+from meho_backplane.metrics import note_loop_tick
 from meho_backplane.operations.agent_run import (
     IllegalTransitionError,
     release_lease,
@@ -166,41 +175,6 @@ _AUDIT_PATH_RESUME = "internal/agent-run/reaper/clear-for-resume"
 AGENT_RUN_REAPER_INTERRUPTION_REASON = (
     "interrupted: lease expired -- worker died mid-flight (reaped by agent_run_reaper)"
 )
-
-
-async def _try_advisory_lock(session: AsyncSession, key: int) -> bool:
-    """Acquire a session-level PG advisory lock; ``True`` on non-PG.
-
-    Returns ``True`` when the lock is held (or the dialect has no
-    advisory locks, i.e. the single-replica SQLite test path) and the
-    caller should proceed with the sweep; ``False`` when another
-    replica holds it and this tick should be skipped.
-
-    Same shape as
-    :func:`meho_backplane.topology.scheduler._try_advisory_lock` --
-    duplicated rather than imported so the reaper does not pull in
-    the topology package (different feature surface, different
-    lifespan ordering).
-    """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return True
-    locked = await session.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
-    return bool(locked)
-
-
-async def _release_advisory_lock(session: AsyncSession, key: int) -> None:
-    """Release the session-level PG advisory lock; no-op on non-PG.
-
-    The advisory lock is released explicitly at the end of every tick
-    so the connection can be returned to the pool clean. PG would
-    release it on session close anyway, but the asyncpg pool may
-    reuse the connection before close.
-    """
-    conn = await session.connection()
-    if conn.dialect.name != "postgresql":
-        return
-    await session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
 
 
 def _stage_audit_row(
@@ -360,11 +334,13 @@ async def _run_one_tick() -> None:
     now = datetime.now(UTC)
     settings = get_settings()
     sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        if not await _try_advisory_lock(session, _REAPER_ADVISORY_LOCK_KEY):
+    # #3010: the lock rides a dedicated pinned connection — the tick's
+    # commit would strand a lock taken on the work session.
+    async with advisory_lock(_REAPER_ADVISORY_LOCK_KEY, subsystem="agent_run_reaper") as locked:
+        if not locked:
             _log.debug("agent_run_reaper_tick_skipped_lock_held")
             return
-        try:
+        async with sessionmaker() as session:
             # ``select ... where status='running' AND lease_expires_at < now``
             # -- the partial index drives this on PG. The LIMIT bounds
             # the per-tick work; a backlog is drained across multiple
@@ -438,8 +414,6 @@ async def _run_one_tick() -> None:
                 cleared_for_resume=outcomes.get("cleared", 0),
                 duration_ms=duration_ms,
             )
-        finally:
-            await _release_advisory_lock(session, _REAPER_ADVISORY_LOCK_KEY)
 
 
 async def _reaper_loop() -> None:
@@ -472,6 +446,7 @@ async def _reaper_loop() -> None:
                 "agent_run_reaper_tick_failed",
                 exc_info=True,
             )
+        note_loop_tick("agent_run_reaper", get_settings().agent_run_reaper_tick_interval_seconds)
 
 
 def start_agent_run_reaper() -> asyncio.Task[None]:

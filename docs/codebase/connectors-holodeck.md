@@ -24,7 +24,13 @@ the 7 read ops (`config.show`, `pod.list`, `pod.info`, `service.list`,
 registered under `connector_id="holodeck-ssh-9.0"`. G3.8-T3 (#855) ships
 the CLI verbs + E2E acceptance suite + onboarding doc. G3.18-T1 (#2153)
 appends `holodeck.disk.usage` — root-fs `df` + `du` on a fixed growth-dir
-set for pre-eviction disk diagnosis — bringing the total to 9 ops.
+set for pre-eviction disk diagnosis — bringing the total to 9 ops. #2847
+appends `holodeck.backups.list` — a safe per-file inventory of
+`/var/backups` reusing `holodeck.backups.prune`'s own `find` listing —
+taking the read surface to **10 ops** (13 total, including the 3
+approval-gated write ops). #2908 (Initiative #2907) appends the 4
+deploy-lifecycle ops (`config.apply`, `instance.start`, `instance.status`,
+`router.patch`) — **17 ops total**.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -41,11 +47,14 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 - **Read-op handlers + parsers** (`ops_read.py`) — `holodeck_config_show`,
   `holodeck_pod_list`, `holodeck_pod_info`, `holodeck_service_list`,
   `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`,
-  `holodeck_disk_usage`. Pure parsers: `parse_kubectl_command`
-  (verb-safelist enforcement), `parse_logs_tail_output` (GNU `tail`
-  `==> path <==` header split), `parse_networking_payload` (four-section
-  composer), `parse_disk_usage_output` (root-fs `df -B1` + per-dir
-  `du -sb` composer with per-section `ok`). `GROWTH_DIRS` is the fixed
+  `holodeck_disk_usage`, `holodeck_backups_list`. Pure parsers:
+  `parse_kubectl_command` (verb-safelist enforcement),
+  `parse_logs_tail_output` (GNU `tail` `==> path <==` header split),
+  `parse_networking_payload` (four-section composer),
+  `parse_disk_usage_output` (root-fs `df -B1` + per-dir `du -sb` composer
+  with per-section `ok`), `parse_backup_listing_output` (`find -printf
+  '%T@ %s %p'` → `{path, mtime, size_bytes}` rows, newest-first order
+  preserved). `GROWTH_DIRS` is the fixed
   code constant (`/var/backups`, `/holodeck-runtime`) the disk-usage op
   measures — no operator path parameter. `KubectlSafetyError` is the
   `ValueError` subclass the dispatcher's error envelope picks up when a
@@ -71,8 +80,19 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 - **Op metadata** (`ops.py`) — the `HolodeckOp` dataclass and the
   `HOLODECK_OPS` tuple. T1 shipped the single `holodeck.about` canary; T2
   (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
-  (the 7 read ops defined in `ops_read.py`) onto the canary. The pattern
-  mirrors bind9's `_bind9_ops()` and pfSense's `_pfsense_ops()`.
+  (the 7 read ops defined in `ops_read.py`) onto the canary, and later tasks
+  append `WRITE_OPS` (`ops_write.py`, #2154) and `DEPLOY_OPS` (`ops_deploy.py`,
+  #2908) — **17 ops total**. The pattern mirrors bind9's `_bind9_ops()` and
+  pfSense's `_pfsense_ops()`.
+
+- **Deploy-lifecycle op handlers + helpers** (`ops_deploy.py`, #2908) —
+  `holodeck_config_apply`, `holodeck_instance_start`, `holodeck_instance_status`,
+  `holodeck_router_patch`, plus the pure helpers `validate_config_apply_params`
+  (the depot-vs-5.2.x refusal, also unit-tested directly),
+  `map_instance_status_envelope` (the `Get-HoloDeckInstance` → flat envelope
+  mapper), `target_hr_version` (reads `Target.version` then `fingerprint.version`),
+  and `ROUTER_PATCHES` (the three `RouterPatchSpec` records: applied/unpatched
+  grep markers + the `sed` expression per patch).
 
 - **`parse_photon_version`** (`connector.py`) — pure parser for
   `/etc/photon-release` output; recovers the `<major>.<minor>(.<patch>)?`
@@ -158,7 +178,7 @@ Four-stage health check; each stage maps to a distinct
 
 The probe does not mutate state. `Get-Service` is read-only on Photon.
 
-### Read ops (T2 surface + G3.18-T1 disk.usage)
+### Read ops (T2 surface + G3.18-T1 disk.usage + #2847 backups.list)
 
 The read ops route through the dispatcher's standard
 `call_operation` path. Each registers via `register_typed_operation()` with
@@ -273,6 +293,27 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   it can never become an arbitrary `du`. This is the complete
   pre-eviction disk signal for the 74 GB root fs (VCF-9.x backup fill).
 
+- **`holodeck.backups.list`** (group `backups`, JSONFlux-shaped, #2847).
+  Runs `find <dir> -maxdepth 1 -type f -printf '%T@ %s %p' | sort -rn`
+  over **plain SSH** — the read-only half of `holodeck.backups.prune`'s
+  own listing pipeline (same `find -maxdepth 1`, plus a `%s` size field,
+  minus the destructive `tail | cut | xargs rm` tail). An optional `path`
+  sub-directory is confined to `/var/backups/**` via `resolve_backup_dir`
+  (the shared resolver both this op and `backups.prune` call, so the
+  single `bound_backup_path` safety bound is never duplicated). Returns a
+  `{rows, total}` envelope with one `{path, mtime, size_bytes}` row per
+  file, **newest-first** — the exact ordering `backups.prune` uses to pick
+  its keep window, so a caller can pass the same `keep_newest` a prune
+  request proposes and locally read off which rows (index ≥ `keep_newest`)
+  that prune would delete, without executing anything. A transport failure
+  surfaces as `{rows: [], total: 0, error}` so an empty result from a
+  broken connection is distinguishable from a genuinely empty directory
+  (the backup-landing health-check signal). Closes the inspection half of
+  the same root-SSH fallback the `backups.prune` write op retired: a
+  reviewer approving that destructive prune is no longer asked to do so
+  blind. `parse_backup_listing_output` is the pure parser. `safety_level=
+  safe`, `requires_approval=False` — pure `find`, no mutation.
+
 ### Write ops (G3.18-T2 surface, approval-gated)
 
 `ops_write.py` (module `WRITE_OPS`, appended to `HOLODECK_OPS` via
@@ -289,7 +330,9 @@ Each handler validates its inputs against a fixed allowlist and **rejects
 before composing** the command, then `shlex.quote`s every interpolated
 token — the same reject-then-compose posture as `_COMPONENT_SAFE_RE` /
 `parse_kubectl_command`. `bound_backup_path` / `bound_image_tar` are the pure
-path-bounding helpers (unit-tested directly).
+path-bounding helpers (unit-tested directly); `resolve_backup_dir` wraps
+`bound_backup_path` with the root-default behaviour and is the single
+resolver `backups.prune` and `backups.list` (#2847) both call.
 
 - **`holodeck.k8s.pods.gc`** (group `k8s-write`). Runs one
   `kubectl delete pods --field-selector status.phase=<phase>` per requested
@@ -305,7 +348,9 @@ path-bounding helpers (unit-tested directly).
 - **`holodeck.backups.prune`** (group `backups-write`). Removes backup
   artefacts under `/var/backups`, keeping the newest `keep_newest` (explicit
   int, required). An optional `path` sub-directory is resolved via
-  `bound_backup_path`, which rejects any value that escapes `/var/backups/**`
+  `resolve_backup_dir` (shared with the `holodeck.backups.list` read op,
+  #2847), which defaults to the root and routes any sub-path through
+  `bound_backup_path` — rejecting any value that escapes `/var/backups/**`
   (relative/absolute traversal, or the root itself). The listing runs at
   `find -maxdepth 1` so the prune never recurses into a subtree.
 - **`holodeck.images.import`** (group `images-write`). Runs
@@ -316,6 +361,71 @@ path-bounding helpers (unit-tested directly).
 These three retire the recovery fallback where the VCF-9.x backup-fill outage
 (Initiative #2145) was fixed by hand-run local root SSH with no MEHO audit
 row.
+
+### Deploy-lifecycle ops (#2908 surface, Initiative #2907)
+
+`ops_deploy.py` (module `DEPLOY_OPS`, appended to `HOLODECK_OPS`) adds four ops
+that make the consumer's hand-run fresh-deploy procedure (`New-HoloDeckConfig`
+/ `New-HoloDeckInstance` / the three per-appliance patches) dispatchable as
+governed steps. Three are `dangerous` / `requires_approval=True`; one is a
+`safe` read.
+
+**Secret hygiene is by construction.** `_run_command` has no `env`/`stdin`
+seam and the `_pwsh` contract forbids credential material in the (argv-visible)
+script body, so **none of these ops handles secret bytes**. The vCenter
+deploy-target SSO credentials and the Broadcom build token live on the
+appliance — in its staged deploy environment (`$env:VC_USER`/`$env:VC_PW`) and
+in the persisted config (`/holodeck-runtime/config/<id>.json`, written by
+`New-HoloDeckConfig`) — and the composed PowerShell references them by variable
+**name** only. Nothing credential-shaped can reach the params-echo, audit, or
+broadcast surfaces.
+
+- **`holodeck.config.apply`** (group `deploy-config`). Composes
+  `New-HoloDeckConfig` **without `-Default`** (the flag triggers a buggy
+  internal `Set-HoloDeckConfig`) + `$null = Import-HoloDeckConfig`. Params carry
+  only non-secret config (version enum, variant, external IP, master CIDR / VLAN,
+  placement refs, and a 9.x-only `depot` whose `credential_ref` is a Vault
+  **path**). **Depot params are refused for a VCF 5.2.x version** (5.2 deploys
+  via Cloud Builder, no offline depot): the refusal is encoded in the parameter
+  schema as `if version~5.2 then not required depot`, so the framework
+  `validate_params` (Draft 2020-12) rejects it **pre-park** — an operator never
+  approves a config that would fail. `validate_config_apply_params` re-expresses
+  the same rule as a clear string for the handler belt-and-braces and the direct
+  test. It is deliberately **not** pinned credential-class, so it keeps its
+  generic param-echo preview (no secret is ever a param).
+- **`holodeck.instance.start`** (group `deploy-lifecycle`). Runs a **single-shot
+  fail-fast `Connect-VIServer` precheck before launch**: a pwsh script reads the
+  persisted config on the appliance, builds a `PSCredential`, and makes exactly
+  one `Connect-VIServer … -ErrorAction Stop` attempt. This catches a
+  stale/locked deploy-target credential *before* Holodeck's 4-retry-in-13s loop
+  storm-locks the SSO account (consumer #258 lesson). On any precheck failure
+  the instance is **never** launched. On a green precheck `New-HoloDeckInstance`
+  is started under `tmux new-session -d` (survives the dispatch returning) and
+  the op returns immediately with the instance id + a start marker.
+- **`holodeck.instance.status`** (group `deploy-status`, `safe`, no approval).
+  Maps `Get-HoloDeckInstance` into a flat envelope (`status`
+  running/completed/failed/unknown, `current_step`, `started_at`,
+  `updated_at`, `instance_id`, `notes`). The flat `status` field is the target
+  a runbook `OperationCallVerify` step matches and a deploy-in-progress Sensor
+  asserts on, so its shape never depends on approval state. `map_instance_status_envelope`
+  re-maps the **benign VCF 5.2.x terminal quirk** — the final
+  `Sync-HolodeckComponents` step throwing *"No route to host"* because VCF
+  Operations is not deployed in 5.2 — to `status="completed"` plus a structured
+  `notes` entry, so a verify/Sensor built on it never reads a fully-deployed
+  5.2.x lab as broken.
+- **`holodeck.router.patch`** (group `deploy-patch`). Idempotent
+  verify-then-apply of the three per-appliance patches (C1 `SddcMgmtDeployment.psm1`
+  `-eq 7`→`-ge 7`; C2 `HoloDeck.psm1` `BroadcomBuildToken` SecureString wrap; C3
+  `Auth.psm1` `Connect-VIServer` PSCredential). Per patch it greps the *applied*
+  marker (present at the expected count → `already_applied`), else the
+  *unpatched* marker (present → timestamped backup + `sed` + re-verify →
+  `applied`), else `not_applicable`. A **second run reports all
+  `already_applied`** (no `sed`). On a **9.1 HoloRouter it runs verify-only**
+  (patches fixed upstream) — it greps but never `sed`s. The patch strings are
+  fixed code constants (C2 references `$env:brcm_build_token` by name), and the
+  result reports only patch id / label / state — no file content. It **is**
+  pinned into `_CREDENTIAL_WRITE_OPS` (broadcast defence-in-depth) per the
+  `rke2.node.config.update` precedent.
 
 ### `execute(target, op_id, params)`
 

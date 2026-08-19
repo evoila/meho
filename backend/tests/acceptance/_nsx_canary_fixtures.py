@@ -88,6 +88,7 @@ __all__ = [
     "NSX_CANARY_TIER0S",
     "NSX_CANARY_TIER1S",
     "NSX_CANARY_TRANSPORT_NODES",
+    "NSX_CANARY_TRANSPORT_NODE_STATE",
     "NSX_FORCE_HANDLE_LIST_OP_ID",
     "NSX_TARGET_NAME",
     "IngestedNsxCanary",
@@ -150,6 +151,21 @@ NSX_CANARY_TRANSPORT_NODES: dict[str, object] = {
         for i in range(3)
     ],
     "result_count": 3,
+}
+
+#: Synthetic per-node state for ``transport-node-0`` — the shape NSX's
+#: ``GET /api/v1/transport-nodes/{id}/state`` returns: overall realization
+#: ``state``, ``maintenance_mode_state`` (the maintenance-safety datum an
+#: operator reads before draining an edge's HA peer), node-deployment +
+#: progress state, and per-host-switch realization.
+NSX_CANARY_TRANSPORT_NODE_STATE: dict[str, object] = {
+    "state": "success",
+    "maintenance_mode_state": "DISABLED",
+    "node_deployment_state": {"state": "NODE_READY", "details": []},
+    "deployment_progress_state": {"progress": 100, "current_step_title": "COMPLETE"},
+    "host_switch_states": [
+        {"host_switch_name": "canary-host-switch", "transport_zone_ids": ["tz-overlay"]}
+    ],
 }
 
 #: Synthetic segment listing — 12 rows so the force-handle reducer
@@ -414,8 +430,12 @@ def _register_nsx_routes(mock: respx.MockRouter) -> None:
             "external_id": "canary-external-id",
         },
     )
-    # nsx.node.list — transport-node inventory.
+    # nsx.transport_node.list — transport-node inventory.
     mock.get("/api/v1/transport-nodes").respond(200, json=NSX_CANARY_TRANSPORT_NODES)
+    # nsx.transport_node.state — per-node realization/health for node 0.
+    mock.get("/api/v1/transport-nodes/transport-node-0/state").respond(
+        200, json=NSX_CANARY_TRANSPORT_NODE_STATE
+    )
     # nsx.cluster.status — manager cluster health.
     mock.get("/api/v1/cluster/status").respond(
         200,

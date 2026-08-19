@@ -27,6 +27,7 @@ from meho_backplane.connectors.vcf_automation._routing import (
     PROVIDER_TOKEN_HEADER,
     TENANT_ACCEPT,
     TENANT_SESSION_PATH,
+    vhost_header,
 )
 from meho_backplane.connectors.vcf_automation.session import (
     VcfAutomationCredentialsLoader,
@@ -124,8 +125,12 @@ async def vcfa_provider_login(
 
     ``request_extensions`` (evoila/meho#2398) carries the caller's
     ``HttpConnector._request_extensions(target)`` so the login handshake
-    honours a target's ``tls_server_name`` SNI / cert-verify override;
-    ``None`` normalises to an empty dict (byte-identical when unset).
+    honours a target's ``tls_server_name`` / ``fqdn`` SNI + cert-verify
+    name; ``None`` normalises to an empty dict (byte-identical when
+    unset). The login also presents ``target.fqdn`` as the ``Host:``
+    header (:func:`._routing.vhost_header`) so VCFA's strict vhost
+    routing accepts the login POST when the transport dials the host IP
+    (evoila/meho#2863).
     """
     username, password = _require_username_password(creds, target.name, "provider")
     provider_username = getattr(target, "provider_username", None)
@@ -135,7 +140,10 @@ async def vcfa_provider_login(
         resp = await client.post(
             PROVIDER_SESSION_PATH,
             auth=(basic_user, password),
-            headers={"Accept": PROVIDER_CLOUDAPI_ACCEPT},
+            headers={
+                "Accept": PROVIDER_CLOUDAPI_ACCEPT,
+                **vhost_header(getattr(target, "fqdn", None), getattr(target, "port", None)),
+            },
             extensions=request_extensions or {},
         )
         resp.raise_for_status()
@@ -183,8 +191,12 @@ async def tenant_login(
 
     ``request_extensions`` (evoila/meho#2398) carries the caller's
     ``HttpConnector._request_extensions(target)`` so the login handshake
-    honours a target's ``tls_server_name`` SNI / cert-verify override;
-    ``None`` normalises to an empty dict (byte-identical when unset).
+    honours a target's ``tls_server_name`` / ``fqdn`` SNI + cert-verify
+    name; ``None`` normalises to an empty dict (byte-identical when
+    unset). The login also presents ``target.fqdn`` as the ``Host:``
+    header (:func:`._routing.vhost_header`) so VCFA's strict vhost
+    routing accepts the login POST when the transport dials the host IP
+    (evoila/meho#2863).
     """
     username, password = _require_username_password(creds, target.name, "tenant")
     body: dict[str, str] = {"username": username, "password": password}
@@ -195,7 +207,11 @@ async def tenant_login(
         resp = await client.post(
             TENANT_SESSION_PATH,
             json=body,
-            headers={"Accept": TENANT_ACCEPT, "Content-Type": TENANT_ACCEPT},
+            headers={
+                "Accept": TENANT_ACCEPT,
+                "Content-Type": TENANT_ACCEPT,
+                **vhost_header(getattr(target, "fqdn", None), getattr(target, "port", None)),
+            },
             extensions=request_extensions or {},
         )
         resp.raise_for_status()

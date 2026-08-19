@@ -97,10 +97,13 @@ from meho_backplane.operations.reducer import PassThroughReducer
 VCFA_E2E_OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fa")
 
 # ``.test.invalid`` (RFC 6761 reserved) so no real network egress fires.
-# The IP-host scenario uses a different host so both routers can coexist
-# in their respective tests without contention.
 VCFA_E2E_FQDN: str = "vcfa-e2e.test.invalid"
-VCFA_E2E_FQDN_BASE_URL: str = f"https://{VCFA_E2E_FQDN}"
+# The reachable dial address (a private NAT-alias IP). Since #2863 the
+# connector always dials ``target.host`` and presents ``VCFA_E2E_FQDN``
+# per-request as the ``Host:`` header + TLS SNI, so the respx routers are
+# rooted at the host IP, not the FQDN.
+VCFA_E2E_HOST: str = "10.10.10.5"
+VCFA_E2E_HOST_BASE_URL: str = f"https://{VCFA_E2E_HOST}"
 VCFA_E2E_TARGET_NAME: str = "vcfa-e2e-target"
 
 # JWT + token values the respx routes return on the per-plane login
@@ -602,24 +605,24 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
        per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`_FINGERPRINT` so the
        resolver binds :class:`VcfAutomationConnector`. The target's
-       ``host`` is an IP literal and ``fqdn`` is the canonical vhost
-       -- this combination is the load-bearing one (vhost routing
-       working when reached by IP). Without ``fqdn``,
-       :func:`_base_url` raises ``VcfAutomationConfigurationError`` at
-       session-establish (see the
-       :func:`test_vcfa_e2e_ip_without_fqdn_surfaces_structured_error`
-       test below).
+       ``host`` is a NAT-alias IP literal and ``fqdn`` is the canonical
+       vhost -- this combination is the load-bearing one (#2863: the
+       transport dials the IP and presents the vhost per-request as the
+       ``Host:`` header + SNI). Without ``fqdn``, :func:`_base_url`
+       raises ``VcfAutomationConfigurationError`` at session-establish
+       (see :func:`test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error`
+       below).
     3. Resolve + cache the connector instance; patch its
        ``_credentials_loader`` to bypass Vault.
-    4. Activate a respx router for the FQDN-rooted base URL and
-       register the dual-plane login + 11 read-op routes.
+    4. Activate a respx router rooted at the host IP (the dialled
+       address) and register the dual-plane login + 11 read-op routes.
     """
     await _insert_vcfa_descriptors()
-    seeded_target = await _seed_target(host="10.10.10.5", fqdn=VCFA_E2E_FQDN)
+    seeded_target = await _seed_target(host=VCFA_E2E_HOST, fqdn=VCFA_E2E_FQDN)
     instance = _resolve_connector()
 
     async with respx.mock(
-        base_url=VCFA_E2E_FQDN_BASE_URL,
+        base_url=VCFA_E2E_HOST_BASE_URL,
         assert_all_called=False,
         assert_all_mocked=False,
     ) as mock:
@@ -846,30 +849,40 @@ async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
 ) -> None:
     """Per-call ``target.fqdn`` override on the dispatch body wins over the DB row.
 
-    Exercises acceptance criterion (e). The seeded Target has its
-    ``fqdn`` column set to the **wrong** value; the dispatch body
-    supplies the correct vhost as a per-call override. The connector
-    uses the override at base-URL composition time so the request
-    lands on the FQDN-rooted respx router. Without the override,
-    the dispatch would land on a different (un-mocked) host and the
-    request would fail.
+    Exercises acceptance criterion (e) under the #2863 posture: the
+    connector always dials ``target.host`` (the NAT-alias IP), so the
+    per-call override no longer changes *which host is dialled* -- it
+    changes the ``Host:`` header + TLS SNI the request presents. The
+    seeded Target carries the **wrong** vhost; the dispatch body supplies
+    the correct one, and the captured request proves the override (not the
+    stale DB value) reached the wire.
 
-    The DB row is **not** modified by the override -- a follow-up
-    fetch confirms the persisted ``fqdn`` is still the wrong value.
+    The DB row is **not** modified by the override -- a follow-up fetch
+    confirms the persisted ``fqdn`` is still the wrong value.
     """
     await _insert_vcfa_descriptors()
-    # Seed the target with the *wrong* fqdn so the per-call override
-    # is the only way the dispatch can find the mocked appliance.
+    # Seed the target with the *wrong* fqdn so only the per-call override
+    # can put the correct vhost on the wire.
     wrong_fqdn = "vcfa-wrong.test.invalid"
-    await _seed_target(host="10.10.10.5", fqdn=wrong_fqdn)
+    await _seed_target(host=VCFA_E2E_HOST, fqdn=wrong_fqdn)
     instance = _resolve_connector()
 
+    captured: dict[str, str | None] = {}
+
+    def _users_responder(request: httpx.Request) -> httpx.Response:
+        captured["host"] = request.headers.get("host")
+        captured["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(200, json=_PROVIDER_USERS)
+
     async with respx.mock(
-        base_url=VCFA_E2E_FQDN_BASE_URL,
+        base_url=VCFA_E2E_HOST_BASE_URL,
         assert_all_called=False,
         assert_all_mocked=False,
     ) as mock:
-        _register_vcfa_routes(mock)
+        mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT}
+        )
+        mock.get("/cloudapi/1.0.0/users").mock(side_effect=_users_responder)
         try:
             result = await call_operation(
                 _OPERATOR,
@@ -881,7 +894,14 @@ async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
                 },
             )
             assert result["status"] == "ok", (
-                f"Per-call fqdn override should reach the mocked appliance; got {result!r}"
+                f"Per-call fqdn override dispatch should succeed; got {result!r}"
+            )
+            # The per-call override -- not the DB row's wrong fqdn -- rode the wire.
+            assert captured["host"] == VCFA_E2E_FQDN, (
+                f"Per-call fqdn override must ride the Host: header; got {captured['host']!r}"
+            )
+            assert captured["sni"] == VCFA_E2E_FQDN, (
+                f"Per-call fqdn override must ride the TLS SNI; got {captured['sni']!r}"
             )
 
             # DB row's fqdn must NOT have been mutated by the per-call override.
@@ -913,7 +933,7 @@ async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error(
     than a confusing post-login 404 storm.
     """
     await _insert_vcfa_descriptors()
-    await _seed_target(host="10.10.10.5", fqdn=None)
+    await _seed_target(host=VCFA_E2E_HOST, fqdn=None)
     instance = _resolve_connector()
 
     try:
@@ -962,19 +982,22 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
     than re-using the fixture's static responder.
     """
     await _insert_vcfa_descriptors()
-    await _seed_target(host="10.10.10.5", fqdn=VCFA_E2E_FQDN)
+    await _seed_target(host=VCFA_E2E_HOST, fqdn=VCFA_E2E_FQDN)
     instance = _resolve_connector()
 
     captured: dict[str, str] = {}
+    routing: dict[str, str | None] = {}
     repr_path = "/cloudapi/1.0.0/users"
 
     def _users_responder(request: httpx.Request) -> httpx.Response:
         captured[request.url.path] = request.headers.get("Authorization", "")
+        routing["url_host"] = request.url.host
+        routing["host_header"] = request.headers.get("host")
         return httpx.Response(200, json=_PROVIDER_USERS)
 
     try:
         async with respx.mock(
-            base_url=VCFA_E2E_FQDN_BASE_URL,
+            base_url=VCFA_E2E_HOST_BASE_URL,
             assert_all_called=False,
             assert_all_mocked=False,
         ) as mock:
@@ -994,6 +1017,9 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
                 },
             )
             assert result["status"] == "ok"
+            # #2863: the request dialled the host IP but presented the vhost FQDN.
+            assert routing["url_host"] == VCFA_E2E_HOST, routing
+            assert routing["host_header"] == VCFA_E2E_FQDN, routing
             assert captured.get(repr_path) == f"Bearer {_PROVIDER_JWT}", (
                 "Provider-plane GET must carry the provider JWT as Bearer; "
                 f"got Authorization={captured.get(repr_path)!r}"

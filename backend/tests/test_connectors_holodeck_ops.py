@@ -62,6 +62,7 @@ from meho_backplane.connectors.holodeck.ops_read import (
     GROWTH_DIRS,
     READ_OPS,
     KubectlSafetyError,
+    parse_backup_listing_output,
     parse_disk_usage_output,
     parse_kubectl_command,
     parse_logs_tail_output,
@@ -1252,13 +1253,179 @@ def test_disk_usage_growth_dirs_are_the_expected_constant() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_backup_listing_output (#2847)
+# ---------------------------------------------------------------------------
+
+
+# Fixture: ``find ... -printf '%T@ %s %p\n' | sort -rn`` output -- three
+# regular files under /var/backups, already ordered newest-first by the
+# remote ``sort -rn`` (mtime epoch descending), the same ordering
+# ``holodeck.backups.prune`` uses internally to pick its keep window.
+_FIND_BACKUPS_OK = (
+    "1723471200.5 10485760 /var/backups/nsx-2026-08-12T14.tar.gz\n"
+    "1723467600.0 10480000 /var/backups/nsx-2026-08-12T13.tar.gz\n"
+    "1723464000.9 10471234 /var/backups/nsx-2026-08-12T12.tar.gz\n"
+)
+
+
+def test_parse_backup_listing_output_row_shape_and_newest_first_order() -> None:
+    """AC: rows carry {path, mtime, size_bytes}, newest-first (input order preserved)."""
+    rows = parse_backup_listing_output(_FIND_BACKUPS_OK)
+    assert rows == [
+        {
+            "path": "/var/backups/nsx-2026-08-12T14.tar.gz",
+            "mtime": 1723471200.5,
+            "size_bytes": 10485760,
+        },
+        {
+            "path": "/var/backups/nsx-2026-08-12T13.tar.gz",
+            "mtime": 1723467600.0,
+            "size_bytes": 10480000,
+        },
+        {
+            "path": "/var/backups/nsx-2026-08-12T12.tar.gz",
+            "mtime": 1723464000.9,
+            "size_bytes": 10471234,
+        },
+    ]
+    # Newest-first: mtimes strictly descending, exactly as sort -rn emits.
+    mtimes = [r["mtime"] for r in rows]
+    assert mtimes == sorted(mtimes, reverse=True)
+
+
+def test_parse_backup_listing_output_mtime_is_float_size_is_int() -> None:
+    row = parse_backup_listing_output("1723471200.5 4096 /var/backups/db.sql.gz\n")[0]
+    assert isinstance(row["mtime"], float)
+    assert isinstance(row["size_bytes"], int)
+
+
+def test_parse_backup_listing_output_preserves_path_with_spaces() -> None:
+    """``%p`` is the trailing field; a filename with spaces stays intact."""
+    rows = parse_backup_listing_output("1723471200.5 4096 /var/backups/my backup 01.tar\n")
+    assert rows[0]["path"] == "/var/backups/my backup 01.tar"
+
+
+def test_parse_backup_listing_output_skips_malformed_and_blank_lines() -> None:
+    rows = parse_backup_listing_output(
+        "1723471200.5 4096 /var/backups/ok.tar\n"
+        "\n"
+        "   \n"
+        "not-a-find-row\n"
+        "1723467600.0 notanint /var/backups/bad-size.tar\n"
+        "notafloat 4096 /var/backups/bad-mtime.tar\n"
+    )
+    assert rows == [{"path": "/var/backups/ok.tar", "mtime": 1723471200.5, "size_bytes": 4096}]
+
+
+def test_parse_backup_listing_output_empty_input_returns_empty_list() -> None:
+    assert parse_backup_listing_output("") == []
+    assert parse_backup_listing_output("   \n\n") == []
+
+
+def test_parse_backup_listing_reproduces_prune_keep_window() -> None:
+    """AC: newest-first ordering lets a caller locally read off what a given
+    ``keep_newest`` would delete -- rows at index >= keep_newest are exactly
+    the files ``holodeck.backups.prune keep_newest=N`` removes."""
+    rows = parse_backup_listing_output(_FIND_BACKUPS_OK)
+    keep_newest = 1
+    would_delete = [r["path"] for r in rows[keep_newest:]]
+    assert would_delete == [
+        "/var/backups/nsx-2026-08-12T13.tar.gz",
+        "/var/backups/nsx-2026-08-12T12.tar.gz",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shim -- backups_list (#2847)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backups_list_composes_find_pipeline_over_plain_ssh() -> None:
+    """AC: runs ``find <dir> -maxdepth 1 -type f -printf '%T@ %s %p\\n' | sort -rn``."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_FIND_BACKUPS_OK)
+        result = await connector.backups_list(_TARGET, {})
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd == "find /var/backups -maxdepth 1 -type f -printf '%T@ %s %p\\n' | sort -rn"
+    # Read-only: no destructive tail from the prune pipeline leaks in.
+    assert "rm" not in cmd
+    assert "xargs" not in cmd
+    # JSONFlux-shaped {rows, total} envelope, newest-first.
+    assert result["total"] == 3
+    assert result["rows"][0]["path"] == "/var/backups/nsx-2026-08-12T14.tar.gz"
+    assert [r["mtime"] for r in result["rows"]] == sorted(
+        (r["mtime"] for r in result["rows"]), reverse=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_backups_list_honours_bounded_sub_path() -> None:
+    """A sub-path is confined under /var/backups and reaches the find target."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="")
+        result = await connector.backups_list(_TARGET, {"path": "daily"})
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd.startswith("find /var/backups/daily -maxdepth 1 -type f")
+    assert result == {"rows": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_backups_list_rejects_out_of_tree_path_without_ssh() -> None:
+    """AC: a path escaping /var/backups/** is rejected before any SSH traffic."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.backups_list(_TARGET, {"path": "../etc"})
+        mock_cmd.assert_not_awaited()
+    assert result["rows"] == []
+    assert result["total"] == 0
+    assert "error" in result and "safety check" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_backups_list_ssh_failure_returns_error_envelope() -> None:
+    """A transport failure surfaces as an error envelope, distinct from an
+    empty directory -- the backup-landing health-check signal."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = OSError("connection refused")
+        result = await connector.backups_list(_TARGET, {})
+    assert result["rows"] == []
+    assert result["total"] == 0
+    assert "error" in result
+
+
+def test_backups_list_op_is_safe_read_only_optional_path() -> None:
+    """AC: safe / no-approval / read-only tag / group backups / optional path param."""
+    op = next(o for o in HOLODECK_OPS if o.op_id == "holodeck.backups.list")
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags
+    assert op.group_key == "backups"
+    assert op.parameter_schema.get("additionalProperties") is False
+    assert "path" in op.parameter_schema.get("properties", {})
+    # path is optional -- no required list, or an empty one.
+    assert not op.parameter_schema.get("required")
+
+
+def test_backups_list_response_schema_is_jsonflux_rows_total() -> None:
+    op = next(o for o in HOLODECK_OPS if o.op_id == "holodeck.backups.list")
+    assert op.response_schema is not None
+    props = op.response_schema.get("properties", {})
+    assert "rows" in props
+    assert "total" in props
+
+
+# ---------------------------------------------------------------------------
 # HOLODECK_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-#: The 9 read-op ids (T1 canary + 7 T2 reads + G3.18-T1 disk.usage).
-#: The G3.18-T2 (#2154) approval-gated write ops are asserted
-#: separately in ``test_connectors_holodeck_write.py``.
+#: The 10 read-op ids (T1 canary + 7 T2 reads + G3.18-T1 disk.usage +
+#: #2847 backups.list). The G3.18-T2 (#2154) approval-gated write ops are
+#: asserted separately in ``test_connectors_holodeck_write.py``.
 _READ_OP_IDS: frozenset[str] = frozenset(
     {
         "holodeck.about",
@@ -1270,13 +1437,15 @@ _READ_OP_IDS: frozenset[str] = frozenset(
         "holodeck.logs.tail",
         "holodeck.networking.show",
         "holodeck.disk.usage",
+        "holodeck.backups.list",
     }
 )
 
 
-def test_holodeck_ops_has_twelve_entries() -> None:
-    """T1 canary (about) + 7 T2 read ops + G3.18-T1 disk.usage + 3 G3.18-T2 write ops = 12 total."""
-    assert len(HOLODECK_OPS) == 12
+def test_holodeck_ops_has_seventeen_entries() -> None:
+    """about + 7 T2 reads + disk.usage + #2847 backups.list + 3 write ops +
+    #2908 4 deploy-lifecycle ops = 17 total."""
+    assert len(HOLODECK_OPS) == 17
 
 
 def test_holodeck_ops_about_remains_at_index_zero() -> None:
@@ -1289,6 +1458,11 @@ def test_holodeck_ops_covers_expected_op_ids() -> None:
         "holodeck.k8s.pods.gc",
         "holodeck.backups.prune",
         "holodeck.images.import",
+        # #2908 deploy-lifecycle ops.
+        "holodeck.config.apply",
+        "holodeck.instance.start",
+        "holodeck.instance.status",
+        "holodeck.router.patch",
     }
     assert op_ids == expected
 
@@ -1359,10 +1533,18 @@ def test_holodeck_ops_group_keys_include_new_groups() -> None:
         "networking",
         # G3.18-T1 (#2153) read-op diagnostics group (holodeck.disk.usage).
         "diagnostics",
+        # #2847 read-op backups group (holodeck.backups.list) -- distinct
+        # from the ``backups-write`` group the prune write op lives in.
+        "backups",
         # G3.18-T2 (#2154) write groups (``-write`` suffix avoids collision).
         "k8s-write",
         "backups-write",
         "images-write",
+        # #2908 deploy-lifecycle groups (``deploy-`` prefix avoids collision).
+        "deploy-config",
+        "deploy-lifecycle",
+        "deploy-status",
+        "deploy-patch",
     } == group_keys
 
 

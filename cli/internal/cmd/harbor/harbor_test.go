@@ -146,7 +146,7 @@ func TestDecodeHarborListEmptyArray(t *testing.T) {
 func TestPrintAboutHumanFormat(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
-		OpID:       "GET:/api/v2.0/systeminfo",
+		OpID:       "harbor.about",
 		Result:     json.RawMessage(`{"harbor_version":"v2.11.0","auth_mode":"db_auth","registry_url":"https://harbor.test"}`),
 		DurationMs: 42.0,
 	}
@@ -164,7 +164,7 @@ func TestPrintAboutErrorRendersErrorString(t *testing.T) {
 	errMsg := "session expired"
 	r := &CallResult{
 		Status:     "error",
-		OpID:       "GET:/api/v2.0/systeminfo",
+		OpID:       "harbor.about",
 		Error:      &errMsg,
 		DurationMs: 5.0,
 	}
@@ -279,14 +279,14 @@ func TestPrintSearchTable(t *testing.T) {
 	summary := "List Harbor projects"
 	r := &searchResponse{
 		Hits: []searchHit{
-			{OpID: "GET:/api/v2.0/projects", Summary: &summary, FusedScore: 0.987},
+			{OpID: "harbor.project.list", Summary: &summary, FusedScore: 0.987},
 		},
 		QueryDurationMs: 12.0,
 	}
 	var buf bytes.Buffer
 	printSearchTable(&buf, "list projects", r)
 	out := buf.String()
-	for _, want := range []string{"harbor-rest-2.x", "list projects", "1 hit(s)", "GET:/api/v2.0/projects", "List Harbor projects"} {
+	for _, want := range []string{"harbor-rest-2.x", "list projects", "1 hit(s)", "harbor.project.list", "List Harbor projects"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSearchTable missing %q in:\n%s", want, out)
 		}
@@ -368,12 +368,12 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 			if body.ConnectorID != "harbor-rest-2.x" {
 				t.Errorf("connector_id: got %q want harbor-rest-2.x", body.ConnectorID)
 			}
-			if body.OpID != "GET:/api/v2.0/systeminfo" {
+			if body.OpID != "harbor.about" {
 				t.Errorf("op_id: got %q", body.OpID)
 			}
 			writeJSON(t, w, 200, CallResult{
 				Status: "ok",
-				OpID:   "GET:/api/v2.0/systeminfo",
+				OpID:   "harbor.about",
 				Result: json.RawMessage(`{"harbor_version":"v2.11.0","auth_mode":"db_auth"}`),
 			})
 		},
@@ -381,7 +381,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "prod-harbor", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "harbor.about", "prod-harbor", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -403,13 +403,13 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 			if raw["target"] != nil {
 				t.Errorf("empty target should be null on wire; got %v", raw["target"])
 			}
-			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "GET:/api/v2.0/systeminfo"})
+			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: "harbor.about"})
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "harbor.about", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -434,7 +434,7 @@ func TestDispatchProjectInfoSendsParams(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	const opID = "GET:/api/v2.0/projects/{project_name}"
+	const opID = "harbor.project.info"
 	params := map[string]any{"project_name": "library"}
 	if _, err := conn.Call(context.Background(), srv.URL, opID, "prod-harbor", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)

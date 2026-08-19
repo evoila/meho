@@ -317,6 +317,7 @@ func TestAllOpsUseCanonicalOpIDs(t *testing.T) {
 		"pfsense.interface.list",
 		"pfsense.gateway.list",
 		"pfsense.config.show",
+		"pfsense.dhcp.leases",
 	}
 
 	// Build a mock server that records which op_ids were dispatched.
@@ -360,6 +361,7 @@ func TestNewRootCmdHasExpectedSubcommands(t *testing.T) {
 		"nat":      false,
 		"network":  false,
 		"config":   false,
+		"dhcp":     false,
 	}
 	for _, sub := range root.Commands() {
 		want[sub.Name()] = true
@@ -422,6 +424,18 @@ func TestConfigHasShow(t *testing.T) {
 	}
 	if !subs["show"] {
 		t.Errorf("config is missing sub-verb 'show'")
+	}
+}
+
+// TestDhcpHasLeases — the `dhcp` sub-command must have a `leases` sub-verb.
+func TestDhcpHasLeases(t *testing.T) {
+	dhcp := newDhcpCmd()
+	subs := make(map[string]bool)
+	for _, s := range dhcp.Commands() {
+		subs[s.Name()] = true
+	}
+	if !subs["leases"] {
+		t.Errorf("dhcp is missing sub-verb 'leases'")
 	}
 }
 
@@ -497,6 +511,24 @@ func TestPrintNetworkGatewayDefaultFlag(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "YES") {
 		t.Errorf("expected 'YES' for default gateway; got:\n%s", out)
+	}
+}
+
+// TestPrintDhcpLeasesRendersTable — printDhcpLeases writes the header
+// row and the IP / hostname / binding state for each lease.
+func TestPrintDhcpLeasesRendersTable(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "pfsense.dhcp.leases",
+		Result: json.RawMessage(`{"rows":[{"ip":"192.168.1.100","mac":"08:00:27:aa:bb:cc","hostname":"lab-vm-01","starts":"2026/08/12 10:00:00","ends":"2099/01/01 00:00:00","binding_state":"active"}],"total":1}`),
+	}
+	var buf bytes.Buffer
+	printDhcpLeases(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"IP", "192.168.1.100", "lab-vm-01", "active"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDhcpLeases output missing %q; got:\n%s", want, out)
+		}
 	}
 }
 

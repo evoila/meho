@@ -94,16 +94,16 @@ working set as 11 curated ops, distributed across both planes:
 
 | Plane | Group | CLI verb | `op_id` |
 | --- | --- | --- | --- |
-| provider | `provider-site` | `meho vcf-automation about --plane provider` | `GET:/cloudapi/1.0.0/site` |
-| provider | `provider-orgs` | `meho vcf-automation org list` | `GET:/cloudapi/1.0.0/orgs` |
+| provider | `provider-site` | `meho vcf-automation about --plane provider` | `vcfa.provider.health` |
+| provider | `provider-orgs` | `meho vcf-automation org list` | `vcfa.provider.org.list` |
 | provider | `provider-orgs` | `meho vcf-automation org get <id>` | `GET:/cloudapi/1.0.0/orgs/{id}` |
-| provider | `provider-regions` | `meho vcf-automation region list` | `GET:/cloudapi/1.0.0/regions` |
+| provider | `provider-regions` | `meho vcf-automation region list` | `vcfa.provider.region.list` |
 | provider | `provider-regions` | `meho vcf-automation region get <id>` | `GET:/cloudapi/1.0.0/regions/{id}` |
 | provider | `provider-users` | `meho vcf-automation user list` | `GET:/cloudapi/1.0.0/users` |
-| tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `GET:/iaas/api/about` |
-| tenant | `tenant-projects` | `meho vcf-automation project list` | `GET:/iaas/api/projects` |
-| tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `GET:/iaas/api/deployments` |
-| tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `GET:/iaas/api/deployments/{id}` |
+| tenant | `tenant-about` | `meho vcf-automation about --plane tenant` | `vcfa.tenant.about` |
+| tenant | `tenant-projects` | `meho vcf-automation project list` | `vcfa.tenant.project.list` |
+| tenant | `tenant-deployments` | `meho vcf-automation deployment list` | `vcfa.tenant.deployment.list` |
+| tenant | `tenant-deployments` | `meho vcf-automation deployment get <id>` | `vcfa.tenant.deployment.get` |
 | tenant | `tenant-blueprints` | `meho vcf-automation blueprint list` | `GET:/iaas/api/blueprints` |
 
 Every op dispatches through the same `POST /api/v1/operations/call`
@@ -231,7 +231,7 @@ meho vcf-automation about --plane provider --target rdc-vcfa \
   --fqdn vcfa.maintenance.evoila.io
 
 # Escape hatch — run any vcfa-rest-9.0 op_id by name
-meho vcf-automation operation call GET:/cloudapi/1.0.0/site --target rdc-vcfa
+meho vcf-automation operation call GET:/cloudapi/1.0.0/users --target rdc-vcfa
 meho vcf-automation operation search "deployment status" --group tenant-deployments
 ```
 
@@ -242,10 +242,14 @@ meho vcf-automation operation search "deployment status" --group tenant-deployme
 Dual-plane verb. `--plane` is **required** because the resource name
 "about" exists on both planes with different shapes:
 
-- **`--plane provider`** dispatches `GET:/cloudapi/1.0.0/site` and
-  renders site identity (`id`, `name`, `restName`, `productVersion`).
-- **`--plane tenant`** dispatches `GET:/iaas/api/about` and renders
-  IaaS API self-describe (`latestApiVersion`, `supportedApis[]`).
+- **`--plane provider`** dispatches `vcfa.provider.health` (the typed
+  read; repointed off the ingested `GET:/cloudapi/1.0.0/site` op_id by
+  #2355) and renders site identity (`id`, `name`, `restName`,
+  `productVersion`).
+- **`--plane tenant`** dispatches `vcfa.tenant.about` (the typed read;
+  repointed off the ingested `GET:/iaas/api/about` op_id by #2355) and
+  renders IaaS API self-describe (`latestApiVersion`,
+  `supportedApis[]`).
 
 Omitting `--plane` fails fast with an explicit message — no silent
 default.
@@ -283,7 +287,11 @@ controls reference project membership.
 
 ### `meho vcf-automation deployment list` / `deployment get <id>`
 
-Tenant-plane only. The largest payload on the tenant surface; large
+Tenant-plane only. `deployment list` dispatches the typed
+`vcfa.tenant.deployment.list` (repointed off the ingested
+`GET:/iaas/api/deployments` op_id by #2942); `deployment get`
+dispatches the typed `vcfa.tenant.deployment.get` (#2960).
+The largest payload on the tenant surface; large
 tenants return hundreds of deployments. The dispatcher's JSONFlux
 seam wraps oversized responses in a `ResultHandle`; use the
 `result_describe` / `result_query` meta-tools to navigate. The
@@ -310,7 +318,7 @@ op_id). The persistent `--fqdn` flag still threads into the body.
 
 ```bash
 meho vcf-automation operation search "deployments" --group tenant-deployments
-meho vcf-automation operation call GET:/iaas/api/about --target rdc-vcfa
+meho vcf-automation operation call GET:/iaas/api/blueprints --target rdc-vcfa
 ```
 
 ## Audit and broadcast classification
@@ -325,7 +333,7 @@ the read-only surface never mutates state. The audit row carries:
 Broadcast events publish per-tenant on every successful dispatch.
 `meho audit query --connector vcfa-rest-9.0` retrieves the full
 dispatch history; filter by op_id to focus on one plane (`--op-id
-GET:/iaas/api/deployments`).
+vcfa.tenant.deployment.list`).
 
 ## Migrating off `scripts/vcf-automation.sh`
 

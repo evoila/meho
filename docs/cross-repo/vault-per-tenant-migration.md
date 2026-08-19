@@ -47,17 +47,18 @@ the same rendering the guard's
 [`rendered_tenant_prefix`](../../backend/src/meho_backplane/connectors/vault/tenant_scope.py)
 produces and the same UUID that appears in audit rows and JWT claims.
 
-New targets created or PATCH-homed after #1723 land on the per-tenant
-path automatically (see "What the backplane does for you"). This runbook
+New targets created after #1723 land on the per-tenant path
+automatically (see "What the backplane does for you"). This runbook
 covers the **existing** secrets that predate the change.
 
 ## What the backplane does for you
 
 - **Create** (`POST /api/v1/targets`) with no explicit `secret_ref`
   derives `tenants/<tenant_id>/<name>` and stores it on the row.
-- **Update** (`PATCH /api/v1/targets/{name}`) that does not touch
-  `secret_ref`, on a row whose `secret_ref` is still unset, fills in the
-  same derived path.
+- **Update** (`PATCH /api/v1/targets/{name}`) never derives
+  `secret_ref`: a PATCH that omits it leaves the stored value unchanged
+  (an unset row stays unset). Derivation happens only at create time, on
+  omission (#2872).
 - An **explicitly-supplied** `secret_ref` (including a non-default mount
   layout, or an explicit `{"secret_ref": null}` to clear it) is always
   honoured verbatim — the backplane never silently re-homes a ref you set.

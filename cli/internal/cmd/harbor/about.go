@@ -13,7 +13,7 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newAboutCmd returns `meho harbor about` → GET:/api/v2.0/systeminfo.
+// newAboutCmd returns `meho harbor about` → harbor.about.
 func newAboutCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -23,7 +23,7 @@ func newAboutCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "about",
 		Short: "Show Harbor version, auth mode, and registry URL",
-		Long: "about dispatches GET:/api/v2.0/systeminfo against connector_id=\"harbor-rest-2.x\"\n" +
+		Long: "about dispatches harbor.about against connector_id=\"harbor-rest-2.x\"\n" +
 			"and renders the appliance's harbor_version / auth_mode / registry_url fields.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call:\n" +
@@ -53,15 +53,15 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/systeminfo", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.about", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v2.0/systeminfo", r, jsonOut, printAbout)
+	return conn.Render(cmd, "harbor.about", r, jsonOut, printAbout)
 }
 
 func printAbout(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v2.0/systeminfo — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s harbor.about — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return
@@ -98,7 +98,7 @@ func printAbout(w io.Writer, r *CallResult) {
 	}
 }
 
-// newHealthCmd returns `meho harbor health` → GET:/api/v2.0/health.
+// newHealthCmd returns `meho harbor health` → harbor.health.
 func newHealthCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -108,7 +108,7 @@ func newHealthCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "health",
 		Short: "Show Harbor composite health across all subsystems",
-		Long: "health dispatches GET:/api/v2.0/health against connector_id=\"harbor-rest-2.x\"\n" +
+		Long: "health dispatches harbor.health against connector_id=\"harbor-rest-2.x\"\n" +
 			"and renders the overall status plus per-component health.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
@@ -133,15 +133,15 @@ func runHealth(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOve
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/health", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.health", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v2.0/health", r, jsonOut, printHealth)
+	return conn.Render(cmd, "harbor.health", r, jsonOut, printHealth)
 }
 
 func printHealth(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v2.0/health — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s harbor.health — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

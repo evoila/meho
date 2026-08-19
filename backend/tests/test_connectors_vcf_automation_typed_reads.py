@@ -12,8 +12,9 @@ state**. Acceptance contract (#2305):
 
 * **Typed dispatch on a fresh boot with zero catalog state** — after
   ``register_typed_operations()`` and with **no** ingested
-  ``endpoint_descriptor`` rows seeded, all five audited ops (org list,
-  region list, provider health, tenant project list, tenant about)
+  ``endpoint_descriptor`` rows seeded, all seven typed read ops (org
+  list, region list, provider health, tenant project list, tenant
+  deployment list, tenant deployment get, tenant about)
   dispatch through ``call_operation`` against a respx-mocked VCFA
   appliance and return ``status="ok"``, with ``source_kind="typed"`` on
   every registered row.
@@ -68,7 +69,11 @@ from meho_backplane.connectors.vcf_automation._routing import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Target
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import (
+    PassThroughReducer,
+    reset_dispatcher_caches,
+    set_default_reducer,
+)
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
     reset_handler_cache,
@@ -81,7 +86,11 @@ from meho_backplane.operations.meta_tools import call_operation
 
 _OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fb")
 _FQDN = "vcfa-typed.test.invalid"
-_BASE_URL = f"https://{_FQDN}"
+# The reachable dial address (a NAT-alias IP). Since #2863 the connector
+# dials ``target.host`` and presents ``_FQDN`` per-request as the ``Host:``
+# header + SNI, so the respx router is rooted at the host, not the FQDN.
+_HOST = "10.20.30.5"
+_BASE_URL = f"https://{_HOST}"
 _TARGET_NAME = "vcfa-typed-target"
 
 _PROVIDER_JWT = "vcfa-typed-provider-jwt"
@@ -135,10 +144,48 @@ _TENANT_PROJECTS: dict[str, Any] = {
     "totalElements": 1,
     "totalPages": 1,
 }
+#: Two deployments — one succeeded, one failed — so the shape assertion
+#: covers the "which failed" half of the operator's question. Fields
+#: mirror the recorded-fixture shape in tests.test_connectors_vcf_automation_e2e.
+_TENANT_DEPLOYMENTS: dict[str, Any] = {
+    "content": [
+        {
+            "id": "deployment-1",
+            "name": "deploy-ok",
+            "description": "synthetic deployment",
+            "status": "CREATE_SUCCESSFUL",
+            "projectId": "project-1",
+            "blueprintId": "blueprint-1",
+            "ownedBy": "user-1",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "lastUpdatedAt": "2026-05-15T00:00:00Z",
+            "resources": [],
+        },
+        {
+            "id": "deployment-2",
+            "name": "deploy-failed",
+            "description": "synthetic deployment",
+            "status": "CREATE_FAILED",
+            "projectId": "project-1",
+            "blueprintId": "blueprint-1",
+            "ownedBy": "user-1",
+            "createdAt": "2026-05-02T00:00:00Z",
+            "lastUpdatedAt": "2026-05-16T00:00:00Z",
+            "resources": [],
+        },
+    ],
+    "totalElements": 2,
+    "totalPages": 1,
+}
 _TENANT_ABOUT: dict[str, Any] = {
     "latestApiVersion": "9.0",
     "supportedApis": [{"apiVersion": "9.0"}],
 }
+
+#: The id the detail-read routes/params use; its payload is the single
+#: deployment object (one ``content`` entry of ``_TENANT_DEPLOYMENTS``).
+_DETAIL_DEPLOYMENT_ID = "deployment-1"
+_TENANT_DEPLOYMENT_DETAIL: dict[str, Any] = _TENANT_DEPLOYMENTS["content"][0]
 
 #: op_id -> the JSON body its respx route returns.
 _PAYLOAD_BY_OP: dict[str, dict[str, Any]] = {
@@ -146,7 +193,15 @@ _PAYLOAD_BY_OP: dict[str, dict[str, Any]] = {
     "vcfa.provider.region.list": _PROVIDER_REGIONS,
     "vcfa.provider.health": _PROVIDER_SITE,
     "vcfa.tenant.project.list": _TENANT_PROJECTS,
+    "vcfa.tenant.deployment.list": _TENANT_DEPLOYMENTS,
+    "vcfa.tenant.deployment.get": _TENANT_DEPLOYMENT_DETAIL,
     "vcfa.tenant.about": _TENANT_ABOUT,
+}
+
+#: op_id -> the params the parametrized dispatch test sends. Ops absent
+#: here dispatch with ``{}``; the detail read requires its ``id``.
+_DISPATCH_PARAMS_BY_OP: dict[str, dict[str, Any]] = {
+    "vcfa.tenant.deployment.get": {"id": _DETAIL_DEPLOYMENT_ID},
 }
 
 
@@ -254,10 +309,13 @@ def _resolve_connector() -> VcfAutomationConnector:
 
 
 def _register_routes(mock: respx.MockRouter, *, capture: dict[str, str] | None = None) -> None:
-    """Register the dual-plane login + five typed-op GET routes on *mock*.
+    """Register the dual-plane login + seven typed-op GET routes on *mock*.
 
     When *capture* is passed, every GET records its ``Accept`` header under
     the request path so the plane-selection tests can assert the media type.
+    A templated op path (the ``{id}`` detail read) is resolved with
+    ``_DETAIL_DEPLOYMENT_ID`` — respx path matching is exact, so the
+    resolved detail route and the bare list route coexist.
     """
     mock.post("/cloudapi/1.0.0/sessions/provider").respond(
         200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT}
@@ -274,7 +332,8 @@ def _register_routes(mock: respx.MockRouter, *, capture: dict[str, str] | None =
                 capture[request.url.path] = request.headers.get("Accept", "")
             return httpx.Response(200, json=_payload)
 
-        mock.get(op.path).mock(side_effect=_responder)
+        route_path = op.path.format(id=_DETAIL_DEPLOYMENT_ID) if "{id}" in op.path else op.path
+        mock.get(route_path).mock(side_effect=_responder)
 
 
 @dataclass(frozen=True)
@@ -285,9 +344,9 @@ class _Bundle:
 
 @pytest.fixture
 async def typed_bundle(captured_events: list[Any]) -> AsyncIterator[_Bundle]:
-    """Register the five typed ops (zero ingested state) + respx-mock the appliance."""
+    """Register the seven typed ops (zero ingested state) + respx-mock the appliance."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     async with respx.mock(
         base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
@@ -354,7 +413,7 @@ def test_every_typed_op_declares_the_plane_its_path_rides() -> None:
     misrouted HTTP 401 — both planes carry a Bearer header but reject the
     other plane's token).
     """
-    assert len(VCFA_TYPED_OPS) == 5
+    assert len(VCFA_TYPED_OPS) == 7
     for op in VCFA_TYPED_OPS:
         assert plane_for_path(op.path) == op.plane, (
             f"op {op.op_id!r} declares plane={op.plane!r} but "
@@ -371,14 +430,14 @@ _TYPED_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VCFA_TYPED_OPS)
 
 @pytest.mark.parametrize("op_id", _TYPED_OP_IDS, ids=lambda op: op)
 async def test_typed_ops_dispatch_ok(op_id: str, typed_bundle: _Bundle) -> None:
-    """All five typed ops dispatch through ``call_operation`` and return ``status='ok'``."""
+    """All seven typed ops dispatch through ``call_operation`` and return ``status='ok'``."""
     result = await call_operation(
         _OPERATOR,
         {
             "connector_id": VCFA_CONNECTOR_ID,
             "op_id": op_id,
             "target": {"name": _TARGET_NAME},
-            "params": {},
+            "params": _DISPATCH_PARAMS_BY_OP.get(op_id, {}),
         },
     )
     assert result["status"] == "ok", (
@@ -395,7 +454,7 @@ async def test_typed_ops_dispatch_ok(op_id: str, typed_bundle: _Bundle) -> None:
 async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]) -> None:
     """Provider typed op establishes the provider session + Accept; tenant cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     cache_key = target_cache_key(seeded)
     accept_by_path: dict[str, str] = {}
@@ -434,7 +493,7 @@ async def test_provider_typed_op_rides_provider_plane(captured_events: list[Any]
 async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) -> None:
     """Tenant typed op establishes the tenant session + Accept; provider cache stays empty."""
     await VcfAutomationConnector.register_typed_operations()
-    seeded = await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    seeded = await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     cache_key = target_cache_key(seeded)
     accept_by_path: dict[str, str] = {}
@@ -473,7 +532,7 @@ async def test_tenant_typed_op_rides_tenant_plane(captured_events: list[Any]) ->
 async def test_provider_op_query_params_forward_pagination(captured_events: list[Any]) -> None:
     """``vcfa.provider.org.list`` forwards ``page`` / ``pageSize`` as query params."""
     await VcfAutomationConnector.register_typed_operations()
-    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    await _seed_target(host=_HOST, fqdn=_FQDN)
     instance = _resolve_connector()
     captured: dict[str, str] = {}
 
@@ -504,3 +563,182 @@ async def test_provider_op_query_params_forward_pagination(captured_events: list
 
     assert result["status"] == "ok", result
     assert "page=2" in captured["query"] and "pageSize=50" in captured["query"], captured
+
+
+async def test_tenant_deployment_list_forwards_odata_and_returns_content(
+    captured_events: list[Any],
+) -> None:
+    """``vcfa.tenant.deployment.list`` forwards OData params, returns the content envelope.
+
+    Pins the PassThrough reducer so the assertion targets the inline
+    payload deterministically. The recorded list is two rows — under any
+    handle threshold — so pinning only guards against reducer state a
+    sibling test module might leave set (the E2E force-handle test).
+    """
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host=_HOST, fqdn=_FQDN)
+    instance = _resolve_connector()
+    captured: dict[str, str] = {}
+
+    def _deployments_responder(request: httpx.Request) -> httpx.Response:
+        captured["query"] = str(request.url.query.decode())
+        return httpx.Response(200, json=_TENANT_DEPLOYMENTS)
+
+    set_default_reducer(PassThroughReducer())
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/iaas/api/login").respond(200, json={"token": _TENANT_TOKEN})
+            m.get("/iaas/api/deployments").mock(side_effect=_deployments_responder)
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.tenant.deployment.list",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {"$filter": "status eq 'CREATE_FAILED'", "$top": 50},
+                },
+            )
+    finally:
+        await instance.aclose()
+        set_default_reducer(PassThroughReducer())
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    # OData params forward onto the tenant-plane request. httpx may encode
+    # the leading ``$`` as ``%24`` or leave it raw (a query sub-delimiter).
+    query = captured["query"]
+    assert "%24filter=" in query or "$filter=" in query, query
+    assert "%24top=50" in query or "$top=50" in query, query
+    # The vendor's content[] envelope round-trips inline with the failed
+    # deployment's fields intact — the "which failed" half of the question.
+    content = result["result"]["content"]
+    assert {d["status"] for d in content} == {"CREATE_SUCCESSFUL", "CREATE_FAILED"}, content
+    assert {"id", "name", "status", "projectId", "resources"} <= content[0].keys(), content[0]
+
+
+async def test_tenant_deployment_get_requests_detail_path_and_returns_object(
+    captured_events: list[Any],
+) -> None:
+    """``vcfa.tenant.deployment.get`` hits ``/iaas/api/deployments/<id>``, returns the object.
+
+    Pins the PassThrough reducer for the same reason as the list test —
+    a sibling module may leave a force-handle reducer set; the single
+    deployment object must round-trip inline.
+    """
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    instance = _resolve_connector()
+    requested_paths: list[str] = []
+
+    def _detail_responder(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        return httpx.Response(200, json=_TENANT_DEPLOYMENT_DETAIL)
+
+    set_default_reducer(PassThroughReducer())
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/iaas/api/login").respond(200, json={"token": _TENANT_TOKEN})
+            m.get(f"/iaas/api/deployments/{_DETAIL_DEPLOYMENT_ID}").mock(
+                side_effect=_detail_responder
+            )
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.tenant.deployment.get",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {"id": _DETAIL_DEPLOYMENT_ID},
+                },
+            )
+    finally:
+        await instance.aclose()
+        set_default_reducer(PassThroughReducer())
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    # The handler substituted the id into the detail path — not the list path.
+    assert requested_paths == [f"/iaas/api/deployments/{_DETAIL_DEPLOYMENT_ID}"]
+    # The single deployment object round-trips inline (no content[] envelope).
+    detail = result["result"]
+    assert detail["id"] == _DETAIL_DEPLOYMENT_ID, detail
+    assert {"id", "name", "status", "projectId", "blueprintId", "resources"} <= detail.keys(), (
+        detail
+    )
+
+
+async def test_tenant_deployment_get_percent_encodes_the_id(
+    captured_events: list[Any],
+) -> None:
+    """A reserved char in the id is percent-encoded — it cannot extend the path.
+
+    OpenAPI ``style: simple`` semantics (the same contract the ingested
+    dispatch path's ``{var}`` expansion honours): ``quote(value,
+    safe="")`` turns ``/`` into ``%2F``, so a hostile id like
+    ``../requests`` stays one path segment under
+    ``/iaas/api/deployments/``.
+    """
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    instance = _resolve_connector()
+    tricky_id = "dep/../other"
+    encoded = "dep%2F..%2Fother"
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            m.post("/iaas/api/login").respond(200, json={"token": _TENANT_TOKEN})
+            detail_route = m.get(f"/iaas/api/deployments/{encoded}").respond(
+                200, json=_TENANT_DEPLOYMENT_DETAIL
+            )
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.tenant.deployment.get",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {"id": tricky_id},
+                },
+            )
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "ok", result
+    assert detail_route.called, "the encoded detail route was never hit"
+
+
+async def test_tenant_deployment_get_missing_id_is_invalid_params(
+    captured_events: list[Any],
+) -> None:
+    """Omitting the required ``id`` fails schema validation before any request."""
+    await VcfAutomationConnector.register_typed_operations()
+    await _seed_target(host="10.20.30.5", fqdn=_FQDN)
+    instance = _resolve_connector()
+
+    try:
+        async with respx.mock(
+            base_url=_BASE_URL, assert_all_called=False, assert_all_mocked=False
+        ) as m:
+            login_route = m.post("/iaas/api/login").respond(200, json={"token": _TENANT_TOKEN})
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": VCFA_CONNECTOR_ID,
+                    "op_id": "vcfa.tenant.deployment.get",
+                    "target": {"name": _TARGET_NAME},
+                    "params": {},
+                },
+            )
+    finally:
+        await instance.aclose()
+        reset_dispatcher_caches()
+
+    assert result["status"] == "error", result
+    assert "invalid_params" in (result.get("error") or ""), result
+    # Validation fails before the connector ever authenticates.
+    assert not login_route.called, "param validation must reject before any wire call"

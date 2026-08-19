@@ -35,7 +35,7 @@ func newRobotListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List Harbor system-level robot accounts",
-		Long: "list dispatches GET:/api/v2.0/robots against connector_id=\"harbor-rest-2.x\"\n" +
+		Long: "list dispatches harbor.robot.list against connector_id=\"harbor-rest-2.x\"\n" +
 			"and renders a table of robot names, enabled status, and expiry.\n" +
 			"Robot secrets are never returned by the list endpoint — they are only\n" +
 			"available immediately after robot creation.\n" +
@@ -61,15 +61,15 @@ func runRobotList(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/robots", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.list", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v2.0/robots", r, jsonOut, printRobotList)
+	return conn.Render(cmd, "harbor.robot.list", r, jsonOut, printRobotList)
 }
 
 func printRobotList(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v2.0/robots — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s harbor.robot.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

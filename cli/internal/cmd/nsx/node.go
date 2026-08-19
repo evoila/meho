@@ -24,7 +24,10 @@ func newNodeCmd() *cobra.Command {
 	return cmd
 }
 
-// newNodeListCmd returns `meho nsx node list` → GET:/api/v1/transport-nodes.
+// newNodeListCmd returns `meho nsx node list` → nsx.transport_node.list
+// (repointed from the ingested GET:/api/v1/transport-nodes op_id once
+// #2836 shipped the typed read — the legacy op_id no longer resolves
+// on a zero-catalog boot; #2942).
 func newNodeListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -34,7 +37,7 @@ func newNodeListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List NSX transport nodes (ESXi + edge)",
-		Long: "list dispatches GET:/api/v1/transport-nodes against connector_id=\n" +
+		Long: "list dispatches nsx.transport_node.list against connector_id=\n" +
 			"\"nsx-rest-4.2\". Renders id / display_name / type for human eyes;\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
@@ -59,15 +62,15 @@ func runNodeList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneO
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v1/transport-nodes", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "nsx.transport_node.list", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v1/transport-nodes", r, jsonOut, printNodeList)
+	return conn.Render(cmd, "nsx.transport_node.list", r, jsonOut, printNodeList)
 }
 
 func printNodeList(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v1/transport-nodes — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s nsx.transport_node.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

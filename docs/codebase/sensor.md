@@ -17,6 +17,16 @@ The layer is deliberately minimal: a Sensor stores a **bounded** assertion
 model carries no transition logic; the admin service owns create/list/get/
 delete, the runner (#2505) owns claim/advance/park and the result write.
 
+Op-specific probe recipes live with their ops. One worth naming here:
+health-checking a **strict-vhost appliance** (a service that vhost-routes
+and 404s unless the request's `Host:` matches — e.g. VCFA behind a
+NAT-alias IP before DNS exists). Pin a `net.http_probe` Sensor with the
+`host_header` param so the probe dials the IP (what the allowlist gates)
+yet sends the virtual host as the `Host:` header and TLS SNI; otherwise a
+by-IP probe reads a misleading 404 / `tls_error` whether the service is
+healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
+§ *Vhost-routed probes by IP*.
+
 ## Key types
 
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity
@@ -145,6 +155,28 @@ history and projection can never diverge. The row records the *observed*
 outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
 flapping reading that never commits still lands in history.
 
+### Aggregate offender sample (#2976)
+
+An aggregate assertion (`count` / `sum` / `max` / `min` / `any` / `all`)
+collapses the selected rows to one number, so the evidence records only
+`observed` — e.g. `{"aggregate":"count","observed":2,...}` says *two* series
+breached but not *which* two. Once the condition clears that identity is
+unrecoverable from the retained per-tick rows (the raw payload survives in
+`audit_log.raw_payload`, but no operator/agent read surface exposes it). On a
+**breaching** tick (`degraded` / `critical`) of an aggregate assertion the
+evaluator (`checks.evaluate._with_offender_sample`) now attaches a bounded
+`sample` of the selected rows to the evidence — at most
+`_EVIDENCE_SAMPLE_LIMIT` (5) rows verbatim (prometheus series labels+value, or
+the selected objects/keys for a JSON select), plus `sample_truncated: true`
+when more were dropped. `observed` still carries the true aggregate. For
+`gt` / `gte` the sample *is* the offending set; for `lt` / `lte` it is the rows
+present (the breach being what is missing). `ok` / `unknown` ticks, scalar
+(non-aggregate) assertions, and empty selections are untouched, so the common
+healthy tick's evidence is byte-for-byte unchanged. The sample rides the same
+evidence dict every surface already renders — the latest-result projection, the
+per-tick `sensor_results` rows, the sensor detail view, notification mails
+(clipped), and the investigator briefing — so no consumer needed a change.
+
 ### Per-tick evidence history (#2756)
 
 `meho_backplane.db.models.SensorResult` (`sensor_results` table, migration
@@ -229,9 +261,11 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   #2784 (the refusal is now the `connector_probe_refused` dispatch
   error, which lands here as `unknown` / `reason: dispatch_not_ok`), but
   the general hazard is a **connector contract** the checks layer cannot
-  detect: assertion evidence is `{path, aggregate, comparator, expect,
-  observed}` and carries no sibling fields from the payload, so a
-  reading-shaped refusal has no in-band way to announce itself. See
+  detect: a scalar assertion's evidence is `{path, aggregate, comparator,
+  expect, observed}` and carries no sibling fields from the payload (only a
+  breaching *aggregate* pulls a bounded `sample` in, #2976), so a
+  reading-shaped refusal on a scalar probe has no in-band way to announce
+  itself. See
   `docs/codebase/connectors-net-diagnostics.md` § *Refusal is a dispatch
   error, not a reading*.
 - The safe-only guard's descriptor read and the insert are in separate

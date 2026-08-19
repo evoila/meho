@@ -161,6 +161,23 @@ image-revert plus forward-compatible schema discipline (`helm rollback`
 contract, Goal #11 DoD). The additive-only rule is what makes that safe: any
 older image can read any newer schema. See the rollback contract below.
 
+### Index rebuilds are permitted
+
+`op.drop_index(...)` is **not** on the banned list, and rebuilding an index
+(`drop_index` then `create_index`, e.g. to add or change a partial `WHERE`
+predicate that neither PostgreSQL nor SQLite can alter in place) is an allowed
+`upgrade()` operation. It removes no data and no column, and it stays
+forward-compatible: an older image running against the rebuilt index sees the
+same name and columns and enforces at least the same or a superset of what it
+expects. Migration `0072` is the reference — it converts the full unique
+`targets_tenant_name_idx` into a partial `UNIQUE (tenant_id, name) WHERE
+deleted_at IS NULL` so soft-delete tombstones stop blocking name re-use
+(#2874); an older image still 409s on a live duplicate and merely also
+tolerates an insert over a tombstone. A rebuild whose new predicate is
+*stricter* than the old one is not automatically safe — verify the existing
+data satisfies it (or backfill first), exactly as a new `create_index` on a
+populated table would.
+
 ## Rollback contract (readiness ↔ migrations, #1607)
 
 The chart applies migrations from a `helm.sh/hook: pre-install,pre-upgrade`

@@ -191,7 +191,7 @@ reason.
 | Op id | Handler | Safety | Description |
 | ----- | ------- | ------ | ----------- |
 | `bind9.about` | `Bind9Connector.about` | `safe` | Operator-facing wrapper around fingerprint; returns vendor / product / version / build / os / named_conf_path |
-| `bind9.zone.list` | `Bind9Connector.bind9_zone_list` | `safe` | Parse `named-checkconf -p` into zone rows: `{name, file, type}` per declared zone |
+| `bind9.zone.list` | `Bind9Connector.bind9_zone_list` | `safe` | Parse `named-checkconf -p` into zone rows: `{name, file, type, view}` per declared zone (`view` is the enclosing `view "<name>"` block, or `null` outside any view — disambiguates split-horizon) |
 | `bind9.zone.read` | `Bind9Connector.bind9_zone_read` | `safe` | Resolve zonefile via `named-checkconf -p`, read + parse via dnspython; row per rrset member `{name, ttl, class, type, rdata}` |
 | `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; verify predicate = `dig` returns the new IP |
@@ -294,7 +294,7 @@ pins the parsers directly without booting an event loop:
 
 | Parser | Source module | Input | Output |
 | ------ | ------------- | ----- | ------ |
-| `parse_named_checkconf_zones` | `ops_zone.py` | `named-checkconf -p` stdout | list of `{name, file, type}` rows |
+| `parse_named_checkconf_zones` | `ops_zone.py` | `named-checkconf -p` stdout | list of `{name, file, type, view}` rows (`view` = enclosing `view "<name>"`, `null` outside any view) |
 | `parse_zonefile` | `ops_zone.py` | zonefile text + origin | list of `{name, ttl, class, type, rdata}` rows via `dns.zone.from_text` |
 | `parse_dig_answer` | `ops_record.py` | `dig` stdout (`+noall +answer` or default) | list of `{name, ttl, class, type, rdata}` rows |
 | `ensure_path_under_root` | `ops_config.py` | requested path + allowed root | canonical absolute path under root, or `ConfigPathRejectedError` |

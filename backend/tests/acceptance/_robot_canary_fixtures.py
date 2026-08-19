@@ -126,12 +126,6 @@ ROBOT_FORCE_HANDLE_LIST_OP_ID: str = "GET:/server"
 #: ``GET:/server`` takes no path parameters — empty dict is correct.
 ROBOT_FORCE_HANDLE_PARAMS: dict[str, str] = {}
 
-#: Synthetic query/account-info response.
-ROBOT_CANARY_QUERY: dict[str, object] = {
-    "api_version": "1.0",
-    "account_id": "robot-canary-account",
-}
-
 #: Synthetic server list — 3 dedicated servers.
 ROBOT_CANARY_SERVERS: list[dict[str, object]] = [
     {
@@ -245,6 +239,58 @@ ROBOT_CANARY_RDNS: list[dict[str, object]] = [
     {"rdns": {"ip": "1.2.3.2", "ptr": "canary-server-2.example.com"}},
 ]
 
+#: Synthetic single-server firewall config (server-ip=1.2.3.1). Models the
+#: onboarding template shape: operator /32 allowed on https, lab-internal
+#: 10.0.0.0/8 allowed, final default-discard.
+ROBOT_CANARY_FIREWALL: dict[str, object] = {
+    "firewall": {
+        "server_ip": "1.2.3.1",
+        "server_number": 100001,
+        "status": "active",
+        "filter_ipv6": False,
+        "whitelist_hos": True,
+        "port": "main",
+        "rules": {
+            "input": [
+                {
+                    "name": "operator-https",
+                    "ip_version": "ipv4",
+                    "dst_ip": None,
+                    "dst_port": "443",
+                    "src_ip": "198.51.100.7/32",
+                    "src_port": None,
+                    "protocol": "tcp",
+                    "tcp_flags": None,
+                    "action": "accept",
+                },
+                {
+                    "name": "lab-internal",
+                    "ip_version": "ipv4",
+                    "dst_ip": None,
+                    "dst_port": None,
+                    "src_ip": "10.0.0.0/8",
+                    "src_port": None,
+                    "protocol": None,
+                    "tcp_flags": None,
+                    "action": "accept",
+                },
+                {
+                    "name": "default-discard",
+                    "ip_version": None,
+                    "dst_ip": None,
+                    "dst_port": None,
+                    "src_ip": None,
+                    "src_port": None,
+                    "protocol": None,
+                    "tcp_flags": None,
+                    "action": "discard",
+                },
+            ],
+            "output": [],
+        },
+    }
+}
+
 #: Synthetic SSH key list — 2 keys registered in the Robot portal.
 ROBOT_CANARY_KEYS: list[dict[str, object]] = [
     {
@@ -337,7 +383,7 @@ def _param_schema_for(path: str) -> dict[str, object]:
     """Build a minimal ``parameter_schema`` for each ``{var}`` in *path*.
 
     Mirrors :func:`tests.acceptance._harbor_canary_fixtures._param_schema_for`.
-    Robot paths carry path variables like ``{server-ip}`` and ``{id}``.
+    Robot paths carry path variables like ``{server-ip}`` and ``{vswitch-id}``.
     """
     placeholders = _PATH_VAR_RE.findall(path)
     if not placeholders:
@@ -364,9 +410,8 @@ def _register_robot_routes(mock: respx.MockRouter) -> None:
     Robot uses HTTP Basic on every request — no session establish call
     is needed. Each route returns a pre-seeded JSON body. Templated
     paths are registered for specific parameter values the smoke test
-    uses (server-ip="1.2.3.1", id=4321).
+    uses (server-ip="1.2.3.1", vswitch-id=4321).
     """
-    mock.get("/query").respond(200, json=ROBOT_CANARY_QUERY)
     mock.get("/server").respond(200, json=ROBOT_CANARY_SERVERS)
     mock.get("/server/1.2.3.1").respond(200, json=ROBOT_CANARY_SERVER_DETAIL)
     mock.get("/ip").respond(200, json=ROBOT_CANARY_IPS)
@@ -375,6 +420,7 @@ def _register_robot_routes(mock: respx.MockRouter) -> None:
     mock.get("/vswitch/4321").respond(200, json=ROBOT_CANARY_VSWITCH_DETAIL)
     mock.get("/failover").respond(200, json=ROBOT_CANARY_FAILOVERS)
     mock.get("/rdns").respond(200, json=ROBOT_CANARY_RDNS)
+    mock.get("/firewall/1.2.3.1").respond(200, json=ROBOT_CANARY_FIREWALL)
     mock.get("/key").respond(200, json=ROBOT_CANARY_KEYS)
 
 
@@ -383,16 +429,13 @@ def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
 
     Mirrors the Hetzner Robot consumer sandbox behaviour:
     ``https://robot-sandbox.hetzner.com`` returns HTTP 200 with empty JSON
-    arrays (``[]``) for every read endpoint when called with any valid Basic
-    credential. The sandbox op for ``GET:/query`` returns ``{}`` (an empty
-    object, not an array) because the Robot Webservice query endpoint returns
-    an object shape. All other read ops return ``[]``.
+    arrays (``[]``) for every list endpoint when called with any valid Basic
+    credential; single-resource reads return ``{}``.
 
     Operators use the sandbox before they have a production Robot account;
     the MEHO op surface must tolerate empty-array responses gracefully
     (``status='ok'``, empty ``result``) without crashing.
     """
-    mock.get("/query").respond(200, json={})
     mock.get("/server").respond(200, json=[])
     mock.get("/server/1.2.3.1").respond(200, json={})
     mock.get("/ip").respond(200, json=[])
@@ -401,6 +444,7 @@ def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
     mock.get("/vswitch/4321").respond(200, json={})
     mock.get("/failover").respond(200, json=[])
     mock.get("/rdns").respond(200, json=[])
+    mock.get("/firewall/1.2.3.1").respond(200, json={})
     mock.get("/key").respond(200, json=[])
 
 
@@ -504,10 +548,10 @@ async def ingested_robot_canary_sandbox(
 
     Models the Hetzner Robot consumer sandbox
     (``https://robot-sandbox.hetzner.com``): all 10 read endpoints respond
-    with HTTP 200 + empty JSON arrays (``[]``) or empty objects (``{}``) for
-    the query endpoint. Operators who run against the sandbox before they
-    have a production Robot account should receive ``status='ok'`` with an
-    empty result — not a parse crash.
+    with HTTP 200 + empty JSON arrays (``[]``) for lists or empty objects
+    (``{}``) for single-resource reads. Operators who run against the
+    sandbox before they have a production Robot account should receive
+    ``status='ok'`` with an empty result — not a parse crash.
 
     Setup is identical to :func:`ingested_robot_canary` except:
 

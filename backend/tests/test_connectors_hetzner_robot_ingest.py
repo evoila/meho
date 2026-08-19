@@ -84,7 +84,7 @@ _EXPECTED_READ_OP_IDS = frozenset(
         "GET:/server",
         "GET:/server/{server-ip}",
         "GET:/vswitch",
-        "GET:/vswitch/{id}",
+        "GET:/vswitch/{vswitch-id}",
         "GET:/firewall/{server-ip}",
         "GET:/rdns",
     }
@@ -93,8 +93,8 @@ _EXPECTED_READ_OP_IDS = frozenset(
 #: The write/admin ops the spec covers for the full wrapper surface.
 _EXPECTED_WRITE_OP_IDS = frozenset(
     {
-        "POST:/vswitch/{id}",
-        "DELETE:/vswitch/{id}",
+        "POST:/vswitch/{vswitch-id}",
+        "DELETE:/vswitch/{vswitch-id}",
         "POST:/firewall/{server-ip}",
         "POST:/order/server_addon/transaction",
     }

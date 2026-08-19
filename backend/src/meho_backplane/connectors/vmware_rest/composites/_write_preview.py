@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 9 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 19 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 9 write composites onto the per-op preview hook shipped
+This wires all 19 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -22,13 +22,45 @@ helpers, never the mutating sub-ops.
                           total_resolved}``
 ``host.detach_from_vds``  ``{host, dvs, fallback_network, resolved,
                           total_resolved}``
-``cluster.patch``         ``{cluster, patch_method, resolved, total_resolved}``
+``cluster.patch``         ``{cluster, resolved, total_resolved}``
 ``vm.create``             echo: name, guest_os, sizing, networks, power-on
-``vm.clone``              echo: source_vm, target_name, library_item, wait flag
+``vm.clone``              echo: source_vm, target_name, library_item
+``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
+                          resource_pool, datastore, host, power_on,
+                          customization_spec_name
 ``vm.snapshot.revert``    echo: vm, snapshot_name
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
+``vm.disk.grow``          live-read: vm, name, disk, disk_label,
+                          current_capacity_bytes, requested_capacity_bytes,
+                          delta_bytes
+``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
+                          rule_name, enabled, resolved, total_resolved
+``folder.create``         echo: parent_folder, new_folder_name
+``vm.resize``             live-read: ``{vm, name, power_state, current,
+                          requested}`` sizing from->to
+``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
+                          current_backing, requested_backing}`` network from->to
+``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
+                          current_backing, state}`` (the host-local ISO path)
+``guest.customization_``  echo: spec_name, os_type, hostname_scheme,
+``spec.create``           nic_count, static_ip_summary (IDENTITY only --
+                          never the Windows admin / product-key /
+                          domain-join credentials, #1503)
+``vm.customize``          live-read: vm, name, power_state, spec_name,
+                          applies_on (spec reference carries no secret)
 ========================  ====================================================
+
+GOSC secret hygiene (#1503) is the load-bearing property of the two
+guest-customization builders. ``guest.customization_spec.create`` reads
+ONLY the identity keys (``spec_name`` / ``os_type`` / ``hostname`` /
+``interfaces`` ip+prefix+gateway) -- it never touches the
+``windows_admin_password`` / ``windows_product_key`` /
+``windows_domain_admin_password`` params, so no credential can reach the
+durable ``proposed_effect`` row by construction. Defence in depth: the
+op is pinned ``credential_write`` so its broadcast collapses to
+aggregate-only regardless of the builder, and the durable audit row
+stores only a params hash.
 
 Two preview depths, chosen per composite
 ========================================
@@ -40,10 +72,28 @@ Two preview depths, chosen per composite
   (:func:`._write._resolve_vm_list` / :func:`._write._resolve_cluster_hosts`),
   so the reviewer sees the resolved entity list (capped at
   :data:`_PREVIEW_RESOLVED_CAP`, with ``total_resolved`` carrying the
-  uncapped count).
+  uncapped count). ``vm.disk.grow`` is also a live-read builder, but
+  single-entity: the decision is the *from→to capacity delta*, and the
+  current capacity is a live vCenter read (:func:`._write._resolve_disk_info`),
+  not a param — so the preview reads the disk's current size + label and
+  echoes the requested capacity so the approver sees the disk grows (never
+  shrinks) and by how much.
+* **Live-read from->to diff** for the three #2891 hardware composites
+  (``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``): the delta
+  *is* the decision, so the builder live-reads the VM's current sizing /
+  NIC backing / CD-ROM backing via the same shared helpers the handlers
+  use (:func:`._write._read_vm_info` / :func:`._write._read_ethernet_nic`
+  / :func:`._write._read_cdrom` /
+  :func:`._write._resolve_distributed_portgroup`) and pairs it with the
+  requested change. Declines (``None`` -> identifier-only default) when no
+  connector resolved or the VM read returns no dict, and fails-soft on a
+  resolution fault exactly like the fan-out builders.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
-  five single-entity composites whose params fully name the blast
-  radius. ``vm.power`` additionally echoes ``power_kind`` so the approver
+  six single-entity composites whose params fully name the blast
+  radius. ``vm.clone_from_template`` echoes only the customization spec
+  *name*, never its secret-bearing contents (#1503), so the GOSC keystone
+  composes without leaking sysprep/password material onto the reviewer
+  surface. ``vm.power`` additionally echoes ``power_kind`` so the approver
   sees the soft-vs-hard distinction (a Tools-mediated ``guest_shutdown``
   is a very different blast radius from a hard ``off``).
   ``vm.migrate`` deliberately does **not** pre-resolve a DRS
@@ -74,11 +124,13 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 9 op_ids classify as ``write`` (``.create`` /
-``.patch`` suffixes) or ``other`` — none is a credential class, so none
-is suppressed. The previews themselves carry only vSphere inventory
-identity (moids, display names, power states) and the operator's own
-dispatch params — infrastructure topology, never credential material.
+any builder fires: the 19 op_ids classify as ``write`` (``.create`` /
+``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` — and
+``vm.clone_from_template`` — ``_template`` — are not write suffixes) —
+none is a credential class, so none is suppressed. The
+previews themselves carry only vSphere inventory identity (moids, display
+names, power states, disk capacities) and the operator's own dispatch
+params — infrastructure topology, never credential material.
 
 Fail-soft: every builder either declines (``None`` → identifier-only
 default) on malformed params or lets resolution faults propagate into
@@ -95,8 +147,15 @@ from typing import Any
 
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
+    _read_cdrom,
+    _read_ethernet_nic,
+    _read_vm_info,
     _resolve_cluster_hosts,
+    _resolve_cluster_name,
+    _resolve_disk_info,
+    _resolve_distributed_portgroup,
     _resolve_vm_list,
+    _resolve_vm_name,
 )
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -227,7 +286,6 @@ async def _cluster_patch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     )
     return {
         "cluster": cluster,
-        "patch_method": ctx.params.get("patch_method", "default"),
         **_capped_resolution(rows, _host_identity),
     }
 
@@ -271,7 +329,97 @@ async def _vm_clone_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "source_vm": source_vm,
         "target_name": target_name,
         "library_item": library_item,
-        "wait_for_completion": bool(ctx.params.get("wait_for_completion", True)),
+    }
+
+
+async def _vm_deploy_from_library_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.deploy_from_library`` — echo the deploy coordinates (no I/O).
+
+    Param-echo: the params name the blast radius — which library item (id or
+    name, plus scoping library), where it lands (resource pool / host / folder
+    / datastore), the OVF-network→portgroup map, provisioning, and whether it
+    powers on. ``ovf_properties`` may carry secret values (appliance
+    passwords), so only its **keys** (property ids) are echoed, never the
+    values (#1503 secret-hygiene). No live read is issued, so the preview
+    cannot drift from the approved dispatch. Declines (``None``) when neither
+    library reference nor the required ``resource_pool`` is a string.
+    """
+    library_item = ctx.params.get("library_item")
+    library_item_name = ctx.params.get("library_item_name")
+    resource_pool = ctx.params.get("resource_pool")
+    has_reference = isinstance(library_item, str) or isinstance(library_item_name, str)
+    if not has_reference or not isinstance(resource_pool, str):
+        return None
+    network_mappings = ctx.params.get("network_mappings")
+    ovf_properties = ctx.params.get("ovf_properties")
+    return {
+        "library_item": library_item if isinstance(library_item, str) else None,
+        "library_item_name": library_item_name if isinstance(library_item_name, str) else None,
+        "library_name": (
+            ctx.params.get("library_name")
+            if isinstance(ctx.params.get("library_name"), str)
+            else None
+        ),
+        "name": ctx.params.get("name") if isinstance(ctx.params.get("name"), str) else None,
+        "resource_pool": resource_pool,
+        "host": ctx.params.get("host") if isinstance(ctx.params.get("host"), str) else None,
+        "folder": ctx.params.get("folder") if isinstance(ctx.params.get("folder"), str) else None,
+        "datastore": (
+            ctx.params.get("datastore") if isinstance(ctx.params.get("datastore"), str) else None
+        ),
+        "network_mappings": (
+            {str(k): str(v) for k, v in network_mappings.items()}
+            if isinstance(network_mappings, dict)
+            else {}
+        ),
+        "storage_provisioning": (
+            ctx.params.get("storage_provisioning")
+            if isinstance(ctx.params.get("storage_provisioning"), str)
+            else None
+        ),
+        "ovf_property_keys": (
+            sorted(str(k) for k in ovf_properties) if isinstance(ovf_properties, dict) else []
+        ),
+        "power_on": bool(ctx.params.get("power_on", False)),
+    }
+
+
+async def _vm_clone_from_template_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.clone_from_template`` — echo the clone coordinates (no I/O).
+
+    Param-echo: the params fully name the blast radius — which template, where
+    it lands (folder / resource pool / datastore / optional host pin), whether
+    it powers on, and which GOSC spec (if any) applies. Only the customization
+    spec *name* is echoed, never its secret-bearing contents (#1503), and no
+    live read is issued, so the preview cannot drift from what the approved
+    dispatch does. Declines (``None``) on malformed params.
+    """
+    source_template = ctx.params.get("source_template")
+    new_vm_name = ctx.params.get("new_vm_name")
+    folder = ctx.params.get("folder")
+    resource_pool = ctx.params.get("resource_pool")
+    datastore = ctx.params.get("datastore")
+    if (
+        not isinstance(source_template, str)
+        or not isinstance(new_vm_name, str)
+        or not isinstance(folder, str)
+        or not isinstance(resource_pool, str)
+        or not isinstance(datastore, str)
+    ):
+        return None
+    host = ctx.params.get("host")
+    customization_spec_name = ctx.params.get("customization_spec_name")
+    return {
+        "source_template": source_template,
+        "new_vm_name": new_vm_name,
+        "folder": folder,
+        "resource_pool": resource_pool,
+        "datastore": datastore,
+        "host": host if isinstance(host, str) else None,
+        "power_on": bool(ctx.params.get("power_on", False)),
+        "customization_spec_name": (
+            customization_spec_name if isinstance(customization_spec_name, str) else None
+        ),
     }
 
 
@@ -339,23 +487,360 @@ async def _vm_power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 9 write composites. Module-level so the
+async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.disk.grow`` — live-read the current→requested capacity delta.
+
+    The delta *is* the decision: the reviewer must see that the disk grows
+    (never shrinks) and by how much. Reads the REST ``Disk.Info`` for the
+    disk's ``label`` + current ``capacity`` (bytes) — the load-bearing read,
+    shared with the handler-family via :func:`._write._resolve_disk_info` —
+    and best-effort the VM display name, then echoes the requested capacity
+    and the computed ``delta_bytes``. A failing disk read propagates into
+    the #1628 ``preview_unavailable`` marker (the delta is unknowable, so
+    the park is honest about it rather than showing a bare identifier). The
+    per-VM ``ReconfigVM_Task`` write never fires here. Declines (``None``)
+    without a resolved connector or on malformed params.
+    """
+    vm = ctx.params.get("vm")
+    disk = ctx.params.get("disk")
+    capacity_bytes = ctx.params.get("capacity_bytes")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(disk, str)
+        or not isinstance(capacity_bytes, int)
+        or isinstance(capacity_bytes, bool)
+        or ctx.connector_instance is None
+    ):
+        return None
+    disk_info = await _resolve_disk_info(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+        disk=disk,
+    )
+    raw_capacity = disk_info.get("capacity")
+    current_bytes = (
+        raw_capacity
+        if isinstance(raw_capacity, int) and not isinstance(raw_capacity, bool)
+        else None
+    )
+    name = await _resolve_vm_name(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+    )
+    label = disk_info.get("label")
+    return {
+        "vm": vm,
+        "name": name,
+        "disk": disk,
+        "disk_label": label if isinstance(label, str) else None,
+        "current_capacity_bytes": current_bytes,
+        "requested_capacity_bytes": capacity_bytes,
+        "delta_bytes": (capacity_bytes - current_bytes if current_bytes is not None else None),
+    }
+
+
+async def _cluster_drs_rule_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``cluster.drs_rule.create`` — resolve the VM set the rule would govern.
+
+    The fan-out blast-radius pattern (like ``vm.power.bulk``): resolves the
+    rule's VM names to the same ``[{vm, name}]`` set the approved write
+    references — scoped to the cluster — via the shared
+    :func:`._write._resolve_vm_list` (one read-only GET), capped at
+    :data:`_PREVIEW_RESOLVED_CAP` with ``total_resolved`` carrying the
+    uncapped count. Best-effort reads the cluster display name
+    (:func:`._write._resolve_cluster_name`) so the reviewer sees which
+    cluster + which VMs the affinity / anti-affinity rule pins. The
+    ReconfigureComputeResource_Task write never fires here. Declines
+    (``None``) without a resolved connector or on malformed params.
+    """
+    cluster = ctx.params.get("cluster")
+    rule_name = ctx.params.get("rule_name")
+    rule_type = ctx.params.get("rule_type")
+    if (
+        not isinstance(cluster, str)
+        or not isinstance(rule_name, str)
+        or not isinstance(rule_type, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    vm_names = [n for n in (ctx.params.get("vms") or []) if isinstance(n, str)]
+    rows = await _resolve_vm_list(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        filter_dict={"names": vm_names, "clusters": [cluster]},
+    )
+    cluster_name = await _resolve_cluster_name(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        cluster=cluster,
+    )
+    return {
+        "cluster": cluster,
+        "cluster_name": cluster_name,
+        "rule_type": rule_type,
+        "rule_name": rule_name,
+        "enabled": bool(ctx.params.get("enabled", True)),
+        **_capped_resolution(rows, _vm_identity),
+    }
+
+
+async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``folder.create`` — echo the parent + new folder name (no I/O).
+
+    Param echo (the ``secret.move`` precedent, #1580): the params fully name
+    the blast radius — one new folder under one named parent. Parent-name
+    resolution and the synchronous ``CreateFolder`` write stay the handler's
+    job at dispatch time.
+    """
+    parent_folder = ctx.params.get("parent_folder")
+    folder_name = ctx.params.get("folder_name")
+    if not isinstance(parent_folder, str) or not isinstance(folder_name, str):
+        return None
+    return {"parent_folder": parent_folder, "new_folder_name": folder_name}
+
+
+async def _vm_resize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.resize`` — live-read the current sizing, echo the requested.
+
+    The from->to diff is the decision the approver signs off: which VM,
+    what it is now (cpu_count / cores_per_socket / memory_MiB + power
+    state), and what it would become. Reads current sizing via the shared
+    :func:`._write._read_vm_info` (one read-only GET); no CPU/memory PATCH
+    fires here.
+    """
+    vm = ctx.params.get("vm")
+    if not isinstance(vm, str) or ctx.connector_instance is None:
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    if info is None:
+        return None
+    cpu_raw = info.get("cpu")
+    mem_raw = info.get("memory")
+    cpu = cpu_raw if isinstance(cpu_raw, dict) else {}
+    mem = mem_raw if isinstance(mem_raw, dict) else {}
+    return {
+        "vm": vm,
+        "name": info.get("name"),
+        "power_state": info.get("power_state"),
+        "current": {
+            "cpu_count": cpu.get("count"),
+            "cores_per_socket": cpu.get("cores_per_socket"),
+            "memory_MiB": mem.get("size_MiB"),
+        },
+        "requested": {
+            "cpu_count": ctx.params.get("cpu_count"),
+            "cores_per_socket": ctx.params.get("cores_per_socket"),
+            "memory_MiB": ctx.params.get("memory_mib"),
+        },
+    }
+
+
+async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.nic.repoint`` — live-read the NIC + resolve the target portgroup.
+
+    The from->to network pair is what the four-eyes reviewer needs: the
+    NIC's current backing (which network it is on now) and the target
+    portgroup (name + resolved moid). Reads the NIC via
+    :func:`._write._read_ethernet_nic` and resolves the portgroup via
+    :func:`._write._resolve_distributed_portgroup` (the same helper the
+    approved dispatch binds); the VM ``name`` comes from
+    :func:`._write._read_vm_info`. No NIC PATCH fires here.
+    """
+    vm = ctx.params.get("vm")
+    nic = ctx.params.get("nic")
+    portgroup_name = ctx.params.get("portgroup_name")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(nic, str)
+        or not isinstance(portgroup_name, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    nic_info = await _read_ethernet_nic(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+        nic_id=nic,
+    )
+    network_moid, _resolution, _candidates = await _resolve_distributed_portgroup(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        portgroup_name=portgroup_name,
+    )
+    return {
+        "vm": vm,
+        "name": info.get("name") if info else None,
+        "nic": nic,
+        "mac_address": nic_info.get("mac_address") if nic_info else None,
+        "current_backing": nic_info.get("backing") if nic_info else None,
+        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+    }
+
+
+async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.device.cdrom`` — live-read the current backing + state.
+
+    The host-local ISO path in the current backing is exactly what the
+    approver needs to see before removing / updating / disconnecting the
+    device. Reads the CD-ROM via :func:`._write._read_cdrom` and the VM
+    ``name`` via :func:`._write._read_vm_info`; no DELETE / PATCH /
+    disconnect fires here.
+    """
+    vm = ctx.params.get("vm")
+    cdrom = ctx.params.get("cdrom")
+    action = ctx.params.get("action")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(cdrom, str)
+        or not isinstance(action, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    cdrom_info = await _read_cdrom(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+        cdrom_id=cdrom,
+    )
+    return {
+        "vm": vm,
+        "name": info.get("name") if info else None,
+        "cdrom": cdrom,
+        "action": action,
+        "current_backing": cdrom_info.get("backing") if cdrom_info else None,
+        "state": cdrom_info.get("state") if cdrom_info else None,
+    }
+
+
+async def _guest_customization_spec_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``guest.customization_spec.create`` — IDENTITY fields only (no I/O).
+
+    **Secret hygiene (#1503) is the whole point of this builder.** It
+    reads ONLY the identity keys (``spec_name`` / ``os_type`` /
+    ``hostname`` / ``interfaces`` ip+prefix+gateway) and never the
+    ``windows_admin_password`` / ``windows_product_key`` /
+    ``windows_domain_admin_password`` params -- so no credential can
+    reach the durable ``proposed_effect`` row through this path by
+    construction. The reviewer still sees the full blast radius: which
+    spec, which OS, the host name, and the per-NIC static IPs the guest
+    will come up on.
+    """
+    spec_name = ctx.params.get("spec_name")
+    os_type = ctx.params.get("os_type")
+    if not isinstance(spec_name, str) or not isinstance(os_type, str):
+        return None
+    raw_interfaces = ctx.params.get("interfaces")
+    interfaces = raw_interfaces if isinstance(raw_interfaces, list) else []
+    static_ips = [
+        nic["ip_address"]
+        for nic in interfaces
+        if isinstance(nic, dict) and isinstance(nic.get("ip_address"), str) and nic["ip_address"]
+    ]
+    hostname = ctx.params.get("hostname")
+    return {
+        "spec_name": spec_name,
+        "os_type": os_type,
+        "hostname_scheme": f"FIXED:{hostname}" if isinstance(hostname, str) and hostname else None,
+        "nic_count": len(interfaces),
+        "static_ip_summary": static_ips,
+    }
+
+
+async def _vm_customize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.customize`` — resolve the VM by name for its power state.
+
+    Echoes the VM name, the spec being applied, and ``applies_on``, and
+    (when a connector is resolved) live-reads the VM by name via the
+    shared :func:`._write._resolve_vm_list` to surface the moid + current
+    power state -- the load-bearing fact for the reviewer, since a
+    powered-on VM will be refused at dispatch. The spec reference carries
+    no secret (the credential material lives in the saved spec created
+    separately), so a plain echo is safe. Falls back to the name-only
+    echo when no connector is available or the name is not unambiguous.
+    """
+    vm_name = ctx.params.get("name")
+    spec_name = ctx.params.get("spec_name")
+    if not isinstance(vm_name, str) or not isinstance(spec_name, str):
+        return None
+    preview: dict[str, Any] = {
+        "vm": None,
+        "name": vm_name,
+        "spec_name": spec_name,
+        "power_state": None,
+        "applies_on": "next_power_on",
+    }
+    if ctx.connector_instance is None:
+        return preview
+    rows = await _resolve_vm_list(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        filter_dict={"names": [vm_name]},
+    )
+    if len(rows) == 1:
+        row = rows[0]
+        vm_moid = row.get("vm")
+        power_state = row.get("power_state")
+        if isinstance(vm_moid, str):
+            preview["vm"] = vm_moid
+        if isinstance(power_state, str):
+            preview["power_state"] = power_state
+    return preview
+
+
+#: op_id → builder for the 19 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
+    "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
+    "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
+    "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
+    "vmware.composite.vm.resize": _vm_resize_preview,
+    "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
+    "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
     "vmware.composite.host.evacuate": _host_evacuate_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
+    "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
+    "vmware.composite.folder.create": _folder_create_preview,
+    "vmware.composite.guest.customization_spec.create": _guest_customization_spec_create_preview,
+    "vmware.composite.vm.customize": _vm_customize_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 9 write-composite park-time preview builders. Import-time.
+    """Wire the 19 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

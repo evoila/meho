@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: declarative typed-op metadata table. This module is a
-# data file — 12 audited-read SddcTypedOp records, each a data-only value with
-# grounded operator-facing prose (summary / description / llm_instructions) the
+# data file — 14 SddcTypedOp records (the #2306 audited 12-read set plus the
+# #2837 network-pool pre-flight reads), each a data-only value with grounded
+# operator-facing prose (summary / description / llm_instructions) the
 # BM25 + embedding search surfaces read verbatim. Cyclomatic complexity is
-# trivial; the length is the 12-op catalog, not logic. Splitting the tuple
+# trivial; the length is the 14-op catalog, not logic. Splitting the tuple
 # across files fragments the single source of truth the registrar iterates.
 
 """Typed-op metadata + registrar for :class:`SddcManagerConnector` (#2306).
 
-The audited SDDC Manager read set (the #2294 12-read lab-audit surface) is
-registered as typed ops (``source_kind="typed"``) so it dispatches on a
+The audited SDDC Manager read set (the #2294 12-read lab-audit surface),
+extended with the network-pool pre-flight reads (#2837), is registered as
+typed ops (``source_kind="typed"``) so it dispatches on a
 fresh boot with **zero catalog ingest** -- the #2247 failure class the
 older ingested-row enablement was subject to
 (per-deploy catalog state). The op bodies live in
@@ -35,8 +37,8 @@ typed op carries a dotted op-id (``sddc.domain.list``) and a code
 ``handler_ref``, so it resolves through
 :func:`~meho_backplane.operations._branches.dispatch_typed`
 and never through an ``endpoint_descriptor`` ingested row (#2262). The
-four non-audited reads (releases/system, domain detail, network-pools,
-bundles) remain ingested browse breadth.
+three non-audited reads (releases/system, domain detail, bundles) remain
+ingested browse breadth.
 
 Credential-read gating (``sddc.credential.list``)
 -------------------------------------------------
@@ -126,10 +128,14 @@ SDDC_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use to read the VCF infrastructure inventory SDDC Manager governs: "
         "domains and their lifecycle status (sddc.domain.list / "
         "sddc.domain.status), vSphere clusters (sddc.cluster.list), ESXi "
-        "hosts (sddc.host.list), vCenters (sddc.vcenter.list), and NSX-T "
-        "clusters (sddc.nsxt_cluster.list). The right group for 'what does "
-        "this VCF stack contain' and for mapping a workload domain to its "
-        "vCenter and NSX-T cluster. Read-only."
+        "hosts (sddc.host.list), vCenters (sddc.vcenter.list), NSX-T "
+        "clusters (sddc.nsxt_cluster.list), and the network pools that back "
+        "host commissioning (sddc.network_pool.list / sddc.network_pool.get). "
+        "The right group for 'what does this VCF stack contain', for mapping "
+        "a workload domain to its vCenter and NSX-T cluster, and for the "
+        "host-commissioning IP-capacity pre-flight (does the pool's "
+        "VMOTION/vSAN network still have enough free IPs for N new hosts). "
+        "Read-only."
     ),
     _GROUP_PLATFORM: (
         "Use to read the SDDC Manager platform itself: the appliance "
@@ -229,11 +235,13 @@ _DOMAIN_STATUS = SddcTypedOp(
     summary="Lifecycle status of one VCF domain.",
     description=(
         "Reads the lifecycle status of one VCF domain via "
-        "GET /v1/domains/{id}/status -- its ACTIVE / ACTIVATING / ERROR "
-        "state and the last status transition. Requires a domain id from "
-        "sddc.domain.list. The read an operator runs when a domain-create "
-        "or expand workflow is in flight or a domain is reported unhealthy. "
-        "Works with zero catalog ingest. safety_level=safe, read-only."
+        "GET /v1/domains/{id} -- the domain object's top-level status "
+        "field carries the ACTIVE / ACTIVATING / UPGRADING / ERROR state "
+        "(SDDC Manager 9.0 serves no dedicated /status sub-resource). "
+        "Requires a domain id from sddc.domain.list. The read an operator "
+        "runs when a domain-create or expand workflow is in flight or a "
+        "domain is reported unhealthy. Works with zero catalog ingest. "
+        "safety_level=safe, read-only."
     ),
     parameter_schema={
         "type": "object",
@@ -258,7 +266,10 @@ _DOMAIN_STATUS = SddcTypedOp(
             "still activating / errored -- e.g. while a domain-expand "
             "workflow runs."
         ),
-        output_shape="{status, ...}. Surface the state and any error detail.",
+        output_shape=(
+            "{id, name, status, upgradeState, ...} -- the full domain "
+            "object. Surface the top-level status and any error detail."
+        ),
         parameter_hints={"id": "The VCF domain id from sddc.domain.list."},
     ),
 )
@@ -436,6 +447,91 @@ _NSXT_CLUSTER_LIST = SddcTypedOp(
             "when mapping a workload domain to its NSX-T cluster."
         ),
         output_shape="{elements: [{id, vipFqdn, domainIds}, ...], pageMetadata}.",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.network_pool.list
+# ---------------------------------------------------------------------------
+
+_NETWORK_POOL_LIST = SddcTypedOp(
+    op_id="sddc.network_pool.list",
+    handler_attr="network_pool_list",
+    summary="VCF network pools (IP ranges + VLANs) for host commissioning.",
+    description=(
+        "Lists the VCF network pools SDDC Manager defines for host "
+        "commissioning via GET /v1/network-pools. The entry point for the "
+        "host-commissioning IP-capacity pre-flight: pick the pool a domain "
+        "or cluster draws from, then read its per-network free-vs-used IP "
+        "counts with sddc.network_pool.get. Works with zero catalog ingest. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema=_NO_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_INVENTORY,
+    tags=("read-only", "sddc", "vcf", "network-pool", "inventory"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to list network pools before commissioning hosts; pick the "
+            "pool a domain / cluster uses, then drill into its capacity with "
+            "sddc.network_pool.get."
+        ),
+        output_shape=(
+            "{elements: [{id, name, networks: [{type, vlanId}, ...]}, ...], pageMetadata}."
+        ),
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.network_pool.get
+# ---------------------------------------------------------------------------
+
+_NETWORK_POOL_GET = SddcTypedOp(
+    op_id="sddc.network_pool.get",
+    handler_attr="network_pool_get",
+    summary="One network pool's networks[] with free-vs-used IP capacity.",
+    description=(
+        "Reads one network pool's detail via GET /v1/network-pools/{id}, "
+        "including its networks[] -- each network's type (VSAN / VMOTION / "
+        "...), vlanId, subnet / mask / gateway, ipPools[] ranges, and the "
+        "freeIps / usedIps lists whose lengths are the capacity an operator "
+        "confirms before commissioning N hosts. Requires a pool id from "
+        "sddc.network_pool.list. Works with zero catalog ingest. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The network-pool id (from sddc.network_pool.list).",
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_INVENTORY,
+    tags=("read-only", "sddc", "vcf", "network-pool", "capacity"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a pool id to check whether its VMOTION / vSAN networks "
+            "still have enough free IPs before commissioning N hosts. "
+            "free-vs-used = len(freeIps) vs len(usedIps) per network."
+        ),
+        output_shape=(
+            "{id, name, networks: [{type, vlanId, subnet, mask, gateway, "
+            "ipPools: [{start, end}], freeIps: [...], usedIps: [...]}, ...]}. "
+            "Report free/used counts per network type."
+        ),
+        parameter_hints={"id": "The network-pool id from sddc.network_pool.list."},
     ),
 )
 
@@ -659,8 +755,9 @@ _LICENSE_LIST = SddcTypedOp(
 
 
 #: The typed ops :class:`SddcManagerConnector` registers at lifespan
-#: startup -- the audited 12-read set (#2306). Ordered inventory ->
-#: credentials -> tasks -> platform to match the operator's typical path.
+#: startup -- the audited 12-read set (#2306) plus the network-pool
+#: pre-flight reads (#2837). Ordered inventory -> credentials -> tasks ->
+#: platform to match the operator's typical path.
 SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _DOMAIN_LIST,
     _DOMAIN_STATUS,
@@ -668,6 +765,8 @@ SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _HOST_LIST,
     _VCENTER_LIST,
     _NSXT_CLUSTER_LIST,
+    _NETWORK_POOL_LIST,
+    _NETWORK_POOL_GET,
     _CREDENTIAL_LIST,
     _TASK_LIST,
     _SYSTEM_INFO,

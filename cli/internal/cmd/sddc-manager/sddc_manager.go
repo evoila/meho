@@ -5,17 +5,21 @@
 // for G3.5-T6 (#618) of Initiative #368. v0.2 ships the operator-facing
 // alias verbs over the 9 enabled SDDC Manager read-only core ops, each
 // pre-baking connector_id="sddc-rest-9.0" so operators don't type the
-// connector ID on every dispatch:
+// connector ID on every dispatch. Verbs whose backend read went typed
+// dispatch the dotted typed op_id (#2355, #2837 — ingested
+// METHOD:/path op_ids no longer resolve on a zero-catalog boot); the
+// rest keep their ingested op_ids until a typed counterpart ships:
 //
 //   - `meho sddc-manager about [--target T]`                — GET:/v1/releases/system
-//   - `meho sddc-manager manager list [--target T]`         — GET:/v1/sddc-managers
-//   - `meho sddc-manager domain list [--target T]`          — GET:/v1/domains
+//   - `meho sddc-manager manager list [--target T]`         — sddc.manager.list
+//   - `meho sddc-manager domain list [--target T]`          — sddc.domain.list
 //   - `meho sddc-manager domain info <id> [--target T]`     — GET:/v1/domains/{id}
-//   - `meho sddc-manager cluster list [--domain D] [--target T]`   — GET:/v1/clusters
-//   - `meho sddc-manager host list [--domain D] [--cluster C] [--target T]` — GET:/v1/hosts
-//   - `meho sddc-manager network-pool list [--target T]`    — GET:/v1/network-pools
+//   - `meho sddc-manager cluster list [--domain D] [--target T]`   — sddc.cluster.list
+//   - `meho sddc-manager host list [--domain D] [--cluster C] [--target T]` — sddc.host.list
+//   - `meho sddc-manager network-pool list [--target T]`    — sddc.network_pool.list
+//   - `meho sddc-manager network-pool get <id> [--target T]` — sddc.network_pool.get
 //   - `meho sddc-manager bundle list [--target T]`          — GET:/v1/bundles
-//   - `meho sddc-manager workflow list [--status S] [--target T]`  — GET:/v1/tasks
+//   - `meho sddc-manager workflow list [--status S] [--target T]`  — sddc.task.list
 //   - `meho sddc-manager operation search/call`             — meta-tool wrappers
 //
 // Every verb is a thin Cobra command that POSTs to

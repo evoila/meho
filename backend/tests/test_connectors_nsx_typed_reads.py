@@ -8,6 +8,7 @@ Coverage matrix (per Task #2302 acceptance criteria):
 * **Zero-catalog typed dispatch (AC #1).** Each audited read
   (nsx.node.status / nsx.cluster.status / nsx.backup.config /
   nsx.backup.status / nsx.transport_zone.list / nsx.tier1.list /
+  nsx.segment.list / nsx.transport_node.list / nsx.transport_node.state /
   nsx.alarm.list) dispatches through :func:`~meho_backplane.operations.dispatch`
   against a respx-mocked NSX manager with **only** the typed registrar
   run -- no ingested descriptor rows -- and returns ``status="ok"``. The
@@ -21,7 +22,11 @@ Coverage matrix (per Task #2302 acceptance criteria):
   downstream GET is recovered by the dispatcher's auth-class arm calling
   the connector's public ``invalidate_session`` hook and re-dispatching
   once; the op returns ``status="ok"``.
-* **Registration-shape invariants.** All seven carry
+* **Segment CIDR occupancy is passed through unmodified (#2835).**
+  nsx.segment.list forwards the vendor ``{results, result_count}``
+  envelope so each segment's ``subnets[].gateway_address`` (the
+  pre-flight CIDR-occupancy datum) reaches the operator unmodified.
+* **Registration-shape invariants.** All ten carry
   ``safety_level="safe"``, ``requires_approval=False``, a ``read-only``
   tag, ``additionalProperties=False`` on the parameter schema, and
   non-empty llm_instructions. No write op is registered.
@@ -198,6 +203,45 @@ _TZ_PAYLOAD: dict[str, Any] = {
 _TIER1_PAYLOAD: dict[str, Any] = {
     "results": [{"id": "t1-a", "display_name": "tenant-a", "tier0_path": "/infra/tier-0s/t0"}]
 }
+_SEGMENTS_PAYLOAD: dict[str, Any] = {
+    "results": [
+        {
+            "id": "seg-app",
+            "display_name": "app-tier",
+            "resource_type": "Segment",
+            "transport_zone_path": (
+                "/infra/sites/default/enforcement-points/default/transport-zones/tz-overlay"
+            ),
+            "subnets": [{"gateway_address": "10.20.0.1/24"}],
+        },
+        {
+            "id": "seg-db",
+            "display_name": "db-tier",
+            "resource_type": "Segment",
+            "transport_zone_path": (
+                "/infra/sites/default/enforcement-points/default/transport-zones/tz-overlay"
+            ),
+            "subnets": [{"gateway_address": "10.20.1.1/24"}],
+        },
+    ],
+    "result_count": 2,
+}
+_TRANSPORT_NODE_LIST_PAYLOAD: dict[str, Any] = {
+    "results": [
+        {
+            "id": "tn-edge-1",
+            "display_name": "edge-node-01",
+            "node_deployment_info": {"resource_type": "EdgeNode"},
+        }
+    ],
+    "result_count": 1,
+}
+_TRANSPORT_NODE_STATE_PAYLOAD: dict[str, Any] = {
+    "state": "success",
+    "maintenance_mode_state": "DISABLED",
+    "node_deployment_state": {"state": "NODE_READY", "details": []},
+    "host_switch_states": [{"host_switch_name": "nvds1", "transport_zone_ids": ["tz-overlay"]}],
+}
 _ALARM_PAYLOAD: dict[str, Any] = {
     "results": [
         {
@@ -231,6 +275,27 @@ _ALARM_PAYLOAD: dict[str, Any] = {
             _TZ_PAYLOAD,
         ),
         ("nsx.tier1.list", {}, "GET", "/policy/api/v1/infra/tier-1s", _TIER1_PAYLOAD),
+        (
+            "nsx.segment.list",
+            {},
+            "GET",
+            "/policy/api/v1/infra/segments",
+            _SEGMENTS_PAYLOAD,
+        ),
+        (
+            "nsx.transport_node.list",
+            {},
+            "GET",
+            "/api/v1/transport-nodes",
+            _TRANSPORT_NODE_LIST_PAYLOAD,
+        ),
+        (
+            "nsx.transport_node.state",
+            {"id": "tn-edge-1"},
+            "GET",
+            "/api/v1/transport-nodes/tn-edge-1/state",
+            _TRANSPORT_NODE_STATE_PAYLOAD,
+        ),
         ("nsx.alarm.list", {}, "GET", "/api/v1/alarms", _ALARM_PAYLOAD),
     ],
 )
@@ -314,6 +379,81 @@ async def test_alarm_list_forwards_filters(
     assert sent.params.get("status") == "OPEN"
     assert sent.params.get("feature_name") == "manager_health"
     assert sent.params.get("severity") == "CRITICAL"
+
+
+@pytest.mark.asyncio
+async def test_segment_list_returns_cidr_occupancy_shape(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#2835: nsx.segment.list passes the vendor segment envelope through unmodified.
+
+    The operator's pre-flight question -- "which subnet/gateway CIDRs are
+    already in use before I carve a new segment?" -- is answered by
+    ``subnets[].gateway_address`` on each returned segment, so the handler
+    must forward the vendor payload without projecting it away.
+    """
+    await _register_and_resolve(_stub_embedding)
+
+    async with respx.mock(base_url=_NSX_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/api/session/create").respond(200, headers=_XSRF_HEADERS)
+        route = mock.get("/policy/api/v1/infra/segments").respond(200, json=_SEGMENTS_PAYLOAD)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=NSX_CONNECTOR_ID,
+            op_id="nsx.segment.list",
+            target=_NsxReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert route.called and route.call_count == 1
+    body = result.result
+    assert isinstance(body, dict)
+    # Vendor {results, result_count} envelope passed through unmodified.
+    assert body["result_count"] == 2
+    segments = body["results"]
+    assert [seg["id"] for seg in segments] == ["seg-app", "seg-db"]
+    # The subnet/CIDR-occupancy datum the pre-flight needs, plus the
+    # transport-zone cross-reference and resource_type -- all unmodified.
+    assert segments[0]["subnets"][0]["gateway_address"] == "10.20.0.1/24"
+    assert segments[1]["subnets"][0]["gateway_address"] == "10.20.1.1/24"
+    assert segments[0]["transport_zone_path"].endswith("/tz-overlay")
+    assert segments[0]["resource_type"] == "Segment"
+
+
+@pytest.mark.asyncio
+async def test_transport_node_state_substitutes_id_into_path(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """nsx.transport_node.state substitutes ``id`` into the path and passes state through.
+
+    Exercises the id-scoped read shape (mirrors ``sddc.domain.status``):
+    the ``id`` param lands in the request path, and the vendor state
+    payload -- maintenance_mode_state + host_switch_states + the rest --
+    is returned unmodified so no health field is dropped at the boundary.
+    """
+    await _register_and_resolve(_stub_embedding)
+
+    node_id = "tn-edge-7"
+    async with respx.mock(base_url=_NSX_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/api/session/create").respond(200, headers=_XSRF_HEADERS)
+        route = mock.get(f"/api/v1/transport-nodes/{node_id}/state").respond(
+            200, json=_TRANSPORT_NODE_STATE_PAYLOAD
+        )
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=NSX_CONNECTOR_ID,
+            op_id="nsx.transport_node.state",
+            target=_NsxReadTarget(),
+            params={"id": node_id},
+        )
+
+    assert result.status == "ok", result.error
+    assert route.called and route.call_count == 1
+    assert route.calls[0].request.url.path == f"/api/v1/transport-nodes/{node_id}/state"
+    assert result.result == _TRANSPORT_NODE_STATE_PAYLOAD
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +600,9 @@ _EXPECTED_OP_IDS = {
     "nsx.backup.status",
     "nsx.transport_zone.list",
     "nsx.tier1.list",
+    "nsx.segment.list",
+    "nsx.transport_node.list",
+    "nsx.transport_node.state",
     "nsx.alarm.list",
 }
 

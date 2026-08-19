@@ -25,9 +25,16 @@ This module ships:
   :meth:`fingerprint`, registered as the ``rke2.about`` typed op.
 * :meth:`Rke2SshConnector.posture_show` -- the read-only posture tier
   (``rke2.posture.show``): config-file modes + redacted token presence.
+* :meth:`Rke2SshConnector.service_status` -- the read-only service-state
+  probe (``rke2.node.service.status``, #2833 / #2852): live systemd state
+  of the ``rke2-server`` / ``rke2-agent`` units via ``systemctl show``.
 * :meth:`Rke2SshConnector.etcd_snapshot_save` -- the safe, non-gated
   ``rke2.etcd-snapshot.save`` op (T4 #2431): an on-demand managed-etcd
   snapshot on a server node, returning a snapshot name + path.
+* :meth:`Rke2SshConnector.etcd_snapshot_list` -- the safe, read-only
+  ``rke2.etcd-snapshot.list`` op (#2853): enumerates the managed-etcd
+  snapshots that already exist on a server node (the ``.save`` read
+  counterpart), returning name / location / size / timestamp rows.
 * :meth:`Rke2SshConnector.execute` -- the G0.6 dispatcher shim (same
   shape as :meth:`Bind9Connector.execute` / :meth:`HolodeckConnector.execute`).
 
@@ -41,8 +48,9 @@ the bind9 anti-shape.
 The approval-gated write ops (``rke2.token.rotate`` /
 ``rke2.node.service.restart`` / ``rke2.node.config.update``) land in
 :mod:`~meho_backplane.connectors.rke2.ops_write` (sibling Tasks
-#2429/#2430) and the safe, non-gated ``rke2.etcd-snapshot.save`` (T4
-#2431) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
+#2429/#2430) and the safe, non-gated snapshot ops
+``rke2.etcd-snapshot.save`` (T4 #2431) + ``rke2.etcd-snapshot.list``
+(#2853) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
 composed onto :data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS` and
 their bound-method shims live here. The dispatcher shim does not change.
 """
@@ -326,6 +334,50 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def service_status(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.service.status`` (#2833 / #2852).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_read.rke2_service_status`,
+        which runs one read-only ``systemctl show`` probe over the shared SSH
+        adapter across the fixed ``rke2-server`` / ``rke2-agent`` pair and
+        returns their live systemd state (load/active/sub state, start time,
+        restart count) without mutating anything. Safe / non-gated like the
+        sibling ``posture_show``.
+        """
+        from meho_backplane.connectors.rke2.ops_read import (
+            rke2_service_status as _rke2_service_status,
+        )
+
+        return await _rke2_service_status(self, target, params, operator)
+
+    async def config_get(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.config.get`` (#2854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_read.rke2_config_get`,
+        which ``cat``s the RKE2 server ``config.yaml`` (or a ``config.yaml.d``
+        drop-in) over SSH and
+        returns its parsed content with the join tokens + etcd S3 credentials
+        redacted. Read-only / safe -- the write-side reader lives in
+        ``config_update``.
+        """
+        from meho_backplane.connectors.rke2.ops_read import (
+            rke2_config_get as _rke2_config_get,
+        )
+
+        return await _rke2_config_get(self, target, params, operator)
+
     async def token_rotate(
         self,
         target: Target,
@@ -406,6 +458,29 @@ class Rke2SshConnector(SshConnector):
         )
 
         return await _rke2_etcd_snapshot_save(self, target, params, operator)
+
+    async def etcd_snapshot_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.etcd-snapshot.list`` (#2853).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_snapshot.rke2_etcd_snapshot_list`,
+        which runs the shared embedded-etcd-server precondition guard and
+        enumerates the existing managed-etcd snapshots over the shared SSH
+        adapter. Safe tier, non-gated, and genuinely read-only -- the result
+        carries snapshot names / locations / sizes / timestamps only, never
+        etcd contents. Set-shaped, so the JSONFlux reducer materialises a
+        result handle above threshold.
+        """
+        from meho_backplane.connectors.rke2.ops_snapshot import (
+            rke2_etcd_snapshot_list as _rke2_etcd_snapshot_list,
+        )
+
+        return await _rke2_etcd_snapshot_list(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:
@@ -575,15 +650,43 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Pair with a rotation runbook to confirm the token is present "
         "before rotating. Transport: plain SSH (``stat``, read-only)."
     ),
+    "rke2-service-read": (
+        "Use to check whether an RKE2 node's systemd service is up WITHOUT "
+        "changing it: ``rke2.node.service.status`` runs a read-only "
+        "``systemctl show`` over the fixed ``rke2-server`` / ``rke2-agent`` "
+        "pair and reports each unit's load / active / sub state, start time, "
+        "and restart count. The unit reporting ``not-found`` is not installed "
+        "on the node, so the result also reveals the node's role. Reach for "
+        "it when the Kubernetes API is unreachable and ``kubernetes.*`` ops "
+        "cannot answer 'is rke2-server actually up, and is it crash-looping?'. "
+        "Read-only -- the restart itself is the approval-gated "
+        "``rke2.node.service.restart``. Transport: plain SSH."
+    ),
+    "rke2-config-read": (
+        "Use to read an RKE2 node's ``config.yaml`` CONTENT (not just its "
+        "permission modes) before or after an ``rke2.node.config.update`` "
+        "patch: ``rke2.node.config.get`` ``cat``s the server ``config.yaml`` "
+        "(or a ``config.yaml.d/*.yaml`` drop-in) and returns the parsed "
+        "top-level "
+        "mapping so an operator can verify ``tls-san`` / ``datastore-endpoint`` "
+        "/ ``node-taint``. The join tokens and etcd S3 credentials are "
+        "redacted (names surfaced in ``redacted_keys``, values never), so it "
+        "replaces the untracked ``ssh cat`` that would leak the token. "
+        "Read-only / safe. Transport: plain SSH."
+    ),
     "rke2-etcd-snapshot": (
-        "Use to capture an on-demand managed-etcd snapshot on an RKE2 "
-        "server node before a risky change: ``rke2.etcd-snapshot.save`` "
-        "runs ``rke2 etcd-snapshot save`` as root over SSH and returns the "
-        "snapshot name + on-disk path (never etcd contents). Refuses "
-        "non-server or external-datastore nodes with a structured error. "
-        "Safe and non-mutating to running cluster state -- it copies etcd "
-        "to disk. Pair it ahead of the approval-gated node-write ops "
-        "(token rotate / config update / service restart) as the recovery "
-        "point. Transport: plain SSH."
+        "Use for managed-etcd snapshots on an RKE2 server node. "
+        "``rke2.etcd-snapshot.save`` runs ``rke2 etcd-snapshot save`` as "
+        "root over SSH and returns the snapshot name + on-disk path (never "
+        "etcd contents) -- capture one before a risky change as the "
+        "recovery point, ahead of the approval-gated node-write ops (token "
+        "rotate / config update / service restart). "
+        "``rke2.etcd-snapshot.list`` runs ``rke2 etcd-snapshot list`` and "
+        "returns the existing snapshots as ``{name, location, size_bytes, "
+        "created_at}`` rows -- read-only, and the way to CONFIRM a fresh "
+        "snapshot landed after a rotation (a snapshot taken before the "
+        "rotation was made with the retired token). Both refuse non-server "
+        "or external-datastore nodes with a structured error and are safe / "
+        "non-mutating to running cluster state. Transport: plain SSH."
     ),
 }

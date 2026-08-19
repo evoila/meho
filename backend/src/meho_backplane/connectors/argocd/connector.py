@@ -80,7 +80,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import structlog
@@ -90,6 +89,17 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.argocd.routes import (
+    APP_GET_ROUTE,
+    APP_LIST_ROUTE,
+    APP_MANAGED_RESOURCES_ROUTE,
+    APP_RESOURCE_TREE_ROUTE,
+    CLUSTER_LIST_ROUTE,
+    PROJECT_LIST_ROUTE,
+    REPO_LIST_ROUTE,
+    VERSION_ROUTE,
+    route_path,
+)
 from meho_backplane.connectors.argocd.session import (
     ARGOCD_TOKEN_FIELD,
     ArgoCdCredentialsLoader,
@@ -109,7 +119,9 @@ _log = structlog.get_logger(__name__)
 
 #: The ArgoCD server version endpoint. Unauthenticated; returns the
 #: ``VersionMessage`` payload. Used by both fingerprint() and probe().
-_VERSION_PATH = "/api/version"
+#: Sourced from the connector's route table (#2987) so the reconcile
+#: lane's declared set covers the probe path by construction.
+_VERSION_PATH = route_path(VERSION_ROUTE)
 _PROBE_METHOD = f"GET {_VERSION_PATH}"
 
 
@@ -406,7 +418,7 @@ class ArgoCdConnector(HttpConnector):
     # (see :func:`~meho_backplane.operations._branches.dispatch_typed`); the
     # ``operator`` is forwarded to :meth:`_get_json` so the credential loader
     # reads the per-target bearer token under the operator's identity. All
-    # six are read-only — no write/mutating op ships in this Task.
+    # seven are read-only — no write/mutating op ships in this section.
     # ------------------------------------------------------------------
 
     async def app_list(
@@ -433,7 +445,7 @@ class ArgoCdConnector(HttpConnector):
         if selector:
             query["selector"] = selector
         return await self._get_json(
-            target, "/api/v1/applications", operator=operator, params=query or None
+            target, route_path(APP_LIST_ROUTE), operator=operator, params=query or None
         )
 
     async def app_get(
@@ -448,14 +460,12 @@ class ArgoCdConnector(HttpConnector):
         optional ``project`` query param scopes the lookup (ArgoCD returns
         404 rather than the app if it is not in that project).
         """
-        name = quote(str(params["name"]), safe="")
+        path = route_path(APP_GET_ROUTE, name=params["name"])
         query: dict[str, Any] = {}
         project = params.get("project")
         if project:
             query["project"] = project
-        return await self._get_json(
-            target, f"/api/v1/applications/{name}", operator=operator, params=query or None
-        )
+        return await self._get_json(target, path, operator=operator, params=query or None)
 
     async def app_diff(
         self,
@@ -470,17 +480,12 @@ class ArgoCdConnector(HttpConnector):
         ``liveState`` / ``targetState`` (and the normalized / predicted pair
         the controller compares) for one managed resource.
         """
-        name = quote(str(params["name"]), safe="")
+        path = route_path(APP_MANAGED_RESOURCES_ROUTE, name=params["name"])
         query: dict[str, Any] = {}
         project = params.get("project")
         if project:
             query["project"] = project
-        return await self._get_json(
-            target,
-            f"/api/v1/applications/{name}/managed-resources",
-            operator=operator,
-            params=query or None,
-        )
+        return await self._get_json(target, path, operator=operator, params=query or None)
 
     async def app_resource_tree(
         self,
@@ -494,17 +499,12 @@ class ArgoCdConnector(HttpConnector):
         ``hosts`` / ``shardsCount``); each node carries per-resource health
         and sync status plus ``parentRefs`` linking it into the hierarchy.
         """
-        name = quote(str(params["name"]), safe="")
+        path = route_path(APP_RESOURCE_TREE_ROUTE, name=params["name"])
         query: dict[str, Any] = {}
         project = params.get("project")
         if project:
             query["project"] = project
-        return await self._get_json(
-            target,
-            f"/api/v1/applications/{name}/resource-tree",
-            operator=operator,
-            params=query or None,
-        )
+        return await self._get_json(target, path, operator=operator, params=query or None)
 
     async def appproject_list(
         self,
@@ -519,7 +519,7 @@ class ArgoCdConnector(HttpConnector):
         ``destinations`` / resource allow- and deny-lists).
         """
         del params  # schema declares the param object empty
-        return await self._get_json(target, "/api/v1/projects", operator=operator)
+        return await self._get_json(target, route_path(PROJECT_LIST_ROUTE), operator=operator)
 
     async def repo_list(
         self,
@@ -534,7 +534,37 @@ class ArgoCdConnector(HttpConnector):
         ArgoCD can currently reach and authenticate to the repo).
         """
         del params  # schema declares the param object empty
-        return await self._get_json(target, "/api/v1/repositories", operator=operator)
+        return await self._get_json(target, route_path(REPO_LIST_ROUTE), operator=operator)
+
+    async def cluster_list(
+        self,
+        operator: Operator,
+        target: ArgoCdTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``argocd.cluster.list`` — ``GET /api/v1/clusters``.
+
+        Returns the ``ClusterList`` (``{"items": [...], "metadata": {...}}``);
+        each item carries the destination cluster's ``server`` URL, ``name``,
+        ``connectionState`` (whether ArgoCD can currently reach and
+        authenticate to the cluster), ``serverVersion``, and ``info``
+        (``applicationsCount`` + the cached connection state).
+
+        Defense in depth: ArgoCD's ``Cluster.config`` carries the destination
+        cluster's own credentials (bearer token, TLS client cert/key,
+        basic-auth username/password, AWS/exec provider config). The handler
+        strips the whole ``config`` object from every item before returning so
+        no destination credential ever rides back in the envelope — even if a
+        broad-RBAC token makes ``argocd-server`` include it.
+        """
+        del params  # schema declares the param object empty
+        payload = await self._get_json(target, route_path(CLUSTER_LIST_ROUTE), operator=operator)
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    item.pop("config", None)
+        return payload
 
     # ------------------------------------------------------------------
     # Write primitive + approval-gated write handlers (G3.12-T4 #1405)

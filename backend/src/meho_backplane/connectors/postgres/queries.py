@@ -32,6 +32,7 @@ __all__ = [
     "fetch_databases",
     "fetch_fingerprint",
     "fetch_indexes",
+    "fetch_replication",
     "fetch_schemas",
     "fetch_settings",
     "fetch_tables",
@@ -228,6 +229,57 @@ WHERE datistemplate = false
 ORDER BY size_bytes DESC
 """
 
+# Recovery role + replay staleness. pg_is_in_recovery() tells which side of a
+# streaming pair the instance is on; pg_last_xact_replay_timestamp() is NULL
+# outside recovery, and now() - it is the staleness measure a standby exposes
+# even when pg_stat_wal_receiver has no row (WAL replayed from an archive).
+_RECOVERY_STATUS_SQL = """
+SELECT pg_is_in_recovery() AS in_recovery,
+       pg_last_xact_replay_timestamp() AS last_xact_replay_timestamp
+"""
+
+# Primary-side view: one row per connected standby. Empty on a standby, and on
+# a primary with no replicas. LSNs are cast to their canonical 'X/Y' text form
+# because asyncpg decodes pg_lsn as a raw int8; the *_lag columns are interval
+# and become float seconds through _jsonable.
+_REPLICATION_STANDBYS_SQL = """
+SELECT pid,
+       usename,
+       application_name,
+       client_addr::text AS client_addr,
+       state,
+       sent_lsn::text AS sent_lsn,
+       write_lsn::text AS write_lsn,
+       flush_lsn::text AS flush_lsn,
+       replay_lsn::text AS replay_lsn,
+       write_lag,
+       flush_lag,
+       replay_lag,
+       sync_state,
+       sync_priority,
+       reply_time
+FROM pg_catalog.pg_stat_replication
+ORDER BY pid
+"""
+
+# Standby-side view: 0 or 1 row, populated only while actively streaming from a
+# primary. conninfo is deliberately omitted -- it carries the primary DSN which
+# can hold a password, the same "never surface a secret" discipline that omits
+# the query text from pg_stat_activity.
+_WAL_RECEIVER_SQL = """
+SELECT status,
+       receive_start_lsn::text AS receive_start_lsn,
+       written_lsn::text AS written_lsn,
+       flushed_lsn::text AS flushed_lsn,
+       latest_end_lsn::text AS latest_end_lsn,
+       last_msg_send_time,
+       last_msg_receipt_time,
+       slot_name,
+       sender_host,
+       sender_port
+FROM pg_catalog.pg_stat_wal_receiver
+"""
+
 
 async def fetch_databases(conn: asyncpg.Connection) -> dict[str, Any]:
     """List non-template databases with owner, encoding, and on-disk size."""
@@ -292,3 +344,30 @@ async def fetch_fingerprint(conn: asyncpg.Connection) -> dict[str, Any]:
     identity = {key: _jsonable(val) for key, val in row.items()} if row else {}
     identity["database_sizes"] = _rows(sizes)
     return identity
+
+
+async def fetch_replication(conn: asyncpg.Connection) -> dict[str, Any]:
+    """Snapshot physical streaming replication health from both role sides.
+
+    Combines three catalog reads into one op response (the multi-read shape
+    :func:`fetch_fingerprint` uses): the recovery role + last-replay timestamp,
+    ``pg_stat_replication`` (primary-side, one row per connected standby), and
+    ``pg_stat_wal_receiver`` (standby-side, 0 or 1 row). The op is symmetric by
+    design -- a primary reports its standbys with ``wal_receiver`` null, a
+    standby reports its ``wal_receiver`` with an empty ``standbys`` list, and a
+    standalone instance reports both empty -- so ``in_recovery`` tells the
+    caller which side of the snapshot is meaningful.
+    """
+    status = await conn.fetchrow(_RECOVERY_STATUS_SQL)
+    standbys = await conn.fetch(_REPLICATION_STANDBYS_SQL)
+    receiver = await conn.fetchrow(_WAL_RECEIVER_SQL)
+    return {
+        "in_recovery": _jsonable(status["in_recovery"]) if status else None,
+        "last_xact_replay_timestamp": (
+            _jsonable(status["last_xact_replay_timestamp"]) if status else None
+        ),
+        "standbys": _rows(standbys),
+        "wal_receiver": (
+            {key: _jsonable(val) for key, val in receiver.items()} if receiver else None
+        ),
+    }

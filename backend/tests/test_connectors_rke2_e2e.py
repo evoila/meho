@@ -3,8 +3,11 @@
 
 """RKE2 connector recorded-fixture / asyncssh fake-shell E2E test (#2221).
 
-Drives ``rke2.about``, ``rke2.posture.show`` and the safe, non-gated
-``rke2.etcd-snapshot.save`` (T4 #2431) through the full ``call_operation``
+Drives ``rke2.about``, ``rke2.posture.show``, the service-state read
+``rke2.node.service.status`` (#2852), the redacted config-content read
+``rke2.node.config.get`` (#2854), and the safe, non-gated snapshot ops
+``rke2.etcd-snapshot.save`` (T4 #2431) + the read-only
+``rke2.etcd-snapshot.list`` (#2853) through the full ``call_operation``
 dispatch stack against an in-process asyncssh fake-shell server that
 replays plain-SSH command stubs -- no Docker dependency, no live RKE2
 node. The shape mirrors the G3.8 Holodeck recorded-fixture E2E precedent
@@ -76,14 +79,55 @@ _PROBE_FIXTURE = (
     "S|/etc/rancher/rke2/rke2.yaml|600|root|root\n"
     "S|/var/lib/rancher/rke2/server/token|600|root|root\n"
 )
+# rke2.node.service.status -- `systemctl show --all` over the fixed unit
+# pair: rke2-server active, rke2-agent not installed on this control-plane
+# node. One `UNIT=` marker per unit, then that unit's KEY=VALUE block.
+_SERVICE_STATUS_FIXTURE = (
+    "UNIT=rke2-server\n"
+    "LoadState=loaded\n"
+    "ActiveState=active\n"
+    "SubState=running\n"
+    "ExecMainStartTimestamp=Fri 2026-08-01 09:12:03 UTC\n"
+    "NRestarts=0\n"
+    "UNIT=rke2-agent\n"
+    "LoadState=not-found\n"
+    "ActiveState=inactive\n"
+    "SubState=dead\n"
+)
 # Precondition-guard sentinel for an embedded-etcd server node.
 _SNAPSHOT_GUARD_FIXTURE = "ok\n"
 # `rke2 etcd-snapshot save` logs the saved snapshot name to stderr.
 _SNAPSHOT_SAVE_FIXTURE = "INFO[0000] Snapshot pre-upgrade-rke2-node-e2e-1754907117 saved.\n"
+# `rke2 etcd-snapshot list` prints the Name/Location/Size/Created table to
+# stdout (two local snapshots; sizes are the documented raw-byte integers).
+# Rows are split across adjacent string literals (real vendor lines exceed the
+# 100-col lint limit) that concatenate at compile time.
+_SNAPSHOT_LIST_FIXTURE = (
+    "Name  Location  Size  Created\n"
+    "on-demand-rke2-node-e2e-1754907117  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-rke2-node-e2e-1754907117  "
+    "52428800  2026-08-06T09:12:03Z\n"
+    "on-demand-rke2-node-e2e-1754820717  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-rke2-node-e2e-1754820717  "
+    "51380224  2026-08-05T09:12:03Z\n"
+)
 
 # A canary token value the fixture never emits (posture never reads the
 # token content). Asserted absent from every dispatch result.
 _TOKEN_VALUE_CANARY = "K10rke2e2ecanarytokenDONOTLEAK::server:zzz999"  # NOSONAR
+
+# rke2.node.config.get (#2854): a config.yaml body whose join token must be
+# REDACTED as it flows through the full dispatch stack. The canary value is
+# asserted absent from the result; tls-san (a non-secret) survives verbatim.
+_CONFIG_TOKEN_CANARY = "K10rke2e2eCONFIGcanaryDONOTLEAK::server:ggg777"  # gitleaks:allow NOSONAR
+_CONFIG_YAML_FIXTURE = (
+    f"token: {_CONFIG_TOKEN_CANARY}\n"
+    "tls-san:\n"
+    "  - 10.0.0.5\n"
+    "  - rke2.lab.example\n"
+    "node-taint:\n"
+    "  - dedicated=infra:NoSchedule\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +155,12 @@ async def _fake_shell_process_factory(process: Any) -> None:
     elif cmd.startswith("command -v stat"):
         # rke2.posture.show -- the per-path stat probe (#2698).
         response = _PROBE_FIXTURE
+    elif cmd.startswith("command -v systemctl"):
+        # rke2.node.service.status -- the systemctl-show service probe (#2852).
+        response = _SERVICE_STATUS_FIXTURE
+    elif cmd.startswith("if [ -e "):
+        # rke2.node.config.get -- the bounded `cat` of config.yaml (#2854).
+        response = _CONFIG_YAML_FIXTURE
     elif cmd.startswith("printf 'ACTIVE="):
         # rke2.token.rotate fingerprint preflight: server node, active,
         # patched version (1.29 is above the CVE-fix range).
@@ -124,6 +174,10 @@ async def _fake_shell_process_factory(process: Any) -> None:
         process.stderr.write(_SNAPSHOT_SAVE_FIXTURE)
         process.exit(0)
         return
+    elif cmd.startswith("/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list"):
+        # rke2.etcd-snapshot.list -- run as root over plain SSH (no sudo argv).
+        # rke2 prints the snapshot table to stdout.
+        response = _SNAPSHOT_LIST_FIXTURE
     elif cmd.startswith("sh -c "):
         # etcd-snapshot precondition guard (plain, as root) -- report an
         # embedded-etcd server node.
@@ -400,6 +454,72 @@ async def test_rke2_e2e_posture_show_unknown_token_survives_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_rke2_e2e_service_status_dispatches_ok(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """rke2.node.service.status dispatches safe/non-gated and reports unit state.
+
+    A TENANT_ADMIN dispatch of the safe, non-approval service-status op runs
+    to completion through the full ``call_operation`` stack (no approval park)
+    and returns the live systemd state of both probed units: rke2-server
+    active, rke2-agent not installed on this node.
+    """
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.node.service.status",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"rke2.node.service.status failed: {result.get('error')}"
+    by_unit = {u["unit"]: u for u in result["result"]["units"]}
+    assert by_unit["rke2-server"]["active_state"] == "active"
+    assert by_unit["rke2-server"]["sub_state"] == "running"
+    assert by_unit["rke2-server"]["since"] == "Fri 2026-08-01 09:12:03 UTC"
+    assert by_unit["rke2-server"]["restart_count"] == 0
+    # The other unit is not installed here -- not-found nulls its live state.
+    assert by_unit["rke2-agent"]["load_state"] == "not-found"
+    assert by_unit["rke2-agent"]["active_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """rke2.node.config.get returns parsed config content with the token redacted.
+
+    Proves the redacted config-content read (#2854) is dispatchable end to end:
+    the non-secret ``tls-san`` survives verbatim while the join ``token`` is
+    masked before it can reach the result envelope (and therefore the audit
+    ``raw_payload``, which stores the raw handler result).
+    """
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.node.config.get",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"rke2.node.config.get failed: {result.get('error')}"
+    payload = result["result"]
+    assert payload["path"] == "/etc/rancher/rke2/config.yaml"
+    assert payload["content"]["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert payload["content"]["node-taint"] == ["dedicated=infra:NoSchedule"]
+    assert payload["content"]["token"] == "***redacted***"
+    assert payload["redacted_keys"] == ["token"]
+    # The planted join token never survives the dispatch (result view + audit).
+    assert _CONFIG_TOKEN_CANARY not in repr(result)
+
+
+@pytest.mark.asyncio
 async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
     rke2_e2e: _Rke2E2EBundle,
     captured_events: list[Any],
@@ -429,6 +549,41 @@ async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
         "/var/lib/rancher/rke2/server/db/snapshots/pre-upgrade-rke2-node-e2e-1754907117"
     )
     assert payload["exit_status"] == 0
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_etcd_snapshot_list_dispatches_ok_read_only(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """rke2.etcd-snapshot.list (safe, read-only) enumerates snapshots via dispatch.
+
+    A TENANT_ADMIN dispatch of the safe, no-approval list op runs through the
+    full ``call_operation`` stack (guard -> list over plain SSH) and returns the
+    parsed ``{snapshots: [...]}`` rows. The module reducer is the
+    ``PassThroughReducer`` here, so the set-shaped payload is asserted inline
+    rather than as a handle (the JSONFlux threshold is the reducer's concern,
+    covered elsewhere).
+    """
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.etcd-snapshot.list",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"rke2.etcd-snapshot.list failed: {result.get('error')}"
+    snapshots = result["result"]["snapshots"]
+    assert [s["name"] for s in snapshots] == [
+        "on-demand-rke2-node-e2e-1754907117",
+        "on-demand-rke2-node-e2e-1754820717",
+    ]
+    assert snapshots[0]["size_bytes"] == 52428800
+    assert snapshots[0]["location"].startswith("file:///var/lib/rancher/rke2/server/db/snapshots/")
+    assert snapshots[0]["created_at"] == "2026-08-06T09:12:03Z"
 
 
 # ---------------------------------------------------------------------------

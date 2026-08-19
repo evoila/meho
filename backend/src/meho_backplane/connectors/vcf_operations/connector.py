@@ -162,6 +162,7 @@ _OPS_TOKEN_SCHEME = "OpsToken"
 _VERSIONS_CURRENT_PATH = "/suite-api/api/versions/current"
 _ALERTS_PATH = "/suite-api/api/alerts"
 _RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
+_RESOURCES_STATS_LATEST_PATH = "/suite-api/api/resources/stats/latest"
 
 
 def _vrops_acquire_payload_builder(
@@ -564,6 +565,43 @@ class VcfOperationsConnector(HttpConnector):
         if query:
             path = f"{path}?{urlencode(query, doseq=True)}"
         return await self._post_json(target, path, operator=operator, json=body)
+
+    async def resource_stats(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.resource.stats`` — ``GET /suite-api/api/resources/stats/latest``.
+
+        Returns the latest metric *values* vROps computed for the named
+        resources — the sizing / resource-pressure answer. ``resourceId``
+        (required, one or more UUIDs) and the optional ``statKey`` list ride
+        as repeated query params (``resourceId=a&resourceId=b``); httpx
+        serialises a list value to repeated pairs, the same mechanism
+        :meth:`alert_list` relies on. The optional ``currentOnly`` boolean
+        rides as a scalar query param.
+
+        ``resourceId`` is read with subscript, not ``dict.get``: the op's
+        ``parameter_schema`` marks it ``required`` with ``minItems=1``, so
+        the dispatcher's pre-execution
+        :func:`~meho_backplane.operations._validate.validate_params` rejects
+        a missing / empty list before this handler runs — an unbounded
+        all-resource stats read never reaches the wire. The payload is
+        returned unparsed: the dispatch layer reduces a large stat set to a
+        JSONFlux handle, so the vendor's ``stats-of-resources`` field names
+        stay out of executable code.
+        """
+        query: dict[str, Any] = {"resourceId": params["resourceId"]}
+        stat_keys = params.get("statKey")
+        if stat_keys:
+            query["statKey"] = stat_keys
+        current_only = params.get("currentOnly")
+        if current_only is not None:
+            query["currentOnly"] = current_only
+        return await self._get_json(
+            target, _RESOURCES_STATS_LATEST_PATH, operator=operator, params=query
+        )
 
     async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:
         """Public duck-typed credential-eviction hook for the dispatch path (#2396).

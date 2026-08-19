@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+#
+# code-quality-allow: pre-existing legacy debt not introduced by this task.
+# The module was already >1000 lines (the wire-shape contract + the full op
+# sensitivity classifier + redaction rules) before this task; #2908 only adds
+# two op-ids to the fixed `_CREDENTIAL_WRITE_OPS` frozenset. Splitting the
+# classifier out of the schema module is a behaviour-preserving refactor out
+# of scope for a two-line allowlist pin and would balloon the review surface.
 
 """Broadcast event schema + PII classifier (G6.1-T2).
 
@@ -171,6 +178,30 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # written token in full. Pinning it collapses the broadcast to
         # aggregate-only. (The op result itself returns key NAMES only.)
         "rke2.node.config.update",
+        # #2892 — the GOSC customization-spec create composite. Its params
+        # carry Windows sysprep credentials (``windows_admin_password`` /
+        # ``windows_product_key`` / ``windows_domain_admin_password``). The
+        # ``password`` fields trip the key-name scrub, but ``product_key``
+        # does not (``key`` is neither an anywhere- nor a final-position
+        # secret token), so a plain ``write`` classification (the ``.create``
+        # suffix) would broadcast the product key in full. Pinning it
+        # collapses the whole params dict to aggregate-only (#1503); the
+        # park-time preview additionally echoes identity fields only. The
+        # sibling ``vmware.composite.vm.customize`` carries only a spec-name
+        # reference (no secret) and is not pinned.
+        "vmware.composite.guest.customization_spec.create",
+        # #2908 — the Holodeck HoloRouter patch op. Its C2 patch wraps the
+        # BroadcomBuildToken *read* and its fixed patch strings reference
+        # ``$env:brcm_build_token`` by name, never a value; the op takes no
+        # params today. The pin is defence-in-depth per the
+        # ``rke2.node.config.update`` precedent: should a future param-shape
+        # change ever place a token/credential in params, the broadcast
+        # collapses to aggregate-only rather than shipping it on the feed. The
+        # sibling ``holodeck.config.apply`` carries only non-secret config +
+        # Vault *refs* (the vCenter/depot creds are read on the appliance from
+        # its staged env, never a param), so it keeps its param-echo preview
+        # and is deliberately NOT pinned.
+        "holodeck.router.patch",
     }
 )
 
@@ -320,7 +351,21 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: the full-detail ``other`` class. ``.versions`` is the KV-v2
 #: version-metadata browse (``vault.kv.versions`` — G3.3-T1 #545): a
 #: read of metadata only (no secret values), so it likewise classifies
-#: ``read`` rather than ``credential_read``.
+#: ``read`` rather than ``credential_read``. ``.vulnerabilities`` is the
+#: Harbor per-artifact CVE-list read (``harbor.artifact.vulnerabilities`` --
+#: #2857): a non-mutating supply-chain read whose noun suffix (like
+#: ``.health`` / ``.versions``) would otherwise fall through to the
+#: full-detail ``other`` class rather than broadcast at the same ``read``
+#: sensitivity as its ``harbor.artifact.info`` sibling. ``.summary`` is the
+#: Harbor project storage-occupancy read (``harbor.project.summary`` — #2858):
+#: a non-mutating quota/usage read whose noun suffix (like ``.health`` /
+#: ``.versions``) would otherwise fall through to the full-detail
+#: ``other`` class rather than broadcast at the same ``read`` sensitivity
+#: as its ``harbor.project.info`` sibling. Adding it also reclassifies
+#: the ``vmware.composite.performance.summary`` metrics composite from
+#: ``other`` to ``read`` — the correct class for a non-mutating read;
+#: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
+#: so the broadcast detail level is unchanged for it.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -330,6 +375,8 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".health",
     ".seal_status",
     ".versions",
+    ".vulnerabilities",
+    ".summary",
 )
 
 #: Underscore-spelled mirrors of the dotted verb suffixes, applied only to
@@ -552,7 +599,7 @@ def classify_op(op_id: str) -> str:
        patch) keeps its ``credential_write`` class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
-       / ``.versions``). ``.read`` is deliberately **not** a read
+       / ``.versions`` / ``.summary``). ``.read`` is deliberately **not** a read
        suffix: it would over-match the ``credential_read``-allowlisted
        ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
        the policy single-sourced) and would reclassify the auth-config

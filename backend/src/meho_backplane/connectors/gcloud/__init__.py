@@ -19,7 +19,8 @@ Two-phase registration (same shape as
   :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
   invokes :meth:`GcloudConnector.register_gcloud_typed_operations`, which
   delegates to :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-  for each of the eight G3.7-T5 (#848) read-only ops.
+  for each read-only op in ``GCLOUD_OPS`` (eight from G3.7-T5 #848 plus
+  the #2846 service-account-key inventory op).
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit

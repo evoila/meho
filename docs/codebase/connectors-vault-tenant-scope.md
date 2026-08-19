@@ -88,9 +88,17 @@ automatically:
 [`connectors/vault/tenant_paths.py`](../../backend/src/meho_backplane/connectors/vault/tenant_paths.py)'s
 `tenant_secret_ref(tenant_id, target)` derives
 `tenants/<tenant_id>/<target>`, and `api/v1/targets.py`'s `create_target`
-(no explicit `secret_ref`) and `update_target` (PATCH not touching
-`secret_ref` on an unset row) apply it. An explicitly-supplied
-`secret_ref` is always honoured verbatim.
+applies it **only when `secret_ref` is omitted** — distinguished from an
+explicit `{"secret_ref": null}` via Pydantic's `model_fields_set` (#2872).
+An explicit null is persisted as `NULL` (the operator declaring "no
+credential" for the [#2234](https://github.com/evoila/meho/issues/2234)
+auth-optional dispatch branch — e.g. an unauthenticated, port-forwarded
+Prometheus); any explicitly-supplied non-null `secret_ref` is honoured
+verbatim. `update_target` does **not** derive the default: a PATCH that
+omits `secret_ref` leaves the persisted value untouched. The pre-#2872
+re-home branch that filled an unset row on any unrelated PATCH was removed,
+so a deliberately-cleared `NULL` survives — post-#2872, `secret_ref IS
+NULL` unambiguously means "operator chose no credential".
 
 This replaces the retired **per operator `sub`** layout
 (`secret/data/targets/<sub>/*`, `connector-vault-policy.md` §2), which

@@ -40,8 +40,8 @@ The connector's response to this risk:
   from tenacity's retry policy. The connector adds an explicit 401-check
   before `raise_for_status()` so the operator sees a clear human-readable
   message rather than a generic HTTP error.
-- The `llm_instructions` for the two most-called ops (`hetzner-robot.about`
-  and `hetzner-robot.server.list`) contain the same warning verbatim so
+- The `llm_instructions` for the most-called op
+  (`hetzner-robot.server.list`) contain the same warning verbatim so
   agents see it before composing a call.
 
 **What to do when you see `auth_failed`:**
@@ -51,7 +51,7 @@ The connector's response to this risk:
 3. Verify the Webservice user exists and is active.
 4. Update the credentials at the target's Vault path
    (`secret_ref`, see [Credentials in Vault](#credentials-in-vault)).
-5. Test with `meho hetzner-robot about --target <slug>` exactly once.
+5. Test with `meho hetzner-robot server list --target <slug>` exactly once.
 6. If it still fails, check the Webservice user's password again before
    trying a second time.
 
@@ -80,16 +80,21 @@ The v0.2 op surface (Initiative [#370](https://github.com/evoila/meho/issues/370
 
 | Group | CLI verb | `op_id` | Notes |
 | --- | --- | --- | --- |
-| robot-about | `meho hetzner-robot about` | `GET:/query` | API version + account summary |
 | robot-servers | `meho hetzner-robot server list` | `GET:/server` | Dedicated-server inventory |
 | robot-servers | `meho hetzner-robot server info <ip>` | `GET:/server/{server-ip}` | Single server detail |
 | robot-networking | `meho hetzner-robot ip list` | `GET:/ip` | All IPs with lock + traffic status |
 | robot-networking | `meho hetzner-robot subnet list` | `GET:/subnet` | All subnets with gateway + IP version |
 | robot-networking | `meho hetzner-robot vswitch list` | `GET:/vswitch` | All vSwitches with VLAN + server members |
-| robot-networking | `meho hetzner-robot vswitch info <id>` | `GET:/vswitch/{id}` | Single vSwitch detail |
+| robot-networking | `meho hetzner-robot vswitch info <vswitch-id>` | `GET:/vswitch/{vswitch-id}` | Single vSwitch detail |
 | robot-networking | `meho hetzner-robot failover list` | `GET:/failover` | All failover IPs with routing targets |
 | robot-networking | `meho hetzner-robot rdns list` | `GET:/rdns` | All reverse DNS (PTR) entries |
+| robot-networking | `meho hetzner-robot firewall get <ip>` | `GET:/firewall/{server-ip}` | Per-server packet-filter firewall (#2848) |
 | robot-ssh-keys | `meho hetzner-robot ssh-key list` | `GET:/key` | SSH public keys in the Robot portal |
+
+The former `about` verb (`GET:/query`) was removed by
+[#2985](https://github.com/evoila/meho/issues/2985): the spec-reconcile
+lane proved the Robot Webservice serves no such endpoint. Use
+`server list` as the cheapest authenticated probe.
 
 The CLI verb tree is **operator ergonomics** over those dispatch routes;
 it is **not** a separate data path and is **not** mirrored on the MCP
@@ -183,20 +188,6 @@ rdc-robot  ok  GET /server  hetzner/robot-webservice (3 servers)
 If you see `auth_failed`, stop — fix credentials before probing again.
 
 ## Available ops — CLI usage examples
-
-### About (API version + account summary)
-
-```bash
-meho hetzner-robot about --target rdc-robot
-```
-
-Expected output:
-
-```
-hetzner-rest-2026.04 GET:/query — status=ok (42ms)
-  api_version: 1.0
-  account_id:  robot-account-001
-```
 
 ### Dedicated-server inventory
 
@@ -349,7 +340,6 @@ layer replaces. The migration:
 - [ ] `secret_ref` in `targets.yaml` points to the Webservice-user credentials in Vault.
 - [ ] `meho targets probe rdc-robot` returns `ok`.
 - [ ] `meho hetzner-robot server list --target rdc-robot` returns the expected inventory.
-- [ ] `meho hetzner-robot about --target rdc-robot` returns `status=ok`.
 - [ ] All CI scripts using `scripts/hetzner-robot.sh` updated to `meho hetzner-robot …`.
 - [ ] `scripts/hetzner-robot.sh` deleted or marked deprecated.
 

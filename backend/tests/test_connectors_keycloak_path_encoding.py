@@ -440,7 +440,8 @@ def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
     Uses exact call-site counts (not >=) so that any future addition or removal
     of a call site triggers an explicit review.  Current counts:
 
-    * ops_read: 2 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``.
+    * ops_read: 3 sites — ``keycloak_client_get`` + ``keycloak_role_mapping_get``
+      + ``keycloak_role_users`` (role name → path segment, #2843).
     * ops_write: 4 sites — ``keycloak_client_update``, ``keycloak_protocol_mapper_create``,
       ``keycloak_user_password_reset``, ``keycloak_role_mapping_add``.
     """
@@ -450,7 +451,7 @@ def test_quote_segment_imported_and_called_in_both_handler_modules() -> None:
     import meho_backplane.connectors.keycloak.ops_write as ops_write_mod
 
     expected_counts = {
-        ops_read_mod: 2,
+        ops_read_mod: 3,
         ops_write_mod: 4,
     }
     for mod, expected in expected_counts.items():

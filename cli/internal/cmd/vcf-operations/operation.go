@@ -124,7 +124,7 @@ func newOperationCallCmd() *cobra.Command {
 			"\"vrops-rest-9.0\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho vcf-operations operation call GET:/suite-api/api/versions/current --target rdc-vrops\n" +
+		Example: "  meho vcf-operations operation call GET:/suite-api/api/alertdefinitions --target rdc-vrops\n" +
 			"  meho vcf-operations operation call GET:/suite-api/api/resources --target rdc-vrops --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,

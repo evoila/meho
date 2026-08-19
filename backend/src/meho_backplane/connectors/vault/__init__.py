@@ -103,10 +103,10 @@ register_typed_op_registrar(register_vault_typed_operations)
 # handler state, distinct endpoint_descriptor rows.
 register_typed_op_registrar(register_vault_sys_typed_operations)
 # The identity (entity/group/alias) + token (create/revoke_accessor/
-# list_accessors) op groups (G3.15-T4 #1412) ship their own registrar so
-# they register independently of the KV / sys / auth surfaces. Writes are
-# requires_approval=True; vault.token.create's response token is redacted
-# via the credential_mint op-class allowlist.
+# list_accessors/lookup_accessor) op groups (G3.15-T4 #1412, #2844) ship
+# their own registrar so they register independently of the KV / sys /
+# auth surfaces. Writes are requires_approval=True; vault.token.create's
+# response token is redacted via the credential_mint op-class allowlist.
 register_typed_op_registrar(register_vault_identity_token_operations)
 
 __all__ = [

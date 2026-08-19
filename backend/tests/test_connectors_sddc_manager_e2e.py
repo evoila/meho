@@ -222,8 +222,8 @@ async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EB
 # ---------------------------------------------------------------------------
 
 _OP_IDS: tuple[str, ...] = SDDC_CANARY_CORE_OP_IDS
-assert len(_OP_IDS) == 4, (
-    f"Expected 4 ingested SDDC Manager browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
+assert len(_OP_IDS) == 3, (
+    f"Expected 3 ingested SDDC Manager browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 )
 
 
@@ -232,10 +232,11 @@ async def test_sddc_e2e_all_ops_dispatch_ok(
     op_id: str,
     sddc_e2e_canary: _SddcE2EBundle,
 ) -> None:
-    """All 4 curated SDDC Manager ingested ops dispatch through the full dispatcher (status='ok').
+    """All 3 curated SDDC Manager ingested ops dispatch through the full dispatcher (status='ok').
 
-    The audited 12-read operational set is now typed ops (#2306); these 4
-    are the browse-breadth curation left in ``core_ops.py``.
+    The audited 12-read operational set is now typed ops (#2306), and network
+    pools joined the typed surface in #2837; these 3 are the browse-breadth
+    reads with no typed equivalent (release, domain detail, bundles).
 
     The connector mints a session token at ``POST /v1/tokens`` from the stub
     credentials loader on first dispatch (then caches both the credentials and
@@ -300,7 +301,7 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
         _OPERATOR,
         {
             "connector_id": SDDC_CONNECTOR_ID,
-            "op_id": "GET:/v1/network-pools",
+            "op_id": "GET:/v1/bundles",
             "target": {"name": target_name},
             "params": {},
         },
@@ -326,7 +327,7 @@ async def test_sddc_e2e_dispatch_writes_audit_row(
     * ``row.payload["op_id"]`` equals the dispatched ``op_id``.
     * ``row.payload["params_hash"]`` is present (non-None string).
     """
-    op_id = "GET:/v1/network-pools"
+    op_id = "GET:/v1/bundles"
     sessionmaker = get_sessionmaker()
 
     async def _count_dispatch_rows() -> int:
@@ -465,7 +466,7 @@ async def test_sddc_ingest_enable_reads_dispatch_round_trip(
     await _seed_target()
     instance = _resolve_connector()
 
-    op_id = "GET:/v1/network-pools"
+    op_id = "GET:/v1/bundles"
     async with respx.mock(
         base_url=SDDC_CANARY_BASE_URL,
         assert_all_called=False,

@@ -752,7 +752,6 @@ async def test_scheduler_loop_renews_vault_token_on_dedicated_timer(
     async def _tick_noop(*_args: Any, **_kwargs: Any) -> int:
         return 0
 
-    monkeypatch.setattr(loop, "reconcile_active_event_triggers", _anoop)
     monkeypatch.setattr(loop, "run_one_tick", _tick_noop)
     monkeypatch.setattr(loop, "_check_scheduler_vault_token", _anoop)
     # Trip the renewal cadence on the first post-tick check.

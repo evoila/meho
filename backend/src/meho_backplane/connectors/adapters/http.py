@@ -53,14 +53,17 @@ natively. The per-target TLS trust has three states, in precedence order:
 **Client pool key:** the pool is keyed on
 :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
 (``(tenant_id, id)``) **plus** :meth:`HttpConnector.extra_cache_dimensions`
-(``(verify_tls, ca_pin_digest)``), i.e.
-``(tenant_id, id, verify_tls, ca_pin_digest)``. Appending the two
-TLS-trust dimensions keeps the ``(tenant_id, id)`` tenant-isolation prefix
-intact (evoila/meho#1682/#1642) while ensuring a PATCH that flips
-``verify_tls`` **or** rotates ``tls_ca_pin`` is not served the stale
-pooled client built under the previous trust material. The pin digest is
-the empty string when unpinned, so an unpinned target's key is unchanged
-in its pin slot from the #1781 shape.
+(``(verify_tls, ca_pin_digest, base_url)``), i.e.
+``(tenant_id, id, verify_tls, ca_pin_digest, base_url)``. Appending the
+three construction-time dimensions keeps the ``(tenant_id, id)``
+tenant-isolation prefix intact (evoila/meho#1682/#1642) while ensuring a
+PATCH that flips ``verify_tls``, rotates ``tls_ca_pin``, **or** changes
+what :meth:`_base_url` resolves (``extras.scheme`` / host / port,
+evoila/meho#2873) is not served the stale pooled client built under the
+previous material. Both a client's ``verify`` context and its ``base_url``
+are baked into the ``httpx.AsyncClient`` at construction, so both must be
+in the key. The pin digest is the empty string when unpinned, so an
+unpinned target's key is unchanged in its pin slot from the #1781 shape.
 """
 
 from __future__ import annotations
@@ -380,31 +383,49 @@ class HttpConnector(Connector):
     def __init__(self) -> None:
         # Keyed on the tenant-unique ``(tenant_id, id)`` tuple
         # (``target_cache_key``) plus ``extra_cache_dimensions`` (the
-        # ``(verify_tls, ca_pin_digest)`` TLS-trust dimensions), not
-        # ``target.name``: each pooled client is host-bound via
-        # ``base_url``, and two tenants may legitimately own same-named
+        # ``(verify_tls, ca_pin_digest, base_url)`` construction-time
+        # dimensions), not ``target.name``: each pooled client is host-bound
+        # via ``base_url``, and two tenants may legitimately own same-named
         # targets pointing at different hosts. Name-keying would route the
         # second tenant's request to the first tenant's host and leak
-        # credentials across the boundary (evoila/meho#1682). The TLS-trust
-        # suffix keeps a PATCH that flips ``verify_tls`` or rotates the
-        # ``tls_ca_pin`` from being served the stale client built under the
-        # old trust material.
+        # credentials across the boundary (evoila/meho#1682). The suffix
+        # keeps a PATCH that flips ``verify_tls``, rotates the ``tls_ca_pin``,
+        # or changes what ``_base_url`` resolves (``extras.scheme`` / host /
+        # port, evoila/meho#2873) from being served the stale client built
+        # under the old material.
         self._clients: dict[tuple[str, ...], httpx.AsyncClient] = {}
         self._lock = asyncio.Lock()
 
     def extra_cache_dimensions(self, target: Target) -> tuple[object, ...]:
         """Return extra pool-key dimensions appended to ``target_cache_key``.
 
-        The base appends two TLS-trust dimensions so a target whose TLS
-        trust *changes* (via PATCH) gets a freshly built client rather than
-        the stale one cached under the previous trust material — a client's
-        ``verify`` context is fixed at construction:
+        The base appends three construction-time dimensions so a target
+        whose transport material *changes* (via PATCH) gets a freshly built
+        client rather than the stale one cached under the previous material.
+        Both a client's ``verify`` context and its ``base_url`` are fixed at
+        construction, so both must be in the key:
 
-        1. the resolved ``verify_tls`` flag (evoila/meho#1781), and
+        1. the resolved ``verify_tls`` flag (evoila/meho#1781),
         2. a digest of the per-target ``tls_ca_pin`` CA material
            (evoila/meho#1784) — empty string when unpinned, so an
            unpinned target's key is unchanged from the #1781 shape in its
-           pin slot.
+           pin slot, and
+        3. the resolved :meth:`_base_url` (evoila/meho#2873). ``base_url``
+           is baked into the ``httpx.AsyncClient`` at construction, so a
+           PATCH changing anything ``_base_url`` reads — ``extras.scheme``
+           (evoila/meho#2599), ``host``, or ``port`` — must rotate the pool
+           entry exactly like a TLS-trust change does, or the warm pool
+           keeps serving a client bound to the old URL forever. Keying on
+           the *polymorphically resolved* URL (subclasses override
+           :meth:`_base_url` — the Prometheus/Loki plain-HTTP variants,
+           gcloud, github, vcf_automation) rather than on the raw
+           ``extras.scheme`` is what captures Loki's default-``http``
+           override — where ``scheme``-absent and ``scheme=https`` share a
+           base scheme yet resolve to different URLs — without regressing
+           Prometheus's silent coercion of an unrecognised scheme. An
+           *invalid* ``extras.scheme`` therefore now fails loud at key
+           derivation (``_effective_scheme`` raises) instead of silently
+           serving the stale client.
 
         The append preserves the ``(tenant_id, id)`` prefix, so the
         cross-tenant isolation guarantee (evoila/meho#1682/#1642) is
@@ -416,16 +437,17 @@ class HttpConnector(Connector):
         return (
             bool(getattr(target, "verify_tls", True)),
             _ca_pin_digest(getattr(target, "tls_ca_pin", None)),
+            self._base_url(target),
         )
 
     def _client_cache_key(self, target: Target) -> tuple[str, ...]:
         """Return the full pooled-client key for *target*.
 
         ``target_cache_key`` (``(tenant_id, id)``) plus
-        :meth:`extra_cache_dimensions` (``(verify_tls, ca_pin_digest)``).
-        Stringified into a flat ``tuple[str, ...]`` so the key is hashable
-        and a subclass that derives it the same way produces an identical
-        tuple.
+        :meth:`extra_cache_dimensions`
+        (``(verify_tls, ca_pin_digest, base_url)``). Stringified into a flat
+        ``tuple[str, ...]`` so the key is hashable and a subclass that
+        derives it the same way produces an identical tuple.
         """
         return target_cache_key(target) + tuple(
             str(dim) for dim in self.extra_cache_dimensions(target)

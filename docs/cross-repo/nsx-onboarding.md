@@ -38,13 +38,13 @@ ops stay in the wrapper until v0.2.next ships policy + approval flow:
 
 | Group | CLI verb | `op_id` | Path |
 | --- | --- | --- | --- |
-| nsx-identity | `meho nsx about` | `GET:/api/v1/node` | Manager identity + version |
-| nsx-inventory | `meho nsx node list` | `GET:/api/v1/transport-nodes` | Transport-node inventory |
-| nsx-cluster | `meho nsx cluster status` | `GET:/api/v1/cluster/status` | Management + control cluster health |
-| nsx-segments | `meho nsx segment list` | `GET:/policy/api/v1/infra/segments` | Policy-API overlay/VLAN segment listing |
-| nsx-transport-zones | `meho nsx transport-zone list` | `GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones` | Transport-zone listing |
+| nsx-identity | `meho nsx about` | `nsx.node.status` | Manager identity + version |
+| nsx-inventory | `meho nsx node list` | `nsx.transport_node.list` | Transport-node inventory |
+| nsx-cluster | `meho nsx cluster status` | `nsx.cluster.status` | Management + control cluster health |
+| nsx-segments | `meho nsx segment list` | `nsx.segment.list` | Policy-API overlay/VLAN segment listing |
+| nsx-transport-zones | `meho nsx transport-zone list` | `nsx.transport_zone.list` | Transport-zone listing |
 | nsx-routing | `meho nsx tier0 list` | `GET:/policy/api/v1/infra/tier-0s` | Provider-edge Tier-0 router listing |
-| nsx-routing | `meho nsx tier1 list` | `GET:/policy/api/v1/infra/tier-1s` | Tenant Tier-1 router listing |
+| nsx-routing | `meho nsx tier1 list` | `nsx.tier1.list` | Tenant Tier-1 router listing |
 | nsx-policy-firewall | `meho nsx firewall policy list [--scope <domain>]` | `GET:/policy/api/v1/infra/domains/{domain-id}/security-policies` | Security policy listing per domain |
 | nsx-policy-firewall | `meho nsx firewall rule list <policy-id> [--scope <domain>]` | `GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules` | Per-policy rule listing |
 
@@ -187,7 +187,10 @@ meho nsx operation search "firewall rules" --target rdc-nsx
 
 ### `meho nsx about`
 
-Dispatches `GET:/api/v1/node` against `connector_id="nsx-rest-4.2"`.
+Dispatches `nsx.node.status` (the typed read; repointed off the
+ingested `GET:/api/v1/node` op_id by #2355 — the legacy op_id no
+longer resolves on a zero-catalog boot) against
+`connector_id="nsx-rest-4.2"`.
 Human output: `node_version`, `kernel_version`, `hostname`, `node_uuid`.
 
 ```text
@@ -199,34 +202,47 @@ nsx-rest-4.2 — node_version=4.2.1.0.0 (kernel 4.2.1.0.0 build) @ nsxmgr-rdc
 
 ### `meho nsx node list`
 
-Dispatches `GET:/api/v1/transport-nodes`. Renders `id` / `display_name`
+Dispatches `nsx.transport_node.list` (the typed read; repointed off
+the ingested `GET:/api/v1/transport-nodes` op_id by #2942 — the
+legacy op_id no longer resolves on a zero-catalog boot). Renders
+`id` / `display_name`
 and `resource_type` from `node_deployment_info`. The list covers all
 transport nodes registered on the manager (ESXi hosts, bare-metal
 endpoints, edge nodes).
 
 ### `meho nsx cluster status`
 
-Dispatches `GET:/api/v1/cluster/status`. Renders management-cluster
+Dispatches `nsx.cluster.status` (the typed read; repointed off the
+ingested `GET:/api/v1/cluster/status` op_id by #2355 — the legacy
+op_id no longer resolves on a zero-catalog boot). Renders management-cluster
 and control-cluster aggregate status. A healthy deployment shows
 `STABLE` / `STABLE`; a degraded member shows the member UUID in the
 detail list.
 
 ### `meho nsx segment list`
 
-Dispatches `GET:/policy/api/v1/infra/segments`. Renders `id` /
+Dispatches `nsx.segment.list` (the typed read; repointed off the
+ingested `GET:/policy/api/v1/infra/segments` op_id by #2942 — the
+legacy op_id no longer resolves on a zero-catalog boot). Renders
+`id` /
 `display_name` / `transport_zone_path`. This is the broadest list op —
 production deployments often have hundreds of segments. Use `--json |
 jq` to filter by transport zone path or subnet CIDR.
 
 ### `meho nsx transport-zone list`
 
-Dispatches the long enforcement-point-qualified path. Renders `id` /
+Dispatches `nsx.transport_zone.list` (the typed read; repointed off
+the ingested long enforcement-point-qualified path by #2355 — the
+legacy op_id no longer resolves on a zero-catalog boot). Renders `id` /
 `display_name` / `tz_type` (`OVERLAY` or `VLAN`).
 
 ### `meho nsx tier0 list` / `meho nsx tier1 list`
 
-Dispatch `GET:/policy/api/v1/infra/tier-0s` and
-`GET:/policy/api/v1/infra/tier-1s` respectively. Render `id` /
+`tier0 list` dispatches the ingested `GET:/policy/api/v1/infra/tier-0s`
+(no typed tier-0 read exists); `tier1 list` dispatches `nsx.tier1.list`
+(the typed read; repointed off the ingested
+`GET:/policy/api/v1/infra/tier-1s` op_id by #2355 — the legacy op_id
+no longer resolves on a zero-catalog boot). Render `id` /
 `display_name` / `ha_mode` (Tier-0) or `tier0_path` (Tier-1). Tier-0s
 are provider-owned; Tier-1s are tenant-owned and attach to a Tier-0.
 

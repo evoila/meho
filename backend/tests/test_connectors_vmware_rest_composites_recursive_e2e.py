@@ -72,9 +72,9 @@ from meho_backplane.settings import get_settings
 # each runs directly on the connector session (no descriptor row, no audit
 # row) -- the test asserts these paths produce ZERO ``AuditLog`` rows.
 _LEAF_OP_LIST_VMS = "GET:/vcenter/vm"
-_LEAF_OP_GET_DRS_RECS = "GET:/vcenter/cluster/{cluster}/drs/recommendations"
+_LEAF_OP_GET_DRS_RECS = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 _LEAF_OP_RELOCATE_VM = "POST:/vcenter/vm/{vm}?action=relocate"
-_LEAF_OP_HOST_MAINTENANCE_ENTER = "PATCH:/vcenter/host/{host}/maintenance?action=enter"
+_LEAF_OP_HOST_MAINTENANCE_ENTER = "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +220,35 @@ class _DepthRecordingConnector:
         self.calls.append((verb, spec))
         return self.responses.get(spec, {"value": {}})
 
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        """Serve the vim sub-calls the #2970-switched steps issue.
+
+        The DRS read (depth 1, inside the recursion) + the maintenance
+        ``*_Task`` + its ``Task.info`` poll (depth 0). Same keying as the
+        write-e2e recorder: method paths verbatim, ``RetrievePropertiesEx``
+        by queried object type with a default terminal-success Task read.
+        """
+        self.depths.append(composite_depth_var.get())
+        self.calls.append(("VMOMI", path))
+        if path.endswith("/RetrievePropertiesEx"):
+            spec_type = json["specSet"][0]["propSet"][0]["type"]
+            if spec_type in self.responses:
+                return self.responses[spec_type]
+            if spec_type == "Task":
+                task_moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
+                return {
+                    "objects": [
+                        {
+                            "obj": {"type": "Task", "value": task_moid},
+                            "propSet": [{"name": "info", "val": {"state": "success"}}],
+                        }
+                    ]
+                }
+            raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+        return self.responses[path]
+
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -252,11 +281,49 @@ async def test_host_evacuate_e2e_through_production_dispatch_audit_tree(
                     {"vm": "vm-bb", "cluster": "cluster-1"},
                 ]
             },
-            "/vcenter/cluster/cluster-1/drs/recommendations": {
-                "value": [
-                    {"vm": "vm-aa", "target_host": "host-target"},
-                    {"vm": "vm-bb", "target_host": "host-target"},
+            # vim drsRecommendation property read (#2970), keyed by object type.
+            "ClusterComputeResource": {
+                "objects": [
+                    {
+                        "obj": {"type": "ClusterComputeResource", "value": "cluster-1"},
+                        "propSet": [
+                            {
+                                "name": "drsRecommendation",
+                                "val": [
+                                    {
+                                        "migrationList": [
+                                            {
+                                                "vm": {
+                                                    "type": "VirtualMachine",
+                                                    "value": "vm-aa",
+                                                },
+                                                "destination": {
+                                                    "type": "HostSystem",
+                                                    "value": "host-target",
+                                                },
+                                            },
+                                            {
+                                                "vm": {
+                                                    "type": "VirtualMachine",
+                                                    "value": "vm-bb",
+                                                },
+                                                "destination": {
+                                                    "type": "HostSystem",
+                                                    "value": "host-target",
+                                                },
+                                            },
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
                 ]
+            },
+            # vim maintenance-enter (#2970): the *_Task MoRef the poll drives.
+            "/HostSystem/host-source/EnterMaintenanceMode_Task": {
+                "type": "Task",
+                "value": "t-enter-src",
             },
         }
     )

@@ -21,9 +21,14 @@ Coverage matrix (per Task #2306 acceptance criteria):
   downstream GET is recovered by the dispatcher's auth-class arm calling
   the connector's public ``invalidate_session`` hook (#2290) and
   re-dispatching once; the op returns ``status="ok"``.
-* **Registration-shape invariants.** The 11 non-gated reads carry
+* **Registration-shape invariants.** The 13 non-gated reads carry
   ``safety_level="safe"``, ``requires_approval=False``, a ``read-only``
   tag, and non-empty llm_instructions; no write op is registered.
+
+The network-pool pre-flight reads (``sddc.network_pool.list`` /
+``sddc.network_pool.get``, #2837) ride the same AC #1 zero-catalog typed
+dispatch shape; ``.get`` additionally asserts id-substitution and that the
+``networks[]`` free/used IP-capacity fields pass through intact.
 
 Mirrors :mod:`tests.test_connectors_nsx_typed_reads` for the dispatch
 lifecycle + embedding stub and
@@ -193,6 +198,7 @@ _SYSTEM_PAYLOAD: dict[str, Any] = {"proxyConfiguration": {"isEnabled": False}}
         ("sddc.host.list", "/v1/hosts"),
         ("sddc.vcenter.list", "/v1/vcenters"),
         ("sddc.nsxt_cluster.list", "/v1/nsxt-clusters"),
+        ("sddc.network_pool.list", "/v1/network-pools"),
         ("sddc.task.list", "/v1/tasks"),
         ("sddc.system.info", "/v1/system"),
         ("sddc.vcf_service.list", "/v1/vcf-services"),
@@ -236,12 +242,19 @@ async def test_domain_status_builds_path_from_id(
     _stub_embedding: AsyncMock,
     session: AsyncSession,
 ) -> None:
-    """AC #1: sddc.domain.status interpolates the domain id into the path."""
+    """AC #1: sddc.domain.status interpolates the domain id into the path.
+
+    The op reads ``GET /v1/domains/{id}`` -- the domain object whose
+    top-level ``status`` carries the lifecycle state; the pinned 9.0 spec
+    serves no dedicated ``/status`` sub-resource (the #2982 reconcile
+    finding).
+    """
     await _register_and_resolve(_stub_embedding)
 
+    domain_payload = {"id": "domain-mgmt", "name": "sfo-m01", "status": "ACTIVE"}
     async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
         mock.post(_TOKEN_PATH).respond(200, json={"accessToken": _ACCESS_TOKEN})
-        route = mock.get("/v1/domains/domain-mgmt/status").respond(200, json={"status": "ACTIVE"})
+        route = mock.get("/v1/domains/domain-mgmt").respond(200, json=domain_payload)
         result = await dispatch(
             operator=_make_operator(),
             connector_id=SDDC_CONNECTOR_ID,
@@ -251,7 +264,78 @@ async def test_domain_status_builds_path_from_id(
         )
 
     assert result.status == "ok", result.error
-    assert result.result == {"status": "ACTIVE"}
+    assert result.result == domain_payload
+    assert route.called and route.call_count == 1
+
+
+#: A network-pool detail payload with the VCF ``networks[]`` capacity shape
+#: (Broadcom VCF API: type / vlanId / subnet / mask / gateway / ipPools /
+#: freeIps / usedIps). Free-vs-used capacity is ``len(freeIps)`` vs
+#: ``len(usedIps)`` per network -- the pre-flight the operator runs.
+_NETWORK_POOL_DETAIL: dict[str, Any] = {
+    "id": "np-01",
+    "name": "sfo-m01-np01",
+    "networks": [
+        {
+            "id": "net-vmotion",
+            "type": "VMOTION",
+            "vlanId": 1612,
+            "mtu": 9000,
+            "subnet": "172.16.12.0",
+            "mask": "255.255.255.0",
+            "gateway": "172.16.12.1",
+            "ipPools": [{"start": "172.16.12.101", "end": "172.16.12.108"}],
+            "freeIps": ["172.16.12.105", "172.16.12.106", "172.16.12.107", "172.16.12.108"],
+            "usedIps": ["172.16.12.101", "172.16.12.102", "172.16.12.103", "172.16.12.104"],
+        },
+        {
+            "id": "net-vsan",
+            "type": "VSAN",
+            "vlanId": 1613,
+            "mtu": 9000,
+            "subnet": "172.16.13.0",
+            "mask": "255.255.255.0",
+            "gateway": "172.16.13.1",
+            "ipPools": [{"start": "172.16.13.101", "end": "172.16.13.108"}],
+            "freeIps": ["172.16.13.105", "172.16.13.106", "172.16.13.107", "172.16.13.108"],
+            "usedIps": ["172.16.13.101", "172.16.13.102", "172.16.13.103", "172.16.13.104"],
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_network_pool_get_builds_path_from_id_and_passes_capacity_through(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """#2837: sddc.network_pool.get interpolates the pool id and returns the
+    networks[] free/used IP-capacity fields intact (pass-through handler)."""
+    await _register_and_resolve(_stub_embedding)
+
+    async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": _ACCESS_TOKEN})
+        route = mock.get("/v1/network-pools/np-01").respond(200, json=_NETWORK_POOL_DETAIL)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=SDDC_CONNECTOR_ID,
+            op_id="sddc.network_pool.get",
+            target=_SddcReadTarget(),
+            params={"id": "np-01"},
+        )
+
+    assert result.status == "ok", result.error
+    # The whole vendor payload passes through untouched -- no capacity field
+    # is dropped or reshaped at the connector boundary.
+    assert result.result == _NETWORK_POOL_DETAIL
+    vmotion = result.result["networks"][0]
+    assert vmotion["type"] == "VMOTION"
+    assert vmotion["gateway"] == "172.16.12.1"
+    assert vmotion["ipPools"] == [{"start": "172.16.12.101", "end": "172.16.12.108"}]
+    # free-vs-used capacity survives so the pre-flight can count it.
+    assert len(vmotion["freeIps"]) == 4
+    assert len(vmotion["usedIps"]) == 4
+    # The id was path-substituted, not sent as a query param.
     assert route.called and route.call_count == 1
 
 
@@ -481,6 +565,8 @@ _EXPECTED_OP_IDS = {
     "sddc.host.list",
     "sddc.vcenter.list",
     "sddc.nsxt_cluster.list",
+    "sddc.network_pool.list",
+    "sddc.network_pool.get",
     "sddc.credential.list",
     "sddc.task.list",
     "sddc.system.info",

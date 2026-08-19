@@ -293,6 +293,32 @@ func TestPrintNetworkPoolList(t *testing.T) {
 	}
 }
 
+func TestPrintNetworkPoolGet(t *testing.T) {
+	r := &CallResult{
+		Status:     "ok",
+		Result:     json.RawMessage(`{"id":"np-01","name":"sfo-m01-np01","networks":[{"type":"VMOTION","vlanId":1612,"subnet":"172.16.12.0","mask":"255.255.255.0","gateway":"172.16.12.1","ipPools":[{"start":"172.16.12.101","end":"172.16.12.108"}],"freeIps":["172.16.12.105","172.16.12.106","172.16.12.107","172.16.12.108"],"usedIps":["172.16.12.101","172.16.12.102","172.16.12.103","172.16.12.104"]}]}`),
+		DurationMs: 5.0,
+	}
+	var buf bytes.Buffer
+	printNetworkPoolGet(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"np-01", "sfo-m01-np01", "VMOTION", "1612", "172.16.12.1", "free=4", "used=4", "172.16.12.101 - 172.16.12.108"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printNetworkPoolGet missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintNetworkPoolGetErrorFallsBackToGeneric(t *testing.T) {
+	errMsg := "network pool not found"
+	r := &CallResult{Status: "error", OpID: "sddc.network_pool.get", Error: &errMsg}
+	var buf bytes.Buffer
+	printNetworkPoolGet(&buf, r)
+	if !strings.Contains(buf.String(), "network pool not found") {
+		t.Errorf("error path should surface the error; got:\n%s", buf.String())
+	}
+}
+
 func TestPrintBundleList(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
@@ -517,6 +543,41 @@ func TestDispatchDomainInfoSendsIDParam(t *testing.T) {
 	}
 }
 
+// TestDispatchNetworkPoolGetSendsIDParam — network-pool get verb passes id in
+// params so the backend substitutes it into GET /v1/network-pools/{id}, and
+// dispatches the typed op_id.
+func TestDispatchNetworkPoolGetSendsIDParam(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
+			var body callRequestBody
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode body: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			poolID, _ := body.Params["id"].(string)
+			if poolID != "np-01" {
+				t.Errorf("id param: got %q want %q", poolID, "np-01")
+			}
+			if body.OpID != "sddc.network_pool.get" {
+				t.Errorf("op_id: got %q want sddc.network_pool.get", body.OpID)
+			}
+			if body.ConnectorID != "sddc-rest-9.0" {
+				t.Errorf("connector_id: got %q want sddc-rest-9.0", body.ConnectorID)
+			}
+			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID,
+				Result: json.RawMessage(`{"id":"np-01","name":"np","networks":[]}`)})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	params := map[string]any{"id": "np-01"}
+	if _, err := conn.Call(context.Background(), srv.URL, "sddc.network_pool.get", "rdc-sddc", params); err != nil {
+		t.Fatalf("dispatchOp: %v", err)
+	}
+}
+
 // TestDispatchWorkflowListSendsStatusFilter — workflow list passes status in params.
 func TestDispatchWorkflowListSendsStatusFilter(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
@@ -614,6 +675,26 @@ func TestDomainSubtreeAssemblesAllVerbs(t *testing.T) {
 	t.Fatalf("domain sub-tree not found")
 }
 
+// TestNetworkPoolSubtreeAssemblesAllVerbs pins the `sddc-manager network-pool` sub-tree.
+func TestNetworkPoolSubtreeAssemblesAllVerbs(t *testing.T) {
+	root := NewRootCmd()
+	for _, c := range root.Commands() {
+		if c.Name() == "network-pool" {
+			subnames := map[string]bool{}
+			for _, sub := range c.Commands() {
+				subnames[sub.Name()] = true
+			}
+			for _, want := range []string{"list", "get"} {
+				if !subnames[want] {
+					t.Errorf("network-pool sub-tree missing %q; got %v", want, subnames)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("network-pool sub-tree not found")
+}
+
 // TestOperationSubtreeAssemblesAllVerbs pins the `sddc-manager operation` sub-tree.
 func TestOperationSubtreeAssemblesAllVerbs(t *testing.T) {
 	root := NewRootCmd()
@@ -637,7 +718,7 @@ func TestOperationSubtreeAssemblesAllVerbs(t *testing.T) {
 // TestFlatListVerbsHaveListSubcommand pins single-verb sub-trees.
 func TestFlatListVerbsHaveListSubcommand(t *testing.T) {
 	root := NewRootCmd()
-	for _, parent := range []string{"manager", "cluster", "host", "network-pool", "bundle", "workflow"} {
+	for _, parent := range []string{"manager", "cluster", "host", "bundle", "workflow"} {
 		found := false
 		for _, c := range root.Commands() {
 			if c.Name() != parent {

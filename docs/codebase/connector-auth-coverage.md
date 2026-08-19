@@ -40,6 +40,7 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 | 13 | kubernetes | `kubernetes/connector.py` | kubeconfig loaded from Vault → cert/token embedded in `ApiClient` | kubeconfig payload | embedded in `ApiClient` | **RESERVED** `kubeconfig` |
 | 14 | nsx | `nsx/session.py` | Session create `POST /api/session/create` (form `j_username`/`j_password`) → `Set-Cookie JSESSIONID` jar + `X-XSRF-TOKEN` | `username`, `password` | mutated cookie jar + `dict[str,str]` | **RESERVED** `cookie_jar_session` |
 | 15 | vcf_automation | `vcf_automation/_auth.py` | Dual-plane: provider login (`/cloudapi/.../sessions/provider`) + tenant login (`/iaas/api/login`), token from header / body | `username`, `password`, `domain` | `dict[str,str]` (plane-specific Bearer) | **RESERVED** `dual_plane_session` |
+| 16 | vcf_installer | `vcf_installer/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}` → `TokenPair.accessToken`) → cached Bearer; re-login once on `401`. Second member of the scheme (SDDC Manager shape) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
 
 > Row count note: the connectors directory ships 15 HTTP-family connector
 > packages; the issue's "14" excludes `vcf_automation`'s dual-plane shape

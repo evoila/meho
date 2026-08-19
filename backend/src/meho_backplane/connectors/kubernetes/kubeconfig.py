@@ -66,6 +66,7 @@ durable artifact.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
@@ -81,9 +82,16 @@ from meho_backplane.connectors._shared.vault_creds import (
 __all__ = [
     "DEFAULT_KUBECONFIG_FIELD",
     "DEFAULT_KUBECONFIG_KV_MOUNT",
+    "WCP_PASSWORD_FIELD",
+    "WCP_USERNAME_FIELD",
+    "CredentialLoader",
+    "KubeconfigCredential",
     "KubeconfigLoader",
+    "KubernetesCredential",
     "KubernetesTargetLike",
+    "WcpSsoCredential",
     "load_kubeconfig_from_vault",
+    "load_kubernetes_credential",
     "parse_kubeconfig_yaml",
 ]
 
@@ -98,6 +106,15 @@ DEFAULT_KUBECONFIG_KV_MOUNT: str = "secret"
 #: operator stores the kubeconfig at ``<secret_ref>`` with this single
 #: field; the loader reads exactly this key.
 DEFAULT_KUBECONFIG_FIELD: str = "kubeconfig"
+
+#: KV-v2 field names a vSphere Supervisor (WCP) target's secret carries
+#: instead of ``kubeconfig``: the vSphere SSO ``{username, password}`` the
+#: connector performs the ``/wcp/login`` exchange with. The username is
+#: the fully-qualified SSO principal (e.g. ``administrator@vsphere.local``
+#: or a scoped read-only namespace user), so no separate realm field is
+#: needed.
+WCP_USERNAME_FIELD: str = "username"
+WCP_PASSWORD_FIELD: str = "password"
 
 
 @runtime_checkable
@@ -135,6 +152,52 @@ reads the per-target secret under the operator's identity via
 :doc:`docs/architecture/connector-auth.md`. An injected test loader
 receives the same ``(target, operator)`` pair so the wiring is
 exercised by both the default and the injected path.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class KubeconfigCredential:
+    """A resolved static kubeconfig — the durable-credential k8s target path.
+
+    ``config`` is the parsed kubeconfig in the dict shape
+    ``kubernetes_asyncio.config.new_client_from_config_dict`` /
+    ``load_kube_config_from_dict`` accept.
+    """
+
+    config: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class WcpSsoCredential:
+    """Resolved vSphere SSO ``{username, password}`` for a WCP Supervisor.
+
+    A vSphere Supervisor issues no static/durable credential; the
+    connector holds this SSO pair and performs the ``/wcp/login`` token
+    exchange (mint -> cache -> refresh) itself. See
+    :mod:`meho_backplane.connectors.kubernetes.wcp`.
+    """
+
+    username: str
+    password: str
+
+
+#: Discriminated credential the connector resolves per target. The
+#: variant selects the client-build path: a static kubeconfig
+#: (:class:`KubeconfigCredential`) or the WCP SSO token exchange
+#: (:class:`WcpSsoCredential`).
+KubernetesCredential = KubeconfigCredential | WcpSsoCredential
+
+
+CredentialLoader = Callable[[KubernetesTargetLike, Operator], Awaitable[KubernetesCredential]]
+"""Async callable resolving a (target, operator) pair to a discriminated credential.
+
+The connector's credential seam. Production passes
+:func:`load_kubernetes_credential` (payload-shape discrimination over the
+operator-context Vault read); tests inject a callable returning a
+pre-built :class:`KubernetesCredential`. The legacy
+:data:`KubeconfigLoader` injection is adapted onto this contract by the
+connector (its dict result is wrapped in a :class:`KubeconfigCredential`),
+so existing kubeconfig-only injections keep working unchanged.
 """
 
 
@@ -185,6 +248,29 @@ def _extract_kubeconfig_text(
             "expected a YAML string"
         )
     return kubeconfig_text
+
+
+def _require_str_field(
+    secret_data: dict[str, object],
+    field: str,
+    *,
+    target_name: str,
+    secret_ref: str,
+) -> str:
+    """Extract a required non-empty string field, whitespace-stripped.
+
+    Missing / wrong-type / blank all raise
+    :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+    naming the target + field — never a bare ``KeyError`` and never
+    echoing the value.
+    """
+    value = secret_data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise VaultCredentialsReadError(
+            f"vault secret for target {target_name!r} (secret_ref={secret_ref!r}) "
+            f"has field {field!r} that is empty or not a string"
+        )
+    return value.strip()
 
 
 async def load_kubeconfig_from_vault(
@@ -299,3 +385,85 @@ async def load_kubeconfig_from_vault(
     )
 
     return parse_kubeconfig_yaml(kubeconfig_text)
+
+
+async def load_kubernetes_credential(
+    target: KubernetesTargetLike,
+    operator: Operator,
+    *,
+    mount: str = DEFAULT_KUBECONFIG_KV_MOUNT,
+) -> KubernetesCredential:
+    """Resolve a target's credential, discriminating kubeconfig vs WCP SSO.
+
+    Reads ``target.secret_ref`` **once** through the shared
+    backend-dispatch seam
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`)
+    and routes on the payload's field shape — the same
+    credential-protocol discrimination the GitHub connector uses for its
+    App-vs-PAT split (``connectors/github/session.py``), rather than
+    overloading the target's ``auth_model`` (which is the *identity*
+    model — ``shared_service_account`` etc. — not a credential protocol):
+
+    * a ``kubeconfig`` field -> :class:`KubeconfigCredential` (the static
+      durable-credential path, checked **first** so an existing
+      kubeconfig secret is never re-interpreted);
+    * else ``username`` + ``password`` fields ->
+      :class:`WcpSsoCredential` (the vSphere Supervisor / WCP
+      token-exchange path,
+      :mod:`~meho_backplane.connectors.kubernetes.wcp`);
+    * neither ->
+      :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`.
+
+    A vSphere Supervisor target thus differs from a normal k8s target
+    only in the shape of the credential its ``secret_ref`` holds; it
+    still fingerprints as ``product="k8s"`` and needs no target-schema
+    change (the connector's resolution / target model are untouched).
+
+    The rubric **State 2** wiring (`shared_service_account`) and the
+    operator-context read identity are inherited verbatim from
+    :func:`load_vault_secret_data`; see
+    :doc:`docs/architecture/connector-auth.md`.
+    """
+    secret_data = await load_vault_secret_data(
+        cast(BasicCredentialsTargetLike, target), operator, mount=mount
+    )
+
+    if DEFAULT_KUBECONFIG_FIELD in secret_data:
+        kubeconfig_text = _extract_kubeconfig_text(
+            secret_data,
+            target_name=target.name,
+            secret_ref=target.secret_ref,
+            field=DEFAULT_KUBECONFIG_FIELD,
+        )
+        # Non-secret attribution only — never the kubeconfig content.
+        structlog.get_logger(__name__).info(
+            "kubernetes_credential_resolved",
+            target=target.name,
+            host=target.host,
+            secret_ref=target.secret_ref,
+            mode="kubeconfig",
+        )
+        return KubeconfigCredential(parse_kubeconfig_yaml(kubeconfig_text))
+
+    if WCP_USERNAME_FIELD in secret_data and WCP_PASSWORD_FIELD in secret_data:
+        username = _require_str_field(
+            secret_data, WCP_USERNAME_FIELD, target_name=target.name, secret_ref=target.secret_ref
+        )
+        password = _require_str_field(
+            secret_data, WCP_PASSWORD_FIELD, target_name=target.name, secret_ref=target.secret_ref
+        )
+        # Non-secret attribution only — never the SSO username/password.
+        structlog.get_logger(__name__).info(
+            "kubernetes_credential_resolved",
+            target=target.name,
+            host=target.host,
+            secret_ref=target.secret_ref,
+            mode="vsphere-supervisor",
+        )
+        return WcpSsoCredential(username=username, password=password)
+
+    raise VaultCredentialsReadError(
+        f"vault secret for target {target.name!r} (secret_ref={target.secret_ref!r}) "
+        f"carries neither a {DEFAULT_KUBECONFIG_FIELD!r} field (static kubeconfig) nor "
+        f"{WCP_USERNAME_FIELD!r}+{WCP_PASSWORD_FIELD!r} fields (vSphere Supervisor SSO)"
+    )

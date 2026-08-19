@@ -40,12 +40,23 @@ from meho_backplane.connectors.kubernetes.connector import (
     product_from_git_version,
 )
 from meho_backplane.connectors.kubernetes.kubeconfig import (
+    CredentialLoader,
+    KubeconfigCredential,
     KubeconfigLoader,
+    KubernetesCredential,
     KubernetesTargetLike,
+    WcpSsoCredential,
     load_kubeconfig_from_vault,
+    load_kubernetes_credential,
     parse_kubeconfig_yaml,
 )
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS, KubernetesOp
+from meho_backplane.connectors.kubernetes.wcp import (
+    WcpLoginError,
+    WcpToken,
+    build_wcp_api_configuration,
+    wcp_login,
+)
 from meho_backplane.connectors.registry import (
     register_connector,
     register_connector_v2,
@@ -88,14 +99,23 @@ async def register_kubernetes_typed_operations(
 
 __all__ = [
     "KUBERNETES_OPS",
+    "CredentialLoader",
+    "KubeconfigCredential",
     "KubeconfigLoader",
     "KubernetesConnector",
+    "KubernetesCredential",
     "KubernetesOp",
     "KubernetesTargetLike",
+    "WcpLoginError",
+    "WcpSsoCredential",
+    "WcpToken",
+    "build_wcp_api_configuration",
     "load_kubeconfig_from_vault",
+    "load_kubernetes_credential",
     "parse_kubeconfig_yaml",
     "product_from_git_version",
     "register_kubernetes_typed_operations",
+    "wcp_login",
 ]
 
 # v1 entry -- retained for ``get_connector("k8s")`` callers (the

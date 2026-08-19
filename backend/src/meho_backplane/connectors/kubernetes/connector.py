@@ -69,9 +69,13 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.kubernetes.kubeconfig import (
+    CredentialLoader,
+    KubeconfigCredential,
     KubeconfigLoader,
+    KubernetesCredential,
     KubernetesTargetLike,
-    load_kubeconfig_from_vault,
+    WcpSsoCredential,
+    load_kubernetes_credential,
 )
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.kubernetes.ops_core import (
@@ -80,6 +84,7 @@ from meho_backplane.connectors.kubernetes.ops_core import (
     namespace_row,
     node_row,
 )
+from meho_backplane.connectors.kubernetes.wcp import build_wcp_api_configuration
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -279,6 +284,22 @@ def product_from_git_version(git_version: str) -> str:
     return "vanilla"
 
 
+def _adapt_kubeconfig_loader(loader: KubeconfigLoader) -> CredentialLoader:
+    """Adapt a legacy kubeconfig-dict loader onto the credential-loader contract.
+
+    Preserves the ``kubeconfig_loader=`` injection every existing test
+    uses: the dict the loader returns is wrapped in a
+    :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigCredential`,
+    so the static path is byte-identical and only vSphere Supervisor
+    (WCP) targets ever take the new SSO branch.
+    """
+
+    async def _wrapped(target: KubernetesTargetLike, operator: Operator) -> KubernetesCredential:
+        return KubeconfigCredential(await loader(target, operator))
+
+    return _wrapped
+
+
 class KubernetesConnector(Connector):
     """Kubernetes connector -- reads kubeconfig per target, caches the client."""
 
@@ -302,10 +323,30 @@ class KubernetesConnector(Connector):
         self,
         *,
         kubeconfig_loader: KubeconfigLoader | None = None,
+        credential_loader: CredentialLoader | None = None,
     ) -> None:
-        self._kubeconfig_loader: KubeconfigLoader = (
-            kubeconfig_loader if kubeconfig_loader is not None else load_kubeconfig_from_vault
-        )
+        """Wire the credential seam.
+
+        ``credential_loader`` (new) resolves a target to a discriminated
+        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubernetesCredential`
+        — a static kubeconfig or a vSphere Supervisor (WCP) SSO pair —
+        and defaults to
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubernetes_credential`.
+        ``kubeconfig_loader`` is the legacy kubeconfig-dict seam kept for
+        the existing test injections; its dict result is adapted onto the
+        credential contract as a
+        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigCredential`,
+        so the static path stays byte-identical and only WCP targets take
+        the new branch. Passing both is a wiring error.
+        """
+        if kubeconfig_loader is not None and credential_loader is not None:
+            raise ValueError("pass at most one of kubeconfig_loader / credential_loader")
+        if credential_loader is not None:
+            self._credential_loader: CredentialLoader = credential_loader
+        elif kubeconfig_loader is not None:
+            self._credential_loader = _adapt_kubeconfig_loader(kubeconfig_loader)
+        else:
+            self._credential_loader = load_kubernetes_credential
         self._api_clients: dict[str, client.ApiClient] = {}
         # Parallel cache of websocket-transport clients, keyed the same
         # way as ``_api_clients`` (``secret_ref``). Only ``k8s.exec``
@@ -347,7 +388,7 @@ class KubernetesConnector(Connector):
 
         G0.16-T4 (#1306) converged this path with the dispatch surface
         — both now flow the operator through the same
-        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubernetes_credential`
         helper. See :doc:`docs/codebase/connectors-kubernetes.md`.
         """
         eff_operator = operator if operator is not None else synthesise_system_operator()
@@ -1717,36 +1758,46 @@ class KubernetesConnector(Connector):
         """Resolve (and cache) the :class:`ApiClient` for *target*.
 
         The single lock serialises concurrent first-use for any target;
-        in practice the second caller hits the cache fast-path. The
-        slow kubeconfig read happens under the lock so two concurrent
-        callers for the same target don't both pay the cost.
+        in practice the second caller hits the cache fast-path. The slow
+        credential read + client build happens under the lock so two
+        concurrent callers for the same target don't both pay the cost.
 
         ``operator`` is forwarded to the injected
-        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigLoader`
+        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.CredentialLoader`
         so the default
-        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
-        can read the per-target kubeconfig under the operator's identity
-        (``vault_client_for_operator(operator)``). An injected test
-        loader receives the same ``(target, operator)`` pair so the
-        wiring is exercised by both the default and the injected path.
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubernetes_credential`
+        reads the per-target secret under the operator's identity
+        (``vault_client_for_operator(operator)``) and discriminates a
+        static kubeconfig from a vSphere Supervisor (WCP) SSO pair. An
+        injected test loader receives the same ``(target, operator)``
+        pair so the wiring is exercised by both the default and the
+        injected path.
 
         Cache-hit fast path: when the :class:`ApiClient` is already
         cached for this target's :meth:`_cache_key`, the operator
-        argument is ignored (the kubeconfig has already been resolved
+        argument is ignored (the credential has already been resolved
         under a prior operator's identity). This is the v0.2 design
-        choice: kubeconfigs are tied to ``target.secret_ref`` (the
-        shared service account) rather than the acting operator, so the
-        client is shareable across operators. A future per-operator
-        auth model (impersonation) would re-key the cache on operator
-        identity; until then ``secret_ref`` is sufficient.
+        choice: credentials are tied to ``target.secret_ref`` (the shared
+        service account) rather than the acting operator, so the client
+        is shareable across operators. For a WCP target the cached
+        client's short-lived Supervisor token refreshes transparently via
+        the :class:`Configuration`'s ``refresh_api_key_hook`` — the client
+        object stays cached, only its bearer rotates. A future
+        per-operator auth model (impersonation) would re-key the cache on
+        operator identity; until then ``secret_ref`` is sufficient.
         """
         key = self._cache_key(target)
         async with self._lock:
             cached = self._api_clients.get(key)
             if cached is not None:
                 return cached
-            kubeconfig_dict = await self._kubeconfig_loader(target, operator)
-            api_client = await config.new_client_from_config_dict(kubeconfig_dict)
+            credential = await self._credential_loader(target, operator)
+            if isinstance(credential, WcpSsoCredential):
+                api_client = client.ApiClient(
+                    configuration=await self._wcp_configuration(target, credential)
+                )
+            else:
+                api_client = await config.new_client_from_config_dict(credential.config)
             self._api_clients[key] = api_client
             _log.info(
                 "kubernetes_api_client_built",
@@ -1754,6 +1805,34 @@ class KubernetesConnector(Connector):
                 host=target.host,
             )
             return api_client
+
+    async def _wcp_configuration(
+        self,
+        target: KubernetesTargetLike,
+        credential: WcpSsoCredential,
+    ) -> client.Configuration:
+        """Build a self-refreshing :class:`Configuration` for a WCP Supervisor.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.kubernetes.wcp.build_wcp_api_configuration`,
+        which performs the ``/wcp/login`` SSO exchange, takes the
+        Supervisor CA from the response, dials the operator-reachable
+        ``target.host`` (never the internal-VIP ``server`` the login
+        returns), and installs the token-refresh hook. The TLS knobs are
+        read defensively (``verify_tls`` defaults on, ``tls_ca_pin`` is
+        optional) so the narrow :class:`KubernetesTargetLike` Protocol
+        stays unchanged while the concrete ``Target`` model's fields are
+        honoured.
+        """
+        port = target.port if target.port is not None else _DEFAULT_K8S_PORT
+        return await build_wcp_api_configuration(
+            host=target.host,
+            api_port=port,
+            username=credential.username,
+            password=credential.password,
+            verify_tls=bool(getattr(target, "verify_tls", True)),
+            ca_pem=getattr(target, "tls_ca_pin", None),
+        )
 
     async def _get_ws_api_client(
         self,
@@ -1764,7 +1843,7 @@ class KubernetesConnector(Connector):
 
         Mirrors :meth:`_get_api_client` exactly -- same lock, same
         :meth:`_cache_key` (``secret_ref``), same operator-identity
-        kubeconfig load -- but builds a
+        credential load -- but builds a
         :class:`~kubernetes_asyncio.stream.WsApiClient` instead of an
         ordinary :class:`~kubernetes_asyncio.client.ApiClient`. The ws
         client is the only transport that can speak the
@@ -1772,14 +1851,17 @@ class KubernetesConnector(Connector):
         (only ``k8s.exec`` touches it) so read-only targets never pay
         for a second client.
 
-        The kubeconfig is loaded the same way
-        :func:`~kubernetes_asyncio.config.new_client_from_config_dict`
+        For a static-kubeconfig target the kubeconfig is loaded the same
+        way :func:`~kubernetes_asyncio.config.new_client_from_config_dict`
         does -- a fresh :class:`~kubernetes_asyncio.client.Configuration`
         populated by
         :func:`~kubernetes_asyncio.config.load_kube_config_from_dict` --
-        then handed to the ``WsApiClient`` constructor. Separate
-        ``Configuration`` instances keep the REST and ws clients from
-        sharing mutable auth state.
+        then handed to the ``WsApiClient`` constructor. A vSphere
+        Supervisor (WCP) target instead gets the self-refreshing
+        :class:`Configuration` from :meth:`_wcp_configuration`, so exec
+        over a Supervisor rides the same token-refresh hook the read path
+        uses. Separate ``Configuration`` instances keep the REST and ws
+        clients from sharing mutable auth state.
         """
         # Local import: pulled only on the exec path so the read-only
         # ops don't drag the stream sub-package into every import.
@@ -1791,12 +1873,15 @@ class KubernetesConnector(Connector):
             cached = self._ws_api_clients.get(key)
             if cached is not None:
                 return cached
-            kubeconfig_dict = await self._kubeconfig_loader(target, operator)
-            ws_config = type.__call__(Configuration)
-            await load_kube_config_from_dict(
-                config_dict=kubeconfig_dict,
-                client_configuration=ws_config,
-            )
+            credential = await self._credential_loader(target, operator)
+            if isinstance(credential, WcpSsoCredential):
+                ws_config = await self._wcp_configuration(target, credential)
+            else:
+                ws_config = type.__call__(Configuration)
+                await load_kube_config_from_dict(
+                    config_dict=credential.config,
+                    client_configuration=ws_config,
+                )
             ws_client = WsApiClient(configuration=ws_config)
             self._ws_api_clients[key] = ws_client
             _log.info(

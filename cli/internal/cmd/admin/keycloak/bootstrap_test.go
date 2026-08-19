@@ -767,6 +767,113 @@ func TestBootstrap_AllFourDefaultScopesApplied(t *testing.T) {
 	}
 }
 
+// TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle is the opt-in
+// contract for #2902: when a deployment sets
+// CLIOfflineSessionIdleSeconds (the `--cli-offline-access` flag), the
+// device-code CLI client gains `offline_access` as an OPTIONAL scope
+// (never default) plus a bounded `client.offline.session.idle.timeout`
+// attribute — the same opt-in shape #912 gave the MCP client, but off
+// by default for the CLI.
+func TestBootstrap_CLIOfflineAccessOptInAssignsScopeAndIdle(t *testing.T) {
+	fake := newFakeKeycloak()
+	opts := fullOpts()
+	opts.CLIOfflineSessionIdleSeconds = 172800
+	if _, _, err := runBootstrapOnce(t, fake, opts); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	var cliUUID string
+	var cliClient *clientRep
+	for uuid, c := range fake.clients {
+		if c.ClientID == "meho-cli" {
+			cliUUID = uuid
+			cliClient = c
+		}
+	}
+	if cliClient == nil {
+		t.Fatalf("meho-cli client not found")
+	}
+
+	// offline_access is attached as an OPTIONAL scope on the CLI client.
+	foundOptional := false
+	for _, sid := range fake.optionalScopes[cliUUID] {
+		if sid == "scope-offline-access" {
+			foundOptional = true
+			break
+		}
+	}
+	if !foundOptional {
+		t.Errorf("meho-cli missing optional scope offline_access when "+
+			"opted in; got optionalScopes=%v", fake.optionalScopes[cliUUID])
+	}
+
+	// ...and NOT as a default scope (else every device login would mint
+	// a refresh token even without --offline).
+	for _, sid := range fake.defaultScopes[cliUUID] {
+		if sid == "scope-offline-access" {
+			t.Errorf("meho-cli has offline_access as DEFAULT — must be " +
+				"optional only")
+		}
+	}
+
+	// The per-client offline-session idle timeout is bounded to the
+	// requested value (Keycloak attr client.offline.session.idle.timeout).
+	if got := cliClient.Attributes["client.offline.session.idle.timeout"]; got != "172800" {
+		t.Errorf("client.offline.session.idle.timeout = %q, want 172800", got)
+	}
+}
+
+// TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff is the
+// off-by-default contract for #2902: a bootstrap run that does NOT opt
+// in must leave the CLI client exactly as before — no offline_access
+// scope and no offline-session-idle attribute — so existing
+// deployments are unaffected.
+func TestBootstrap_DefaultRunLeavesCLIOfflineAccessOff(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var cliUUID string
+	var cliClient *clientRep
+	for uuid, c := range fake.clients {
+		if c.ClientID == "meho-cli" {
+			cliUUID = uuid
+			cliClient = c
+		}
+	}
+	if cliClient == nil {
+		t.Fatalf("meho-cli client not found")
+	}
+	for _, sid := range fake.optionalScopes[cliUUID] {
+		if sid == "scope-offline-access" {
+			t.Errorf("default run assigned offline_access to meho-cli; " +
+				"must be opt-in via --cli-offline-access")
+		}
+	}
+	if _, ok := cliClient.Attributes["client.offline.session.idle.timeout"]; ok {
+		t.Errorf("default run set client.offline.session.idle.timeout on " +
+			"meho-cli; must be opt-in only")
+	}
+}
+
+// TestBootstrap_RejectsNegativeCLIOfflineIdle pins that validate()
+// rejects a negative --cli-offline-access value (0 = off is fine; a
+// negative idle timeout is nonsensical and would otherwise be sent to
+// Keycloak verbatim).
+func TestBootstrap_RejectsNegativeCLIOfflineIdle(t *testing.T) {
+	opts := fullOpts()
+	opts.KeycloakBaseURL = "https://keycloak.evba.lab"
+	opts.CLIOfflineSessionIdleSeconds = -1
+	err := opts.withDefaults().validate()
+	if err == nil {
+		t.Fatal("expected validate() to reject a negative " +
+			"--cli-offline-access value")
+	}
+	if !strings.Contains(err.Error(), "--cli-offline-access") {
+		t.Errorf("error = %v, want mention of --cli-offline-access", err)
+	}
+}
+
 func TestBootstrap_CLIClientHasDeviceGrantAttribute(t *testing.T) {
 	fake := newFakeKeycloak()
 	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {

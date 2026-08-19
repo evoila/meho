@@ -33,10 +33,20 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// defaultCLIOfflineSessionIdleSeconds is the offline-session idle
+// timeout (48h) applied to the CLI device-code client when an operator
+// passes a bare `--cli-offline-access`. 48h means daily use never
+// re-prompts while a weekend gap costs at most one Monday device dance
+// — far tighter than the weeks-long gcloud / kubectl offline-token
+// norm, directly answering the RDC Wall W7 blast-radius concern
+// (#2902).
+const defaultCLIOfflineSessionIdleSeconds = 172800
 
 // NewRootCmd returns the `meho admin keycloak` parent command, ready
 // for cmd/admin/admin.go to graft onto the admin tree.
@@ -74,23 +84,24 @@ func NewRootCmd() *cobra.Command {
 // in shell history or `ps` output.
 func newBootstrapClientsCmd() *cobra.Command {
 	var (
-		keycloakBaseURL      string
-		realm                string
-		adminUsername        string
-		cliClientID          string
-		mcpClientID          string
-		backplaneAudience    string
-		mcpResourceURI       string
-		tenantID             string
-		tenantRole           string
-		adminGroupName       string
-		adminUserUsername    string
-		adminUserEmail       string
-		skipUserProvisioning bool
-		mcpRedirectURIs      []string
-		mcpWebOrigins        []string
-		insecureSkipTLS      bool
-		dryRun               bool
+		keycloakBaseURL       string
+		realm                 string
+		adminUsername         string
+		cliClientID           string
+		mcpClientID           string
+		backplaneAudience     string
+		mcpResourceURI        string
+		tenantID              string
+		tenantRole            string
+		adminGroupName        string
+		adminUserUsername     string
+		adminUserEmail        string
+		skipUserProvisioning  bool
+		mcpRedirectURIs       []string
+		mcpWebOrigins         []string
+		insecureSkipTLS       bool
+		dryRun                bool
+		cliOfflineSessionIdle int
 	)
 
 	cmd := &cobra.Command{
@@ -120,6 +131,11 @@ func newBootstrapClientsCmd() *cobra.Command {
 			"      --admin-username admin \\\n" +
 			"      --mcp-resource-uri https://meho.evba.lab/mcp \\\n" +
 			"      --admin-user-username damir.topic@example.com\n",
+		// No positional args — flags only. Also guards the
+		// --cli-offline-access optional-value flag: pflag's NoOptDefVal
+		// treats `--cli-offline-access 3600` (space form) as a
+		// positional arg, so NoArgs rejects it instead of dropping it.
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Resolve passwords (env first, stdin fallback).
 			adminPassword := os.Getenv("KEYCLOAK_ADMIN_PASSWORD")
@@ -147,26 +163,27 @@ func newBootstrapClientsCmd() *cobra.Command {
 			}
 
 			opts := BootstrapOptions{
-				KeycloakBaseURL:      keycloakBaseURL,
-				Realm:                realm,
-				AdminUsername:        adminUsername,
-				AdminPassword:        adminPassword,
-				CLIClientID:          cliClientID,
-				MCPClientID:          mcpClientID,
-				BackplaneAudience:    backplaneAudience,
-				MCPResourceURI:       mcpResourceURI,
-				TenantID:             tenantID,
-				TenantRole:           tenantRole,
-				AdminGroupName:       adminGroupName,
-				AdminUserUsername:    adminUserUsername,
-				AdminUserEmail:       adminUserEmail,
-				AdminUserPassword:    adminUserPassword,
-				SkipUserProvisioning: skipUserProvisioning,
-				MCPRedirectURIs:      mcpRedirectURIs,
-				MCPWebOrigins:        mcpWebOrigins,
-				DryRun:               dryRun,
-				Out:                  cmd.OutOrStdout(),
-				Err:                  cmd.ErrOrStderr(),
+				KeycloakBaseURL:              keycloakBaseURL,
+				Realm:                        realm,
+				AdminUsername:                adminUsername,
+				AdminPassword:                adminPassword,
+				CLIClientID:                  cliClientID,
+				MCPClientID:                  mcpClientID,
+				BackplaneAudience:            backplaneAudience,
+				MCPResourceURI:               mcpResourceURI,
+				TenantID:                     tenantID,
+				TenantRole:                   tenantRole,
+				AdminGroupName:               adminGroupName,
+				AdminUserUsername:            adminUserUsername,
+				AdminUserEmail:               adminUserEmail,
+				AdminUserPassword:            adminUserPassword,
+				SkipUserProvisioning:         skipUserProvisioning,
+				CLIOfflineSessionIdleSeconds: cliOfflineSessionIdle,
+				MCPRedirectURIs:              mcpRedirectURIs,
+				MCPWebOrigins:                mcpWebOrigins,
+				DryRun:                       dryRun,
+				Out:                          cmd.OutOrStdout(),
+				Err:                          cmd.ErrOrStderr(),
 			}
 
 			if insecureSkipTLS {
@@ -224,6 +241,24 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"skip TLS verification when calling Keycloak (one-time bootstrap convenience; do not use in CI against untrusted Keycloaks)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"print what would be provisioned without making any API calls")
+	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access", 0,
+		"opt the device-code CLI client into the long-lived offline-token "+
+			"path (#2902): assign `offline_access` as an optional client "+
+			"scope and bound its per-client offline-session idle timeout to "+
+			"the given number of seconds. Off by default. A bare "+
+			"`--cli-offline-access` uses "+strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)+
+			" seconds (48h); to pass a custom value use the equals form, "+
+			"e.g. `--cli-offline-access=86400`. Pairs with `meho login "+
+			"--offline`. Security: this enables a long-lived refresh token "+
+			"on the operator's disk — keep the bound tight and prefer the "+
+			"OS keyring for storage")
+	// Optional-value flag: a bare `--cli-offline-access` yields the 48h
+	// default; a custom value MUST use the equals form
+	// (`--cli-offline-access=SECONDS`). pflag's NoOptDefVal treats a
+	// space-separated value as a positional arg, which the cobra.NoArgs
+	// guard above then rejects rather than silently dropping.
+	cmd.Flags().Lookup("cli-offline-access").NoOptDefVal =
+		strconv.Itoa(defaultCLIOfflineSessionIdleSeconds)
 
 	// `--keycloak-base-url` and `--realm` and `--admin-username` are
 	// mandatory; mark them so cobra-generated --help is precise.

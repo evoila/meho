@@ -549,6 +549,11 @@ def test_create_modal_renders_writable_scopes_only_for_operator() -> None:
     assert 'hx-post="/ui/memory/create"' in body
     assert 'hx-post="/ui/memory/preview"' in body
     assert "delay:300ms" in body
+    # #218: the create form is migrated off dead daisyUI-v4 classes
+    # (removed in v5 — zero compiled rules — which collapsed the
+    # label-over-input column).
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_create_modal_renders_tenant_for_tenant_admin() -> None:

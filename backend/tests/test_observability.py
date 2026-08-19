@@ -37,7 +37,7 @@ import platform
 import re
 import sys
 from collections.abc import Iterator
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
@@ -45,7 +45,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from meho_backplane.main import app
-from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.middleware import UNMATCHED_ROUTE_LABEL, RequestContextMiddleware
 
 _UUID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
 
@@ -583,3 +583,98 @@ def test_uvicorn_access_dropped_error_bridged(monkeypatch: pytest.MonkeyPatch) -
 
     assert "bind_failed" in events
     assert all("GET /" not in event for event in events)
+
+
+# ---------------------------------------------------------------------------
+# http_request_duration_seconds histogram
+# ---------------------------------------------------------------------------
+
+
+def test_http_request_duration_histogram_observes_per_request(client: TestClient) -> None:
+    """Each request adds exactly one observation to the duration histogram.
+
+    The histogram is observed at the same middleware seam as
+    :data:`HTTP_REQUESTS_TOTAL` (#2886), so two requests to ``/`` move
+    the ``_count`` sample for the matched-template label set forward by
+    exactly two — proving the observe() call rides the same code path as
+    the counter increment.
+    """
+    labels = {"method": "GET", "path": "/", "status": "200"}
+    before = REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=labels) or 0.0
+
+    client.get("/")
+    client.get("/")
+
+    after = REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=labels)
+    assert after is not None
+    assert after - before == pytest.approx(2.0)
+
+
+def test_metrics_endpoint_exposes_duration_histogram(client: TestClient) -> None:
+    """``/metrics`` exports the histogram's bucket / count / sum series.
+
+    A ``prometheus_client.Histogram`` exposes ``<name>_bucket{le=…}``,
+    ``<name>_count`` and ``<name>_sum``. The full labelled ``_count`` and
+    ``_sum`` assertions prove the exposition reflects a real observation
+    for the matched-template label set, not merely the HELP/TYPE preamble
+    (which carries the bare metric name and would satisfy a loose
+    substring check even with zero samples).
+    """
+    client.get("/")
+    body = client.get("/metrics").text
+
+    assert "http_request_duration_seconds_bucket{" in body
+    assert 'le="+Inf"' in body
+    assert 'http_request_duration_seconds_count{method="GET",path="/",status="200"}' in body
+    assert 'http_request_duration_seconds_sum{method="GET",path="/",status="200"}' in body
+
+
+def test_unmatched_routes_collapse_to_single_metric_label() -> None:
+    """Distinct 404 paths fold into one ``path="__unmatched__"`` metric label.
+
+    Hardening (#2886): an unauthenticated scanner spraying distinct
+    non-existent paths must not mint one Prometheus label value per URL
+    on the unauthenticated ``/metrics`` endpoint. Both the counter and
+    the duration histogram collapse every unmatched route to the
+    :data:`~meho_backplane.middleware.UNMATCHED_ROUTE_LABEL` constant,
+    while the literal path survives only on the (unbounded-by-design)
+    log line.
+    """
+    from fastapi import FastAPI
+
+    probe = FastAPI()
+    probe.add_middleware(RequestContextMiddleware)
+
+    @probe.get("/exists")
+    async def _exists() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    probe_client = TestClient(probe)
+
+    unmatched = {"method": "GET", "path": UNMATCHED_ROUTE_LABEL, "status": "404"}
+    counter_before = REGISTRY.get_sample_value("http_requests_total", labels=unmatched) or 0.0
+    hist_before = (
+        REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=unmatched) or 0.0
+    )
+
+    scan_paths = [f"/nonexistent-{uuid4().hex}" for _ in range(5)]
+    for path in scan_paths:
+        assert probe_client.get(path).status_code == 404
+
+    counter_after = REGISTRY.get_sample_value("http_requests_total", labels=unmatched) or 0.0
+    hist_after = (
+        REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=unmatched) or 0.0
+    )
+
+    # All five distinct scans folded into the single constant label —
+    # both the counter and the histogram advanced by exactly five.
+    assert counter_after - counter_before == pytest.approx(len(scan_paths))
+    assert hist_after - hist_before == pytest.approx(len(scan_paths))
+
+    # And not one literal scanned path minted its own label value.
+    for path in scan_paths:
+        literal = {"method": "GET", "path": path, "status": "404"}
+        assert REGISTRY.get_sample_value("http_requests_total", labels=literal) is None
+        assert (
+            REGISTRY.get_sample_value("http_request_duration_seconds_count", labels=literal) is None
+        )

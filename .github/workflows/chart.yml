@@ -441,6 +441,74 @@ jobs:
           fi
           echo ">> ingest-sender netpol rule verified: renders on opt-in, absent by default"
 
+      - name: Assert observability scrape wiring renders on opt-in (#2885)
+        # #2885: the Prometheus Operator ServiceMonitor + starter
+        # PrometheusRule are OPTIONAL and disabled by default, so the
+        # kubeconform render above (which sets neither) never exercises
+        # them — and their CRDs (monitoring.coreos.com/v1) aren't in the
+        # upstream schema set kubeconform validates against anyway. This
+        # step is therefore the authoritative CI gate for the feature (the
+        # backend/tests/test_chart_observability_scrape.py mirror skips in
+        # the unit lane, which ships no helm). It renders with both opt-ins
+        # on and greps the load-bearing fields: the ServiceMonitor scrapes
+        # /metrics and carries the discovery label a Prometheus
+        # serviceMonitorSelector needs; the PrometheusRule ships both
+        # release-scoped starter alerts. The default render from the
+        # "Helm template + kubeconform" step proves the opt-out path (no
+        # ServiceMonitor / PrometheusRule without the flags).
+        run: |
+          set -euo pipefail
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            --set serviceMonitor.enabled=true \
+            --set serviceMonitor.labels.release=kube-prometheus-stack \
+            --set prometheusRule.enabled=true \
+            --set prometheusRule.labels.release=kube-prometheus-stack \
+            > /tmp/rendered-obs.yaml
+
+          grep -Eq '^kind: ServiceMonitor$' /tmp/rendered-obs.yaml \
+            || { echo "::error::serviceMonitor.enabled=true did not render a ServiceMonitor (#2885 regression)"; exit 1; }
+          grep -Eq '^kind: PrometheusRule$' /tmp/rendered-obs.yaml \
+            || { echo "::error::prometheusRule.enabled=true did not render a PrometheusRule (#2885 regression)"; exit 1; }
+
+          # ServiceMonitor scrapes the backplane /metrics route (the path
+          # is unique to the ServiceMonitor endpoint — probes use
+          # /healthz + /ready).
+          grep -Eq '^[[:space:]]*path: /metrics$' /tmp/rendered-obs.yaml \
+            || { echo "::error::ServiceMonitor did not scrape /metrics (#2885 regression)"; exit 1; }
+
+          # Both starter alerts, release-scoped.
+          grep -Fq 'absent(up{job="test-meho"' /tmp/rendered-obs.yaml \
+            || { echo "::error::PrometheusRule missing the release-scoped absent(up) scrape alert (#2885 regression)"; exit 1; }
+          grep -Fq 'rate(broadcast_publish_errors_total[5m])' /tmp/rendered-obs.yaml \
+            || { echo "::error::PrometheusRule missing the broadcast_publish_errors_total rate alert (#2885 regression)"; exit 1; }
+
+          # Discovery label present on BOTH resources — a Prometheus
+          # serviceMonitorSelector / ruleSelector only picks them up when
+          # this label matches (the #1 pickup gotcha).
+          if [ "$(grep -c '^[[:space:]]*release: kube-prometheus-stack$' /tmp/rendered-obs.yaml)" -lt 2 ]; then
+            echo "::error::discovery 'release' label missing on ServiceMonitor/PrometheusRule (#2885 regression)"
+            exit 1
+          fi
+
+          # Opt-out path: the default-overrides render carries neither.
+          if grep -Eq '^kind: (ServiceMonitor|PrometheusRule)$' /tmp/rendered.yaml; then
+            echo "::error::default render leaked a ServiceMonitor/PrometheusRule without opt-in (#2885 regression)"
+            exit 1
+          fi
+          echo ">> observability scrape wiring verified: renders on opt-in, absent by default"
+
   helm-test:
     # Internal "run" job — the REQUIRED branch-protection context lives on the
     # `helm-test-gate` aggregator below, not here. A required job that is gated

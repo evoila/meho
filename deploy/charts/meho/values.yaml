@@ -139,6 +139,77 @@ service:
   # -- Name of the service port (consumed by the Ingress backend reference).
   portName: http
 
+# Prometheus Operator scrape wiring (Initiative #2884, #2885). Both
+# resources below are OPTIONAL and disabled by default: the chart renders
+# them only on opt-in, and they require the Prometheus Operator CRDs
+# (`monitoring.coreos.com/v1`) to be present in the cluster. A default
+# install ships neither, so a cluster without the operator is unaffected.
+serviceMonitor:
+  # -- Render a ServiceMonitor that scrapes the backplane `/metrics`
+  # endpoint (unauthenticated legacy-0.0.4 exposition — see
+  # `backend/src/meho_backplane/metrics.py`). Default `false`: `/metrics`
+  # stays dark until an operator running the Prometheus Operator flips
+  # this on. The ServiceMonitor selects THIS release's Service via the
+  # `app.kubernetes.io/name` + `app.kubernetes.io/instance` selector
+  # labels and scrapes the named `service.portName` port.
+  enabled: false
+  # -- Extra labels applied to the ServiceMonitor metadata. REQUIRED in
+  # most clusters: a Prometheus CR only discovers ServiceMonitors whose
+  # labels match its `serviceMonitorSelector`. kube-prometheus-stack's
+  # default selector is `release: <prometheus-release>` (e.g.
+  # `release: kube-prometheus-stack`), so set that here or the scrape
+  # config is silently never generated. Empty by default because the
+  # correct value is cluster-specific.
+  labels: {}
+  # -- Scrape interval (Prometheus duration, e.g. `30s`, `1m`).
+  interval: 30s
+  # -- Per-scrape timeout (Prometheus duration). Must be <= `interval`.
+  scrapeTimeout: 10s
+  # -- HTTP path scraped on the backplane Service port. `/metrics` matches
+  # the backplane exposition route (main.py).
+  path: /metrics
+
+# Optional starter alerting rules (Initiative #2884, #2885). Renders a
+# PrometheusRule with two conservative alerts so a fresh install has a
+# baseline safety net without hand-authoring PromQL. Sibling tasks extend
+# it (the background-loop liveness alert lands with #2888 as a new rule
+# group). Independent of `serviceMonitor.enabled` — an operator scraping
+# via their own ServiceMonitor can still adopt these rules, and vice
+# versa. Requires the Prometheus Operator CRDs; disabled by default.
+prometheusRule:
+  # -- Render the starter PrometheusRule. Default `false`.
+  enabled: false
+  # -- Extra labels applied to the PrometheusRule metadata. Same discovery
+  # contract as `serviceMonitor.labels`: a Prometheus CR only evaluates
+  # PrometheusRules whose labels match its `ruleSelector`
+  # (kube-prometheus-stack default `release: <prometheus-release>`). Set
+  # it or the rules are silently never loaded.
+  labels: {}
+  # `MehoMetricsScrapeAbsent`: fires when Prometheus has NO scrape target
+  # for this release at all — the ServiceMonitor was never picked up, the
+  # label selector drifted, or the Service was removed (i.e. `absent(up)`
+  # for this release's target). The "is anyone even scraping me" backstop;
+  # a target that is up-but-failing surfaces as `up == 0`, a separate
+  # signal not covered by the starter set.
+  scrapeAbsent:
+    # -- How long the target must be absent before the alert fires
+    # (Prometheus duration).
+    for: 10m
+    # -- `severity` label attached to the alert (Alertmanager routing).
+    severity: critical
+  # `MehoBroadcastPublishErrors`: fires on a sustained nonzero rate of
+  # `broadcast_publish_errors_total`. That counter is the fail-open
+  # broadcast publisher's only operational signal (a dropped event is
+  # swallowed by design —
+  # `backend/src/meho_backplane/broadcast/publisher.py`), so a persistent
+  # error rate means the activity feed is silently losing events.
+  broadcastPublishErrors:
+    # -- How long the error rate must stay nonzero before firing
+    # (Prometheus duration).
+    for: 15m
+    # -- `severity` label attached to the alert.
+    severity: warning
+
 ingress:
   enabled: true
   # -- IngressClass name. Empty = let the cluster's default IngressClass apply.

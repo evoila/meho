@@ -29854,6 +29854,7 @@
               "rabbitmq",
               "rke2",
               "sddc",
+              "tempo",
               "vault",
               "vcfa",
               "vmware",

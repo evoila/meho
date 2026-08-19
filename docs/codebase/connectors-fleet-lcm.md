@@ -23,22 +23,46 @@ impl dispatches; the legacy surface still answers on 9.0 appliances for
 back-compat, which is why both bands overlap at 9.0 and the resolver — not the
 connector — picks the surface per target.
 
-## Skeleton scope
+## Scope: typed read core (#3047)
 
-This Task (#3036) ships the connector **skeleton** — auth + fingerprint +
-probe + the G0.6 dispatch shim — the same shape the legacy `vcf_fleet`
-connector first shipped as (#831). The 51 `/v1/*` operations are **not**
-hand-coded: they arrive via G0.7 spec ingestion as `source_kind="ingested"`
-`endpoint_descriptor` rows under `connector_id="fleet-lcm-9.0"`. Registering
-this real `HttpConnector` subclass is the load-bearing prerequisite for those
-rows to become **dispatchable** — a bare `GenericRestConnector` auto-shim is
-non-dispatchable (its `auth_headers` / `execute` raise), so ingested ops ride
-*this* class's `auth_headers` on dispatch (the `VmwareRestConnector` pattern).
+The connector ships a curated **13-op typed read core** — the modern successor
+to the legacy `fleet-rest` read surface — registered as `source_kind="typed"`
+and **enabled at register time**, so a VCF Fleet 9.x target (which resolves
+here by most-specific-version) dispatches a modern `/v1/*` read op on a **fresh
+boot with zero catalog ingest**. This is what **restores 9.0 fleet dispatch**
+after the "modern default now" resolver decision (#3033): the #3036 skeleton
+left `fleet-lcm` registered but with no dispatchable ops, so a 9.0 target
+resolved to an impl that could not serve a call; the read core closes that gap.
 
-**Live-appliance dispatch verification is a non-goal** (#1002 / #995 — no
-reachable Fleet LCM appliance). The connector ships registered, spec-guarded
-(reconcile lane), and reconcile-armed; live Bearer-auth verification is a
-follow-up gated on a stood-up appliance (see "Auth" below).
+The read core covers the operator's "is it up, what's deployed, what's
+happening, what can we upgrade to" drill path across five groups:
+
+| Group | Ops |
+|---|---|
+| `fleet-lcm-system` | `fleet-lcm.health`, `.system.info`, `.config.info` |
+| `fleet-lcm-sddc` | `fleet-lcm.sddc-lcm.list`, `.sddc-lcm.info` |
+| `fleet-lcm-components` | `fleet-lcm.component.list`, `.component.info`, `.component.status` |
+| `fleet-lcm-tasks` | `fleet-lcm.task.list`, `.task.info` |
+| `fleet-lcm-lifecycle` | `fleet-lcm.upgrade-plan.list`, `.upgrade-plan.info`, `.release-version.list` |
+
+**Why typed, not ingested.** The connector *is* the modern generic impl and its
+51-op spec is pinnable, but the read core is hand-coded typed (the harbor / nsx
+#2358 pattern) precisely so it is live on a fresh boot with **no** operational
+`meho connector ingest` + `enable_reads` step — merging the read core *is* the
+9.0-restoration, not a runbook the operator must still run. The wider surface
+(the full 51-op spec as `source_kind="ingested"` breadth + the component /
+upgrade / task **writes**) remains a follow-up, enabled operationally through
+the generic review flow (`ReviewService.enable_reads` over an ingest of the same
+pinned `fleet-lcm-openapi.yaml`). Registering this real `HttpConnector` subclass
+is also the load-bearing prerequisite for those future ingested rows to become
+dispatchable (a bare `GenericRestConnector` auto-shim is non-dispatchable — the
+`VmwareRestConnector` pattern).
+
+**Live-appliance dispatch verification remains a non-goal** (#1002 / #995 — no
+reachable Fleet LCM appliance). The read core is unit-tested end-to-end against
+a respx-mocked service (dispatch `status="ok"` through **both** the Bearer and
+Basic auth seams) and reconcile-guarded; live Bearer-auth verification against
+real hardware is the #3047 follow-up (see "Auth" below).
 
 ## Key types
 
@@ -111,23 +135,62 @@ pattern). `probe()` delegates to `fingerprint()`.
 
 ### Dispatch
 
-`execute()` is the G0.6 ABC-compatibility shim (builds a synthetic `Operator`
-and forwards to `meho_backplane.operations.dispatch`). Ingested `/v1/*` ops
-route through the dispatcher via `POST /api/v1/operations/call` (or MCP
-`call_operation`) and ride this connector's `auth_headers`.
+The typed read-core ops dispatch through `meho_backplane.operations.dispatch`
+(via `POST /api/v1/operations/call` or MCP `call_operation`): the dispatcher
+resolves the persisted `module.ClassName.method` handler_ref to the connector's
+bound-method shim, threads `operator` / `target` / `params`, and the handler
+issues an authenticated `GET` on this connector's client — so the read rides
+`auth_headers` (Bearer primary, Basic fallback). `execute()` is the G0.6
+ABC-compatibility shim (builds a synthetic `Operator` and forwards to
+`dispatch`); it remains the path for any future `source_kind="ingested"` op.
+
+## Typed read core internals
+
+The read core follows the harbor #2856 layout:
+
+- **`typed_ops.py`** — the `FleetLcmTypedOp` dataclass table
+  (`FLEET_LCM_TYPED_OPS`), the per-group `when_to_use` map
+  (`FLEET_LCM_TYPED_WHEN_TO_USE_BY_GROUP`), and the module-level
+  `register_fleet_lcm_typed_operations(*, embedding_service=None)` registrar.
+- **`typed_reads.py`** — the op bodies (`async def fleet_lcm_*_impl(connector,
+  operator, target, params)`), each issuing an authenticated `GET` via
+  `HttpConnector._get_json` and returning the parsed payload.
+- **`_llm_instructions.py`** — the per-op `llm_instructions` blobs
+  (`when_to_call` / `output_shape` / `next_step`), keyed by op id (split out
+  for the file-size budget).
+- **`_paths.py`** — the `/v1/*` request-path templates + `fill_path` /
+  `encode_segment` (percent-encoded, fail-loud path substitution for the by-id
+  ops; the reconcile lane introspects these constants).
+- **`connector.py`** — 13 thin bound-method shims (`health`, `system_info`, …)
+  that lazily import and delegate to their `_impl` body; each typed op's
+  `handler_attr` names its shim.
+
+`register_fleet_lcm_typed_operations` is queued onto the lifespan registrar
+list via `register_typed_op_registrar` in `__init__.py`;
+`register_typed_operation` creates each `OperationGroup` (`review_status=
+"enabled"`) and inserts each descriptor `source_kind="typed"`, `is_enabled=
+True`, `method=None` / `path=None` (the wire path lives only in the handler).
+So the read core needs no operator review — it is live the moment the connector
+loads.
 
 ## Spec reconcile lane
 
 [`backend/tests/test_connectors_fleet_lcm_spec_reconcile.py`](../../backend/tests/test_connectors_fleet_lcm_spec_reconcile.py)
-asserts the connector's hand-coded probe path (`_FLEET_LCM_HEALTH_PATH`,
-introspected from the live constant — the #2944 pattern) is served by the
-pinned `fleet-lcm-9.0/fleet-lcm-openapi.yaml`. **No server-base fold** is
-applied: the spec's server url `https://vcf.broadcom.com/fleet-lcm` is
-*absolute*, so `parse_openapi` does not fold the `/fleet-lcm` base onto path
-keys (only *relative* server bases are folded, #1796) — the served op_id is the
-raw `GET:/v1/health`, matching the probe constant. The lane arms when the shelf
-provides the spec (`MEHO_CONSUMER_DOCS_ROOT`) and skips uniformly otherwise
-(`tests/_spec_shelf.py` contract).
+asserts every hand-coded `GET:/path` the typed read core dispatches — the 13
+`/v1/*` path templates in `_paths.py` plus the connector's
+`_FLEET_LCM_HEALTH_PATH` probe (introspected from the live constants — the
+#2944 pattern) — is served by the pinned `fleet-lcm-9.0/fleet-lcm-openapi.yaml`.
+The typed health op and the probe share `/v1/health`; the pin asserts that link
+so the two never drift. **No server-base fold** is applied: the spec's server
+url `https://vcf.broadcom.com/fleet-lcm` is *absolute*, so `parse_openapi` does
+not fold the `/fleet-lcm` base onto path keys (only *relative* server bases are
+folded, #1796) — the served op_ids are the raw `GET:/v1/*`, matching the
+templates (the by-id placeholders `{sddcLcmId}` / `{componentId}` / `{taskId}` /
+`{planId}` are byte-for-byte the spec's own path-parameter names). The lane arms
+when the shelf provides the spec (`MEHO_CONSUMER_DOCS_ROOT`) and skips uniformly
+otherwise (`tests/_spec_shelf.py` contract). (The wider ingested breadth is not
+reconciled here — reconciling ingested rows against the spec they were ingested
+from is tautological.)
 
 ## Dependencies
 
@@ -143,18 +206,28 @@ provides the spec (`MEHO_CONSUMER_DOCS_ROOT`) and skips uniformly otherwise
 ## Known issues / follow-ups
 
 - **Bearer auth not live-verified.** See "Auth" — the header shape ships and is
-  unit-tested; token provisioning + live dispatch are the follow-up gated on a
-  reachable appliance.
-- **Ops arrive by ingestion.** Until an operator ingests
-  `fleet-lcm-openapi.yaml`, the connector is registered and discoverable but
-  `execute` against any `op_id` resolves to "unknown operation" — correct for a
-  registered-but-empty connector at this stage.
+  unit-tested (dispatch through the Bearer seam against a respx mock); token
+  provisioning + live dispatch against a real appliance are the #3047 follow-up
+  gated on reachable hardware. Until then the live default is the Basic
+  alternative the appliance also accepts.
+- **Read core only; ingested breadth + writes are a follow-up.** The 13-op
+  typed read core dispatches on a fresh boot. The wider 51-op `/v1/*` surface
+  (as `source_kind="ingested"` breadth) and the component / upgrade / task
+  writes are enabled operationally through the generic review flow
+  (`meho connector ingest` of `fleet-lcm-openapi.yaml` → `ReviewService.enable_reads`),
+  not shipped here.
 
 ## References
 
-- Modern-impl Task: <https://github.com/evoila/meho/issues/3036>
+- Typed read-core Task: <https://github.com/evoila/meho/issues/3047>
+- Modern-impl skeleton Task: <https://github.com/evoila/meho/issues/3036>
 - Legacy re-band + resolution test Task: <https://github.com/evoila/meho/issues/3037>
 - Parent initiative: <https://github.com/evoila/meho/issues/3033>
+- Read-core tests:
+  [`test_connectors_fleet_lcm_typed_reads.py`](../../backend/tests/test_connectors_fleet_lcm_typed_reads.py)
+  (dispatch + registration) and
+  [`test_connectors_fleet_lcm_spec_reconcile.py`](../../backend/tests/test_connectors_fleet_lcm_spec_reconcile.py)
+  (13-path reconcile lane).
 - Legacy impl: [`connectors-vcf-fleet.md`](connectors-vcf-fleet.md)
 - Spec provenance: `vmware/vcf-api-specs@c3f3b52c` (Apache-2.0); shelf
   `docs/fleet-lcm-9.0/MANIFEST.md`.

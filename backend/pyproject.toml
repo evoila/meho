@@ -24,7 +24,7 @@ dependencies = [
     "hvac>=2.4.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",
-    "alembic>=1.18.5",
+    "alembic>=1.19.1",
     "jsonschema>=4.26.0",
     # jsonschema asserts ``format: date-time`` only when this package is
     # importable — the MCP tools/call gate passes

@@ -345,6 +345,48 @@ split.
   form. Left as-is per "never invent a path"; the activation run
   reconciles it.
 
+### vcd — fully excluded, all-typed (no pinnable spec) (#3057)
+
+The `vcd` (VMware Cloud Director) connector is a **net-new typed**
+connector for the legacy standalone product (initiative
+[#3056](https://github.com/evoila/meho/issues/3056), task #3057). Unlike
+VCFA above there is no plane to arm: **all four** hand-coded op_ids are
+excluded, so the lane
+(`backend/tests/test_connectors_vcd_spec_reconcile.py`) is a **manifest
+pin only** — it sweeps the four op_ids unconditionally so the enumeration
+is proven on every run, with no served-op-id compare.
+
+- **Excluded (4 op_ids: `GET:/api/query`, `GET:/api/versions`,
+  `GET:/cloudapi/1.0.0/orgs`, `POST:/cloudapi/1.0.0/sessions/provider`).**
+  What was checked, per family: (1) **the modern `/cloudapi/1.0.0/*`
+  surface** is the same vCloud-Director-derived surface VCFA's provider
+  plane speaks (VCFA absorbed vCD's provider plane); the appliance serves
+  no `/cloudapi/1.0.0/openapi*` (the evidenced 404 recorded for the
+  `vcf-automation-9.0` provider plane above — live Holodeck VCFA 9.0.2,
+  2026-05-16, #501 — applies to the same endpoint family). A VMware Cloud
+  Director OpenAPI *is* published on the Broadcom developer portal
+  (`developer.broadcom.com/xapis/vmware-cloud-director-openapi`), but it
+  is not a pinnable vendored Apache-2.0 artifact and covers only the
+  cloudapi families — the same reason VCFA excludes `GET:/cloudapi/1.0.0/orgs`
+  rather than pin it. (2) **The classic `/api/*` query service +
+  `/api/versions`** are the legacy vCloud API, whose machine-readable
+  definition Broadcom bundles into the UI JS at build time: no vCD
+  directory in [`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs),
+  and `go-vcloud-director`'s hand-written `govcd/` endpoint map (the only
+  machine-readable surface) does not enumerate the query-service `type=`
+  catalog as an OpenAPI. So no artifact can serve a reconcile authority
+  for the four paths without false reds. **Residual risk, named** (the
+  nsx lesson): this task ran no live probe of a *vCD-specific* appliance's
+  spec-serving locations — live end-to-end verification against the vCD
+  10.6 provider lab is the deferred tail (needs lab Vault/VPN access), the
+  same unit-tested-first posture `fleet-lcm` shipped with; if a
+  vendor-documented spec-serving family emerges there, that falsifies this
+  exclusion and is the activation trigger.
+- **Activation:** `vmware/vcf-api-specs` gaining a vCD spec, or a
+  pinnable/appliance-served spec covering the classic `/api/*` query
+  service being evidenced. The activating task runs the full extension
+  mechanics and reconciles the four op_ids on first run.
+
 ## Red lane = finding (the protocol)
 
 A red lane on first run against the real shelf is **the guard working**,

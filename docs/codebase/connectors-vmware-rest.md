@@ -914,6 +914,28 @@ recording the failing sub-op, its status, and the underlying error.
 The response schema marks `vm_count`/`vm_names` as nullable and adds the
 optional `enrichment_note` key (present only on a skipped row).
 
+The same null + `enrichment_note` treatment is extended to a second,
+subtler failure mode by the **cross-row identical-sets guard** (#2975).
+A per-datastore VM leg can *succeed* (HTTP 200) yet still be wrong: if
+the target silently ignores the per-datastore filter, `GET:/vcenter/vm`
+returns the whole-inventory VM list, so every datastore row is
+enriched with the identical global list — `vm_count` equal to the
+cluster-wide VM total and an identical `vm_names` sample on all rows.
+That poisons the classic "which VMs live on this filling-up datastore?"
+triage question with the same wrong answer on every row. Because a VM's
+working directory lives on exactly one datastore, genuinely-distinct
+datastores never share a non-empty VM set; so an identical **non-empty**
+set across *every* enriched row is treated as failed enrichment — all
+those rows are nulled and carry an `enrichment_note` explaining the
+filter was not applied — rather than emitting the populated-but-wrong
+global list. The non-empty condition excludes the legitimate all-empty
+case (every datastore really has zero VMs), and the guard needs at least
+two enriched rows to compare, so a single-datastore result is never
+touched. The guard is defence-in-depth: it stands regardless of *why*
+the filter was ignored (the upstream root cause is diagnosed separately
+from the dispatch audit row), so it protects the data even when a target
+build mishandles the filter param.
+
 ### Per-entity capacity sensing (`filter_names`, #2758)
 
 `datastore.usage` takes an exact-match `filter_names` param (array of

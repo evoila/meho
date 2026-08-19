@@ -28,14 +28,20 @@ For every HTTP request the middleware:
    - the structured ``request_completed`` log line emitted by the
      middleware after the handler returns.
 
-2. Times the request via :func:`time.monotonic` and exposes the
-   duration in milliseconds on the ``request_completed`` log.
+2. Times the request via :func:`time.monotonic`, exposes the duration
+   in milliseconds on the ``request_completed`` log, and observes it
+   (in seconds) on the :data:`HTTP_REQUEST_DURATION_SECONDS` histogram.
 
-3. Increments the :data:`HTTP_REQUESTS_TOTAL` counter labelled by
+3. Records the :data:`HTTP_REQUESTS_TOTAL` counter and the
+   :data:`HTTP_REQUEST_DURATION_SECONDS` histogram, both labelled by
    ``method``, ``path``, ``status``. ``path`` is the matched FastAPI
-   route template when available (e.g. ``/items/{item_id}``), bounding
-   label cardinality; the literal request path is used as a fall-back
-   for unmatched routes (404s).
+   route template (e.g. ``/items/{item_id}``), or the constant
+   :data:`UNMATCHED_ROUTE_LABEL` (``"__unmatched__"``) for unmatched
+   routes (404s) — bounding label cardinality against a hostile 404
+   scan. The ``request_completed`` / ``request_failed`` *log* keeps the
+   literal request path for unmatched routes (a log line is not a
+   bounded label set), so the forensic "what did the scanner probe"
+   detail is preserved.
 
 4. Never logs the values of sensitive request headers
    (``Authorization``, ``Cookie``, ``X-API-Key``). The middleware does
@@ -97,12 +103,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from meho_backplane.auth.jwt import verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.metrics import HTTP_REQUESTS_TOTAL
+from meho_backplane.metrics import HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUESTS_TOTAL
 from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
     "RUNNER_ALLOWED_PATH_PREFIXES",
     "SENSITIVE_HEADERS",
+    "UNMATCHED_ROUTE_LABEL",
     "BroadcastDetailMiddleware",
     "RequestContextMiddleware",
     "verify_jwt_and_bind",
@@ -133,6 +140,16 @@ SENSITIVE_HEADERS: Final[frozenset[bytes]] = frozenset(
 _REQUEST_ID_HEADER: Final[bytes] = b"x-request-id"
 _BROADCAST_DETAIL_HEADER: Final[bytes] = b"x-broadcast-detail"
 
+#: Metrics ``path`` label value for any request that matched no
+#: registered route (typically a 404). Folding every unmatched literal
+#: path to one constant is what bounds ``http_requests_total`` and
+#: ``http_request_duration_seconds`` label cardinality — an
+#: unauthenticated scanner spraying distinct 404 URLs would otherwise
+#: mint one label value per URL on the unauthenticated ``/metrics``
+#: endpoint (#2886). The literal path is still recorded on the log line
+#: (see :func:`_log_path`) for forensics.
+UNMATCHED_ROUTE_LABEL: Final[str] = "__unmatched__"
+
 #: structlog contextvar key the broadcast resolver reads via
 #: :func:`meho_backplane.broadcast.overrides.read_request_override`.
 #: Kept as a module-level constant in this module (the binder) and as
@@ -152,19 +169,48 @@ def _extract_request_id(scope: Scope) -> str:
     return uuid4().hex
 
 
-def _matched_route_path(scope: Scope) -> str:
-    """Return the matched route template, falling back to the literal path.
+def _route_template(scope: Scope) -> str | None:
+    """Return the matched FastAPI route template, or ``None`` if unmatched.
 
-    FastAPI populates ``scope["route"]`` once the router has resolved
-    the request to an ``APIRoute``. Bounding the metrics ``path`` label
-    by the route template (``/items/{id}``) instead of the literal URL
-    (``/items/42``, ``/items/43``, …) prevents unbounded label
-    cardinality — a Prometheus anti-pattern that has caused real
-    outages in production deployments.
+    FastAPI/Starlette populates ``scope["route"]`` once the router has
+    resolved the request to an ``APIRoute``; its ``path`` attribute is
+    the template (``/items/{id}``). Absent for unmatched routes (404s),
+    where the caller picks the fall-back — a bounded constant for
+    metrics (:func:`_metric_path_label`), the literal path for logs
+    (:func:`_log_path`).
     """
     route = scope.get("route")
     template = getattr(route, "path", None)
     if isinstance(template, str) and template:
+        return template
+    return None
+
+
+def _metric_path_label(scope: Scope) -> str:
+    """Return the bounded ``path`` label for the request-facing metrics.
+
+    The matched route template (``/items/{id}``) when the router
+    resolved the request, else the constant :data:`UNMATCHED_ROUTE_LABEL`
+    — never the literal request path. Labelling by the literal URL is
+    the Prometheus cardinality anti-pattern that has caused real
+    production outages, and on the unauthenticated ``/metrics`` endpoint
+    it is a hardening gap: a scanner spraying distinct 404 URLs would
+    fan the ``path`` label out without bound (#2886).
+    """
+    return _route_template(scope) or UNMATCHED_ROUTE_LABEL
+
+
+def _log_path(scope: Scope) -> str:
+    """Return the ``path`` for the structured request log.
+
+    The matched route template when available, else the literal request
+    path. Logs are not a bounded Prometheus label set, so the literal
+    path is kept for unmatched routes — it is the forensic signal for
+    *which* URL a scanner probed. Contrast :func:`_metric_path_label`,
+    which must collapse unmatched routes to bound cardinality.
+    """
+    template = _route_template(scope)
+    if template is not None:
         return template
     fallback = scope.get("path", "")
     return fallback if isinstance(fallback, str) else ""
@@ -219,25 +265,34 @@ class RequestContextMiddleware:
             log.exception(
                 "request_failed",
                 method=scope.get("method", ""),
-                path=_matched_route_path(scope),
+                path=_log_path(scope),
                 duration_ms=duration_ms,
             )
             raise
 
-        duration_ms = round((time.monotonic() - start) * 1000, 2)
+        elapsed_seconds = time.monotonic() - start
+        duration_ms = round(elapsed_seconds * 1000, 2)
         method = scope.get("method", "")
-        path = _matched_route_path(scope)
+        metric_path = _metric_path_label(scope)
 
+        # Counter and histogram share the label set and the bounded
+        # ``path`` label; the histogram observes full-precision seconds
+        # (the log's ``duration_ms`` is rounded for human reading only).
         HTTP_REQUESTS_TOTAL.labels(
             method=method,
-            path=path,
+            path=metric_path,
             status=str(status_code),
         ).inc()
+        HTTP_REQUEST_DURATION_SECONDS.labels(
+            method=method,
+            path=metric_path,
+            status=str(status_code),
+        ).observe(elapsed_seconds)
 
         log.info(
             "request_completed",
             method=method,
-            path=path,
+            path=_log_path(scope),
             status=status_code,
             duration_ms=duration_ms,
         )

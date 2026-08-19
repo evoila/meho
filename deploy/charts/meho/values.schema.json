@@ -105,6 +105,84 @@
         "portName": { "type": "string", "minLength": 1, "maxLength": 15 }
       }
     },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Prometheus Operator ServiceMonitor scrape wiring (Initiative #2884, #2885). Optional and disabled by default; requires the Prometheus Operator CRDs (monitoring.coreos.com/v1) in the cluster. When `enabled: true` the chart renders a ServiceMonitor selecting this release's Service (app.kubernetes.io/name + app.kubernetes.io/instance) and scraping the named `service.portName` port at `path`. `labels` is the discovery contract: a Prometheus CR only picks up ServiceMonitors whose labels match its `serviceMonitorSelector` (kube-prometheus-stack default `release: <prometheus-release>`), so the scrape config is silently never generated unless `labels` carries the matching label. Default `enabled: false` renders nothing — a default install (no Prometheus Operator) is unaffected.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra labels on the ServiceMonitor metadata. Set the label your Prometheus CR's serviceMonitorSelector matches (commonly `release: kube-prometheus-stack`) or the ServiceMonitor is ignored."
+        },
+        "interval": {
+          "type": "string",
+          "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+          "description": "Scrape interval as a Prometheus duration (e.g. `30s`, `1m`)."
+        },
+        "scrapeTimeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+          "description": "Per-scrape timeout as a Prometheus duration. Must be <= `interval` (the Prometheus Operator rejects a larger value)."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/",
+          "description": "HTTP path scraped on the Service port. Default `/metrics` matches the backplane exposition route."
+        }
+      }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional starter Prometheus Operator PrometheusRule (Initiative #2884, #2885). Disabled by default; requires the Prometheus Operator CRDs (monitoring.coreos.com/v1). When `enabled: true` the chart renders two conservative alerts — `MehoMetricsScrapeAbsent` (absent(up) for this release's target) and `MehoBroadcastPublishErrors` (sustained nonzero rate of broadcast_publish_errors_total) — grouped by concern (`meho.scrape`, `meho.broadcast`) so sibling tasks can extend the rule (the #2888 background-loop liveness alert lands as a new group). Independent of `serviceMonitor.enabled`. `labels` is the same discovery contract as `serviceMonitor.labels`: a Prometheus CR only evaluates PrometheusRules whose labels match its `ruleSelector`. Default `enabled: false` renders nothing.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra labels on the PrometheusRule metadata. Set the label your Prometheus CR's ruleSelector matches (commonly `release: kube-prometheus-stack`) or the rules are never loaded."
+        },
+        "scrapeAbsent": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tuning for the `MehoMetricsScrapeAbsent` alert (fires when Prometheus has no scrape target for this release at all).",
+          "properties": {
+            "for": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+              "description": "How long the target must be absent before firing (Prometheus duration)."
+            },
+            "severity": {
+              "type": "string",
+              "minLength": 1,
+              "description": "`severity` label attached to the alert (Alertmanager routing key). Free-form to allow site-specific severities."
+            }
+          }
+        },
+        "broadcastPublishErrors": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tuning for the `MehoBroadcastPublishErrors` alert (sustained nonzero rate of broadcast_publish_errors_total).",
+          "properties": {
+            "for": {
+              "type": "string",
+              "pattern": "^([0-9]+(ms|s|m|h|d|w|y))+$",
+              "description": "How long the error rate must stay nonzero before firing (Prometheus duration)."
+            },
+            "severity": {
+              "type": "string",
+              "minLength": 1,
+              "description": "`severity` label attached to the alert."
+            }
+          }
+        }
+      }
+    },
     "ingress": {
       "type": "object",
       "additionalProperties": false,

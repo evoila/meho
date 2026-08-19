@@ -1,0 +1,67 @@
+{{- /*
+Prometheus Operator PrometheusRule — starter alerting rules
+(Initiative #2884, #2885).
+
+Optional and disabled by default: rendered only when
+`prometheusRule.enabled` is true, and requires the Prometheus Operator
+CRDs (`monitoring.coreos.com/v1`).
+
+Rules are split into groups BY CONCERN (`meho.scrape`, `meho.broadcast`)
+so sibling tasks can extend the rule without restructuring: the
+background-loop liveness alert lands with #2888 as a new `meho.loops`
+group rather than an edit to an existing group. Keep this shape.
+*/ -}}
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "meho.fullname" . }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: meho.scrape
+      rules:
+        - alert: MehoMetricsScrapeAbsent
+          # Fires when Prometheus has NO target series for this release at
+          # all — the ServiceMonitor was never picked up (ruleSelector /
+          # serviceMonitorSelector label mismatch), the selector drifted,
+          # or the Service was removed. A target that is known-but-failing
+          # surfaces as `up == 0`, a separate signal the starter set does
+          # not cover. `job` defaults to the Service name (= fullname) and
+          # `namespace` is stamped by the operator's target relabeling.
+          expr: 'absent(up{job="{{ include "meho.fullname" . }}", namespace="{{ .Release.Namespace }}"})'
+          for: {{ .Values.prometheusRule.scrapeAbsent.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.scrapeAbsent.severity }}
+          annotations:
+            summary: MEHO backplane metrics are not being scraped
+            description: >-
+              Prometheus has no scrape target for the MEHO backplane
+              (job {{ include "meho.fullname" . }}, namespace
+              {{ .Release.Namespace }}); every application counter is dark.
+              Check that the ServiceMonitor exists and its labels match the
+              Prometheus serviceMonitorSelector.
+    - name: meho.broadcast
+      rules:
+        - alert: MehoBroadcastPublishErrors
+          # broadcast_publish_errors_total is the fail-open activity
+          # publisher's only operational signal: a dropped event is
+          # swallowed by design (backend/src/meho_backplane/broadcast/publisher.py),
+          # so a sustained nonzero rate means the activity feed is silently
+          # losing events.
+          expr: 'rate(broadcast_publish_errors_total[5m]) > 0'
+          for: {{ .Values.prometheusRule.broadcastPublishErrors.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.broadcastPublishErrors.severity }}
+          annotations:
+            summary: MEHO broadcast publisher is dropping events
+            description: >-
+              broadcast_publish_errors_total has a sustained nonzero rate:
+              the activity-broadcast publisher is failing to XADD events to
+              Valkey (unreachable / XADD error / teardown race) and events
+              are being lost. Check the broadcast subchart (Valkey) health.
+{{- end }}

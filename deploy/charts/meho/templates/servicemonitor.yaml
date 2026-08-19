@@ -1,0 +1,40 @@
+{{- /*
+Prometheus Operator ServiceMonitor (Initiative #2884, #2885).
+
+Optional and disabled by default: rendered only when
+`serviceMonitor.enabled` is true, and requires the Prometheus Operator
+CRDs (`monitoring.coreos.com/v1`) to be installed in the cluster. A
+default install ships neither this resource nor the CRDs, so a cluster
+without the operator is unaffected.
+
+Selects THIS release's backplane Service via the name+instance selector
+labels (the broadcast subchart's Service carries a different
+`app.kubernetes.io/name`, so it is not matched) and scrapes the named
+`service.portName` port at `serviceMonitor.path`. The `/metrics`
+exposition is unauthenticated (see backend/src/meho_backplane/metrics.py),
+so no scrape credentials are wired.
+*/ -}}
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "meho.fullname" . }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "meho.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: {{ .Values.service.portName }}
+      path: {{ .Values.serviceMonitor.path }}
+      scheme: http
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+{{- end }}

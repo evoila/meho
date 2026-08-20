@@ -2630,6 +2630,7 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "ambiguous_library",
                 "item_not_found",
                 "ambiguous_item",
+                "resolve_error",
             ],
             "description": (
                 "``'deployed'`` — the OVF deploy report returned "
@@ -2643,9 +2644,12 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
                 "``library_item_name`` was supplied; ``'library_not_found'`` / "
                 "``'ambiguous_library'`` — the ``library_name`` lookup matched "
                 "zero / many libraries; ``'item_not_found'`` / ``'ambiguous_item'`` "
-                "— the ``library_item_name`` lookup matched zero / many items. "
-                "Every non-``deployed`` status is reached before or without a "
-                "successful mutation."
+                "— the ``library_item_name`` lookup matched zero / many items; "
+                "``'resolve_error'`` — a content-library ``?action=find`` "
+                "resolution call itself faulted (HTTP 4xx/5xx), surfaced as a "
+                "structured message with the vCenter status carried in ``issues`` "
+                "rather than a raw vendor error. Every non-``deployed`` status is "
+                "reached before or without a successful mutation."
             ),
         },
         "vm_id": {

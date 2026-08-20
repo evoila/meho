@@ -670,10 +670,10 @@ async def test_deploy_from_library_name_resolution_scoped_by_library(gate: _Gate
         ("POST", _FIND_ITEM_PATH),
         ("POST", "/api/vcenter/ovf/library-item/li-resolved?action=deploy"),
     ]
-    assert conn.calls[0]["body"] == {"spec": {"name": "lab-templates"}}
-    assert conn.calls[1]["body"] == {
-        "spec": {"name": "holorouter-ova", "type": "ovf", "library_id": "lib-7"}
-    }
+    # The find bodies are the FindSpec at the top level of the /api body (#3071),
+    # NOT the legacy /rest {"spec": {...}} envelope vCenter 8.x 400s.
+    assert conn.calls[0]["body"] == {"name": "lab-templates"}
+    assert conn.calls[1]["body"] == {"name": "holorouter-ova", "type": "ovf", "library_id": "lib-7"}
     # The finds are un-gated reads; only the deploy hit the policy seam.
     assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
 
@@ -796,7 +796,13 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
         request=httpx.Request(
             "POST", "https://vc/api/vcenter/ovf/library-item/li-ovf?action=deploy"
         ),
-        response=httpx.Response(404, json={"error_type": "NOT_FOUND"}),
+        response=httpx.Response(
+            404,
+            json={
+                "error_type": "NOT_FOUND",
+                "messages": [{"default_message": "resource pool resgroup-missing not found"}],
+            },
+        ),
     )
     conn = _RecordingConnector({"/api/vcenter/ovf/library-item/li-ovf?action=deploy": fault})
     out = await vm_deploy_from_library_composite(
@@ -809,8 +815,55 @@ async def test_deploy_from_library_deploy_error_on_http_fault(gate: _GateRecorde
     assert out["library_item_id"] == "li-ovf"
     assert len(out["issues"]) == 1
     assert out["issues"][0]["category"] == "placement"
+    # The structured message carries the HTTP status, the vAPI error_type, and
+    # the localized vendor message (#3071 diagnosability, #1649/#1804 pattern).
     assert "404" in out["issues"][0]["message"]
     assert "NOT_FOUND" in out["issues"][0]["message"]
+    assert "resource pool resgroup-missing not found" in out["issues"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_resolve_error_on_find_http_fault(gate: _GateRecorder) -> None:
+    """A 4xx on the content-library find → structured resolve_error, not a bare fault.
+
+    Regression guard for #3071: the name-resolution find call sits before the
+    deploy gate, so a fault there used to escape the composite uncaught and
+    surface as an opaque ``connector_error: HTTPStatusError`` with no status,
+    url, or vendor message. It is now folded into the ``resolve_error`` arm
+    carrying the vCenter HTTP status + error_type + localized message.
+    """
+    fault = httpx.HTTPStatusError(
+        "bad request",
+        request=httpx.Request("POST", "https://vc/api/content/library/item?action=find"),
+        response=httpx.Response(
+            400,
+            json={
+                "error_type": "INVALID_ARGUMENT",
+                "messages": [{"default_message": "Invalid input for method: Find"}],
+            },
+        ),
+    )
+    conn = _RecordingConnector({_FIND_ITEM_PATH: fault})
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item_name": "holorouter-ova", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "resolve_error"
+    assert out["vm_id"] is None
+    assert out["library_item_id"] is None
+    assert out["candidates"] is None
+    assert len(out["issues"]) == 1
+    issue = out["issues"][0]
+    assert issue["category"] == "resolve"
+    assert issue["severity"] == "error"
+    assert "400" in issue["message"]
+    assert "INVALID_ARGUMENT" in issue["message"]
+    assert "Invalid input for method: Find" in issue["message"]
+    # The fault happened during un-gated resolution; nothing hit the policy seam.
+    assert gate.calls == []
+    assert [c["path"] for c in conn.calls] == [_FIND_ITEM_PATH]
 
 
 @pytest.mark.asyncio

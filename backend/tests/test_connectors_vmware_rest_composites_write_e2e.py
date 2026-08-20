@@ -234,6 +234,10 @@ class _RecordingVmwareConnector:
     def _spec(self, path: str) -> str:
         return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
 
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        del target, operator
+        return None
+
     async def _get_json(
         self, target: Any, path: str, *, operator: Operator, params: Any = None
     ) -> Any:

@@ -608,6 +608,10 @@ class _DeployRecordingConnector:
         del target, operator
         return adapt_filter_params("/api", query)
 
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        del target, operator
+        return None
+
     async def _post_json(
         self,
         target: Any,

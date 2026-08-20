@@ -112,14 +112,21 @@ class _RecordingConnector:
         *,
         mount_prefix: str = "/api",
         vmomi: dict[str, Any] | None = None,
+        about_version: str | None = None,
     ) -> None:
         self._responses = responses
         self._seq_index = 0
         self._mount_prefix = mount_prefix
         self._vmomi = vmomi or {}
+        self._about_version_value = about_version
         self.calls: list[dict[str, Any]] = []
         self.mount_calls: list[str] = []
         self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        """Serve the live ``about.version`` the version-aware deploy path reads."""
+        del target, operator
+        return self._about_version_value
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         self.mount_calls.append(path)
@@ -638,6 +645,51 @@ async def test_deploy_from_library_deploy_body_shape(gate: _GateRecorder) -> Non
         "host_id": "host-19",
         "folder_id": "group-v10",
     }
+
+
+@pytest.mark.parametrize(
+    ("about_version", "expected_key", "unexpected_key"),
+    [
+        # vCenter 8.0.x (and every pre-9.0 release) expects the legacy caps
+        # Automation name; the lowercase 9.0 key 400s UNEXPECTED_INPUT there.
+        ("8.0.3", "accept_all_EULA", "accept_all_eula"),
+        ("7.0.3", "accept_all_EULA", "accept_all_eula"),
+        # 9.0 keeps the pinned-spec lowercase form byte-identical.
+        ("9.0.0", "accept_all_eula", "accept_all_EULA"),
+        # An unresolved version falls back to the pinned-spec (9.0) form.
+        (None, "accept_all_eula", "accept_all_EULA"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_deploy_from_library_eula_field_is_version_aware(
+    gate: _GateRecorder,
+    about_version: str | None,
+    expected_key: str,
+    unexpected_key: str,
+) -> None:
+    """The EULA-accept wire key tracks the target's vCenter version (#3074).
+
+    8.0.x/pre-9.0 targets get the legacy ``accept_all_EULA``; 9.0 (and an
+    unresolved version) keep the pinned-spec lowercase ``accept_all_eula``.
+    Exactly one casing is ever emitted — the other must never leak onto the wire.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True
+            ),
+        },
+        about_version=about_version,
+    )
+    await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    deployment_spec = conn.calls[0]["body"]["deployment_spec"]
+    assert deployment_spec[expected_key] is True
+    assert unexpected_key not in deployment_spec
 
 
 @pytest.mark.asyncio

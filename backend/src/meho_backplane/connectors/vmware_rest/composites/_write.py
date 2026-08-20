@@ -1366,17 +1366,38 @@ async def _resolve_deploy_library_item(
     return item_ids[0], None
 
 
-def _build_ovf_deploy_body(params: dict[str, Any]) -> dict[str, Any]:
+def _deploy_eula_field_name(about_version: str | None) -> str:
+    """Return the OVF ``ResourcePoolDeploymentSpec`` EULA-accept wire field name.
+
+    A genuine 8.0-vs-9.0 field-name divergence: the pinned 9.0 Automation
+    spec keys the field ``accept_all_eula`` (lowercase), but vCenter 8.0.x —
+    and every pre-9.0 release — rejects that key with ``HTTP 400
+    UNEXPECTED_INPUT`` and expects the legacy Automation name
+    ``accept_all_EULA`` (``govmomi``'s ``DeploymentSpec.AcceptAllEULA`` ⇒
+    ``accept_all_EULA``; a live ``govc library.deploy`` onto 8.0.3 succeeded
+    with that shape). Gate off the live ``about.version`` major component: a
+    resolvable pre-9.0 major gets the caps form; 9.0+ — and an unresolved
+    version, which falls back to the pinned-spec form — keep the lowercase
+    form so 9.0 dispatch stays byte-identical.
+    """
+    major = about_version.split(".", 1)[0].strip() if about_version else ""
+    if major.isdigit() and int(major) < 9:
+        return "accept_all_EULA"
+    return "accept_all_eula"
+
+
+def _build_ovf_deploy_body(params: dict[str, Any], eula_field: str) -> dict[str, Any]:
     """Build the ``{deployment_spec, target}`` OVF deploy request body.
 
     ``resource_pool`` is the required deploy-target anchor; ``host`` / ``folder``
     refine it. ``network_mappings`` is sent verbatim as the OVF-key → network-moid
     map (the pinned 9.0 spec models it as a map, not an array). ``ovf_properties``
     folds into a single ``PropertyParams`` entry in ``additional_parameters``.
-    ``accept_all_eula`` defaults to true (deploying a curated item accepts its
-    EULA).
+    The EULA-accept flag defaults to true (deploying a curated item accepts its
+    EULA) and is keyed by *eula_field* — the version-aware wire name resolved by
+    :func:`_deploy_eula_field_name`.
     """
-    deployment_spec: dict[str, Any] = {"accept_all_eula": bool(params.get("accept_all_eula", True))}
+    deployment_spec: dict[str, Any] = {eula_field: bool(params.get("accept_all_eula", True))}
     _put_if_str(deployment_spec, "name", params.get("name"))
     network_mappings = params.get("network_mappings")
     if isinstance(network_mappings, dict) and network_mappings:
@@ -1469,7 +1490,9 @@ async def vm_deploy_from_library_composite(
         return resolution_error
     assert item_id is not None  # resolution_error is None ⇒ item_id resolved
 
-    deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params)}
+    about_version = await connector._about_version(target, operator)
+    eula_field = _deploy_eula_field_name(about_version)
+    deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params, eula_field)}
     try:
         gate, deploy_payload = await _write_sub_op(
             connector, target, operator, _OP_DEPLOY_OVF_LIBRARY_ITEM, deploy_params

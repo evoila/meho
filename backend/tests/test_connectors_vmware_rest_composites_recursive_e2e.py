@@ -214,6 +214,7 @@ class _DepthRecordingConnector:
         json: Any = None,
         data: Any = None,
         extra_headers: Any = None,
+        timeout: Any = None,
     ) -> Any:
         self.depths.append(composite_depth_var.get())
         spec = self._spec(path)

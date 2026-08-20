@@ -193,6 +193,18 @@ _OP_DEPLOY_LIBRARY_VM = (
 # id strings and mutate nothing, so they run un-gated like the REST listing
 # reads.
 _OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy"
+# Per-request timeout for the two *synchronous* library-item deploys
+# (``_OP_DEPLOY_LIBRARY_VM`` / ``_OP_DEPLOY_OVF_LIBRARY_ITEM``). Both hold the
+# POST connection open for the entire multi-GB disk copy with no
+# ``vmw-task=true`` variant to poll (#2970), so a real appliance deploy runs
+# well past the connector's 30s client-default read timeout and used to fault
+# with a false ``deploy_error`` while vCenter finished the copy server-side
+# (#3076). This override grants only these two calls a generous read/write
+# ceiling (30 min); connect/pool stay at the fast client default so a dead
+# target still fails fast, and every *other* call on the connector keeps the
+# unchanged 30s default (raising the global client timeout would make ordinary
+# reads hang on a dead target).
+_LIBRARY_ITEM_DEPLOY_TIMEOUT = httpx.Timeout(connect=5.0, read=1800.0, write=1800.0, pool=5.0)
 _OP_FIND_LIBRARY = "POST:/content/library?action=find"
 _OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
 # Content-library item type discriminator for OVF/OVA templates — the find
@@ -706,6 +718,8 @@ async def _write_sub_op(
     operator: Operator,
     op_id: str,
     params: dict[str, Any],
+    *,
+    timeout: Any = httpx.USE_CLIENT_DEFAULT,
 ) -> tuple[OperationResult | None, Any]:
     """Gate then issue one *write* sub-call directly on the connector session.
 
@@ -724,6 +738,12 @@ async def _write_sub_op(
     JSON payload rides back as ``(None, payload)``. Transport failures raise
     :exc:`httpx.HTTPError` for the caller to catch (partial-failure legs) or
     let propagate (load-bearing legs).
+
+    ``timeout`` overrides the connector's default per-request timeout for
+    this one sub-op. It defaults to :data:`httpx.USE_CLIENT_DEFAULT`, so
+    every write sub-op keeps the connector's 30s client default unchanged;
+    only the two synchronous library-item deploys pass an explicit long
+    ceiling (:data:`_LIBRARY_ITEM_DEPLOY_TIMEOUT`, #3076).
     """
     gate = await enforce_subop_policy(
         operator=operator,
@@ -739,7 +759,7 @@ async def _write_sub_op(
     method, path, body = _split_sub_op(op_id, params)
     mounted = await connector.mount_op_path(target, path, operator)
     payload = await connector._post_json(
-        target, mounted, operator=operator, verb=method, json=body or None
+        target, mounted, operator=operator, verb=method, json=body or None, timeout=timeout
     )
     return None, payload
 
@@ -1137,6 +1157,8 @@ async def vm_clone_composite(
         operator,
         _OP_DEPLOY_LIBRARY_VM,
         {"templateLibraryItem": library_item, "spec": {"name": target_name}},
+        # Synchronous deploy — the POST is held open for the whole copy (#3076).
+        timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
     )
     if gate is not None:
         return gate
@@ -1482,7 +1504,7 @@ async def vm_deploy_from_library_composite(
                 _deploy_issue(
                     "resolve",
                     "error",
-                    f"content-library lookup faulted: {_vsphere_fault_detail(exc)}: {exc}",
+                    f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
                 )
             ],
         )
@@ -1495,7 +1517,13 @@ async def vm_deploy_from_library_composite(
     deploy_params = {"ovfLibraryItemId": item_id, **_build_ovf_deploy_body(params, eula_field)}
     try:
         gate, deploy_payload = await _write_sub_op(
-            connector, target, operator, _OP_DEPLOY_OVF_LIBRARY_ITEM, deploy_params
+            connector,
+            target,
+            operator,
+            _OP_DEPLOY_OVF_LIBRARY_ITEM,
+            deploy_params,
+            # Synchronous deploy — the POST is held open for the whole copy (#3076).
+            timeout=_LIBRARY_ITEM_DEPLOY_TIMEOUT,
         )
     except httpx.HTTPError as exc:
         return _deploy_failure(
@@ -1505,7 +1533,7 @@ async def vm_deploy_from_library_composite(
                 _deploy_issue(
                     "placement",
                     "error",
-                    f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}: {exc}",
+                    f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}",
                 )
             ],
         )
@@ -1904,12 +1932,20 @@ def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
     letting a bare :exc:`httpx.HTTPStatusError` escape as an opaque
     ``connector_error`` with no status, url, or vendor message (the regression
     #3071 fixes, sibling of #1649/#1804). A transport-level fault (connect /
-    read, no response) degrades to ``transport fault``. Body parsing is
+    read, no response) degrades to ``transport fault (<ExcType>)`` — the
+    exception *type* name is folded in because several transport faults
+    (notably :exc:`httpx.ReadTimeout`) stringify to the empty string, which
+    otherwise left the surfaced detail an empty ``transport fault:`` tail
+    (#3076); a non-empty ``str(exc)`` is appended after it. The helper owns
+    the whole rendered detail for both fault classes, so callers interpolate
+    it directly without a redundant ``: {exc}`` suffix. Body parsing is
     defensive — a non-JSON or unexpectedly-shaped body drops the missing parts,
     never raises.
     """
     if not isinstance(exc, httpx.HTTPStatusError):
-        return "transport fault"
+        base = f"transport fault ({type(exc).__name__})"
+        text = str(exc)
+        return f"{base}: {text}" if text else base
     detail = f"HTTP {exc.response.status_code}"
     try:
         body = exc.response.json()

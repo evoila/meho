@@ -151,6 +151,7 @@ class _RecordingConnector:
         json: Any = None,
         data: Any = None,
         extra_headers: Any = None,
+        timeout: Any = None,
     ) -> Any:
         self.writes.append({"verb": verb, "path": path, "body": json})
         return {"value": "vm-should-not-exist"}
@@ -622,6 +623,7 @@ class _DeployRecordingConnector:
         json: Any = None,
         data: Any = None,
         extra_headers: Any = None,
+        timeout: Any = None,
     ) -> Any:
         self.deploy_writes.append((path, json))
         return {"succeeded": True, "resource_id": {"type": "VirtualMachine", "id": "vm-ovf-1"}}

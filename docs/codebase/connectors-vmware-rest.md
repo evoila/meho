@@ -864,6 +864,31 @@ successful deploy; a power-on fault leaves `status='deployed'` with
 `powered_on=false` and a `power_on` warning issue (a deployed appliance
 is never rolled back over a power-on hiccup).
 
+**Synchronous-deploy long timeout (#3076).** Both library-item deploys —
+the OVF `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`
+and `vm.clone`'s VMTX
+`POST:/vcenter/vm-template/library-items/{templateLibraryItem}?action=deploy`
+— are **synchronous** with no `vmw-task=true` variant to poll (#2970): the
+POST connection is held open for the entire multi-GB disk copy. The
+connector's pooled client bakes a 30s read/write default
+(`httpx.Timeout(read=30.0, write=30.0)` in `HttpConnector._http_client`),
+which any real appliance copy blows past — so the POST used to raise
+`httpx.ReadTimeout` at ~30s and surface a **false** `deploy_error`
+(`vm.clone`: a raw `connector_error`) while vCenter finished the copy
+server-side. The two deploy sub-ops now pass a per-request `timeout`
+override, `_LIBRARY_ITEM_DEPLOY_TIMEOUT`
+(`connect=5 / read=1800 / write=1800 / pool=5` — a 30-min read/write
+ceiling), threaded `composite → _write_sub_op → HttpConnector._post_json →
+client.request(timeout=)`. The override defaults to
+`httpx.USE_CLIENT_DEFAULT`, so **every other call keeps the unchanged 30s
+client default** — the global client timeout is deliberately *not* raised,
+so ordinary reads/gets still fail fast on a dead target; connect/pool stay
+fast on the deploy too, so only the body transfer gets the long window.
+When a deploy genuinely faults at the transport layer, the structured
+detail names the exception *type* — `transport fault (ReadTimeout)` — since
+`str(httpx.ReadTimeout())` is the empty string (the `_vsphere_fault_detail`
+helper, #3076).
+
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
 Two more vim-only writes ride the #2893 substrate (Task E). Neither has a

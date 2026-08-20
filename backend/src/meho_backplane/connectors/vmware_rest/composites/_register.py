@@ -450,7 +450,9 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "placement validation returns succeeded=false and surfaces as "
             "status='deploy_failed' with per-issue messages, and an invalid / "
             "missing placement resource (HTTP 400/404) as status='deploy_error' "
-            "— structured statuses, never a raw vendor error. With power_on the "
+            "(a faulted content-library find during name resolution as "
+            "status='resolve_error') — structured statuses, never a raw vendor "
+            "error. With power_on the "
             "deployed VM is started best-effort. Equivalent of 'govc "
             "library.deploy' for operator-facing dispatch."
         ),

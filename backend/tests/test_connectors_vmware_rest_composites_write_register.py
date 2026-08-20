@@ -505,7 +505,8 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         # #2970: the pinned deploy operation is synchronous, so the
         # pending/timeout task-wait statuses are gone.
         "vmware.composite.vm.clone": {"completed"},
-        # #2909: OVF/OVA content-library deploy — resolution + deploy-report statuses.
+        # #2909: OVF/OVA content-library deploy — resolution + deploy-report
+        # statuses; #3071 adds resolve_error (a content-library find fault).
         "vmware.composite.vm.deploy_from_library": {
             "deployed",
             "deploy_failed",
@@ -515,6 +516,7 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "ambiguous_library",
             "item_not_found",
             "ambiguous_item",
+            "resolve_error",
         },
         # #2970: the revert is a polled vim *_Task -> a poll timeout is a
         # legible status.

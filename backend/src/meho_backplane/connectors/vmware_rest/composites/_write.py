@@ -1261,16 +1261,17 @@ async def _find_content_library_ids(
     return a bare array of id strings and mutate nothing, so they skip the
     :func:`enforce_subop_policy` seam like the REST listing reads — but they
     are POST-shaped, so they ride ``_post_json`` rather than :func:`_read_sub_op`
-    (which is GET-only). The ``FindSpec`` is wrapped in the ``{"spec": ...}``
-    envelope the ``/api`` protocol expects for a single structured input
-    parameter (the same wrapping the ``CreateSpec`` writes use). Transport
-    faults raise :exc:`httpx.HTTPError` for the caller.
+    (which is GET-only). The ``FindSpec`` is sent at the **top level** of the
+    request body -- the modern ``/api`` surface takes the ``FindSpec`` directly
+    (``Content.Library.FindSpec`` / ``Content.Library.Item.FindSpec``), not the
+    legacy ``/rest`` ``{"spec": {...}}`` envelope, which it rejects with
+    ``400 INVALID_ARGUMENT`` (#3071 — the resolution-step sibling of the
+    write-body envelope fix #2973). Transport faults raise
+    :exc:`httpx.HTTPError` for the caller.
     """
     method, _, path = op_id.partition(":")
     mounted = await connector.mount_op_path(target, path, operator)
-    payload = await connector._post_json(
-        target, mounted, operator=operator, verb=method, json={"spec": spec}
-    )
+    payload = await connector._post_json(target, mounted, operator=operator, verb=method, json=spec)
     ids = _unwrap_value(payload)
     if not isinstance(ids, list):
         raise RuntimeError(f"expected id list from {op_id!r}, got {type(ids).__name__}")
@@ -1445,9 +1446,25 @@ async def vm_deploy_from_library_composite(
     so a placement or network-mapping error is a structured status, never a
     raw vendor error. With ``power_on`` the deployed VM is started best-effort.
     """
-    item_id, resolution_error = await _resolve_deploy_library_item(
-        connector=connector, target=target, operator=operator, params=params
-    )
+    try:
+        item_id, resolution_error = await _resolve_deploy_library_item(
+            connector=connector, target=target, operator=operator, params=params
+        )
+    except httpx.HTTPError as exc:
+        # A content-library ``?action=find`` call faulted (e.g. a 4xx). Surface
+        # the vCenter status + message as a structured ``resolve_error`` instead
+        # of letting the raw ``httpx.HTTPStatusError`` escape as an opaque
+        # ``connector_error`` (#3071).
+        return _deploy_failure(
+            "resolve_error",
+            issues=[
+                _deploy_issue(
+                    "resolve",
+                    "error",
+                    f"content-library lookup faulted: {_vsphere_fault_detail(exc)}: {exc}",
+                )
+            ],
+        )
     if resolution_error is not None:
         return resolution_error
     assert item_id is not None  # resolution_error is None ⇒ item_id resolved
@@ -1458,15 +1475,15 @@ async def vm_deploy_from_library_composite(
             connector, target, operator, _OP_DEPLOY_OVF_LIBRARY_ITEM, deploy_params
         )
     except httpx.HTTPError as exc:
-        status, error_type = _parse_vsphere_error(exc)
-        detail = f"HTTP {status}" if status is not None else "transport fault"
-        if error_type:
-            detail += f" ({error_type})"
         return _deploy_failure(
             "deploy_error",
             library_item_id=item_id,
             issues=[
-                _deploy_issue("placement", "error", f"OVF deploy call faulted: {detail}: {exc}")
+                _deploy_issue(
+                    "placement",
+                    "error",
+                    f"OVF deploy call faulted: {_vsphere_fault_detail(exc)}: {exc}",
+                )
             ],
         )
     if gate is not None:
@@ -1852,6 +1869,40 @@ def _parse_vsphere_error(exc: httpx.HTTPError) -> tuple[int | None, str | None]:
         return status, None
     error_type = body.get("error_type") if isinstance(body, dict) else None
     return status, error_type if isinstance(error_type, str) else None
+
+
+def _vsphere_fault_detail(exc: httpx.HTTPError) -> str:
+    """Human-readable ``HTTP <status> (<error_type>): <message>`` from a sub-op fault.
+
+    The diagnosable form of an upstream fault (#3071): the HTTP status, the
+    machine ``error_type`` (e.g. ``INVALID_ARGUMENT`` / ``NOT_FOUND``), and the
+    first localized vAPI message (``messages[].default_message``) — so a
+    composite can fold a 4xx/5xx into its structured failure arm instead of
+    letting a bare :exc:`httpx.HTTPStatusError` escape as an opaque
+    ``connector_error`` with no status, url, or vendor message (the regression
+    #3071 fixes, sibling of #1649/#1804). A transport-level fault (connect /
+    read, no response) degrades to ``transport fault``. Body parsing is
+    defensive — a non-JSON or unexpectedly-shaped body drops the missing parts,
+    never raises.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return "transport fault"
+    detail = f"HTTP {exc.response.status_code}"
+    try:
+        body = exc.response.json()
+    except (ValueError, httpx.HTTPError):
+        body = None
+    if isinstance(body, dict):
+        error_type = body.get("error_type")
+        if isinstance(error_type, str) and error_type:
+            detail += f" ({error_type})"
+        for message in body.get("messages") or []:
+            if isinstance(message, dict):
+                default = message.get("default_message")
+                if isinstance(default, str) and default:
+                    detail += f": {default}"
+                    break
+    return detail
 
 
 def _guest_tools_unavailable(status: int | None, error_type: str | None) -> bool:

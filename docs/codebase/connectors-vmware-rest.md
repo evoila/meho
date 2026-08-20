@@ -561,14 +561,16 @@ bodies with no envelope — lives in
 everywhere. The path-only reconcile lanes assert *which* endpoints exist;
 this pair asserts *what shape* their bodies take.
 
-**Not-yet-swept (adjacent findings).** The same envelope still rides three
+**Not-yet-swept (adjacent findings).** The same envelope still rides two
 non-VM write bodies that the pinned spec likewise declares flat, left for a
 follow-up because each carries a wrinkle beyond the mechanical flatten:
-`vm.clone`'s library-item deploy (`DeploySpec`), the content-library `find`
-reads (`FindSpec`, a distinct `_post_json` helper, not `_write_sub_op`), and
-`cluster.patch`'s vLCM software apply (`ApplySpec` — an all-optional spec
-whose empty body raises the `json=body or None` "send `{}` vs no body"
-question). Separately, the create/memory bodies still use vSphere's
+`vm.clone`'s library-item deploy (`DeploySpec`) and `cluster.patch`'s vLCM
+software apply (`ApplySpec` — an all-optional spec whose empty body raises
+the `json=body or None` "send `{}` vs no body" question). The content-library
+`find` reads (`FindSpec`, a distinct `_post_json` helper on
+`vm.deploy_from_library`'s resolution path) were the third such body; #3071
+swept them to the flat `/api` shape (see the OVF/OVA deploy section).
+Separately, the create/memory bodies still use vSphere's
 documented mixed-case field names (`guest_OS`, `size_MiB`) while the pinned
 spec keys them lowercase (`guest_os`, `size_mib`); that field-casing gap is
 independent of the envelope and untouched here.
@@ -584,7 +586,7 @@ enum) are:
 | --- | --- |
 | `vm.create` | `created`, `rolled_back` |
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
-| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error` with a structured message, and the name-resolution refusals are pre-deploy — so a placement/mapping error is a structured status, never a raw vendor fault) |
+| `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
@@ -810,17 +812,24 @@ through the generic `_SUB_OPS_VM_DEPLOY_FROM_LIBRARY` sweep (not a
 `library_item_name` is resolved to an id via
 `POST:/content/library/item?action=find` (a *read* — returns a bare id
 array — issued un-gated through the `_find_content_library_ids` helper,
-which rides `_post_json` since find is POST-shaped), filtered to
-`type=ovf` so a colliding non-OVF item name never matches. An optional
-`library_name` first resolves to a library id via
+which rides `_post_json` since find is POST-shaped). The `FindSpec` is sent
+at the **top level** of the `/api` body (`{name, type, library_id}`), not
+the legacy `/rest` `{"spec": {...}}` envelope vCenter 8.x `400`s (#3071); the
+item find is filtered to `type=ovf` so a colliding non-OVF item name never
+matches. An optional `library_name` first resolves to a library id via
 `POST:/content/library?action=find` to scope the item lookup. Zero
 matches → `item_not_found` / `library_not_found`; more than one →
 `ambiguous_item` / `ambiguous_library` with the candidate ids — every
-refusal is **pre-deploy**, so the operator re-dispatches by explicit id.
+refusal is **pre-deploy**, so the operator re-dispatches by explicit id. A
+find call that itself faults (HTTP 4xx/5xx) is caught and mapped to
+`resolve_error` with the vCenter status + message, never a raw
+`connector_error: HTTPStatusError` (#3071).
 
-**Deploy.** The body is `{deployment_spec, target}` (two top-level params
-— not the single-`spec` wrapper the `find` reads and `CreateSpec` writes
-use). `target.resource_pool_id` is the one **required** placement
+**Deploy.** The body is `{deployment_spec, target}` — two top-level named
+params, the flat `/api` shape. This deploy op takes two parameters, so its
+body never carried the single-`spec` envelope the single-parameter `find` /
+`CreateSpec` bodies did before #2973/#3071 flattened them.
+`target.resource_pool_id` is the one **required** placement
 (`host_id` / `folder_id` refine it); `deployment_spec` carries
 `accept_all_eula` (defaults true), `name`, the OVF-network-key →
 portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,

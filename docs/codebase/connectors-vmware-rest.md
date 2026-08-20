@@ -826,10 +826,18 @@ use). `target.resource_pool_id` is the one **required** placement
 portgroup-moid **map** `network_mappings` (a map in the pinned 9.0 spec,
 not an array), `storage_provisioning` / `storage_profile_id` /
 `default_datastore_id`, and any `ovf_properties` folded into a single
-`PropertyParams` entry in `additional_parameters`. Note the pinned 9.0
-spec keys the EULA field `accept_all_eula` (lowercase) — divergent from
-`govmomi`'s legacy `accept_all_EULA`; the connector follows the pinned
-spec it ingests.
+`PropertyParams` entry in `additional_parameters`. The EULA-accept wire
+key is **version-aware** (#3074): the pinned 9.0 spec keys it
+`accept_all_eula` (lowercase), but vCenter 8.0.x — and every pre-9.0
+release — rejects that key (`HTTP 400 UNEXPECTED_INPUT`) and expects the
+legacy Automation name `accept_all_EULA` (`govmomi`'s
+`DeploymentSpec.AcceptAllEULA`; a live `govc library.deploy` onto 8.0.3
+succeeded with it). `_deploy_eula_field_name` gates off the live
+`about.version` major component — pre-9.0 targets get the caps form, 9.0+
+(and an unresolved version, which falls back to the pinned-spec form)
+keep the lowercase form — so a single field-level conditional in the
+composite covers the divergence without a separate `vmware-rest-8.0`
+connector.
 
 **Result mapping — structured statuses, never a raw vendor error.** The
 deploy is synchronous, but unlike `vm.clone` its 200 body is a

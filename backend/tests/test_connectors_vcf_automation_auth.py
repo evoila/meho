@@ -947,6 +947,34 @@ async def test_request_json_rejects_non_idempotent_method() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_post_json_204_no_content_returns_empty_payload() -> None:
+    """A 204-No-Content write ack returns ``{}`` through the transport override.
+
+    Contract parity with the base :meth:`HttpConnector._post_json` empty-body
+    guard (#3082): the override re-implements the JSON tail inside its 401
+    retry-once dance, so a bodyless vendor ack must map to ``{}`` here too —
+    not raise ``json.JSONDecodeError`` after the write took effect.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
+        mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
+        )
+        delete = mock.delete("/cloudapi/1.0.0/orgs/urn:org:1").respond(204)
+        result = await connector._post_json(
+            _TARGET_A,
+            "/cloudapi/1.0.0/orgs/urn:org:1",
+            operator=_make_operator(),
+            verb="DELETE",
+        )
+
+    assert result == {}
+    assert delete.called
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # fingerprint() + probe()
 # ---------------------------------------------------------------------------

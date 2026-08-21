@@ -106,7 +106,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
-from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.http import HttpConnector, json_payload_or_empty
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -525,7 +525,10 @@ class VcfAutomationConnector(HttpConnector):
         op params) merge onto the plane auth headers; ``data`` carries a
         form-encoded body. ``timeout`` overrides the pooled client's default
         per-request timeout, defaulting to :data:`httpx.USE_CLIENT_DEFAULT`
-        so reads keep the client default unchanged (#3076).
+        so reads keep the client default unchanged (#3076). A ``204 No
+        Content`` / empty-body response maps to ``{}`` via
+        :func:`~meho_backplane.connectors.adapters.http.json_payload_or_empty`
+        — contract parity with the base transport helpers (#3082).
         """
 
         # vhost routing is applied per-request (never baked into the pooled
@@ -567,7 +570,7 @@ class VcfAutomationConnector(HttpConnector):
                     "HTTP 401 after refresh"
                 )
         resp.raise_for_status()
-        payload = resp.json()
+        payload = json_payload_or_empty(resp)
         if not isinstance(payload, dict):
             raise RuntimeError(
                 f"vcf-automation {method} {path} for target {target.name!r} "

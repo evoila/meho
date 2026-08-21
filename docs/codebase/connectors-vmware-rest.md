@@ -889,6 +889,30 @@ detail names the exception *type* — `transport fault (ReadTimeout)` — since
 `str(httpx.ReadTimeout())` is the empty string (the `_vsphere_fault_detail`
 helper, #3076).
 
+**204 / empty-body write acks (#3082).** Several vCenter write endpoints
+acknowledge success with **204 No Content** and no body — the power actions
+(`POST:/vcenter/vm/{vm}/power?action=<verb>`), the Tools-mediated guest
+power actions (`POST:/vcenter/vm/{vm}/guest/power?action=<verb>`),
+`DELETE:/vcenter/vm/{vm}` (the `vm.delete` write and the `vm.create`
+rollback), and the session-revoke `DELETE`. The shared transport helpers
+(`HttpConnector._post_json` / `_request_json`) used to end in an
+unconditional `resp.json()`, so a 204 raised `json.JSONDecodeError` —
+wrapped by the dispatcher as `connector_error` — **after the write had
+already taken effect at the vendor** (observed live:
+`vmware.composite.vm.power` powered the VM on, then reported
+`connector_error: JSONDecodeError`; a false error on a succeeded write
+makes envelope-driven automation retry an executed operation). The guard
+lives at the adapter (`json_payload_or_empty` in
+`connectors/adapters/http.py`): a `204` — or any empty body — returns a
+benign `{}`, which the composites' success arms already accept
+(`vm_power_composite` / `vm_power_bulk_composite` / the delete legs discard
+the payload and build their own envelopes); a non-empty body parses exactly
+as before, so 200-with-JSON payload flows (`create` vm-id unwrap, deploy
+payloads) are byte-identical. Every `_write_sub_op` call site inherits the
+guard because `vmware_rest` does not override the transport helpers; the
+`vcf_automation` connector *does* override them and applies the same guard
+for contract parity.
+
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 
 Two more vim-only writes ride the #2893 substrate (Task E). Neither has a

@@ -45,7 +45,7 @@
   hx-get="/ui/broadcast/feed"
   hx-target="#broadcast-feed"
   hx-swap="outerHTML"
-  hx-trigger="change from:find select, input changed delay:300ms from:find input[name=principal]"
+  hx-trigger="change from:find select[name=op_class], change from:find select[name=target], input changed delay:300ms from:find input[name=principal]"
   hx-include="[name=op_class], [name=principal], [name=target]"
   hx-push-url="true"
   role="search"

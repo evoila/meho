@@ -99,13 +99,53 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 
 
 def _instructions(
-    *, when_to_use: str, output_shape: str, parameter_hints: dict[str, str]
+    *,
+    when_to_use: str,
+    output_shape: str,
+    parameter_hints: dict[str, str],
+    result_scalars: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    return {
+    instructions: dict[str, Any] = {
         "when_to_use": when_to_use,
         "output_shape": output_shape,
         "parameter_hints": parameter_hints,
     }
+    if result_scalars is not None:
+        # #3084: the JSONFlux reduction hint — when the vendor object's
+        # set-shaped field (validationChecks[] / sddcSubTasks[]) rides the
+        # reduction, the listed scalar siblings survive on the inline
+        # summary so the submit → poll loop stays drivable through the
+        # governed surface (the reducer's ``_preserved_scalars`` contract).
+        instructions["result_scalars"] = {"keys": list(result_scalars)}
+    return instructions
+
+
+#: ``Validation`` scalars that must survive a ``validationChecks[]``
+#: reduction (#3084): ``id`` is the poll key for
+#: ``installer.sddc.validation.status``; ``executionStatus`` /
+#: ``resultStatus`` carry the lifecycle + verdict; ``description`` names the
+#: run. Field names pinned by the vendored ``vcf-installer-9.1`` OpenAPI
+#: (``components.schemas.Validation``).
+_VALIDATION_RESULT_SCALARS: tuple[str, ...] = (
+    "id",
+    "description",
+    "executionStatus",
+    "resultStatus",
+)
+
+#: ``SddcTask`` scalars that must survive an ``sddcSubTasks[]`` /
+#: ``milestones[]`` reduction (#3084): ``id`` is the poll key for
+#: ``installer.sddc.bringup.status``; ``status`` carries the lifecycle
+#: state; the rest identify the bring-up. Field names pinned by the
+#: vendored ``vcf-installer-9.1`` OpenAPI (``components.schemas.SddcTask``).
+_SDDC_TASK_RESULT_SCALARS: tuple[str, ...] = (
+    "id",
+    "name",
+    "status",
+    "deploymentType",
+    "vcfInstanceName",
+    "creationTimestamp",
+)
 
 
 def _sddc_spec_parameter_schema(posted_to: str) -> dict[str, Any]:
@@ -155,9 +195,12 @@ _SPEC_VALIDATE = InstallerTypedOp(
         output_shape=(
             "{id, executionStatus, resultStatus, validationChecks: [...]}. "
             "Keep the id and poll installer.sddc.validation.status until "
-            "executionStatus is terminal."
+            "executionStatus is terminal. When validationChecks reduces to "
+            "a JSONFlux handle, id / executionStatus / resultStatus stay "
+            "top-level on the result."
         ),
         parameter_hints={"spec": "The full SddcSpec object, POSTed verbatim."},
+        result_scalars=_VALIDATION_RESULT_SCALARS,
     ),
 )
 
@@ -198,9 +241,12 @@ _VALIDATION_STATUS = InstallerTypedOp(
         output_shape=(
             "{id, executionStatus, resultStatus, validationChecks: [...]}. "
             "Terminal when executionStatus leaves IN_PROGRESS; surface any "
-            "FAILED check."
+            "FAILED check. When validationChecks reduces to a JSONFlux "
+            "handle, id / executionStatus / resultStatus stay top-level on "
+            "the result."
         ),
         parameter_hints={"id": "The validation id from installer.sddc.spec.validate."},
+        result_scalars=_VALIDATION_RESULT_SCALARS,
     ),
 )
 
@@ -232,9 +278,12 @@ _BRINGUP_START = InstallerTypedOp(
         ),
         output_shape=(
             "{id, name, status, vcfInstanceName, ...} (SddcTask). Keep the id "
-            "and poll installer.sddc.bringup.status to terminal."
+            "and poll installer.sddc.bringup.status to terminal. When the "
+            "task's sub-task list reduces to a JSONFlux handle, id / status "
+            "stay top-level on the result."
         ),
         parameter_hints={"spec": "The full SddcSpec object, POSTed verbatim."},
+        result_scalars=_SDDC_TASK_RESULT_SCALARS,
     ),
 )
 
@@ -277,9 +326,11 @@ _BRINGUP_STATUS = InstallerTypedOp(
         output_shape=(
             "{id, name, status, vcfInstanceName, sddcSubTasks: [...], "
             "milestones: [...]}. Surface the top-level status and any failed "
-            "sub-task."
+            "sub-task. When the task's sub-task list reduces to a JSONFlux "
+            "handle, id / status stay top-level on the result."
         ),
         parameter_hints={"id": "The bring-up (SDDC) task id from the deploy."},
+        result_scalars=_SDDC_TASK_RESULT_SCALARS,
     ),
 )
 

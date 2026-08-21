@@ -136,3 +136,27 @@ async def test_rows_resolve_their_bound_method_handlers(
     for op in INSTALLER_TYPED_OPS:
         row = rows[op.op_id]
         assert row.handler_ref and op.handler_attr in row.handler_ref, row.handler_ref
+
+
+@pytest.mark.asyncio
+async def test_rows_persist_the_result_scalars_reduction_hint(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Every persisted row carries the #3084 ``result_scalars`` hint with ``id``.
+
+    The dispatcher lifts ``llm_instructions["result_scalars"]`` off the
+    *persisted* descriptor row (``_result_scalars_from_descriptor``), so the
+    hint must survive the DB round-trip — otherwise a reduce of the vendor
+    ``Validation`` / ``SddcTask`` swallows the poll ``id`` again and the
+    submit → poll loop breaks exactly as observed live.
+    """
+    await register_installer_typed_operations(embedding_service=stub_embedding_service)
+    rows = await _fetch_installer_rows()
+    for op in INSTALLER_TYPED_OPS:
+        row = rows[op.op_id]
+        assert isinstance(row.llm_instructions, dict), op.op_id
+        hint = row.llm_instructions.get("result_scalars")
+        assert isinstance(hint, dict), f"{op.op_id} must persist a result_scalars hint"
+        assert op.llm_instructions is not None
+        assert hint == op.llm_instructions["result_scalars"], op.op_id
+        assert "id" in hint["keys"], f"{op.op_id}: the poll id must be a preserved scalar"

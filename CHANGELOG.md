@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — installer poll scalars survive JSONFlux reduction (#3084 / #3085)
+
+- The vcf-installer submit/poll primitives lost their poll identity under
+  JSONFlux reduction: an over-threshold `validationChecks[]` /
+  `sddcSubTasks[]` replaced the **whole** vendor `Validation` / `SddcTask`
+  with the reduction bookkeeping, swallowing the top-level `id` /
+  `executionStatus` / `resultStatus` (proven live against a VCF Installer
+  9.0.2 appliance — the validation `id` had to be recovered out-of-band, so
+  the submit → poll loop was undrivable through MEHO alone). A new opt-in
+  `result_scalars` reduction hint (registered under `llm_instructions`,
+  threaded dispatcher → reducer like `pagination_hint` / `result_ordering`)
+  keeps the listed scalar siblings top-level on the reduced result; all four
+  installer primitives register it, check/sub-task rows keep the full handle
+  + drill-in contract, and ops without the hint are byte-identical to
+  before. Docs: `docs/architecture/jsonflux.md` § *Preserved scalar
+  siblings*.
+
 ### Added — VCF Installer 9.1 governed submit/poll bring-up primitives (Initiative #2907, task #3078)
 
 - Four typed primitives decompose the Installer bring-up surface into short

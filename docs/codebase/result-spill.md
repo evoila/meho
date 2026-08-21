@@ -12,8 +12,10 @@ provenance, reduction thresholds, sample ordering); this doc covers the
 When `JsonFluxReducer.reduce()` materializes a set-shaped payload above
 threshold (>50 rows or >4 KB by default), the caller gets back:
 
-- an inline summary `{row_count, total, sample, source_key?}` (the
-  `sample` is bounded at 5 rows by default), and
+- an inline summary `{row_count, total, sample_rows_returned,
+  sample_bytes, source_key?}` (the bounded preview itself lives once on
+  `handle.sample_rows`, #134; ops registering a `result_scalars` hint
+  additionally keep the listed payload scalars top-level, #3084), and
 - a `ResultHandle` on `OperationResult.handle` carrying `summary_md`,
   `schema_`, `total_rows`, `sample_rows`, and the self-documenting
   `fetch_more` envelope.

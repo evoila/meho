@@ -1642,6 +1642,34 @@ def _result_ordering_from_descriptor(descriptor: EndpointDescriptor) -> dict[str
     return None
 
 
+def _result_scalars_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_scalars`` from a descriptor's ``llm_instructions``.
+
+    #3084. Connectors whose op returns a dict carrying poll-relevant scalars
+    next to the collection that reduces (the VCF Installer's ``Validation``:
+    ``id`` / ``executionStatus`` / ``resultStatus`` beside
+    ``validationChecks[]``) attach ``{"keys": [...]}`` under
+    ``llm_instructions.result_scalars``; the reducer reads it via the
+    dispatcher-supplied context and copies the listed scalar values into the
+    inline summary so the reduction never swallows the id the caller must
+    feed to the next call. Mirrors :func:`_result_ordering_from_descriptor`
+    exactly -- a plain dict is returned (not a validated model) so this
+    layer stays free of a connectors-schema import; the reducer interprets
+    it.
+
+    ``None`` outcomes (op didn't register the hint, ``llm_instructions`` is
+    ``None``, or the slot's value is not a dict) all flow to the reducer as
+    "no hint" -- the summary keeps its reduction-bookkeeping-only shape.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_scalars")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _reduce_or_error(
     *,
     op_id: str,
@@ -1716,6 +1744,16 @@ async def _reduce_or_error(
     result_ordering = _result_ordering_from_descriptor(descriptor)
     if result_ordering is not None:
         reducer_context["result_ordering"] = result_ordering
+    # #3084: forward the op's preserved-scalar hint (when the connector
+    # author registered one via ``llm_instructions``) so the reducer copies
+    # the listed scalar siblings (a validation/task id, execution status)
+    # into the inline summary instead of swallowing them with the rest of
+    # the dict envelope. ``None`` on ops without a hint -- the summary
+    # keeps its bookkeeping-only shape. Pulled here (vs. in the reducer)
+    # for the same decoupling reason as the two hints above.
+    result_scalars = _result_scalars_from_descriptor(descriptor)
+    if result_scalars is not None:
+        reducer_context["result_scalars"] = result_scalars
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,

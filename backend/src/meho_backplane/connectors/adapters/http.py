@@ -693,6 +693,7 @@ class HttpConnector(Connector):
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
     ) -> dict[str, Any]:
         """Non-retried request for a non-idempotent verb, returning parsed JSON.
 
@@ -715,6 +716,17 @@ class HttpConnector(Connector):
         win on a key clash). Retry on non-idempotent verbs is the caller's
         responsibility -- this seam deliberately stays outside the
         :meth:`_request_json` tenacity wrapper.
+
+        ``timeout`` overrides the pooled client's default timeout for this
+        one request only. It defaults to :data:`httpx.USE_CLIENT_DEFAULT`,
+        so every caller that omits it keeps the connector's 30s client
+        default byte-identically (httpx merges the sentinel to the client
+        timeout in ``build_request``). A caller passes an explicit
+        :class:`httpx.Timeout` only for a *synchronous* long-running POST
+        whose body transfer legitimately outlasts 30s -- the vCenter
+        library-item deploys, whose connection is held open for the whole
+        multi-GB disk copy (#3076). The global client default is left
+        untouched so ordinary reads/writes still fail fast on a dead target.
         """
         verb = verb.upper()
         if verb in _IDEMPOTENT_METHODS:
@@ -735,6 +747,7 @@ class HttpConnector(Connector):
             data=data,
             headers=headers,
             extensions=self._request_extensions(target),
+            timeout=timeout,
         )
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]

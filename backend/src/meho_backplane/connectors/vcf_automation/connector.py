@@ -477,12 +477,14 @@ class VcfAutomationConnector(HttpConnector):
         json: Mapping[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
     ) -> dict[str, Any]:
         """Path-aware non-idempotent JSON request with per-plane 401 retry-once.
 
         Honours the *actual* non-idempotent verb (``POST``/``PUT``/``PATCH``/
-        ``DELETE``) and an optional form-encoded ``data=`` body, mirroring the
-        base :meth:`HttpConnector._post_json` contract (#1968) while keeping
+        ``DELETE``), an optional form-encoded ``data=`` body, and an optional
+        per-request ``timeout`` override, mirroring the base
+        :meth:`HttpConnector._post_json` contract (#1968, #3076) while keeping
         the per-plane 401 retry-once dance.
         """
         verb = verb.upper()
@@ -499,6 +501,7 @@ class VcfAutomationConnector(HttpConnector):
             json=json,
             data=data,
             extra_headers=extra_headers,
+            timeout=timeout,
         )
 
     async def _do_request_with_retry(
@@ -512,6 +515,7 @@ class VcfAutomationConnector(HttpConnector):
         json: Mapping[str, Any] | None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
     ) -> dict[str, Any]:
         """Shared per-plane 401 retry-once dance for _request_json + _post_json.
 
@@ -519,7 +523,9 @@ class VcfAutomationConnector(HttpConnector):
         plane's token, refresh headers, retry once. A second 401
         surfaces as :exc:`RuntimeError`. ``extra_headers`` (header-located
         op params) merge onto the plane auth headers; ``data`` carries a
-        form-encoded body.
+        form-encoded body. ``timeout`` overrides the pooled client's default
+        per-request timeout, defaulting to :data:`httpx.USE_CLIENT_DEFAULT`
+        so reads keep the client default unchanged (#3076).
         """
 
         # vhost routing is applied per-request (never baked into the pooled
@@ -540,6 +546,7 @@ class VcfAutomationConnector(HttpConnector):
                 data=data,
                 headers={**dict(headers), **vhost},
                 extensions=extensions,
+                timeout=timeout,
             )
 
         plane = plane_for_path(path)

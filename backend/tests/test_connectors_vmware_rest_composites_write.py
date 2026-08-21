@@ -146,7 +146,17 @@ class _RecordingConnector:
         operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        self.calls.append({"method": "GET", "path": path, "query": params, "body": None})
+        # Reads have no per-request timeout override — they always ride the
+        # connector's fast client default, recorded here for call-uniformity.
+        self.calls.append(
+            {
+                "method": "GET",
+                "path": path,
+                "query": params,
+                "body": None,
+                "timeout": httpx.USE_CLIENT_DEFAULT,
+            }
+        )
         return self._serve(path)
 
     async def _post_json(
@@ -159,8 +169,11 @@ class _RecordingConnector:
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
     ) -> Any:
-        self.calls.append({"method": verb, "path": path, "query": None, "body": json})
+        self.calls.append(
+            {"method": verb, "path": path, "query": None, "body": json, "timeout": timeout}
+        )
         return self._serve(path)
 
     def _serve(self, path: str) -> Any:
@@ -501,6 +514,34 @@ async def test_vm_clone_happy_path_synchronous_deploy(gate: _GateRecorder) -> No
 
 
 @pytest.mark.asyncio
+async def test_vm_clone_deploy_issued_with_long_timeout(gate: _GateRecorder) -> None:
+    """The synchronous VMTX deploy rides the long per-request timeout (#3076).
+
+    The template deploy POST is held open for the whole copy, so it must
+    carry ``_LIBRARY_ITEM_DEPLOY_TIMEOUT``; the pre-flight source GET stays
+    on the connector's fast client default (``USE_CLIENT_DEFAULT``).
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-src": {"name": "src"},
+            "/api/vcenter/vm-template/library-items/li-7?action=deploy": "vm-clone-1",
+        }
+    )
+    out = await vm_clone_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"source_vm": "vm-src", "target_name": "vm-clone-1", "library_item": "li-7"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "completed"
+    source_get, deploy_post = conn.calls
+    assert source_get["method"] == "GET"
+    assert source_get["timeout"] is httpx.USE_CLIENT_DEFAULT
+    assert deploy_post["method"] == "POST"
+    assert deploy_post["timeout"] is _write._LIBRARY_ITEM_DEPLOY_TIMEOUT
+
+
+@pytest.mark.asyncio
 async def test_vm_clone_legacy_value_envelope_unwraps(gate: _GateRecorder) -> None:
     """A legacy ``{"value": ...}``-wrapped deploy response unwraps to the VM id."""
     conn = _RecordingConnector(
@@ -596,6 +637,66 @@ async def test_deploy_from_library_id_passthrough_deployed(gate: _GateRecorder) 
         ("POST", "/api/vcenter/ovf/library-item/li-ovf?action=deploy"),
     ]
     assert gate.gated_op_ids == [_DEPLOY_OVF_OP]
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_deploy_issued_with_long_timeout(gate: _GateRecorder) -> None:
+    """A slow-but-successful OVF deploy returns ``deployed`` and rides the long timeout.
+
+    The synchronous OVF deploy POST is held open for the whole multi-GB copy,
+    so it must carry ``_LIBRARY_ITEM_DEPLOY_TIMEOUT`` rather than the 30s
+    client default that used to cut a real appliance deploy off at ~30s and
+    return a false ``deploy_error`` (#3076). The canned ``succeeded=true``
+    ``DeploymentResult`` stands in for the eventual success the long timeout
+    lets the composite wait for.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/ovf/library-item/li-ovf?action=deploy": _deployment_result(
+                succeeded=True, vm_id="vm-ovf-1"
+            ),
+        }
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deployed"
+    assert out["vm_id"] == "vm-ovf-1"
+    (deploy_post,) = conn.calls
+    assert deploy_post["method"] == "POST"
+    assert deploy_post["timeout"] is _write._LIBRARY_ITEM_DEPLOY_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_deploy_from_library_read_timeout_names_exception_type(gate: _GateRecorder) -> None:
+    """A client ``ReadTimeout`` on the deploy → ``deploy_error`` naming the exc type.
+
+    ``str(httpx.ReadTimeout())`` is empty, which used to leave the surfaced
+    detail an empty ``transport fault:`` tail. The fault detail now folds in
+    the exception *type* name so the operator sees ``transport fault
+    (ReadTimeout)`` (#3076). (This is the residual defect-2 guard; the long
+    timeout of defect-1 makes a real deploy no longer *hit* this path.)
+    """
+    conn = _RecordingConnector(
+        {"/api/vcenter/ovf/library-item/li-ovf?action=deploy": httpx.ReadTimeout("")}
+    )
+    out = await vm_deploy_from_library_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"library_item": "li-ovf", "resource_pool": "resgroup-8"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "deploy_error"
+    assert out["library_item_id"] == "li-ovf"
+    assert len(out["issues"]) == 1
+    message = out["issues"][0]["message"]
+    assert "transport fault (ReadTimeout)" in message
+    # The empty-tail regression is gone — no dangling "transport fault: ".
+    assert "transport fault: " not in message
+    assert message == message.rstrip()
 
 
 @pytest.mark.asyncio

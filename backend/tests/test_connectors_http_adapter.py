@@ -423,6 +423,61 @@ async def test_post_json_extra_headers_merged() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_json_default_timeout_is_client_default() -> None:
+    """Omitting ``timeout`` keeps the pooled client's 30s default on the wire.
+
+    ``httpx.build_request`` folds ``USE_CLIENT_DEFAULT`` to the client's own
+    ``Timeout`` into ``request.extensions['timeout']``, so a caller that does
+    not pass ``timeout`` dispatches byte-identically to before the override
+    existed — the ``connect=5 / read=30 / write=30 / pool=5`` client default.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/api/widget").respond(201, json={"id": 1})
+        await conn._post_json(target, "/api/widget", operator=_make_operator("t"), json={"n": 1})
+
+    req = route.calls[0].request
+    assert req.extensions["timeout"] == {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 5.0}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_timeout_override_reaches_wire_request() -> None:
+    """An explicit ``timeout`` overrides the client default for that one request.
+
+    Guards the #3076 seam: the synchronous library-item deploys pass a
+    generous read/write ceiling so a multi-GB appliance copy is not cut off
+    at the 30s client-default read timeout. The override rides
+    ``request.extensions['timeout']``; connect/pool stay fast so a dead
+    target still fails fast.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+    override = httpx.Timeout(connect=5.0, read=1800.0, write=1800.0, pool=5.0)
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/api/widget").respond(201, json={"id": 1})
+        await conn._post_json(
+            target,
+            "/api/widget",
+            operator=_make_operator("t"),
+            json={"n": 1},
+            timeout=override,
+        )
+
+    req = route.calls[0].request
+    assert req.extensions["timeout"] == {
+        "connect": 5.0,
+        "read": 1800.0,
+        "write": 1800.0,
+        "pool": 5.0,
+    }
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("verb", ["GET", "HEAD", "OPTIONS", "get"])
 async def test_post_json_rejects_idempotent_verb(verb: str) -> None:
     """_post_json refuses idempotent verbs — they belong on the retried path."""

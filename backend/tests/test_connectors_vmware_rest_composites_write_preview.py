@@ -234,6 +234,7 @@ class _RecordingConnector:
         json: Any = None,
         data: Any = None,
         extra_headers: Any = None,
+        timeout: Any = None,
     ) -> Any:
         spec = self._spec(path)
         self.calls.append((verb, spec, None))

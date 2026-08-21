@@ -68,6 +68,7 @@ from meho_backplane.operations.jsonflux_reducer import (
     JsonFluxReducer,
     _detect_collection,
     _fit_sample_to_budget,
+    _preserved_scalars,
     _query_sample,
     _sample_from_tail,
     _serialize,
@@ -475,6 +476,166 @@ async def test_reduce_leaves_string_shaped_payload_untouched() -> None:
 
     assert handle is None, "string-shaped exec output must not materialize a handle"
     assert reduced is payload, "pass-through must return the exact input payload object"
+
+
+# ---------------------------------------------------------------------------
+# Preserved scalar siblings — the ``result_scalars`` hint (#3084)
+# ---------------------------------------------------------------------------
+
+
+def _validation_payload(check_count: int) -> dict[str, Any]:
+    """A VCF Installer ``Validation``-shaped payload (#3084's live shape).
+
+    Field names pinned by the vendored ``vcf-installer-9.1`` OpenAPI
+    (``components.schemas.Validation``): four scalar siblings next to the
+    set-shaped ``validationChecks[]`` the reducer materializes.
+    """
+    return {
+        "id": "b2f5c0de-9a11-4c37-8f7e-3d2f6c1a9e55",
+        "description": "SDDC specification validation",
+        "executionStatus": "COMPLETED",
+        "resultStatus": "SUCCEEDED",
+        "validationChecks": [
+            {"description": f"check-{i}", "resultStatus": "SUCCEEDED"} for i in range(check_count)
+        ],
+    }
+
+
+_VALIDATION_SCALARS_CONTEXT: dict[str, Any] = {
+    "op_id": "installer.sddc.spec.validate",
+    "result_scalars": {"keys": ["id", "description", "executionStatus", "resultStatus"]},
+}
+
+
+async def test_reduce_preserves_hinted_scalars_alongside_reduction() -> None:
+    """Hinted scalar siblings survive on the summary; the checks still reduce.
+
+    #3084 acceptance: the live defect was a governed ``spec.validate``
+    whose ``result`` carried *only* the reduction bookkeeping — the
+    validation ``id`` needed to drive ``installer.sddc.validation.status``
+    was swallowed, so the submit → poll loop was undrivable through MEHO
+    alone. With the hint, the poll-relevant scalars ride the summary while
+    the set-shaped ``validationChecks`` keeps the full reduction + handle
+    drill-in contract.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    payload = _validation_payload(60)
+
+    reduced, handle = await reducer.reduce(payload, None, dict(_VALIDATION_SCALARS_CONTEXT))
+
+    # The reduction itself is unchanged: handle minted, checks not inline.
+    assert handle is not None, "60 checks are over the 50-row threshold; expected a handle"
+    assert handle.total_rows == 60
+    assert "validationChecks" not in reduced
+
+    # The hinted scalars are top-level on the summary.
+    assert reduced["id"] == payload["id"]
+    assert reduced["description"] == payload["description"]
+    assert reduced["executionStatus"] == "COMPLETED"
+    assert reduced["resultStatus"] == "SUCCEEDED"
+
+    # The reducer-owned bookkeeping is intact next to them.
+    assert reduced["row_count"] == 60
+    assert reduced["total"] == 60
+    assert reduced["source_key"] == "validationChecks"
+    assert reduced["sample_rows_returned"] == len(handle.sample_rows or ())
+
+
+async def test_reduce_without_scalar_hint_keeps_bookkeeping_only_summary() -> None:
+    """No hint → the summary shape is exactly the pre-#3084 bookkeeping.
+
+    Backwards-compat guard: scalar preservation is opt-in per op. An op
+    that never declared ``result_scalars`` must not suddenly grow vendor
+    fields on its reduced summary.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    payload = _validation_payload(60)
+
+    reduced, handle = await reducer.reduce(payload, None, {"op_id": "installer.sddc.spec.validate"})
+
+    assert handle is not None
+    assert set(reduced) == {
+        "row_count",
+        "total",
+        "sample_rows_returned",
+        "sample_bytes",
+        "source_key",
+    }
+
+
+async def test_reduce_scalar_hint_skips_reserved_non_scalar_and_absent_keys() -> None:
+    """Reserved / non-scalar / absent / collection keys never reach the summary.
+
+    * ``total`` collides with reducer bookkeeping — the reduction contract
+      wins (the vendor value is dropped with a warning).
+    * ``additionalProperties`` is a nested object — copying it inline would
+      defeat the reduction the hint rides on.
+    * ``missing`` is absent from the payload — a poll-shape variance, not
+      an error.
+    * ``validationChecks`` is the collection itself — already represented
+      as ``source_key``.
+    * a ``None``-valued scalar is preserved as ``None`` (shape stability).
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    payload = _validation_payload(60)
+    payload["total"] = "vendor-total"
+    payload["additionalProperties"] = {"nested": "object"}
+    payload["resultStatus"] = None
+    context = {
+        "op_id": "installer.sddc.spec.validate",
+        "result_scalars": {
+            "keys": [
+                "id",
+                "resultStatus",
+                "total",
+                "additionalProperties",
+                "missing",
+                "validationChecks",
+            ]
+        },
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None
+    assert reduced["id"] == payload["id"]
+    assert reduced["resultStatus"] is None
+    assert reduced["total"] == 60, "reducer bookkeeping must win over a colliding vendor field"
+    assert "additionalProperties" not in reduced
+    assert "missing" not in reduced
+    assert "validationChecks" not in reduced
+
+
+async def test_reduce_scalar_hint_malformed_is_ignored() -> None:
+    """A malformed hint never raises and never leaks keys — bookkeeping only.
+
+    Matches the never-raise discipline of the sibling ``pagination_hint`` /
+    ``result_ordering`` paths: a connector author shipping a broken hint
+    must not break the operator's read at runtime.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    bookkeeping_keys = {"row_count", "total", "sample_rows_returned", "sample_bytes", "source_key"}
+
+    for bad_hint in (
+        "id,executionStatus",  # non-dict hint
+        {"keys": "id"},  # keys not a list
+        {"keys": ["id", 42]},  # keys not all strings
+        {},  # no keys slot at all
+    ):
+        payload = _validation_payload(60)
+        context: dict[str, Any] = {"op_id": "x", "result_scalars": bad_hint}
+        reduced, handle = await reducer.reduce(payload, None, context)
+        assert handle is not None
+        assert set(reduced) == bookkeeping_keys, f"hint {bad_hint!r} must be ignored wholesale"
+
+
+def test_preserved_scalars_noop_on_bare_list_payload_and_absent_hint() -> None:
+    """A bare-list payload has no scalar siblings; no hint means no scalars."""
+    hint_context = {"result_scalars": {"keys": ["id"]}}
+
+    assert _preserved_scalars([{"id": "row"}] * 3, None, hint_context) == {}
+    assert _preserved_scalars({"id": "x", "rows": []}, "rows", None) == {}
+    assert _preserved_scalars({"id": "x", "rows": []}, "rows", {}) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1617,3 +1778,90 @@ async def test_reducing_dispatch_honours_result_ordering_tail_hint(
         "line-198",
         "line-199",
     ], "the dispatched tail-ordered op must surface the most-recent lines inline"
+
+
+async def _validation_shaped_handler(
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level handler returning a 60-check ``Validation``-shaped object.
+
+    Mirrors ``installer.sddc.spec.validate``'s vendor response: four scalar
+    siblings next to the set-shaped ``validationChecks[]``, over the 50-row
+    materialization threshold so the dispatch path reduces it.
+    """
+    del target, params
+    return _validation_payload(60)
+
+
+@pytest.fixture
+async def _registered_scalar_hinted_op(
+    stub_embedding_service: AsyncMock,
+) -> AsyncIterator[None]:
+    """Register a typed op carrying ``llm_instructions.result_scalars``.
+
+    Exercises the dispatcher → reducer scalar wiring end to end: the
+    descriptor's ``llm_instructions`` slot is what
+    ``_result_scalars_from_descriptor`` lifts into the reducer context.
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="installer.validate.like",
+        handler=_validation_shaped_handler,
+        summary="Submit a validation.",
+        description="Submit a validation.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        llm_instructions={
+            "result_scalars": {"keys": ["id", "description", "executionStatus", "resultStatus"]}
+        },
+        embedding_service=stub_embedding_service,
+    )
+    yield
+
+
+async def test_reducing_dispatch_preserves_registered_result_scalars(
+    _registered_scalar_hinted_op: None,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A scalar-hinted op dispatched end-to-end keeps its poll keys top-level.
+
+    #3084. The descriptor's ``llm_instructions["result_scalars"]`` is
+    lifted by ``dispatcher._result_scalars_from_descriptor`` into
+    ``reducer_context["result_scalars"]``; ``JsonFluxReducer`` then copies
+    the listed scalar siblings onto the inline summary. This proves the
+    whole wire — the exact live defect was a governed ``spec.validate``
+    returning a summary without the validation ``id``, so the submit →
+    poll loop could not be driven through the governed surface alone.
+    """
+    set_default_reducer(JsonFluxReducer(sample_size=5))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="installer.validate.like",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "ok", (
+        f"expected ok; got status={result.status!r} error={result.error!r}"
+    )
+    assert result.handle is not None, "a 60-check response must materialize a handle"
+    assert result.handle.total_rows == 60
+
+    assert isinstance(result.result, dict)
+    expected = _validation_payload(60)
+    assert result.result["id"] == expected["id"]
+    assert result.result["description"] == expected["description"]
+    assert result.result["executionStatus"] == "COMPLETED"
+    assert result.result["resultStatus"] == "SUCCEEDED"
+    # The reduction contract is intact next to the preserved scalars.
+    assert result.result["row_count"] == 60
+    assert result.result["source_key"] == "validationChecks"
+    assert "validationChecks" not in result.result

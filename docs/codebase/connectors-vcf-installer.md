@@ -112,6 +112,24 @@ echo (registered for both op_ids in `bringup.py`) — never a password.
 POSTs too, since a `401` is rejected at auth before the server processes the
 request).
 
+**Poll scalars survive JSONFlux reduction
+([#3084](https://github.com/evoila/meho/issues/3084)).** All four
+primitives register the `result_scalars` reduction hint (see
+`docs/architecture/jsonflux.md` § *Preserved scalar siblings*): when an
+over-threshold `validationChecks[]` / `sddcSubTasks[]` rides the JSONFlux
+reduction, the vendor object's top-level scalars stay on the reduced
+result — `Validation`'s `id` / `description` / `executionStatus` /
+`resultStatus`, `SddcTask`'s `id` / `name` / `status` / `deploymentType` /
+`vcfInstanceName` / `creationTimestamp` — so the submit → poll loop is
+drivable from the governed response alone (the pre-#3084 reduction
+replaced the whole object with reduction bookkeeping and swallowed the
+poll `id`, observed live against a VCF Installer 9.0.2 appliance). The
+check/sub-task rows keep the full handle + drill-in contract; an
+under-threshold response passes through verbatim as before. An `SddcTask`
+carrying **both** `sddcSubTasks[]` and `milestones[]` is a dict-of-arrays
+detail object (#2113) and passes through whole. Regression-pinned by
+`backend/tests/test_connectors_vcf_installer_jsonflux_scalars.py`.
+
 **When to use which surface.** The primitives are the deploy-automation
 add-on's durable-workflow surface: validate first (no approval), surface the
 verdict to a human, then request approval for a bare submit whose

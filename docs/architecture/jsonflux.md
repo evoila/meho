@@ -476,6 +476,60 @@ non-dict value is logged once (actionable for the connector author) and
 treated as "no tail ordering" rather than raised, matching the
 never-raise discipline the pagination-hint path follows.
 
+### Preserved scalar siblings — `result_scalars` (#3084)
+
+The reduced summary replaces the **whole** payload. For a bare list that
+is lossless, but many vendor objects carry poll-relevant scalars *next
+to* the collection that reduces — the VCF Installer's `Validation` is
+`{id, description, executionStatus, resultStatus, validationChecks: […]}`,
+and its `SddcTask` is `{id, name, status, …, sddcSubTasks: […]}`. Before
+#3084 an over-threshold `validationChecks` reduction swallowed the
+top-level scalars, so a governed `installer.sddc.spec.validate` returned
+a summary without the validation `id` — the submit → poll loop could not
+be driven through the governed surface alone (observed live against a
+VCF Installer 9.0.2 appliance).
+
+Connectors whose op returns such a shape declare a `result_scalars`
+hint under `llm_instructions`:
+
+```python
+register_typed_operation(
+    op_id="installer.sddc.spec.validate",
+    ...,
+    llm_instructions={
+        "result_scalars": {
+            "keys": ["id", "description", "executionStatus", "resultStatus"],
+        },
+        # ...other llm_instructions slots...
+    },
+)
+```
+
+`dispatcher._result_scalars_from_descriptor(descriptor)` lifts the raw
+dict from `descriptor.llm_instructions["result_scalars"]` and threads it
+through `reducer_context["result_scalars"]` — the exact sibling of the
+`pagination_hint` / `result_ordering` paths. The reducer's
+`_preserved_scalars` copies each listed key's value from the dict payload
+onto the inline summary *before* the reduction bookkeeping is written, so
+the reduced result reads
+`{id, executionStatus, …, row_count, total, sample_rows_returned,
+sample_bytes, source_key}` — identity first, bookkeeping after. The
+collection itself still reduces with the full handle + drill-in contract.
+
+Skips (never raises, matching the sibling hints' discipline): a malformed
+hint (non-dict, or `keys` not a list of strings) is logged and ignored
+wholesale; a non-dict payload has no scalar siblings; the collection key
+itself is skipped (already represented as `source_key`); a key absent
+from the payload is skipped silently; a reserved bookkeeping key
+(`row_count` / `total` / `sample_rows_returned` / `sample_bytes` /
+`source_key`) is skipped with a warning — the reduction contract can
+never be shadowed by a vendor field; and a non-scalar value (nested
+dict / list) is skipped with a warning — copying an unbounded vendor
+object inline would defeat the reduction the hint rides on. `None`
+values are preserved (shape stability across poll states). The hint is
+purely additive: an op without it keeps the bookkeeping-only summary,
+byte-identical to the pre-#3084 shape.
+
 For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 

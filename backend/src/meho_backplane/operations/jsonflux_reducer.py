@@ -192,6 +192,33 @@ _ORDERING_CONTEXT_KEY = "result_ordering"
 #: end is "more recent".
 _SAMPLE_TAIL = "tail"
 
+#: ``context`` key carrying the op's preserved-scalar hint (#3084). Mirrors
+#: the ``result_ordering`` threading: the connector author registers
+#: ``llm_instructions["result_scalars"] = {"keys": [...]}`` on an op whose
+#: dict payload carries poll-relevant scalars *next to* the reduced
+#: collection (VCF Installer's ``Validation``: ``id`` / ``executionStatus``
+#: / ``resultStatus`` beside ``validationChecks[]``); the dispatcher
+#: forwards the dict verbatim and :meth:`JsonFluxReducer._assemble` copies
+#: the listed keys' scalar values into the inline summary so the reduction
+#: never swallows the identity the caller needs for the next call (the
+#: submit → poll loop of #3084).
+_RESULT_SCALARS_CONTEXT_KEY = "result_scalars"
+
+#: Summary keys the reducer itself owns. A hinted scalar key colliding with
+#: one of these is skipped (with a warning) — the reduction bookkeeping is
+#: load-bearing for every consumer and must never be shadowed by a vendor
+#: field that happens to share a name.
+_RESERVED_SUMMARY_KEYS = frozenset(
+    {"row_count", "total", "sample_rows_returned", "sample_bytes", "source_key"}
+)
+
+#: JSON scalar types a ``result_scalars`` hint may preserve. ``bool`` is an
+#: ``int`` subclass, so listing ``int`` covers it; ``None`` is allowed
+#: separately. Anything else (nested dict, list) is skipped with a warning —
+#: the hint is named *scalars* because copying an unbounded vendor object
+#: into the inline summary would defeat the reduction it rides on.
+_SCALAR_VALUE_TYPES = (str, int, float)
+
 #: Positional row-ordinal column the tail-sample query assigns via
 #: ``row_number() OVER ()``. DuckDB does not guarantee the order of a bare
 #: ``SELECT``; numbering the registered (Arrow-backed, insertion-ordered)
@@ -357,7 +384,8 @@ class JsonFluxReducer:
 
         materialized = self._materialize(rows, context)
         spill_outcome = await self._spill(materialized, context)
-        return self._assemble(materialized, envelope_key, context, spill_outcome)
+        preserved_scalars = _preserved_scalars(payload, envelope_key, context)
+        return self._assemble(materialized, envelope_key, context, spill_outcome, preserved_scalars)
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
         """True when *rows* exceeds the row OR byte threshold.
@@ -508,6 +536,7 @@ class JsonFluxReducer:
         envelope_key: str | None,
         context: dict[str, Any] | None,
         spill_outcome: _SpillOutcome,
+        preserved_scalars: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], ResultHandle]:
         """Build the inline summary + the :class:`ResultHandle`.
 
@@ -515,6 +544,13 @@ class JsonFluxReducer:
         persisted -- the handle's drill-in branch flips to
         ``available=True`` pointing at ``result_query`` -- or the skip
         reason the unavailable branch surfaces verbatim (#1629).
+
+        ``preserved_scalars`` (#3084) carries the payload's hinted scalar
+        siblings (:func:`_preserved_scalars`); they seed the summary
+        *before* the reduction bookkeeping is written, so a hinted key can
+        never shadow ``row_count`` / ``total`` / ``sample_rows_returned``
+        / ``sample_bytes`` / ``source_key`` even if the helper's reserved
+        filter is bypassed.
 
         The inline sample is serialized **exactly once** (#134): it lives
         only on :attr:`ResultHandle.sample_rows` -- the audit hoist
@@ -554,13 +590,18 @@ class JsonFluxReducer:
         # ``handle.sample_rows`` (#134). ``sample_bytes`` records the
         # serialized size the reducer bounded the preview to, so an agent
         # reading the summary knows a preview exists and where to find it
-        # without re-measuring the handle.
-        summary: dict[str, Any] = {
-            "row_count": total_rows,
-            "total": total_rows,
-            "sample_rows_returned": len(sample_rows),
-            "sample_bytes": len(_serialize(sample_rows)) if sample_rows else 0,
-        }
+        # without re-measuring the handle. Hinted scalar siblings (#3084)
+        # seed the dict first; the reducer-owned bookkeeping keys are
+        # written after them and therefore always win.
+        summary: dict[str, Any] = dict(preserved_scalars or {})
+        summary.update(
+            {
+                "row_count": total_rows,
+                "total": total_rows,
+                "sample_rows_returned": len(sample_rows),
+                "sample_bytes": len(_serialize(sample_rows)) if sample_rows else 0,
+            }
+        )
         if envelope_key is not None:
             summary["source_key"] = envelope_key
         return summary, handle
@@ -755,6 +796,85 @@ def _sample_from_tail(context: dict[str, Any] | None) -> bool:
         )
         return False
     return raw.get("sample") == _SAMPLE_TAIL
+
+
+def _preserved_scalars(
+    payload: Any,
+    envelope_key: str | None,
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Scalar siblings of the reduced collection the op asked to keep (#3084).
+
+    The connector author registers ``llm_instructions["result_scalars"] =
+    {"keys": [...]}`` on an op whose dict payload carries poll-relevant
+    scalars next to the collection that reduces — the VCF Installer's
+    ``Validation`` (``id`` / ``executionStatus`` / ``resultStatus`` beside
+    ``validationChecks[]``) and ``SddcTask`` (``id`` / ``status`` beside
+    ``sddcSubTasks[]``). Without the hint the reduction replaced the whole
+    payload with the bookkeeping summary, swallowing the validation ``id``
+    the caller must feed to the status poll — the submit → poll loop could
+    not be driven through the governed surface alone.
+
+    Per listed key, the value is copied when it exists on the dict payload
+    and is a JSON scalar (:data:`_SCALAR_VALUE_TYPES` or ``None``). Skipped
+    (never raised, matching the sibling hint paths' never-raise
+    discipline):
+
+    * a malformed hint (non-dict, or ``keys`` not a list of strings) —
+      logged once, whole hint ignored;
+    * a non-dict payload (a bare top-level list has no scalar siblings);
+    * the collection key itself (already represented as ``source_key``);
+    * a key absent from the payload (a poll-shape variance, not an error);
+    * a reserved reducer bookkeeping key (:data:`_RESERVED_SUMMARY_KEYS`)
+      — logged, the reduction contract must never be shadowed;
+    * a non-scalar value (nested dict / list) — logged, copying an
+      unbounded vendor object inline would defeat the reduction.
+    """
+    if not context:
+        return {}
+    raw = context.get(_RESULT_SCALARS_CONTEXT_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        _log.warning(
+            "jsonflux_result_scalars_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return {}
+    keys = raw.get("keys")
+    if not isinstance(keys, list) or not all(isinstance(key, str) for key in keys):
+        _log.warning(
+            "jsonflux_result_scalars_invalid_keys",
+            op_id=context.get("op_id"),
+            received_type=type(keys).__name__,
+        )
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    preserved: dict[str, Any] = {}
+    for key in keys:
+        if key == envelope_key or key not in payload:
+            continue
+        if key in _RESERVED_SUMMARY_KEYS:
+            _log.warning(
+                "jsonflux_result_scalars_reserved_key_skipped",
+                op_id=context.get("op_id"),
+                key=key,
+            )
+            continue
+        value = payload[key]
+        if value is not None and not isinstance(value, _SCALAR_VALUE_TYPES):
+            _log.warning(
+                "jsonflux_result_scalars_non_scalar_skipped",
+                op_id=context.get("op_id"),
+                key=key,
+                received_type=type(value).__name__,
+            )
+            continue
+        preserved[key] = value
+    return preserved
 
 
 def _serialize(payload: Any) -> bytes:

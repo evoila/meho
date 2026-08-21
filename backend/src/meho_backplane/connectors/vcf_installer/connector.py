@@ -3,8 +3,10 @@
 
 """InstallerConnector — hand-rolled HttpConnector subclass for VCF Installer 9.1.
 
-Auth + fingerprint + probe + the G0.6 dispatch shim + the bring-up status poll.
-The governed bring-up *write* (validate → deploy) is a separate ``dangerous`` +
+Auth + fingerprint + probe + the G0.6 dispatch shim + the bound-method shims
+for the four governed submit/poll bring-up primitives (#3078 — bodies in
+:mod:`.typed_reads` / :mod:`.typed_writes`). The one-shot governed bring-up
+(validate → deploy as a single approved unit) is the separate ``dangerous`` +
 ``requires_approval`` composite in :mod:`.bringup`; this connector supplies the
 session-auth POST twin (:meth:`_post_json_with_session_retry`) it dispatches
 through.
@@ -384,13 +386,45 @@ class InstallerConnector(HttpConnector):
             params=params,
         )
 
-    async def sddc_status(
+    async def sddc_spec_validate(
         self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """``installer.sddc.status`` shim — bring-up task poll."""
-        from meho_backplane.connectors.vcf_installer.typed_reads import installer_sddc_status_impl
+        """``installer.sddc.spec.validate`` shim — SddcSpec validation dry-run submit."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_sddc_spec_validate_impl,
+        )
 
-        return await installer_sddc_status_impl(self, operator, target, params)
+        return await installer_sddc_spec_validate_impl(self, operator, target, params)
+
+    async def sddc_validation_status(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.validation.status`` shim — spec validation poll."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_sddc_validation_status_impl,
+        )
+
+        return await installer_sddc_validation_status_impl(self, operator, target, params)
+
+    async def sddc_bringup_start(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.bringup.start`` shim — governed bring-up submit."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_sddc_bringup_start_impl,
+        )
+
+        return await installer_sddc_bringup_start_impl(self, operator, target, params)
+
+    async def sddc_bringup_status(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.bringup.status`` shim — bring-up task poll."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_sddc_bringup_status_impl,
+        )
+
+        return await installer_sddc_bringup_status_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""

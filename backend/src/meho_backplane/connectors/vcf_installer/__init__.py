@@ -10,12 +10,17 @@ impl_id="installer-rest")``. The chassis lifespan calls
 every ``connectors/<product>/`` subpackage at startup, so the registration lands
 before any dispatch can occur.
 
-The bring-up status poll (``installer.sddc.status``) ships as a typed op
-(``source_kind="typed"``) via :mod:`.typed_ops` / :mod:`.typed_reads`,
-dispatchable on a fresh boot with zero catalog ingest. The governed bring-up
-write (``installer.composite.sddc.bringup`` — validate → deploy) ships as a
-``dangerous`` + ``requires_approval`` composite via :mod:`.bringup`; importing
-that module also registers its park-time approval preview builder.
+The governed bring-up surface ships as four submit/poll typed primitives
+(``source_kind="typed"``, #3078) via :mod:`.typed_ops` / :mod:`.typed_reads` /
+:mod:`.typed_writes`, dispatchable on a fresh boot with zero catalog ingest:
+``installer.sddc.spec.validate``, ``installer.sddc.validation.status``,
+``installer.sddc.bringup.start`` (``dangerous`` + ``requires_approval``), and
+``installer.sddc.bringup.status``. The one-shot governed bring-up
+(``installer.composite.sddc.bringup`` — validate → deploy as a single approved
+unit) ships as a ``dangerous`` + ``requires_approval`` composite via
+:mod:`.bringup`; importing that module also registers the park-time approval
+preview builders (for the composite and for ``bringup.start``, which park the
+same ``{"spec": ...}`` shape).
 """
 
 from typing import Final
@@ -37,6 +42,10 @@ from meho_backplane.connectors.vcf_installer.typed_ops import (
     INSTALLER_TYPED_OPS,
     InstallerTypedOp,
     register_installer_typed_operations,
+)
+from meho_backplane.connectors.vcf_installer.typed_writes import (
+    INSTALLER_BRINGUP_START_OP_ID,
+    INSTALLER_SPEC_VALIDATE_OP_ID,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
@@ -74,10 +83,12 @@ register_typed_op_registrar(register_installer_composite_operations)
 
 __all__ = [
     "INSTALLER_BRINGUP_OP_ID",
+    "INSTALLER_BRINGUP_START_OP_ID",
     "INSTALLER_CONNECTOR_ID",
     "INSTALLER_EXECUTION_PROFILE",
     "INSTALLER_IMPL_ID",
     "INSTALLER_PRODUCT",
+    "INSTALLER_SPEC_VALIDATE_OP_ID",
     "INSTALLER_TYPED_OPS",
     "INSTALLER_VERSION",
     "InstallerConnector",

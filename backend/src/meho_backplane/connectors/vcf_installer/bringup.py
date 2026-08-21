@@ -19,7 +19,7 @@ orchestrates the two-step Installer bring-up as one governed, approved unit:
 3. **hand off** — a real bring-up runs for *hours* on the appliance, so the
    composite returns the ``SddcTask`` id the moment the deploy is accepted
    (``status="deploying"``). The caller (an operator or the deploy-automation
-   add-on's durable workflow) polls ``installer.sddc.status`` to a terminal
+   add-on's durable workflow) polls ``installer.sddc.bringup.status`` to a terminal
    ``COMPLETED_WITH_SUCCESS`` / ``ROLLBACK_SUCCESS`` / ``COMPLETED_WITH_FAILURE``.
    Blocking a single dispatch call to a multi-hour terminal state would be wrong.
 
@@ -69,6 +69,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.vcf_installer.typed_writes import INSTALLER_BRINGUP_START_OP_ID
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
@@ -92,7 +93,7 @@ INSTALLER_BRINGUP_OP_ID = "installer.composite.sddc.bringup"
 #: logical mutation identifier, not a wire path.
 _DEPLOY_SUBOP_OP_ID = "installer.sddc.deploy"
 
-#: Same operation group as the ``installer.sddc.status`` poll, so discovery
+#: Same operation group as the ``installer.sddc.bringup.status`` poll, so discovery
 #: co-locates "run a bring-up" with "track a bring-up".
 _GROUP_BRINGUP = "installer-bringup"
 
@@ -376,7 +377,7 @@ async def installer_sddc_bringup_composite(
     )
 
     # 3. HAND OFF — the bring-up runs for hours; return the task id for
-    #    installer.sddc.status polling rather than block on a terminal state.
+    #    installer.sddc.bringup.status polling rather than block on a terminal state.
     _log.info(
         "installer_bringup_deploy_accepted",
         target=getattr(target, "name", None),
@@ -392,7 +393,7 @@ async def installer_sddc_bringup_composite(
             "name": task.get("name"),
             "vcfInstanceName": task.get("vcfInstanceName"),
         },
-        "poll_with": "installer.sddc.status",
+        "poll_with": "installer.sddc.bringup.status",
         "validation_id": validation.get("id"),
         # Always echo the validation verdict so a WARNING can never be silent:
         # `validation_warnings` only carries leaf WARNING checks, which may be
@@ -453,7 +454,7 @@ _BRINGUP_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "Bring-up outcome envelope. status='deploying' with sddc_task.id when the "
-        "deploy is accepted (poll installer.sddc.status to terminal); "
+        "deploy is accepted (poll installer.sddc.bringup.status to terminal); "
         "status='validation_failed'/'validation_timeout' with failed_checks when "
         "validation blocked the deploy."
     ),
@@ -466,7 +467,7 @@ _BRINGUP_WHEN_TO_USE = (
     "validation passes, starts the bring-up (POST /v1/sddcs) and returns the "
     "SddcTask id. dangerous + requires_approval — the reviewer sees an SDDC "
     "identity/network preview, never passwords. The deploy runs for hours; poll "
-    "installer.sddc.status with the returned id for terminal state. This is the "
+    "installer.sddc.bringup.status with the returned id for terminal state. This is the "
     "governed replacement for a Cloud Builder / Installer bring-up run by hand."
 )
 
@@ -497,7 +498,7 @@ async def register_installer_composite_operations(
             "POST /v1/sddcs/validations (non-mutating dry-run, polled to terminal) "
             "gates POST /v1/sddcs (the deploy). Returns the SddcTask id the moment "
             "the deploy is accepted — the bring-up runs for hours, so poll "
-            "installer.sddc.status for terminal state. dangerous + requires_approval; "
+            "installer.sddc.bringup.status for terminal state. dangerous + requires_approval; "
             "the approval preview echoes SDDC identity + network blast-radius only, "
             "never passwords. Direct-session dispatch (Goal #2247)."
         ),
@@ -519,9 +520,12 @@ async def register_installer_composite_operations(
     )
 
 
-# Side-effect: register the park-time preview builder at import time (#1608),
+# Side-effect: register the park-time preview builders at import time (#1608),
 # mirroring how ``connectors/vmware_rest/composites/_write_preview`` wires its
 # builders. This module is imported by the package ``__init__`` (which pulls in
-# ``register_installer_composite_operations``), so the builder is registered
-# before any dispatch can park.
+# ``register_installer_composite_operations``), so the builders are registered
+# before any dispatch can park. The ``installer.sddc.bringup.start`` primitive
+# (#3078) parks the same ``{"spec": <SddcSpec>}`` params shape the composite
+# does, so it shares the composite's secret-hygienic identity/network preview.
 register_preview_builder(INSTALLER_BRINGUP_OP_ID, _sddc_bringup_preview)
+register_preview_builder(INSTALLER_BRINGUP_START_OP_ID, _sddc_bringup_preview)

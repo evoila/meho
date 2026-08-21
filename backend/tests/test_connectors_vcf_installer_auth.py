@@ -251,7 +251,7 @@ async def test_sddc_status_reads_the_bringup_task() -> None:
                 "sddcSubTasks": [],
             },
         )
-        result = await connector.sddc_status(_make_operator(), _TARGET, {"id": "sddc-1"})
+        result = await connector.sddc_bringup_status(_make_operator(), _TARGET, {"id": "sddc-1"})
 
     assert result["status"] == "IN_PROGRESS"
     assert result["id"] == "sddc-1"

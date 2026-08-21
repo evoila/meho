@@ -192,7 +192,7 @@ async def test_bringup_happy_path_validates_then_deploys(monkeypatch: pytest.Mon
     assert result["status"] == "deploying"
     assert result["sddc_task"]["id"] == "sddc-1"
     assert result["sddc_task"]["status"] == "IN_PROGRESS"
-    assert result["poll_with"] == "installer.sddc.status"
+    assert result["poll_with"] == "installer.sddc.bringup.status"
     assert result["validation_id"] == "val-1"
     assert result["validation_result_status"] == "SUCCEEDED"
     assert "validation_warnings" not in result

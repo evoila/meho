@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — VCF Installer 9.1 governed submit/poll bring-up primitives (Initiative #2907, task #3078)
+
+- Four typed primitives decompose the Installer bring-up surface into short
+  governed submit/poll calls — the dispatch surface the deploy-automation
+  add-on's durable workflow binds to (the vendor API is natively asynchronous:
+  every submit returns its tracking object in seconds, so no long-blocking
+  composite and no new dispatch machinery): `installer.sddc.spec.validate`
+  (`POST /v1/sddcs/validations`; `caution` — writes to the appliance, mutates
+  no estate), `installer.sddc.validation.status`
+  (`GET /v1/sddcs/validations/{id}`; `safe`), `installer.sddc.bringup.start`
+  (`POST /v1/sddcs`; `dangerous` + `requires_approval`, parking with the
+  composite's secret-hygienic identity/network preview — never a password),
+  and `installer.sddc.bringup.status` (`GET /v1/sddcs/{id}`; `safe` — renamed
+  pre-release from `installer.sddc.status`, which never shipped in a tagged
+  release). Session-expiry recovery for all four rides the dispatcher's #2067
+  `invalidate_session` arm (safe for the POSTs too — a 401 is rejected at auth
+  before the server processes the request). The submit paths join the
+  spec-reconcile lane against the pinned `vcf-installer-9.1` shelf spec; the
+  `installer.composite.sddc.bringup` one-shot governed unit remains for
+  operators. Docs:
+  [`connectors-vcf-installer.md`](docs/codebase/connectors-vcf-installer.md).
+
 ### Added — VCF Installer 9.1 governed bring-up write (Initiative #2907, task #3065)
 
 - `installer.composite.sddc.bringup` — the governed VCF management-domain bring-up
@@ -98,7 +120,7 @@ connector-related release-notes line.
   terminal) *gates* `POST /v1/sddcs` (the deploy). Validation failures abort
   **before** any mutation with the failed checks summarised; the deploy runs for
   hours so the composite returns the `SddcTask` id the moment it is accepted and
-  the caller polls `installer.sddc.status` to terminal. The park-time approval
+  the caller polls `installer.sddc.bringup.status` to terminal. The park-time approval
   preview and the sub-op policy params echo SDDC identity + network blast-radius
   only — **never a password** (redaction by construction, covered by the
   whole-suite secret-leak guard). Direct-session dispatch (Goal #2247) — every
@@ -115,7 +137,7 @@ connector-related release-notes line.
   the `SddcSpec`, meho governs the POST). This increment ships the **skeleton**:
   `session_login_token` auth (`POST /v1/tokens` → cached Bearer, reusing the SDDC
   Manager scheme), fingerprint / probe via `GET /v1/system/appliance-info`, and
-  the `installer.sddc.status` bring-up status poll (`GET /v1/sddcs/{id}`; typed,
+  the `installer.sddc.bringup.status` bring-up status poll (`GET /v1/sddcs/{id}`; typed,
   `safe`). Ships at rubric State 2 (`shared_service_account`, live operator-context
   Vault read). A spec-reconcile lane pins every hand-coded path against the pinned
   `vcf-installer-9.1` shelf spec. The governed bring-up **write** (validate →

@@ -1501,6 +1501,45 @@ async def test_vm_power_gated_short_circuits(monkeypatch: pytest.MonkeyPatch) ->
     assert conn.calls == []
 
 
+@pytest.mark.asyncio
+async def test_vm_power_vendor_204_no_content_reports_ok_respx(gate: _GateRecorder) -> None:
+    """respx-verified: a 204-No-Content power ack maps to the ``ok`` envelope (#3082).
+
+    vCenter acknowledges ``POST /vcenter/vm/{vm}/power?action=<verb>`` with
+    204 and **no body**. Observed live: the VM powered on at the vendor while
+    the dispatch surfaced ``connector_error: JSONDecodeError`` — a false
+    error on a succeeded write that makes envelope-driven automation retry
+    an operation that already executed. Drives the real handler through a
+    real :class:`VmwareRestConnector` over an httpx (respx) transport so the
+    adapter's empty-body guard — not a recording double — is what maps the
+    bodyless vendor ack to success.
+    """
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url="https://vc-grow.test.invalid") as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            power = mock.post("/api/vcenter/vm/vm-1/power", params={"action": "start"}).respond(204)
+            out = await vm_power_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={"vm": "vm-1", "verb": "on"},
+                connector=connector,
+            )
+        assert out == {
+            "vm": "vm-1",
+            "verb": "on",
+            "status": "ok",
+            "error": None,
+            "error_type": None,
+            "guest_tools": None,
+        }
+        assert power.called
+        assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/power?action=start"]
+    finally:
+        await connector.aclose()
+
+
 # ===========================================================================
 # host.evacuate -- recursive composite (dispatch_child kept for vm.migrate)
 # ===========================================================================

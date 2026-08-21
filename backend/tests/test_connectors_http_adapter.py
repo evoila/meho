@@ -527,6 +527,87 @@ async def test_request_json_extra_headers_merged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 204 / empty-body responses return {} instead of raising (#3082)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["POST", "DELETE"])
+async def test_post_json_204_no_content_returns_empty_payload(verb: str) -> None:
+    """A 204-No-Content write ack returns ``{}`` — no JSONDecodeError.
+
+    Regression for #3082: vCenter acknowledges
+    ``POST /vcenter/vm/{vm}/power?action=<verb>`` (and
+    ``DELETE /vcenter/vm/{vm}``) with 204 and no body; the unconditional
+    ``resp.json()`` raised *after* the write took effect at the vendor,
+    reporting a succeeded write as ``connector_error``.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.request(verb, "/api/vcenter/vm/vm-1/power").respond(204)
+        result = await conn._post_json(
+            target,
+            "/api/vcenter/vm/vm-1/power",
+            operator=_make_operator("tok"),
+            verb=verb,
+        )
+
+    assert result == {}
+    assert route.called
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_200_empty_body_returns_empty_payload() -> None:
+    """A 200 with a zero-byte body returns ``{}`` — same guard, different status (#3082)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/widget").respond(200)
+        result = await conn._post_json(
+            target, "/api/widget", operator=_make_operator("tok"), json={"n": 1}
+        )
+
+    assert result == {}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_200_with_json_body_unchanged_by_empty_guard() -> None:
+    """A 200 with a JSON body parses exactly as before the #3082 guard."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/widget").respond(200, json={"value": "vm-42"})
+        result = await conn._post_json(
+            target, "/api/widget", operator=_make_operator("tok"), json={"n": 1}
+        )
+
+    assert result == {"value": "vm-42"}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_204_no_content_returns_empty_payload() -> None:
+    """The retried idempotent path shares the empty-body guard (#3082 symmetry)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/ack-only").respond(204)
+        result = await conn._request_json(
+            target, "GET", "/api/ack-only", operator=_make_operator("tok")
+        )
+
+    assert result == {}
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
 # Retry behaviour — 5xx
 # ---------------------------------------------------------------------------
 

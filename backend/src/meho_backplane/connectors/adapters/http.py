@@ -227,6 +227,31 @@ def _retryable(exc: BaseException) -> bool:
     return False
 
 
+def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
+    """Parse *resp*'s JSON body, mapping ``204`` / empty bodies to ``{}``.
+
+    Shared success-path tail for :meth:`HttpConnector._request_json` and
+    :meth:`HttpConnector._post_json` (and the contract-parity
+    ``VcfAutomationConnector`` transport override). Several vendor write
+    endpoints acknowledge success with ``204 No Content`` and no body —
+    vCenter's ``POST /vcenter/vm/{vm}/power?action=<verb>``, the guest
+    ``/guest/power`` actions, ``DELETE /vcenter/vm/{vm}``, and the
+    session-revoke ``DELETE`` — where an unconditional ``resp.json()``
+    raised :exc:`json.JSONDecodeError` *after the write had already taken
+    effect at the vendor*, so a succeeded write surfaced as
+    ``connector_error`` and envelope-driven automation retried an
+    operation that had executed (#3082). A ``204`` — or any empty body —
+    now returns a benign ``{}``; callers already treat the payload as
+    optional shape. A non-empty body parses exactly as before, so
+    200-with-JSON behaviour is byte-identical (including the pass-through
+    of non-dict JSON payloads such as vCenter's bare session-token
+    string).
+    """
+    if resp.status_code == httpx.codes.NO_CONTENT or not resp.content:
+        return {}
+    return resp.json()  # type: ignore[no-any-return]
+
+
 # Hard cap on the same-origin redirect chain followed by
 # :class:`_SameOriginRedirectClient`. Vendor canonicalisation never chains
 # more than one trailing-slash hop in practice; the cap is a cheap guard
@@ -650,6 +675,10 @@ class HttpConnector(Connector):
         credentials under the operator's identity. ``extra_headers`` are
         merged onto the connector-supplied :meth:`auth_headers` (e.g.
         header-located op params; per-call values win on a key clash).
+
+        A ``204 No Content`` — or any empty-body — response returns ``{}``
+        instead of raising from the JSON parse (#3082); see
+        :func:`json_payload_or_empty`.
         """
         method = method.upper()
         if method not in _IDEMPOTENT_METHODS:
@@ -670,7 +699,7 @@ class HttpConnector(Connector):
             extensions=self._request_extensions(target),
         )
         resp.raise_for_status()
-        return resp.json()  # type: ignore[no-any-return]
+        return json_payload_or_empty(resp)
 
     async def _get_json(
         self,
@@ -727,6 +756,12 @@ class HttpConnector(Connector):
         library-item deploys, whose connection is held open for the whole
         multi-GB disk copy (#3076). The global client default is left
         untouched so ordinary reads/writes still fail fast on a dead target.
+
+        A ``204 No Content`` — or any empty-body — response returns ``{}``
+        instead of raising from the JSON parse (#3082): vCenter power
+        actions and VM deletes acknowledge success with no body, and a
+        parse failure here surfaced *after* the write took effect at the
+        vendor. See :func:`json_payload_or_empty`.
         """
         verb = verb.upper()
         if verb in _IDEMPOTENT_METHODS:
@@ -750,7 +785,7 @@ class HttpConnector(Connector):
             timeout=timeout,
         )
         resp.raise_for_status()
-        return resp.json()  # type: ignore[no-any-return]
+        return json_payload_or_empty(resp)
 
     async def aclose(self) -> None:
         """Close all pooled clients. Called by lifespan or per-target cleanup."""

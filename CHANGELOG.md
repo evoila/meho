@@ -105,6 +105,25 @@ connector-related release-notes line.
   `vcenter-9.0/vcenter.yaml`. Recipe + explicit gap statement (PUSH upload
   cannot ride the generic dispatcher; caller owns the poll loop):
   `docs/codebase/vmware-rest-governed-iso-path.md`.
+### Added — governed nested-hypervisor VM shape recipe (#3087)
+
+- Verified + documented the governed recipe for building a
+  nested-hypervisor-ready VM (a VM that can itself run ESXi) through the
+  `vmware-rest` connector, every mutation on the governed dispatch path:
+  `vmware.composite.vm.create` passes an ESXi `VMKERNEL_*` guest identifier
+  through to the create body **verbatim** (pinned; the pinned 9.0 spec's
+  `guest_os` enum is prose-only), data disks and the installer CD-ROM ride
+  the raw ingested `POST:/vcenter/vm/{vm}/hardware/disk` /
+  `.../hardware/cdrom` ops with flat `*Spec` bodies (envelope-clean, cf.
+  #2973/#3071; `ISO_FILE` datastore backing), and VHV — which the pinned
+  REST surface **cannot express** (no `hardware_virtualization`/`nestedHV`
+  anywhere in `vcenter.yaml`, correcting #3087's CPU-PATCH premise) — rides
+  the VI-JSON `ReconfigVM_Task` with `nestedHVEnabled: true` on the
+  `/api`-mounted 9.x form (#2466 caveat: 404s on 8.0.x). Always-on respx
+  wire pins through the production `dispatch_ingested` seam plus
+  shelf-gated reconcile lanes ground every claim against the pinned
+  `vcenter-9.0/{vcenter.yaml,vi-json.yaml}`; recipe + 7-item gap list:
+  `docs/codebase/connectors-vmware-rest-nested-esxi-recipe.md`.
 
 ### Fixed — installer poll scalars survive JSONFlux reduction (#3084 / #3085)
 

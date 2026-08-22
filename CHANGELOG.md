@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — governed content-library ISO import-from-URL + iso.image mount recipe (#3086)
+
+- Verified + documented the fully-governed path for pulling a bootable ISO
+  from an HTTP depot into a vCenter content library and mounting it on a VM,
+  entirely on **raw ingested** `vmware-rest` ops (no composite): item create →
+  update session → `PULL` file add (`source_endpoint.uri`) → complete → poll,
+  then `POST:/vcenter/iso/image?action=mount` / `?action=unmount`. The generic
+  dispatcher is envelope-clean for every step (the caller's `body` param rides
+  the wire verbatim — no `/rest`-style `{"spec": …}` wrapper, cf. #2973/#3071),
+  bare-string acks wrap as `{"value": …}` and 204 acks return `{}`. New
+  always-on respx full-dispatch pins + a shelf-gated reconcile lane ground the
+  recipe's op list, body shapes, and required fields against the pinned
+  `vcenter-9.0/vcenter.yaml`. Recipe + explicit gap statement (PUSH upload
+  cannot ride the generic dispatcher; caller owns the poll loop):
+  `docs/codebase/vmware-rest-governed-iso-path.md`.
+
 ### Fixed — installer poll scalars survive JSONFlux reduction (#3084 / #3085)
 
 - The vcf-installer submit/poll primitives lost their poll identity under

@@ -1329,6 +1329,9 @@ they never park.
 
 ## References
 
+- Governed content-library ISO import-from-URL + `iso.image`
+  mount/unmount recipe (raw ingested ops, no composite):
+  [vmware-rest-governed-iso-path.md](vmware-rest-governed-iso-path.md) (#3086).
 - Parent Initiative: [#227 G3.1 vmware-rest-9.0](https://github.com/evoila/meho/issues/227)
 - Parent Task: [#498 G3.1-T1 VmwareRestConnector](https://github.com/evoila/meho/issues/498)
 - Composite-helper Task: [#504 G3.1-T4 register_composite_operation()](https://github.com/evoila/meho/issues/504)

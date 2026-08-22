@@ -670,13 +670,28 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "NICs."
             ),
         },
+        "nested_hv": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, the handler enables nested hardware-assisted "
+                "virtualization (VHV) after NIC attach and before any "
+                "power-on: a vim ``ReconfigVM_Task`` with "
+                "``VirtualMachineConfigSpec.nestedHVEnabled=true`` through "
+                "the governed vmomi write seam (version-correct on vCenter "
+                "8.0.x and 9.x — the flag has no REST expression), polled "
+                "to a terminal state. A failed leg follows the composite's "
+                "rollback contract."
+            ),
+        },
         "power_on_after_create": {
             "type": "boolean",
             "default": False,
             "description": (
                 "When true, the handler issues "
                 "``POST:/vcenter/vm/{vm}/power?action=start`` after "
-                "NIC attach. Default false leaves the VM powered-off."
+                "NIC attach (and after the optional ``nested_hv`` "
+                "reconfigure). Default false leaves the VM powered-off."
             ),
         },
     },
@@ -1212,7 +1227,7 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Per-step success ledger: ``folder_lookup``, "
-                "``create``, ``nic_attach``, ``power_on``."
+                "``create``, ``nic_attach``, ``nested_hv``, ``power_on``."
             ),
         },
         "failed_step": {
@@ -1226,6 +1241,15 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "Human-readable explanation of the rollback trigger; "
                 "``null`` when ``status='created'``."
+            ),
+        },
+        "nested_hv": {
+            "type": "boolean",
+            "description": (
+                "Applied VHV state (#3093). Present only when the request "
+                "carried the ``nested_hv`` param — a param-absent call "
+                "keeps the pre-#3093 envelope byte-identical. ``true`` "
+                "iff the ``ReconfigVM_Task`` leg completed."
             ),
         },
     },

@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `vm.create` `nested_hv`: governed VHV enable via the vim substrate (#3093)
+
+- `vmware.composite.vm.create` grows an optional `nested_hv: boolean` param:
+  when true, the composite enables nested hardware-assisted virtualization
+  after create + NIC attach and **before any power-on** — a vim
+  `ReconfigVM_Task` with `VirtualMachineConfigSpec.nestedHVEnabled=true`
+  through the governed vmomi write seam (`_write_vmomi_sub_op` →
+  `_post_vmomi_json`, the `/sdk/vim25/{release}` mount that is
+  version-correct on vCenter 8.0.x **and** 9.x), task-polled to terminal.
+  The flag has no REST expression and raw VI-JSON dispatch 404s on 8.0.x
+  (#2466), so this is the only cross-version governed path — the flag a
+  nested-hypervisor build cannot skip. A failed leg (transport fault, task
+  fault, or poll timeout) follows the composite's existing rollback
+  contract; the `created` envelope echoes the applied `nested_hv` state
+  when the param was supplied, and a param-absent call stays byte-identical
+  to before. Reconcile lane pins the vim paths + `nestedHVEnabled` against
+  the pinned `vcenter-9.0/vi-json.yaml`.
+
 ### Added — governed content-library ISO import-from-URL + iso.image mount recipe (#3086)
 
 - Verified + documented the fully-governed path for pulling a bootable ISO

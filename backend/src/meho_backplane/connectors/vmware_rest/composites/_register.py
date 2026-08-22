@@ -392,11 +392,12 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.create",
         handler=vm_create_composite,
-        summary="Create a VM with NIC attach + optional power-on; rollback on failure.",
+        summary="Create a VM with NIC attach, optional VHV enable + optional power-on.",
         description=(
             "Orchestrates folder lookup, POST:/vcenter/vm create, per-NIC "
             "adapter create via POST:/vcenter/vm/{vm}/hardware/ethernet, "
-            "and optional "
+            "an optional nested_hv vim ReconfigVM_Task (nestedHVEnabled, "
+            "task-polled, applied before any power-on), and optional "
             "POST:/vcenter/vm/{vm}/power start. Partial-failure rollback: "
             "if any step after the create succeeds fails, the half-"
             "created VM is removed via DELETE:/vcenter/vm/{vm} so the "

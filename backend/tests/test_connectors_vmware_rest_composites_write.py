@@ -474,6 +474,295 @@ async def test_vm_create_gated_create_returns_awaiting_approval_no_write(
     assert [c["method"] for c in conn.calls] == ["GET"]
 
 
+class _UnifiedRecordingConnector(_RecordingConnector):
+    """Recording connector that logs vmomi POSTs into the shared ``calls`` list.
+
+    ``_RecordingConnector`` keeps REST and vmomi calls in two separate
+    lists, which loses their *relative* order. The vm.create VHV tests
+    need the cross-seam ordering proof (reconfigure + task poll strictly
+    before the power-on POST), so this subclass additionally appends a
+    ``POST-VMOMI`` marker into ``calls`` before delegating.
+    """
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.calls.append(
+            {
+                "method": "POST-VMOMI",
+                "path": path,
+                "query": None,
+                "body": json,
+                "timeout": httpx.USE_CLIENT_DEFAULT,
+            }
+        )
+        return await super()._post_vmomi_json(target, path, operator=operator, json=json)
+
+
+_VMOMI_TASK_INFO_READ_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_reconfigures_before_power_on(gate: _GateRecorder) -> None:
+    """nested_hv=true: ReconfigVM_Task + task poll run after NIC attach, before power-on."""
+    conn = _UnifiedRecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+            "/api/vcenter/vm/vm-99/hardware/ethernet": {"value": "nic-1"},
+            "/api/vcenter/vm/vm-99/power?action=start": {},
+        },
+        vmomi={"/VirtualMachine/vm-99/ReconfigVM_Task": _task_moref("task-501")},
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-01",
+            "guest_os": "VMKERNEL_8",
+            "nics": [{"network": "net-3"}],
+            "nested_hv": True,
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    # The ordering criterion: the vim reconfigure + its Task.info poll land
+    # strictly between the NIC attach and the power-on POST.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/folder"),
+        ("POST", "/api/vcenter/vm"),
+        ("POST", "/api/vcenter/vm/vm-99/hardware/ethernet"),
+        ("POST-VMOMI", "/VirtualMachine/vm-99/ReconfigVM_Task"),
+        ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),
+        ("POST", "/api/vcenter/vm/vm-99/power?action=start"),
+    ]
+    # The reconfigure body is the one-field VirtualMachineConfigSpec.
+    assert conn.vmomi_calls[0] == (
+        "/VirtualMachine/vm-99/ReconfigVM_Task",
+        {"spec": {"nestedHVEnabled": True}},
+    )
+
+    # Governance: the vim write is gated under its canonical vi-json op_id,
+    # with params naming the entity, between the NIC and power writes.
+    assert gate.gated_op_ids == [
+        "POST:/vcenter/vm",
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    ]
+    assert gate.calls[2]["params"] == {"vm": "vm-99", "nested_hv": True}
+
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create", "nic_attach", "nested_hv", "power_on"],
+        "failed_step": None,
+        "rollback_reason": None,
+        "nested_hv": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_transport_fault_rolls_back(gate: _GateRecorder) -> None:
+    """A transport fault on the VHV reconfigure rolls back via DELETE."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+            "/api/vcenter/vm/vm-77": {},  # DELETE rollback
+        },
+        vmomi={
+            "/VirtualMachine/vm-77/ReconfigVM_Task": _http_error(
+                500, "https://vc/sdk/vim25/8.0.3.0/VirtualMachine/vm-77/ReconfigVM_Task"
+            )
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-02",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert ("DELETE", "/api/vcenter/vm/vm-77") in [(c["method"], c["path"]) for c in conn.calls]
+    assert out["status"] == "rolled_back"
+    assert out["vm_id"] is None
+    assert out["failed_step"] == "nested_hv"
+    assert "nested_hv reconfigure failed" in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_task_fault_rolls_back(gate: _GateRecorder) -> None:
+    """A faulted ReconfigVM_Task rolls back; the vim fault message is surfaced."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+            "/api/vcenter/vm/vm-77": {},  # DELETE rollback
+        },
+        vmomi={
+            "/VirtualMachine/vm-77/ReconfigVM_Task": _task_moref("task-9"),
+            "Task": _task_info_result("task-9", "error", "VHV not supported on this host"),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-03",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert ("DELETE", "/api/vcenter/vm/vm-77") in [(c["method"], c["path"]) for c in conn.calls]
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nested_hv"
+    assert "VHV not supported on this host" in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_poll_timeout_rolls_back(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A VHV task-poll timeout counts as leg failure: rollback, not 'created'."""
+    monkeypatch.setattr(_write, "_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+            "/api/vcenter/vm/vm-77": {},  # DELETE rollback
+        },
+        vmomi={
+            "/VirtualMachine/vm-77/ReconfigVM_Task": _task_moref("task-9"),
+            "Task": _task_info_result("task-9", "running"),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-04",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert ("DELETE", "/api/vcenter/vm/vm-77") in [(c["method"], c["path"]) for c in conn.calls]
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "nested_hv"
+    assert "did not reach a terminal state" in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_gated_nested_hv_returns_awaiting_no_power_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated VHV reconfigure short-circuits: no vmomi write, no power-on."""
+    vim_op = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={vim_op: _awaiting(vim_op)}))
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-1", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-77"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "esx-nested-05",
+            "guest_os": "VMKERNEL_8",
+            "nested_hv": True,
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == vim_op
+    assert conn.vmomi_calls == []
+    # The power-on never fired: the folder GET and create POST are the only calls.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/folder"),
+        ("POST", "/api/vcenter/vm"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_without_nested_hv_param_is_byte_identical(gate: _GateRecorder) -> None:
+    """Param absent: no vim call, no vim gate, and the envelope carries no new key."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+            "/api/vcenter/vm/vm-99/power?action=start": {},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.vmomi_calls == []
+    assert "POST:/VirtualMachine/{moId}/ReconfigVM_Task" not in gate.gated_op_ids
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create", "power_on"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_nested_hv_false_skips_leg_and_echoes_false(
+    gate: _GateRecorder,
+) -> None:
+    """An explicit nested_hv=false skips the vim leg and echoes the applied state."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-02",
+            "guest_os": "UBUNTU_64",
+            "nested_hv": False,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.vmomi_calls == []
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create"],
+        "failed_step": None,
+        "rollback_reason": None,
+        "nested_hv": False,
+    }
+
+
 # ===========================================================================
 # vm.clone
 # ===========================================================================

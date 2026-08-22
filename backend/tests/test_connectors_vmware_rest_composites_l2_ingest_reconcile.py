@@ -721,3 +721,77 @@ def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             f"{manifest_name} vim sub-op targets a path the spec does not serve"
         )
+
+
+# ---------------------------------------------------------------------------
+# vm.create VHV leg VI-JSON sub-op reconciliation (#3093)
+# ---------------------------------------------------------------------------
+#
+# vm.create's optional ``nested_hv`` leg is vi-json, not vcenter REST:
+# ``VirtualMachineConfigSpec.nestedHVEnabled`` has no REST expression (the
+# #3087 recipe lanes pin that gap) and raw VI-JSON dispatch mounts on
+# ``/api`` — a 9.x-fleet shape that 404s on vCenter 8.0.x (#2466) — so the
+# leg rides the same governed vmomi substrate as disk-grow:
+# ``POST:/VirtualMachine/{moId}/ReconfigVM_Task`` (the flag write) plus the
+# shared Task-poll read ``RetrievePropertiesEx``. Declared in
+# ``_write._VIM_SUB_OPS_VM_CREATE`` (deliberately NOT in the ``_SUB_OPS_*``
+# namespace, so the vcenter.yaml sweep above skips it).
+
+
+def test_vm_create_vhv_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the vm.create VHV vi-json manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_CREATE) == {
+        "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+
+
+def test_vm_create_vhv_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The VHV-leg vi-json op_ids are byte-for-byte what the parser emits.
+
+    Same proof shape as the #2893-#2895 round-trips above: the ``{moId}``
+    path template survives the parser, so ``enforce_subop_policy``'s op_id /
+    a grant's op_pattern resolve against the ingested rows once the operator
+    ingests ``vi-json.yaml``.
+    """
+    required = set(_write._VIM_SUB_OPS_VM_CREATE)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_create_vhv_paths_and_flag_exist_in_the_pinned_spec() -> None:
+    """The VHV vim paths are real POST paths and ``nestedHVEnabled`` is served.
+
+    The definitive #3093 grounding: the leg targets paths the pinned
+    ``vi-json.yaml`` actually serves, and the one field its body sets —
+    ``VirtualMachineConfigSpec.nestedHVEnabled`` — exists in the pinned
+    schema corpus (the schema-level pin lives in the #3087 recipe reconcile
+    lane; this is the cheap text-level guard alongside the path check).
+    Skips when the spec-shelf is not configured (the canary's convention),
+    so CI is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_CREATE:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "vm.create VHV vi-json sub-op targets a path the spec does not serve"
+        )
+    assert "nestedHVEnabled:" in spec_text, (
+        "``nestedHVEnabled`` is absent from the pinned vi-json.yaml — the "
+        "vm.create VHV reconfigure body sets a field the spec does not serve"
+    )

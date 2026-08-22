@@ -29,6 +29,7 @@ everywhere (including public CI, where the shelf is absent).
 
 from __future__ import annotations
 
+from meho_backplane.operations.ingest import parse_openapi
 from tests._governed_iso_recipe import RECIPE_OPS
 from tests._spec_shelf import (
     assert_op_ids_served,
@@ -128,8 +129,6 @@ def test_recipe_required_body_fields_match_the_pinned_spec() -> None:
     raw parsed body schema (``required`` is not part of
     :func:`openapi_request_body_props`' property-name map).
     """
-    from meho_backplane.operations.ingest import parse_openapi
-
     spec_path = require_shelf_spec("vcenter-9.0", "vcenter.yaml")
     rows = parse_openapi(
         f"file://{spec_path}",

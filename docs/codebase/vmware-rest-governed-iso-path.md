@@ -38,7 +38,7 @@ itself; no file bytes transit MEHO):
 |---|------|-------|----------------|-----------------|
 | 0a | List library ids | `GET:/content/library` | — | `list[str]` |
 | 0b | List item ids in a library | `GET:/content/library/item?library_id` | `{library_id}` | `list[str]` |
-| 1 | Create the item | `POST:/content/library/item` | `{body: {library_id, name, type: "iso", description?}}` | `{"value": "<item-id>"}` |
+| 1 | Create the item | `POST:/content/library/item` | `{body: {library_id, name, type?, description?}}` | `{"value": "<item-id>"}` |
 | 2 | Create the update session | `POST:/content/library/item/update-session` | `{body: {library_item_id}}` | `{"value": "<session-id>"}` |
 | 3 | Add the PULL file | `POST:/content/library/item/update-session/{updateSessionId}/file` | `{updateSessionId, body: {name, source_type: "PULL", source_endpoint: {uri: "http://depot/…"}}}` | file-info object (`status: WAITING_FOR_TRANSFER → …`) |
 | 4 | Complete the session | `POST:/content/library/item/update-session/{updateSessionId}?action=complete` | `{updateSessionId}` (bodyless) | `{}` (204) |
@@ -60,9 +60,13 @@ backed by the library item's ISO):
 | 6 | Mount | `POST:/vcenter/iso/image?action=mount` | `{body: {library_item, vm}}` (both required) | `{"value": "<cdrom-id>"}` |
 | 7 | Unmount | `POST:/vcenter/iso/image?action=unmount` | `{body: {vm, cdrom}}` (both required) | `{}` (204) |
 
-The `cdrom` argument of unmount is the string mount returned. `type:
-"iso"` on step 1 selects the ISO type-adapter plugin so the item
-publishes as a mountable ISO.
+The `cdrom` argument of unmount is the string mount returned. On step
+1, `ItemModel.type` is an **open, optional** type-adapter identifier
+per the pinned spec (the spec enumerates no values); `"iso"` is the
+*conventional* value for ISO items but is **not spec-pinned** — its
+live acceptance rides the deferred live-appliance verification (see
+Known gaps). Mount itself keys on the item carrying an ISO file, per
+the Iso.Image API description.
 
 The canonical machine-readable form of this table is
 `backend/tests/_governed_iso_recipe.py` — both test lanes consume it,
@@ -150,8 +154,10 @@ As ingested from the pinned spec (method-based heuristic in
 - **Live-appliance verification deferred.** Everything here is
   grounded on the pinned spec + dispatch-path unit tests with mocked
   vendor responses; the first live run (real depot, real vCenter)
-  should confirm transfer-state transitions and the mount's returned
-  cdrom id round-trip. (Generic-dispatcher adjacent finding, not a
+  should confirm transfer-state transitions, the mount's returned
+  cdrom id round-trip, and the conventional `type: "iso"` item-type
+  literal (the pinned spec leaves `ItemModel.type` open, so the
+  literal is convention, not spec-verified). (Generic-dispatcher adjacent finding, not a
   recipe blocker: ingested **non-idempotent** ops drop query-located
   params — `dispatch_ingested` does not forward `request.query` to
   `_post_json`. No op in this recipe carries one; every POST

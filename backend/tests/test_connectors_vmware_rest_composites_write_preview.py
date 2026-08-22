@@ -384,6 +384,7 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
                 "cpu_count": 4,
                 "memory_mib": 8192,
                 "nics": [{"network": "net-1"}, {"network": "net-2"}],
+                "nested_hv": True,
                 "power_on_after_create": True,
             }
         )
@@ -395,6 +396,7 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
         "cpu_count": 4,
         "memory_mib": 8192,
         "networks": ["net-1", "net-2"],
+        "nested_hv": True,
         "power_on_after_create": True,
     }
 
@@ -407,6 +409,7 @@ async def test_vm_create_preview_mirrors_handler_defaults() -> None:
     assert preview["cpu_count"] == 1
     assert preview["memory_mib"] == 1024
     assert preview["networks"] == []
+    assert preview["nested_hv"] is False
     assert preview["power_on_after_create"] is False
 
 
@@ -925,6 +928,7 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
             "cpu_count": 1,
             "memory_mib": 1024,
             "networks": [],
+            "nested_hv": False,
             "power_on_after_create": False,
         },
         "preview_populated": True,

@@ -584,7 +584,7 @@ enum) are:
 
 | Composite | Status values |
 | --- | --- |
-| `vm.create` | `created`, `rolled_back` |
+| `vm.create` | `created`, `rolled_back` (the optional `nested_hv` VHV leg (#3093) is a vim `ReconfigVM_Task` through the governed vmomi seam, task-polled, applied after NIC attach and before any power-on; a leg failure — transport fault, task fault, or poll timeout — rolls back like the other post-create steps. The `created` envelope echoes the applied `nested_hv` state only when the param was supplied, so a param-absent call keeps the pre-#3093 envelope byte-identical) |
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
 | `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
@@ -674,7 +674,13 @@ capacity field, spec-verified), so the capacity change is only reachable
 through vim `VirtualMachine.ReconfigVM_Task`. This is the connector's first
 *mutating* VI-JSON call, and it establishes two reusable seams that Tasks D
 (`vm.clone_from_template`, `CloneVM_Task`, #2894) and E (`cluster.drs_rule.create`,
-`ReconfigureComputeResource_Task`, #2895) ride.
+`ReconfigureComputeResource_Task`, #2895) ride. `vm.create`'s optional
+`nested_hv` leg (#3093) rides the same two seams:
+`VirtualMachineConfigSpec.nestedHVEnabled` has no REST expression (pinned by
+the #3087 recipe lanes) and *raw* VI-JSON dispatch mounts on `/api` — a
+9.x-fleet accommodation that 404s on vCenter 8.0.x (#2466) — so the
+substrate's `/sdk/vim25/{release}` mount is the only cross-version governed
+path to the flag.
 
 **1. Governed mutating vmomi sub-op — `_write_vmomi_sub_op` (in `_write.py`).**
 A mutating vmomi POST is a *write* sub-op, not a transport detail, so it
@@ -1080,7 +1086,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
 | `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
-| `vm.create` | creation-spec echo (name, guest_os, sizing, networks, power-on) | param echo, no I/O |
+| `vm.create` | creation-spec echo (name, guest_os, sizing, networks, nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.deploy_from_library` | deploy-coordinates echo (item ref, placement, network mappings, provisioning, `ovf_property_keys` — **ids only**, never values #1503, power-on) | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |

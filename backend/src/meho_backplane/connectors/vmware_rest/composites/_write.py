@@ -294,6 +294,29 @@ _PROP_CONFIG_HARDWARE_DEVICE = "config.hardware.device"
 # ``vm.clone`` convention.
 _DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
 
+# vm.create's optional VHV leg (#3093) rides the same two vim paths.
+# ``VirtualMachineConfigSpec.nestedHVEnabled`` has no REST expression (the
+# pinned ``vcenter.yaml`` serves no ``hardware_virtualization`` / ``nestedHV``
+# spelling anywhere, pinned by the #3087 recipe lanes) and *raw* VI-JSON
+# dispatch mounts on ``/api`` — a 9.x-fleet accommodation that 404s on
+# vCenter 8.0.x (#2466) — so the composites' vim substrate
+# (:func:`_write_vmomi_sub_op` → ``_post_vmomi_json`` on the documented
+# ``/sdk/vim25/{release}`` base) is the only cross-version governed path to
+# the flag. ``RetrievePropertiesEx`` is the shared Task-poll read.
+_VIM_SUB_OPS_VM_CREATE: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIG_VM_TASK,
+)
+
+# Default wall-clock bound for the VHV ReconfigVM_Task poll — the 600s
+# convention; module-global so tests can zero it.
+_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS = 600.0
+
+# The one-field ``VirtualMachineConfigSpec`` the VHV reconfigure sends. The
+# ``"spec"`` key is the vim request type's genuine required parameter (the
+# legacy-envelope sweep #2973 does not apply to vim bodies).
+_NESTED_HV_RECONFIG_BODY: Final[dict[str, Any]] = {"spec": {"nestedHVEnabled": True}}
+
 # vim (VI-JSON) op_ids for the folder-template clone write path (#2894).
 # Same ``METHOD:/path`` shape the ingest parser emits from ``vi-json.yaml``
 # (moId rides the path as ``{moId}``); kept out of the ``_SUB_OPS_*``
@@ -960,6 +983,65 @@ async def _rollback_created_vm(
         return
 
 
+async def _enable_nested_hv(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_id: str,
+) -> tuple[OperationResult | None, str | None]:
+    """Enable VHV on a freshly-created (powered-off) VM via ``ReconfigVM_Task``.
+
+    The #3093 leg of :func:`vm_create_composite`: issues the one-field
+    ``nestedHVEnabled`` reconfigure through the governed vmomi write seam
+    (:func:`_write_vmomi_sub_op` — version-correct on vCenter 8.0.x *and*
+    9.x, unlike raw VI-JSON dispatch) and drives the returned ``*_Task``
+    MoRef to a terminal state via :func:`poll_vim_task`.
+
+    Returns ``(gate, failure_reason)``:
+
+    * ``(gate, None)`` — the #2254 seam parked/denied the write; the caller
+      returns the :class:`OperationResult` verbatim (no reconfigure fired).
+    * ``(None, None)`` — VHV applied (task reached ``success``).
+    * ``(None, reason)`` — the leg failed (transport fault, task fault, or
+      poll timeout); the caller folds *reason* into vm.create's existing
+      rollback contract. A timeout counts as failure: the composite can
+      only report ``created`` when every requested step verifiably landed.
+    """
+    try:
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_RECONFIG_VM_TASK,
+            vmomi_path=f"/VirtualMachine/{vm_id}/ReconfigVM_Task",
+            body=_NESTED_HV_RECONFIG_BODY,
+            params={"vm": vm_id, "nested_hv": True},
+        )
+        if gate is not None:
+            return gate, None
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        return None, f"nested_hv reconfigure failed: {exc}"
+    if outcome.state == TASK_STATE_ERROR:
+        return None, (
+            f"nested_hv ReconfigVM_Task on vm {vm_id!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return None, (
+            f"nested_hv ReconfigVM_Task {outcome.task} did not reach a terminal "
+            f"state within {int(_VM_CREATE_VHV_TASK_TIMEOUT_SECONDS)}s"
+        )
+    return None, None
+
+
 async def vm_create_composite(
     *,
     operator: Operator,
@@ -967,10 +1049,14 @@ async def vm_create_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Create a VM with NIC attach + optional power-on; rollback on failure.
+    """Create a VM with NIC attach, optional VHV enable + optional power-on.
 
     Op-id: ``vmware.composite.vm.create``. See module docstring for the
     sub-op chain, the direct-session governance seam, and rollback semantics.
+    The optional ``nested_hv`` leg (#3093) runs after NIC attach and strictly
+    **before** any power-on — a powered-on reconfigure of
+    ``nestedHVEnabled`` is invalid — and follows the same rollback contract
+    as the other post-create steps.
     """
     folder_name = params["folder_name"]
     name = params["name"]
@@ -978,6 +1064,7 @@ async def vm_create_composite(
     cpu_count = int(params.get("cpu_count", 1))
     memory_mib = int(params.get("memory_mib", 1024))
     nics: list[dict[str, Any]] = list(params.get("nics") or [])
+    nested_hv = bool(params.get("nested_hv", False))
     power_on = bool(params.get("power_on_after_create", False))
 
     steps: list[str] = []
@@ -1042,6 +1129,19 @@ async def vm_create_composite(
     if nics:
         steps.append("nic_attach")
 
+    if nested_hv:
+        gate, vhv_failure = await _enable_nested_hv(
+            connector=connector, target=target, operator=operator, vm_id=vm_id
+        )
+        if gate is not None:
+            return gate
+        if vhv_failure is not None:
+            await _rollback_created_vm(
+                connector=connector, target=target, operator=operator, vm_id=vm_id
+            )
+            return _rolled_back(steps=steps, failed_step="nested_hv", reason=vhv_failure)
+        steps.append("nested_hv")
+
     if power_on:
         try:
             gate, _ = await _write_sub_op(
@@ -1060,13 +1160,18 @@ async def vm_create_composite(
             return gate
         steps.append("power_on")
 
-    return {
+    created: dict[str, Any] = {
         "status": "created",
         "vm_id": vm_id,
         "steps_succeeded": steps,
         "failed_step": None,
         "rollback_reason": None,
     }
+    if "nested_hv" in params:
+        # Applied state, echoed only when the operator asked for the leg —
+        # a param-absent call keeps today's envelope byte-identical (#3093).
+        created["nested_hv"] = nested_hv
+    return created
 
 
 # ===========================================================================

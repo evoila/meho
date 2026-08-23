@@ -597,7 +597,9 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 #:
 #: Orchestrates folder lookup -> ``POST:/vcenter/vm`` -> per-NIC attach
 #: -> optional power-on. Partial-failure rollback removes the half-
-#: created VM via ``DELETE:/vcenter/vm/{vm}``.
+#: created VM via ``DELETE:/vcenter/vm/{vm}``. Optional placement pins
+#: (``resource_pool`` / ``datastore`` / ``host`` moids, #3096) thread
+#: into the CreateSpec ``placement`` alongside the resolved folder moid.
 VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -608,6 +610,40 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "Display name of the target VM folder. Resolved via "
                 "``GET:/vcenter/folder?filter.names=...`` to the moid "
                 "passed to ``POST:/vcenter/vm``."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional ResourcePool moid pin (#3096). Threaded into "
+                "the CreateSpec ``placement`` alongside the resolved "
+                "folder moid. The pinned spec marks ``resource_pool`` as "
+                "currently required when neither host nor cluster is "
+                "given, so multi-host clusters should pin it; absent, "
+                "vCenter's placement defaulting applies."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional Datastore moid pin (#3096) for the VM home and "
+                "disk storage. Threaded into the CreateSpec "
+                "``placement``; absent, vCenter's placement defaulting "
+                "applies — on hosts with host-local datastores the "
+                "default may land the VM on the wrong store."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional HostSystem moid pin (#3096). Threaded into the "
+                "CreateSpec ``placement``; per the pinned spec a "
+                "``resource_pool`` given alongside it must belong to "
+                "that host. Absent, vCenter's placement defaulting "
+                "applies."
             ),
         },
         "name": {

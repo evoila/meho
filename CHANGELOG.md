@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `vm.create` placement passthrough: resource_pool / datastore / host pins (#3096)
+
+- `vmware.composite.vm.create` accepts optional `resource_pool`, `datastore`
+  and `host` moid params and threads the supplied ones into the CreateSpec
+  `placement` alongside the resolved folder moid. Folder-only placement
+  cannot pin a multi-host cluster with host-local datastores — the pinned
+  spec marks `resource_pool` as currently required when neither host nor
+  cluster is given, so an underspecified create either fails at the vendor
+  or lands wherever vCenter defaults it — and the composite is the only
+  governed path for a nested-hypervisor-ready VM (its #3093 `nested_hv` leg
+  rides the vim substrate REST cannot express). Absent params keep the
+  create body and the `created` envelope byte-identical (exact-body and
+  exact-envelope regressions pin both), the approval preview echoes the
+  pins, and the pinned `Vcenter.VM.PlacementSpec` field set is reconciled
+  in the nested-ESXi spec lane.
+
 ### Added — `vm.create` `nested_hv`: governed VHV enable via the vim substrate (#3093)
 
 - `vmware.composite.vm.create` grows an optional `nested_hv: boolean` param:

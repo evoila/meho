@@ -1717,18 +1717,49 @@ parse_openapi
       ├─ _build_parameter_schema
       │  ├─ _resolve_shallow_ref      # $ref → #/components/schemas/X
       │  ├─ _build_param_property     # one property per path/query/header
-      │  └─ _build_body_property      # requestBody under "body" key
+      │  ├─ _build_body_property      # requestBody under "body" key
+      │  └─ collect_component_schema_closure  # bundle nested-ref targets (#3095)
       ├─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
-      └─ _assert_json_serializable    # fail-closed: param/response schema must JSON-encode (#2272)
+      ├─ _assert_json_serializable    # fail-closed: param/response schema must JSON-encode (#2272)
+      └─ _assert_parameter_schema_standalone  # fail-closed: every stored $ref must self-resolve (#3095)
 ```
 
 `_resolve_shallow_ref` is the load-bearing helper. It inlines exactly
 one level of `$ref` into the parameter / response / body schema and
-preserves any nested `$ref` strings verbatim. The intent is that the
-parameter_schema is self-contained enough for the dispatcher's
-JSON-Schema validator to validate the immediate parameter shape;
-deeper schema dereferencing (chasing nested `$ref`s) is the
-dispatcher's concern (G0.6-T5 + T2's tracking of `components.schemas`).
+preserves any nested `$ref` strings verbatim. Since #3095,
+`_build_parameter_schema` then bundles every component those nested
+refs transitively reference into the stored schema's own
+`components.schemas` key (`collect_component_schema_closure` in
+`refs.py` — cycle-safe seen-set walk, sorted keys for deterministic
+bytes, schemas with no nested refs gain no key and persist
+byte-identically). The dispatcher's registry-free
+`Draft202012Validator` resolves the nested refs as same-document JSON
+Pointers, so a stored descriptor validates params **standalone**. The
+pre-#3095 contract ("deeper dereferencing is the dispatcher's
+concern") was a broken promise — the dispatcher never had the
+components, so any op whose body schema carried a nested ref crashed
+validation with an unhandled `PointerToNowhere` → HTTP 500 (the
+observed content-library update-session file op). Two guards keep the
+defect class out:
+
+* ingest-time — a nested ref to a component the spec never defines
+  raises `InvalidSchemaError` during the closure walk, and
+  `_assert_parameter_schema_standalone` (same fail-closed posture and
+  proto-build placement as `_assert_json_serializable`) re-walks the
+  final stored document rejecting any `$ref` that does not resolve
+  within it (absolute `#/$defs/...` pointers, `$anchor` fragments,
+  cross-document residue). `response_schema` is deliberately **not**
+  bundled or linted: its only dispatch-time consumer is the JSONFlux
+  reducer, which never resolves refs, and bundling the large recursive
+  vCenter/NSX response types would multiply per-op storage for no
+  functional gain.
+* dispatch-time — `validate_params` (`operations/_validate.py`) maps
+  `referencing.exceptions.Unresolvable` to the typed
+  `InvalidOpSchemaError`, which the dispatcher / request preview /
+  gateway mint each convert to a structured `invalid_op_schema`
+  refusal (extras carry `missing_ref` + re-ingest remediation) —
+  covering rows persisted by pre-#3095 ingests until they are
+  re-ingested.
 
 The four supported component buckets are: `#/components/schemas/*`,
 `#/components/parameters/*` (vi-json.yaml's shared `moId`),

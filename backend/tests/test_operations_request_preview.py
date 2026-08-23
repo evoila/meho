@@ -717,6 +717,53 @@ async def test_preview_invalid_params_returns_structured_error(
 
 
 @pytest.mark.asyncio
+async def test_preview_invalid_op_schema_returns_structured_error(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A poisoned stored schema -> structured invalid_op_schema envelope (#3095).
+
+    The preview mirrors dispatch Step 3, so a descriptor whose stored
+    ``parameter_schema`` carries a dangling ``$ref`` must yield the same
+    governed ``invalid_op_schema`` envelope dispatch returns — never an
+    unhandled ``PointerToNowhere`` -> 500.
+    """
+    connector = _register_recording_gh_connector()
+    await _insert_ingested_descriptor(
+        session=session,
+        product="gh",
+        version="3",
+        impl_id="gh-rest",
+        op_id="POST:/repos/{owner}/{repo}/issues",
+        embedding=stub_embedding_service.encode_one.return_value,
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {
+                    "$ref": "#/components/schemas/Ghost",
+                    "x-meho-param-loc": "body",
+                }
+            },
+        },
+    )
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="gh-rest-3",
+        op_id="POST:/repos/{owner}/{repo}/issues",
+        target=_FakeTarget(name="gh-prod"),
+        params={"body": {"title": "hi"}},
+    )
+
+    assert envelope["status"] == "error"
+    assert envelope["error"].startswith("invalid_op_schema:")
+    assert envelope["extras"]["error_code"] == "invalid_op_schema"
+    assert envelope["extras"]["missing_ref"] == "#/components/schemas/Ghost"
+    assert connector.calls == []
+
+
+@pytest.mark.asyncio
 async def test_preview_unknown_op_returns_structured_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,

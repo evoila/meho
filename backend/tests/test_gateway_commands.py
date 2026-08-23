@@ -96,7 +96,10 @@ def _operator() -> Operator:
 
 
 def _descriptor(
-    *, safety_level: str = "safe", requires_approval: bool = False
+    *,
+    safety_level: str = "safe",
+    requires_approval: bool = False,
+    parameter_schema: dict[str, object] | None = None,
 ) -> EndpointDescriptor:
     return EndpointDescriptor(
         product="net",
@@ -106,7 +109,7 @@ def _descriptor(
         source_kind="typed",
         safety_level=safety_level,
         requires_approval=requires_approval,
-        parameter_schema={},
+        parameter_schema=parameter_schema if parameter_schema is not None else {},
         is_enabled=True,
     )
 
@@ -178,6 +181,45 @@ async def test_mint_refuses_non_safe_op(monkeypatch: pytest.MonkeyPatch, level: 
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.OP_NOT_SAFE
+    assert await _count(GatewayCommand) == 0
+    assert await _count(ApprovalRequest) == 0
+
+
+async def test_mint_refuses_poisoned_parameter_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stored schema with a dangling $ref refuses the mint fail-closed (#3095).
+
+    Same defect class as the dispatcher's ``invalid_op_schema`` branch:
+    the descriptor — not the caller's params — is broken, so the refusal
+    carries a distinct code and never reaches the policy gate or a runner.
+    """
+    await _seed_tenant()
+    _patch_lookup(
+        monkeypatch,
+        _descriptor(
+            parameter_schema={
+                "type": "object",
+                "properties": {"host": {"$ref": "#/components/schemas/Ghost"}},
+            }
+        ),
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=dict(_PARAMS),
+            runner_id=_RUNNER,
+        )
+        await session.commit()
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.INVALID_OP_SCHEMA
+    assert result.refusal_reason is not None
+    assert "#/components/schemas/Ghost" in result.refusal_reason
     assert await _count(GatewayCommand) == 0
     assert await _count(ApprovalRequest) == 0
 

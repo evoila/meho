@@ -26,6 +26,7 @@ import httpx
 import pytest
 import respx
 import yaml
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from meho_backplane.operations.ingest import (
@@ -43,6 +44,10 @@ from meho_backplane.operations.ingest.openapi import (
     _MAX_REDIRECTS,
     _assert_fetchable_remote_url,
     _server_base_path,
+)
+from meho_backplane.operations.ingest.refs import (
+    find_unresolvable_local_refs,
+    iter_schema_refs,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
@@ -653,8 +658,11 @@ def test_parse_petstore_30_request_body_inlined_with_param_loc() -> None:
     # $ref to #/components/schemas/Pet got inlined one level deep.
     assert body["type"] == "object"
     assert set(body["properties"].keys()) == {"id", "name", "tag"}
-    # Nested $ref to Tag is preserved verbatim.
+    # Nested $ref to Tag is preserved verbatim...
     assert body["properties"]["tag"] == {"$ref": "#/components/schemas/Tag"}
+    # ...and its target is bundled into the stored document (#3095) so
+    # the dispatcher's registry-free validator can resolve the pointer.
+    assert "Tag" in post.parameter_schema["components"]["schemas"]
     # Body required because requestBody.required == true.
     assert "body" in post.parameter_schema["required"]
 
@@ -2097,3 +2105,250 @@ def test_read_spec_info_version_non_https_scheme_raises_invalid_spec() -> None:
     """Non-https schemes raise ``InvalidSpecError`` from read_spec_info_version too."""
     with pytest.raises(InvalidSpecError, match="https"):
         read_spec_info_version("file:///tmp/nope.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Nested $ref bundling (#3095)
+# ---------------------------------------------------------------------------
+
+
+def _nested_refs_spec(*, transfer_endpoint_defined: bool = True) -> bytes:
+    """A spec whose body schema transitively refs components two hops deep.
+
+    Models the live #3095 shape: the update-session file op's body refs
+    ``AddSpec`` (inlined at parse), whose ``source_endpoint`` refs
+    ``TransferEndpoint`` (hop 1), whose ``uri`` refs ``Uri`` (hop 2) and
+    whose ``node`` refs the self-recursive ``Node``. With
+    *transfer_endpoint_defined* False the hop-1 component is absent —
+    the descriptor could never validate a body, which must fail ingest.
+    """
+    components: dict[str, object] = {
+        "AddSpec": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "source_endpoint": {"$ref": "#/components/schemas/TransferEndpoint"},
+            },
+            "required": ["name"],
+        },
+        "Uri": {"type": "string"},
+        "Node": {
+            "type": "object",
+            "properties": {"parent": {"$ref": "#/components/schemas/Node"}},
+        },
+    }
+    if transfer_endpoint_defined:
+        components["TransferEndpoint"] = {
+            "type": "object",
+            "properties": {
+                "uri": {"$ref": "#/components/schemas/Uri"},
+                "node": {"$ref": "#/components/schemas/Node"},
+            },
+            "required": ["uri"],
+        }
+    return yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "nested-refs", "version": "1.0.0"},
+            "paths": {
+                "/library/item/update-session/{sessionId}/file": {
+                    "post": {
+                        "parameters": [
+                            {
+                                "name": "sessionId",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/AddSpec"}
+                                }
+                            },
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+                "/flat": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"name": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+            },
+            "components": {"schemas": components},
+        }
+    ).encode()
+
+
+def test_parse_nested_refs_bundled_and_schema_validates_standalone() -> None:
+    """AC (#3095): a two-hop-deep ref chain yields a standalone-validating schema.
+
+    The stored ``parameter_schema`` must carry every transitively
+    referenced component under its own ``components.schemas`` key so the
+    dispatcher's registry-free ``Draft202012Validator`` resolves the
+    nested refs as same-document JSON Pointers — a conforming payload
+    validates, a violation reports its deep path, and no
+    ``PointerToNowhere`` escapes.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "nested_refs.yaml", _nested_refs_spec())
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["POST:/library/item/update-session/{sessionId}/file"]
+    schema = op.parameter_schema
+
+    bundle = schema["components"]["schemas"]
+    assert set(bundle.keys()) == {"Node", "TransferEndpoint", "Uri"}
+    # Nested refs are preserved verbatim — bundling adds targets, never
+    # rewrites pointers.
+    body = schema["properties"]["body"]
+    assert body["properties"]["source_endpoint"] == {
+        "$ref": "#/components/schemas/TransferEndpoint"
+    }
+
+    validator = Draft202012Validator(schema)
+    conforming = {
+        "sessionId": "s-1",
+        "body": {
+            "name": "disk.iso",
+            "source_endpoint": {"uri": "https://x", "node": {"parent": {}}},
+        },
+    }
+    assert list(validator.iter_errors(conforming)) == []
+    violations = [
+        (err.json_path, err.message)
+        for err in validator.iter_errors(
+            {"sessionId": "s-1", "body": {"name": "disk.iso", "source_endpoint": {"uri": 42}}}
+        )
+    ]
+    assert violations == [("$.body.source_endpoint.uri", "42 is not of type 'string'")]
+
+
+def test_parse_nested_ref_cycle_terminates_and_bundle_is_sorted() -> None:
+    """Mutually-recursive components bundle once each; keys are sorted.
+
+    ``Node`` refs itself — deep-inlining would never terminate, the
+    closure walk must. Sorted bundle keys keep re-ingests of the same
+    spec byte-deterministic.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "nested_refs.yaml", _nested_refs_spec())
+        rows = parse_openapi(url)
+    op = _by_op_id(rows)["POST:/library/item/update-session/{sessionId}/file"]
+    bundle = op.parameter_schema["components"]["schemas"]
+    assert list(bundle.keys()) == sorted(bundle.keys())
+    assert bundle["Node"]["properties"]["parent"] == {"$ref": "#/components/schemas/Node"}
+
+
+def test_parse_nested_ref_to_missing_component_fails_ingest() -> None:
+    """AC (#3095): a nested ref to an undefined component refuses the ingest.
+
+    Before #3095 the dangling ref was stored silently and every dispatch
+    of the op crashed with an unhandled ``PointerToNowhere`` → 500. The
+    ingest-time lint now fails the parse — same posture as a dangling
+    top-level ref — naming the operation and the missing component.
+    """
+    spec = _nested_refs_spec(transfer_endpoint_defined=False)
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "nested_refs_missing.yaml", spec)
+        with pytest.raises(InvalidSchemaError, match="missing component") as excinfo:
+            parse_openapi(url)
+    message = str(excinfo.value)
+    assert "TransferEndpoint" in message
+    assert "/library/item/update-session/{sessionId}/file" in message
+
+
+def test_parse_schema_without_nested_refs_gains_no_components_key() -> None:
+    """AC (#3095): descriptors with no nested refs persist byte-identically.
+
+    The bundle key is added only when a closure exists, so every
+    well-formed pre-#3095 descriptor re-ingests to the exact same
+    ``parameter_schema`` bytes.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "nested_refs.yaml", _nested_refs_spec())
+        rows = parse_openapi(url)
+    flat = _by_op_id(rows)["POST:/flat"]
+    assert flat.parameter_schema == {
+        "type": "object",
+        "properties": {
+            "body": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "x-meho-param-loc": "body",
+            }
+        },
+    }
+
+
+def test_parse_response_schema_is_deliberately_not_bundled() -> None:
+    """``response_schema`` keeps nested refs unbundled — nothing validates it.
+
+    Scope decision on #3095: the JSONFlux reducer (the response schema's
+    only dispatch-time consumer) never resolves refs, and bundling the
+    large recursive response types of the vCenter/NSX specs would
+    multiply per-op storage for no functional gain.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
+    page = _by_op_id(rows)["GET:/pets"].response_schema
+    assert page is not None
+    assert "components" not in page
+
+
+def test_iter_schema_refs_walks_schema_positions_only() -> None:
+    """Refs in data positions (enum/const/default/example[s], x-*) are not refs.
+
+    A ``$ref``-shaped object inside an example is literal payload data
+    the validator never dereferences — collecting it would fail ingests
+    over pointers that can never be resolved at dispatch. Named-map
+    keywords (``properties``) recurse through their values even when a
+    property is literally named ``enum``.
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "real": {"$ref": "#/components/schemas/Real"},
+            "enum": {"$ref": "#/components/schemas/PropertyNamedEnum"},
+        },
+        "default": {"$ref": "#/components/schemas/NotARef"},
+        "examples": [{"$ref": "#/components/schemas/NotARef"}],
+        "x-vendor": {"$ref": "#/components/schemas/NotARef"},
+        "allOf": [{"$ref": "#/components/schemas/InAllOf"}],
+    }
+    assert sorted(iter_schema_refs(schema)) == [
+        "#/components/schemas/InAllOf",
+        "#/components/schemas/PropertyNamedEnum",
+        "#/components/schemas/Real",
+    ]
+
+
+def test_find_unresolvable_local_refs_reports_only_dangling_pointers() -> None:
+    """The lint resolves pointers against the stored document itself."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "ok": {"$ref": "#/components/schemas/Present"},
+            "bad": {"$ref": "#/components/schemas/Absent"},
+            "defs": {"$ref": "#/$defs/nowhere"},
+        },
+        "components": {"schemas": {"Present": {"type": "string"}}},
+    }
+    assert find_unresolvable_local_refs(schema) == [
+        "#/$defs/nowhere",
+        "#/components/schemas/Absent",
+    ]
+    assert find_unresolvable_local_refs({"$ref": "#"}) == []

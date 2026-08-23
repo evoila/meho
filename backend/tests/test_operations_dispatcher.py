@@ -484,6 +484,62 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
     assert any(err["validator"] == "required" for err in validation)
 
 
+@pytest.mark.asyncio
+async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A stored schema with a dangling $ref -> structured ``invalid_op_schema``.
+
+    #3095 regression: the live descriptor for the content-library
+    update-session file op carried ``$ref:
+    "#/components/schemas/Content.Library.Item.TransferEndpoint"`` with
+    no such component in the stored document. Validation raised an
+    unhandled ``PointerToNowhere`` (``_WrappedReferencingError``) that
+    escaped ``/api/v1/operations/call`` as an HTTP 500. The dispatcher
+    must return the governed envelope instead — blaming the descriptor,
+    not the caller's params — with the missing pointer named.
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.poisoned",
+        handler=_module_handler_returning_dict,
+        summary="Op with a self-broken stored schema.",
+        description="Poisoned descriptor.",
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "body": {"$ref": "#/components/schemas/Content.Library.Item.TransferEndpoint"}
+            },
+        },
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="vault")
+
+    # The params must reach the $ref during validation for the
+    # referencing failure to surface (jsonschema resolves lazily).
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.poisoned",
+        target=target,
+        params={"body": {"uri": "https://x"}},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("invalid_op_schema:")
+    assert result.extras["error_code"] == "invalid_op_schema"
+    assert (
+        result.extras["missing_ref"] == "#/components/schemas/Content.Library.Item.TransferEndpoint"
+    )
+    assert "re-ingest" in result.extras["remediation"]
+
+
 # ---------------------------------------------------------------------------
 # Typed dispatch + audit + broadcast
 # ---------------------------------------------------------------------------

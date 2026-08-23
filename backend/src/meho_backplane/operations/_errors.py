@@ -15,7 +15,8 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
-``unknown_op`` / ``invalid_params`` / ``no_connector`` /
+``unknown_op`` / ``invalid_params`` / ``invalid_op_schema`` /
+``no_connector`` /
 ``ambiguous_connector`` / ``handler_unreachable`` / ``denied`` /
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
@@ -59,6 +60,7 @@ __all__ = [
     "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
+    "result_invalid_op_schema",
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
@@ -140,6 +142,47 @@ def result_invalid_params(
         extras={
             "error_code": "invalid_params",
             "validation_errors": validation_errors,
+        },
+    )
+
+
+def result_invalid_op_schema(
+    op_id: str,
+    missing_ref: str,
+    duration_ms: float,
+) -> OperationResult:
+    """The stored ``parameter_schema`` is self-broken -- a ``$ref`` resolves nowhere.
+
+    #3095. Raised-shape sibling of :func:`result_invalid_params` with the
+    blame inverted: ``invalid_params`` means the *caller's* params failed
+    a sound schema; ``invalid_op_schema`` means the *descriptor's* schema
+    could never validate any input (a nested ``$ref`` was stored without
+    its component -- pre-#3095 ingest, or a hand-registered typed op with
+    a dangling ref). Before #3095 this crashed dispatch with an unhandled
+    ``PointerToNowhere`` -> HTTP 500, indistinguishable from an outage.
+
+    ``extras`` carries ``missing_ref`` (the ``$ref`` spelling the spec
+    author would recognise) and ``remediation``: re-ingesting the
+    connector's spec rebuilds the descriptor with the component bundle,
+    which is the durable fix for rows written by older ingests.
+    """
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=(
+            f"invalid_op_schema: stored parameter_schema for {op_id!r} contains "
+            f"an unresolvable $ref ({missing_ref}); the op cannot validate any "
+            f"params until its descriptor is repaired"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "invalid_op_schema",
+            "missing_ref": missing_ref,
+            "remediation": (
+                "re-ingest the connector's spec (ingestion bundles referenced "
+                "component schemas transitively since #3095); if the ref names "
+                "a component the vendor spec never defines, fix the spec"
+            ),
         },
     )
 

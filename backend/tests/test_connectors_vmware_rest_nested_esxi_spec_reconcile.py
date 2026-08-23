@@ -292,6 +292,31 @@ def test_vm_create_spec_guest_os_is_a_snake_case_free_string_with_esxi_values() 
     assert {"disks", "cdroms", "cpu", "memory", "nics", "boot", "boot_devices"} <= set(props)
 
 
+def test_vm_placement_spec_serves_the_composite_placement_pins() -> None:
+    """``Vcenter.VM.PlacementSpec`` serves the pins ``vm.create`` threads (#3096).
+
+    The composite threads optional ``resource_pool`` / ``datastore`` /
+    ``host`` moids into the CreateSpec ``placement`` alongside the resolved
+    folder moid — the recipe's way to pin a multi-host cluster with
+    host-local datastores. Exact pin: the pinned PlacementSpec is
+    ``{cluster, datastore, folder, host, resource_pool}`` with no
+    schema-level required set (``resource_pool`` is required only by prose,
+    when neither host nor cluster is given). ``cluster`` is served but
+    deliberately not exposed by the composite; a re-pin that grows or
+    hard-requires a placement field fails here, forcing a deliberate
+    schema review.
+    """
+    schema = _component_schema(_vcenter_spec_text(), "Vcenter.VM.PlacementSpec")
+    assert set(schema.get("properties", {})) == {
+        "cluster",
+        "datastore",
+        "folder",
+        "host",
+        "resource_pool",
+    }
+    assert not schema.get("required")
+
+
 # ---------------------------------------------------------------------------
 # vi-json.yaml lanes — the VHV escape hatch
 # ---------------------------------------------------------------------------

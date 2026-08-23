@@ -381,6 +381,9 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
                 "folder_name": "prod",
                 "name": "vm-new",
                 "guest_os": "UBUNTU_64",
+                "resource_pool": "resgroup-8",
+                "datastore": "datastore-11",
+                "host": "host-14",
                 "cpu_count": 4,
                 "memory_mib": 8192,
                 "nics": [{"network": "net-1"}, {"network": "net-2"}],
@@ -393,6 +396,9 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
         "name": "vm-new",
         "guest_os": "UBUNTU_64",
         "folder_name": "prod",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+        "host": "host-14",
         "cpu_count": 4,
         "memory_mib": 8192,
         "networks": ["net-1", "net-2"],
@@ -411,6 +417,10 @@ async def test_vm_create_preview_mirrors_handler_defaults() -> None:
     assert preview["networks"] == []
     assert preview["nested_hv"] is False
     assert preview["power_on_after_create"] is False
+    # No placement pin supplied -> the echo names the vCenter-defaulting gap.
+    assert preview["resource_pool"] is None
+    assert preview["datastore"] is None
+    assert preview["host"] is None
 
 
 async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
@@ -925,6 +935,9 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
             "name": "vm-new",
             "guest_os": "UBUNTU_64",
             "folder_name": "prod",
+            "resource_pool": None,
+            "datastore": None,
+            "host": None,
             "cpu_count": 1,
             "memory_mib": 1024,
             "networks": [],

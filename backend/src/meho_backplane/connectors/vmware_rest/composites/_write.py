@@ -1056,7 +1056,11 @@ async def vm_create_composite(
     The optional ``nested_hv`` leg (#3093) runs after NIC attach and strictly
     **before** any power-on — a powered-on reconfigure of
     ``nestedHVEnabled`` is invalid — and follows the same rollback contract
-    as the other post-create steps.
+    as the other post-create steps. Optional placement pins (#3096:
+    ``resource_pool`` / ``datastore`` / ``host`` moids) thread into the
+    CreateSpec ``placement`` alongside the resolved folder moid; absent
+    pins leave vCenter's placement defaulting untouched and keep the
+    create body byte-identical to a pre-#3096 call.
     """
     folder_name = params["folder_name"]
     name = params["name"]
@@ -1064,6 +1068,9 @@ async def vm_create_composite(
     cpu_count = int(params.get("cpu_count", 1))
     memory_mib = int(params.get("memory_mib", 1024))
     nics: list[dict[str, Any]] = list(params.get("nics") or [])
+    placement_pins: dict[str, Any] = {
+        key: params[key] for key in ("resource_pool", "datastore", "host") if key in params
+    }
     nested_hv = bool(params.get("nested_hv", False))
     power_on = bool(params.get("power_on_after_create", False))
 
@@ -1079,7 +1086,7 @@ async def vm_create_composite(
     create_spec = {
         "name": name,
         "guest_OS": guest_os,
-        "placement": {"folder": folder_moid},
+        "placement": {"folder": folder_moid, **placement_pins},
         "cpu": {"count": cpu_count},
         "memory": {"size_MiB": memory_mib},
     }

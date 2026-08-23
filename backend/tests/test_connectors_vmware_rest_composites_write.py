@@ -397,6 +397,121 @@ async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
 
 
 @pytest.mark.asyncio
+async def test_vm_create_placement_pins_thread_into_the_create_body(gate: _GateRecorder) -> None:
+    """resource_pool / datastore / host moids ride the CreateSpec placement (#3096).
+
+    Exact-body assertion: the three pins land inside ``placement`` alongside
+    the resolved folder moid, and the ``created`` envelope grows no new key
+    (placement is vendor-facing input, not applied state to echo).
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "host": "host-14",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.calls[1]["body"] == {
+        "name": "web-01",
+        "guest_OS": "UBUNTU_64",
+        "placement": {
+            "folder": "folder-7",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "host": "host-14",
+        },
+        "cpu": {"count": 1},
+        "memory": {"size_MiB": 1024},
+    }
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_partial_placement_pin_adds_only_the_supplied_key(
+    gate: _GateRecorder,
+) -> None:
+    """A lone datastore pin adds exactly that key -- no None-filled siblings."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        }
+    )
+    await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.calls[1]["body"]["placement"] == {
+        "folder": "folder-7",
+        "datastore": "datastore-11",
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_without_placement_pins_create_body_is_byte_identical(
+    gate: _GateRecorder,
+) -> None:
+    """Pins absent: the create body is exactly the pre-#3096 shape (folder only)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "cpu_count": 2,
+            "memory_mib": 4096,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.calls[1]["body"] == {
+        "name": "web-01",
+        "guest_OS": "UBUNTU_64",
+        "placement": {"folder": "folder-7"},
+        "cpu": {"count": 2},
+        "memory": {"size_MiB": 4096},
+    }
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_vm_create_nic_failure_rolls_back_via_delete(gate: _GateRecorder) -> None:
     """A NIC-attach transport error triggers DELETE rollback; status=rolled_back."""
     conn = _RecordingConnector(

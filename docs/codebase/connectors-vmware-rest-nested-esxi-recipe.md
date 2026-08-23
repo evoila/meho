@@ -68,6 +68,16 @@ parameter, not an envelope).
   `nested_hv` state.
 - The composite resolves the folder by display name, attaches NICs, and
   rolls back (`DELETE:/vcenter/vm/{vm}`) on partial failure.
+- **Placement is first-class on the composite (#3096):** optional
+  `resource_pool`, `datastore`, `host` (moids) thread into the CreateSpec
+  `placement` alongside the resolved folder moid — the way to pin a
+  multi-host cluster with host-local datastores. Folder-only placement
+  leaves the pick to vCenter's defaulting, and the pinned spec marks
+  `resource_pool` as currently required when neither host nor cluster is
+  given, so an underspecified create can fail outright on such
+  inventories. Absent pins keep the create body byte-identical to a
+  pre-#3096 call. (`cluster` is served by the pinned PlacementSpec but
+  not exposed — pin the cluster via its root resource pool.)
 - The composite does **not** expose the CreateSpec's `disks`, `cdroms`,
   `boot`, `boot_devices`, or `hardware_version` — vCenter creates a
   single guest-specific blank boot disk by default. When the shape needs
@@ -218,11 +228,13 @@ and rollback contract already live) instead of growing a new op.
 | Wire shape of every raw call (path/verb/mount/body), 204 handling, `/api` vmomi mount caveat, schema validation of the examples, `VMKERNEL_*` pass-through | `backend/tests/test_connectors_vmware_rest_nested_esxi_recipe.py` |
 | cdrom composite manifest (update/remove/disconnect only) | `test_cdrom_composite_covers_update_remove_disconnect_only` (reconcile module) |
 | `vm.create(nested_hv=true)` leg: reconfigure-before-power-on ordering, body shape, gating, rollback on leg failure, param-absent byte-identity | `test_vm_create_nested_hv_*` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; vim manifest + pinned-spec lane in `..._composites_l2_ingest_reconcile.py` (#3093) |
+| `vm.create` placement pins (`resource_pool` / `datastore` / `host`) thread into the create body; pin-absent body byte-identity; pinned `VM.PlacementSpec` field set | `test_vm_create_placement_pins_thread_into_the_create_body` / `test_vm_create_without_placement_pins_create_body_is_byte_identical` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; `test_vm_placement_spec_serves_the_composite_placement_pins` (reconcile module) (#3096) |
 
 ## References
 
 - #3087 (this recipe), #3086 (sibling: ISO import + mount), #3093
-  (`vm.create` `nested_hv` — the composite VHV leg)
+  (`vm.create` `nested_hv` — the composite VHV leg), #3096 (`vm.create`
+  placement pins)
 - #2973 / #3071 — the `/rest`-vs-`/api` body-envelope class the raw
   bodies were checked against; #2466 — VI-JSON mount bases; #3082 —
   204-no-body writes

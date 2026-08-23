@@ -350,11 +350,21 @@ def find_unresolvable_local_refs(schema: Any) -> list[str]:
             segment = _unescape_pointer_segment(raw_segment)
             if isinstance(node, dict) and segment in node:
                 node = node[segment]
-            elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
+                continue
+            # RFC 6901 array indices are ASCII digits only. ``str.isdigit``
+            # alone also accepts non-ASCII digit codepoints ("²") that
+            # ``int()`` then rejects with ValueError -- guard with
+            # ``isascii`` so a pathological ref is flagged, not crashed on.
+            if (
+                isinstance(node, list)
+                and segment.isascii()
+                and segment.isdigit()
+                and int(segment) < len(node)
+            ):
                 node = node[int(segment)]
-            else:
-                unresolvable.add(ref)
-                break
+                continue
+            unresolvable.add(ref)
+            break
     return sorted(unresolvable)
 
 

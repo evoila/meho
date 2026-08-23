@@ -2352,3 +2352,7 @@ def test_find_unresolvable_local_refs_reports_only_dangling_pointers() -> None:
         "#/components/schemas/Absent",
     ]
     assert find_unresolvable_local_refs({"$ref": "#"}) == []
+    # A non-ASCII "digit" index is flagged as unresolvable, never crashes
+    # (str.isdigit accepts "²" but int() rejects it).
+    assert find_unresolvable_local_refs({"$ref": "#/allOf/²", "allOf": [{}]}) == ["#/allOf/²"]
+    assert find_unresolvable_local_refs({"$ref": "#/allOf/0", "allOf": [{}]}) == []

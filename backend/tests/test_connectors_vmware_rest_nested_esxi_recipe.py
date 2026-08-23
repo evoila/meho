@@ -480,12 +480,18 @@ class _RecordingSession:
 
     The full recording connector lives in
     ``tests/test_connectors_vmware_rest_composites_write.py``; this subset
-    carries only the three methods ``vm_create_composite`` touches.
+    carries only the methods ``vm_create_composite`` touches. The
+    ``_about_version`` read serves ``None`` (unresolved), which keeps the
+    composite on the REST create arm this module pins (#3099).
     """
 
     def __init__(self, responses: dict[str, Any]) -> None:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []
+
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        del target, operator
+        return None
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"/api{path}"

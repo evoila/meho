@@ -127,6 +127,11 @@ class _RecordingConnector:
         self._vmomi = vmomi or {}
         self.writes: list[dict[str, Any]] = []
 
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        """Unresolved ``about.version`` keeps ``vm.create`` on its REST arm (#3099)."""
+        del target, operator
+        return None
+
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"/api{path}"
 

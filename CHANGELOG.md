@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `vm.create` rides the vim substrate on pre-9.0 vCenter (#3099)
+
+- `vmware.composite.vm.create` now creates through vim `Folder.CreateVM_Task`
+  (task-polled via the governed vmomi write seam) when the live
+  `about.version` major is < 9: bare REST `POST /api/vcenter/vm` is
+  vendor-defective on vCenter 8.0.x — an opaque
+  `500 UNABLE_TO_ALLOCATE_RESOURCE {messages:[]}` for every spec shape and
+  placement, proven by live controlled probes, while the identical vim
+  create succeeds. On that arm the NICs (vmxnet3; DVPG backing resolved to
+  `switchUuid` + `portgroupKey`, standard portgroup to `deviceName`) and the
+  #3093 `nested_hv` flag fold into the one `VirtualMachineConfigSpec`
+  (collapsing the separate reconfigure), the datastore display name becomes
+  the `files.vmPathName` VM home, and `resource_pool` / `datastore` are
+  required — missing pins, an unmapped `guest_os` enum (curated
+  spec-grounded guestId table, e.g. `VMKERNEL_8` → `vmkernel8Guest`), or an
+  `OPAQUE_NETWORK` NIC fail closed with structured `rolled_back` envelopes
+  before any write. 9.0+ and unresolved versions keep the REST create
+  byte-identical (exact-body and exact-envelope regressions pin it), the
+  response envelope and rollback contract are unchanged, and reconcile
+  lanes pin the new vim path + both sides of the guestId map against the
+  pinned `vcenter-9.0` specs.
+
 ### Added — `vm.create` placement passthrough: resource_pool / datastore / host pins (#3096)
 
 - `vmware.composite.vm.create` accepts optional `resource_pool`, `datastore`

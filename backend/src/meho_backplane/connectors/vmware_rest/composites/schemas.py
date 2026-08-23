@@ -600,6 +600,11 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 #: created VM via ``DELETE:/vcenter/vm/{vm}``. Optional placement pins
 #: (``resource_pool`` / ``datastore`` / ``host`` moids, #3096) thread
 #: into the CreateSpec ``placement`` alongside the resolved folder moid.
+#: On pre-9.0 vCenter (live ``about.version`` major < 9, #3099) the
+#: create rides vim ``Folder.CreateVM_Task`` instead — the bare REST
+#: create is vendor-defective on 8.0.x — with NICs and ``nested_hv``
+#: folded into the one ConfigSpec; ``resource_pool`` and ``datastore``
+#: are required on that arm.
 VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -621,7 +626,9 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "folder moid. The pinned spec marks ``resource_pool`` as "
                 "currently required when neither host nor cluster is "
                 "given, so multi-host clusters should pin it; absent, "
-                "vCenter's placement defaulting applies."
+                "vCenter's placement defaulting applies. On a pre-9.0 "
+                "target it is REQUIRED (#3099): vim CreateVM_Task takes "
+                "an explicit pool and has no placement defaulting."
             ),
         },
         "datastore": {
@@ -632,7 +639,10 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "disk storage. Threaded into the CreateSpec "
                 "``placement``; absent, vCenter's placement defaulting "
                 "applies — on hosts with host-local datastores the "
-                "default may land the VM on the wrong store."
+                "default may land the VM on the wrong store. On a "
+                "pre-9.0 target it is REQUIRED (#3099): the vim arm "
+                "resolves its display name into the "
+                "``files.vmPathName`` VM home."
             ),
         },
         "host": {
@@ -656,7 +666,11 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "Guest-OS identifier (e.g. ``UBUNTU_64``). Drives the "
-                "ConfigSpec.guestOS field on ``POST:/vcenter/vm``."
+                "ConfigSpec.guestOS field on ``POST:/vcenter/vm``. On a "
+                "pre-9.0 target (#3099) it is mapped to the vim guestId "
+                "(``VMKERNEL_8`` -> ``vmkernel8Guest``); an identifier "
+                "outside the curated mapping fails closed with a "
+                "structured ``rolled_back`` before any write."
             ),
         },
         "cpu_count": {
@@ -703,7 +717,11 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``POST:/vcenter/vm/{vm}/hardware/ethernet`` adapter "
                 "create (the network rides the ``backing`` spec) after "
                 "the VM is created. Empty list creates the VM with no "
-                "NICs."
+                "NICs. On a pre-9.0 target (#3099) NICs fold into the "
+                "CreateVM_Task ConfigSpec as vmxnet3 ``deviceChange`` "
+                "adds (distributed or standard portgroup backing; "
+                "``OPAQUE_NETWORK`` has no vim expression there and "
+                "fails closed)."
             ),
         },
         "nested_hv": {
@@ -1269,7 +1287,11 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "failed_step": {
             "type": ["string", "null"],
             "description": (
-                "Name of the first failing step on rollback; ``null`` when ``status='created'``."
+                "Name of the first failing step on rollback; ``null`` "
+                "when ``status='created'``. The pre-9.0 vim arm (#3099) "
+                "adds fail-closed resolution steps: "
+                "``guest_id_mapping``, ``placement_params``, "
+                "``datastore_lookup``, ``network_lookup``."
             ),
         },
         "rollback_reason": {

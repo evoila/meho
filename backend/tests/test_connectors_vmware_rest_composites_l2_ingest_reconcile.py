@@ -724,7 +724,7 @@ def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# vm.create VHV leg VI-JSON sub-op reconciliation (#3093)
+# vm.create VI-JSON sub-op reconciliation (#3093 VHV leg + #3099 create arm)
 # ---------------------------------------------------------------------------
 #
 # vm.create's optional ``nested_hv`` leg is vi-json, not vcenter REST:
@@ -733,21 +733,26 @@ def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
 # ``/api`` — a 9.x-fleet shape that 404s on vCenter 8.0.x (#2466) — so the
 # leg rides the same governed vmomi substrate as disk-grow:
 # ``POST:/VirtualMachine/{moId}/ReconfigVM_Task`` (the flag write) plus the
-# shared Task-poll read ``RetrievePropertiesEx``. Declared in
-# ``_write._VIM_SUB_OPS_VM_CREATE`` (deliberately NOT in the ``_SUB_OPS_*``
-# namespace, so the vcenter.yaml sweep above skips it).
+# shared Task-poll read ``RetrievePropertiesEx``. The #3099 pre-9.0 create
+# arm adds ``POST:/Folder/{moId}/CreateVM_Task`` — on vCenter 8.0.x the
+# bare REST ``POST /api/vcenter/vm`` is vendor-defective, so the whole
+# create rides the vim path there (NICs + nested_hv folded into the one
+# ConfigSpec). Declared in ``_write._VIM_SUB_OPS_VM_CREATE`` (deliberately
+# NOT in the ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep above
+# skips it).
 
 
-def test_vm_create_vhv_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
-    """Pin the vm.create VHV vi-json manifest so a drift can't shrink the reconcile."""
+def test_vm_create_vi_json_sub_op_manifest_is_the_expected_triple() -> None:
+    """Pin the vm.create vi-json manifest so a drift can't shrink the reconcile."""
     assert set(_write._VIM_SUB_OPS_VM_CREATE) == {
         "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/Folder/{moId}/CreateVM_Task",
     }
 
 
-def test_vm_create_vhv_vi_json_sub_ops_round_trip_through_ingest() -> None:
-    """The VHV-leg vi-json op_ids are byte-for-byte what the parser emits.
+def test_vm_create_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The vm.create vi-json op_ids are byte-for-byte what the parser emits.
 
     Same proof shape as the #2893-#2895 round-trips above: the ``{moId}``
     path template survives the parser, so ``enforce_subop_policy``'s op_id /
@@ -770,16 +775,17 @@ def test_vm_create_vhv_vi_json_sub_ops_round_trip_through_ingest() -> None:
     assert required <= ingested_op_ids
 
 
-def test_vm_create_vhv_paths_and_flag_exist_in_the_pinned_spec() -> None:
-    """The VHV vim paths are real POST paths and ``nestedHVEnabled`` is served.
+def test_vm_create_vim_paths_and_flag_exist_in_the_pinned_spec() -> None:
+    """The vm.create vim paths are real POST paths and ``nestedHVEnabled`` is served.
 
-    The definitive #3093 grounding: the leg targets paths the pinned
-    ``vi-json.yaml`` actually serves, and the one field its body sets —
-    ``VirtualMachineConfigSpec.nestedHVEnabled`` — exists in the pinned
-    schema corpus (the schema-level pin lives in the #3087 recipe reconcile
-    lane; this is the cheap text-level guard alongside the path check).
-    Skips when the spec-shelf is not configured (the canary's convention),
-    so CI is the operator-visible signal.
+    The definitive #3093 + #3099 grounding: the VHV leg and the pre-9.0
+    create arm target paths the pinned ``vi-json.yaml`` actually serves
+    (``ReconfigVM_Task``, ``CreateVM_Task``, the Task-poll read), and the
+    one flag the bodies set — ``VirtualMachineConfigSpec.nestedHVEnabled``
+    — exists in the pinned schema corpus (the schema-level pin lives in
+    the #3087 recipe reconcile lane; this is the cheap text-level guard
+    alongside the path check). Skips when the spec-shelf is not configured
+    (the canary's convention), so CI is the operator-visible signal.
     """
     spec_path = resolve_vi_json_yaml()
     if spec_path is None:
@@ -789,9 +795,43 @@ def test_vm_create_vhv_paths_and_flag_exist_in_the_pinned_spec() -> None:
         _, _, path = op_id.partition(":")
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
-            "vm.create VHV vi-json sub-op targets a path the spec does not serve"
+            "vm.create vi-json sub-op targets a path the spec does not serve"
         )
     assert "nestedHVEnabled:" in spec_text, (
         "``nestedHVEnabled`` is absent from the pinned vi-json.yaml — the "
         "vm.create VHV reconfigure body sets a field the spec does not serve"
     )
+
+
+def test_vm_create_guest_id_map_is_grounded_in_both_pinned_specs() -> None:
+    """Every #3099 guestId mapping row exists in both pinned spec enums.
+
+    The pre-9.0 create arm maps the composite's REST-style ``guest_os``
+    enum to the vim ``guestId`` the ``CreateVM_Task`` ConfigSpec takes.
+    Both sides of every curated pair must be real enum values: the key in
+    the pinned ``vcenter.yaml``'s ``Vcenter.Vm.GuestOS`` enum, the value
+    in the pinned ``vi-json.yaml``'s
+    ``VirtualMachineGuestOsIdentifier_enum``. Text-level pins (the
+    ``nestedHVEnabled`` guard's convention): the YAML enum entries are
+    unambiguous single-line items, so a substring with the trailing
+    newline is an exact-value match. Skips when the spec-shelf is not
+    configured, so CI is the operator-visible signal.
+    """
+    vcenter_path = resolve_vcenter_yaml()
+    vi_json_path = resolve_vi_json_yaml()
+    if vcenter_path is None or vi_json_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    vcenter_text = vcenter_path.read_text(encoding="utf-8")
+    vi_json_text = vi_json_path.read_text(encoding="utf-8")
+    assert _write._VIM_GUEST_ID_BY_REST_GUEST_OS, "guestId map is empty — wiring broke"
+    for rest_enum, vim_guest_id in _write._VIM_GUEST_ID_BY_REST_GUEST_OS.items():
+        assert f"- {rest_enum}\n" in vcenter_text, (
+            f"{rest_enum!r} is not a Vm.GuestOS enum value in the pinned "
+            "vcenter.yaml — the #3099 guestId map keys an identifier the REST "
+            "surface does not serve"
+        )
+        assert f"- '{vim_guest_id}'\n" in vi_json_text, (
+            f"{vim_guest_id!r} is not a VirtualMachineGuestOsIdentifier enum "
+            "value in the pinned vi-json.yaml — the #3099 guestId map targets "
+            "a vim identifier the spec does not serve"
+        )

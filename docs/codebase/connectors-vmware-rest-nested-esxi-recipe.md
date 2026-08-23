@@ -52,11 +52,29 @@ parameter, not an envelope).
 }
 ```
 
-- `guest_os` passes through **verbatim** — no machine enum constrains it
-  anywhere on the path (composite schema: any non-empty string; pinned
-  spec: prose-only enum). `VMKERNEL_8` / `VMKERNEL_9` are documented
-  values in the pinned 9.0 spec, so an ESXi guest is a legitimate,
-  spec-grounded identifier (gap 5 on typo behaviour, gap 4 on casing).
+- **The 8.0.x arm is first-class (#3099).** On a live pre-9.0
+  `about.version` major the composite creates through vim
+  `Folder.CreateVM_Task` (task-polled, same governed vmomi substrate as
+  the VHV leg) instead of REST `POST:/vcenter/vm` — the bare REST create
+  is vendor-defective on vCenter 8.0.x (opaque
+  `500 UNABLE_TO_ALLOCATE_RESOURCE` for every spec shape and placement,
+  proven live; the identical vim create succeeds). On that arm the NICs
+  (vmxnet3; DVPG backing resolved to `switchUuid` + `portgroupKey`,
+  standard portgroup to `deviceName`) and `nested_hv` fold into the one
+  `VirtualMachineConfigSpec`, `resource_pool` **and** `datastore` are
+  required (fail-closed `placement_params` — vim has no placement
+  defaulting; the datastore name becomes the `files.vmPathName` VM home),
+  and `guest_os` maps through a curated spec-grounded guestId table
+  (`VMKERNEL_8` → `vmkernel8Guest`; an unmapped enum is a fail-closed
+  `guest_id_mapping` refusal — the pre-9.0 arm closes gap 5's silent-typo
+  hole). 9.0+ and unresolved versions keep the REST arm below
+  byte-identical.
+- `guest_os` passes through **verbatim on the REST arm** — no machine
+  enum constrains it there (composite schema: any non-empty string;
+  pinned spec: prose-only enum). `VMKERNEL_8` / `VMKERNEL_9` are
+  documented values in the pinned 9.0 spec, so an ESXi guest is a
+  legitimate, spec-grounded identifier (gap 5 on typo behaviour, gap 4
+  on casing).
 - `nested_hv: true` (#3093) enables nested hardware-assisted
   virtualization as part of the create: after NIC attach and **before any
   power-on**, the composite issues the vim `ReconfigVM_Task`
@@ -210,9 +228,11 @@ and rollback contract already live) instead of growing a new op.
    9.x wire accepts is exactly what the deferred live-appliance verify
    must answer before touching five composite bodies. Until then the
    recipe's step 1 carries this as its one named risk.
-5. **No machine-readable guest-OS enum.** The identifier is a free
-   string end to end; a typo (`VMKERNEL8`) parks nothing at dispatch and
-   surfaces as a vCenter 400.
+5. **No machine-readable guest-OS enum on the REST arm.** The identifier
+   is a free string there; a typo (`VMKERNEL8`) parks nothing at dispatch
+   and surfaces as a vCenter 400. The pre-9.0 vim arm (#3099) closes this
+   for its targets: the curated guestId map refuses an unmapped enum with
+   a structured `guest_id_mapping` rollback before any write.
 6. **`vm.device.cdrom` has no ADD leg** — by design; the raw op is the
    governed ADD (step 5).
 7. **Boot-order / firmware / hardware-version knobs** are not exposed by
@@ -229,12 +249,14 @@ and rollback contract already live) instead of growing a new op.
 | cdrom composite manifest (update/remove/disconnect only) | `test_cdrom_composite_covers_update_remove_disconnect_only` (reconcile module) |
 | `vm.create(nested_hv=true)` leg: reconfigure-before-power-on ordering, body shape, gating, rollback on leg failure, param-absent byte-identity | `test_vm_create_nested_hv_*` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; vim manifest + pinned-spec lane in `..._composites_l2_ingest_reconcile.py` (#3093) |
 | `vm.create` placement pins (`resource_pool` / `datastore` / `host`) thread into the create body; pin-absent body byte-identity; pinned `VM.PlacementSpec` field set | `test_vm_create_placement_pins_thread_into_the_create_body` / `test_vm_create_without_placement_pins_create_body_is_byte_identical` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; `test_vm_placement_spec_serves_the_composite_placement_pins` (reconcile module) (#3096) |
+| `vm.create` pre-9.0 arm: CreateVM_Task body shape (placement, NIC backings, inline nestedHVEnabled), no REST create attempted, fail-closed guest/placement/backing refusals, task fault/timeout, gate short-circuit, rollback contract; 9.0+/unresolved REST byte-identity | `test_vm_create_pre9_*` + `test_vm_create_v9_and_unresolved_keep_rest_create_byte_identical` in `backend/tests/test_connectors_vmware_rest_composites_write.py`; vim manifest triple + guestId-map spec grounding in `..._composites_l2_ingest_reconcile.py` (#3099) |
 
 ## References
 
 - #3087 (this recipe), #3086 (sibling: ISO import + mount), #3093
   (`vm.create` `nested_hv` — the composite VHV leg), #3096 (`vm.create`
-  placement pins)
+  placement pins), #3099 (`vm.create` pre-9.0 vim `CreateVM_Task` arm —
+  the 8.0.x REST create is vendor-defective)
 - #2973 / #3071 — the `/rest`-vs-`/api` body-envelope class the raw
   bodies were checked against; #2466 — VI-JSON mount bases; #3082 —
   204-no-body writes

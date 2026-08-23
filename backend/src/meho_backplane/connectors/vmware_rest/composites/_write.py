@@ -233,6 +233,14 @@ _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # ``Vcenter.Vm.Hardware.Ethernet.BackingSpec.type`` value for a standard
 # portgroup -- the default backing the NIC create / repoint specs target.
 _NIC_BACKING_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
+# ``Ethernet.BackingSpec.type`` value for a distributed portgroup — on the
+# pre-9.0 vim create arm (#3099) this backing maps to
+# ``VirtualEthernetCardDistributedVirtualPortBackingInfo``.
+_NIC_BACKING_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+# REST Datastore.Info read — the pre-9.0 vim create arm (#3099) resolves the
+# datastore display name off this to build the vim
+# ``files.vmPathName = "[<name>] <vm>"`` home path.
+_OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
 _OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
@@ -294,7 +302,7 @@ _PROP_CONFIG_HARDWARE_DEVICE = "config.hardware.device"
 # ``vm.clone`` convention.
 _DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
 
-# vm.create's optional VHV leg (#3093) rides the same two vim paths.
+# vm.create's optional VHV leg (#3093) rides the vim substrate:
 # ``VirtualMachineConfigSpec.nestedHVEnabled`` has no REST expression (the
 # pinned ``vcenter.yaml`` serves no ``hardware_virtualization`` / ``nestedHV``
 # spelling anywhere, pinned by the #3087 recipe lanes) and *raw* VI-JSON
@@ -303,14 +311,86 @@ _DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
 # (:func:`_write_vmomi_sub_op` → ``_post_vmomi_json`` on the documented
 # ``/sdk/vim25/{release}`` base) is the only cross-version governed path to
 # the flag. ``RetrievePropertiesEx`` is the shared Task-poll read.
+#
+# ``Folder.CreateVM_Task`` (#3099) is the create itself on pre-9.0 targets:
+# bare REST ``POST /api/vcenter/vm`` is vendor-defective on vCenter 8.0.x —
+# an opaque ``500 UNABLE_TO_ALLOCATE_RESOURCE {messages:[]}`` for every
+# spec shape and placement (proven by live controlled probes), while the
+# identical create through the vim surface succeeds. When the live
+# ``about.version`` major is < 9 the whole create rides this task-polled
+# vim path, with NICs and the VHV flag folded into the one
+# ``VirtualMachineConfigSpec`` (collapsing the #3093 second call on that
+# arm); 9.0+ and unresolved versions keep the REST create byte-identical.
+_OP_CREATE_VM_TASK = "POST:/Folder/{moId}/CreateVM_Task"
 _VIM_SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RECONFIG_VM_TASK,
+    _OP_CREATE_VM_TASK,
 )
 
 # Default wall-clock bound for the VHV ReconfigVM_Task poll — the 600s
 # convention; module-global so tests can zero it.
 _VM_CREATE_VHV_TASK_TIMEOUT_SECONDS = 600.0
+
+# Default wall-clock bound for the pre-9.0 CreateVM_Task poll (#3099) —
+# same 600s convention; module-global so tests can zero it.
+_VM_CREATE_TASK_TIMEOUT_SECONDS = 600.0
+
+#: REST ``Vcenter.Vm.GuestOS`` enum → vim ``VirtualMachineGuestOsIdentifier``
+#: for the pre-9.0 CreateVM_Task arm (#3099). Spec-grounded on both sides:
+#: every key is an enum value of the pinned ``vcenter.yaml``'s
+#: ``Vcenter.Vm.GuestOS`` and every value an enum value of the pinned
+#: ``vi-json.yaml``'s ``VirtualMachineGuestOsIdentifier_enum`` with the same
+#: per-value description label (e.g. ``VMKERNEL_8`` / ``vmkernel8Guest`` are
+#: both documented "VMware ESX 8"); the reconcile lane asserts both sides.
+#: Deliberately curated, not exhaustive: the ``VMKERNEL_*`` family (the
+#: nested-ESXi recipe, #3087) plus the common Linux / Windows / catch-all
+#: identifiers. An unmapped enum fails closed with a structured
+#: ``rolled_back`` before any sub-call — never a silent guess.
+_VIM_GUEST_ID_BY_REST_GUEST_OS: Final[dict[str, str]] = {
+    "VMKERNEL": "vmkernelGuest",
+    "VMKERNEL_5": "vmkernel5Guest",
+    "VMKERNEL_6": "vmkernel6Guest",
+    "VMKERNEL_65": "vmkernel65Guest",
+    "VMKERNEL_7": "vmkernel7Guest",
+    "VMKERNEL_8": "vmkernel8Guest",
+    "VMKERNEL_9": "vmkernel9Guest",
+    "OTHER": "otherGuest",
+    "OTHER_64": "otherGuest64",
+    "OTHER_LINUX": "otherLinuxGuest",
+    "OTHER_LINUX_64": "otherLinux64Guest",
+    "UBUNTU": "ubuntuGuest",
+    "UBUNTU_64": "ubuntu64Guest",
+    "DEBIAN_12": "debian12Guest",
+    "DEBIAN_12_64": "debian12_64Guest",
+    "RHEL_8_64": "rhel8_64Guest",
+    "RHEL_9_64": "rhel9_64Guest",
+    "CENTOS_8_64": "centos8_64Guest",
+    "CENTOS_9_64": "centos9_64Guest",
+    "VMWARE_PHOTON_64": "vmwarePhoton64Guest",
+    "WINDOWS_SERVER_2019": "windows2019srv_64Guest",
+    "WINDOWS_SERVER_2021": "windows2019srvNext_64Guest",
+    "WINDOWS_11_64": "windows11_64Guest",
+}
+
+# vim NIC shape for the pre-9.0 create arm (#3099). The ConfigSpec's
+# ``deviceChange`` entries are ``VirtualDeviceConfigSpec`` (declared type ==
+# runtime type, no ``_typeName``), but the ``device`` is declared as the base
+# ``VirtualDevice`` and the ``backing`` as the base
+# ``VirtualDeviceBackingInfo``, so both subtypes carry the ``_typeName``
+# discriminator for the vim25-JSON binding to deserialise them — the
+# ``ClusterConfigSpecEx`` precedent (#2895, spec-verified). The DVPG backing's
+# ``port`` is a ``DistributedVirtualSwitchPortConnection`` (declared ==
+# runtime, no tag) whose ``switchUuid`` / ``portgroupKey`` are resolved from
+# the portgroup moid via the un-gated vmomi property reads below — the same
+# ``key`` + ``config.distributedVirtualSwitch`` → ``uuid`` walk govc performs.
+_VIRTUAL_VMXNET3_TYPE = "VirtualVmxnet3"
+_DV_PORT_BACKING_TYPE = "VirtualEthernetCardDistributedVirtualPortBackingInfo"
+_STANDARD_NETWORK_BACKING_TYPE = "VirtualEthernetCardNetworkBackingInfo"
+_DVPG_MO_TYPE = "DistributedVirtualPortgroup"
+_PROP_DVPG_KEY = "key"
+_PROP_DVPG_DVS = "config.distributedVirtualSwitch"
+_PROP_DVS_UUID = "uuid"
 
 # The one-field ``VirtualMachineConfigSpec`` the VHV reconfigure sends. The
 # ``"spec"`` key is the vim request type's genuine required parameter (the
@@ -622,6 +702,11 @@ _SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_DELETE_VM,
     _OP_CREATE_VM_NIC,
     _power_vm_op_id("start"),
+    # #3099 pre-9.0 vim-arm resolution reads (both REST, vcenter.yaml-served):
+    # the datastore display name for ``files.vmPathName`` and the network
+    # display name for a standard-portgroup NIC backing.
+    _OP_GET_DATASTORE,
+    _OP_LIST_NETWORK,
 )
 _SUB_OPS_VM_CLONE: tuple[str, ...] = (
     _OP_GET_VM,
@@ -1042,6 +1127,436 @@ async def _enable_nested_hv(
     return None, None
 
 
+def _vim_create_required(about_version: str | None) -> bool:
+    """``True`` when the live ``about.version`` major is a resolvable pre-9.0.
+
+    The #3099 arm gate, mirroring :func:`_deploy_eula_field_name`'s
+    version-conditional pattern (#3075): a resolvable pre-9.0 major routes
+    the create through vim ``Folder.CreateVM_Task`` (bare REST
+    ``POST /api/vcenter/vm`` is vendor-defective on vCenter 8.0.x — an
+    opaque ``500 UNABLE_TO_ALLOCATE_RESOURCE`` for every spec shape and
+    placement, proven live, while the identical vim create succeeds);
+    9.0+ — and an unresolved version — keep the REST create byte-identical.
+    """
+    major = about_version.split(".", 1)[0].strip() if about_version else ""
+    return major.isdigit() and int(major) < 9
+
+
+async def _resolve_datastore_name(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    datastore_moid: str,
+) -> tuple[str | None, str | None]:
+    """Resolve a datastore moid to its display name via ``GET:/vcenter/datastore/{datastore}``.
+
+    Returns ``(name, None)`` on success or ``(None, reason)`` when the
+    ``Datastore.Info`` payload carries no usable name — the caller folds the
+    reason into a ``rolled_back`` envelope. A transport fault propagates
+    (the dispatcher wraps it as ``connector_error``), mirroring
+    :func:`_resolve_folder_moid`.
+    """
+    info = _unwrap_value(
+        await _read_sub_op(
+            connector, target, operator, _OP_GET_DATASTORE, {"datastore": datastore_moid}
+        )
+    )
+    name = info.get("name") if isinstance(info, dict) else None
+    if not isinstance(name, str) or not name:
+        return None, f"datastore {datastore_moid!r} info returned no display name"
+    return name, None
+
+
+def _build_dvpg_retrieve_params(portgroup_moid: str) -> dict[str, Any]:
+    """Build the one-object DVPG property read for the vim NIC backing (#3099).
+
+    A single ``RetrievePropertiesEx`` reading ``key`` +
+    ``config.distributedVirtualSwitch`` off the ``DistributedVirtualPortgroup``
+    — the two properties the ``DistributedVirtualSwitchPortConnection``
+    needs (the DVS moid is then resolved to its ``uuid`` in a second read).
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [{"type": _DVPG_MO_TYPE, "pathSet": [_PROP_DVPG_KEY, _PROP_DVPG_DVS]}],
+                "objectSet": [{"obj": {"type": _DVPG_MO_TYPE, "value": portgroup_moid}}],
+            }
+        ],
+        "options": {},
+    }
+
+
+async def _resolve_vim_nic_backing(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    nic: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Build one NIC's vim backing for the pre-9.0 create arm (#3099).
+
+    Returns ``(backing, None)`` or ``(None, reason)``:
+
+    * ``DISTRIBUTED_PORTGROUP`` → ``VirtualEthernetCardDistributedVirtualPortBackingInfo``
+      with the port connection's ``switchUuid`` + ``portgroupKey`` resolved
+      through two un-gated vmomi property reads (DVPG ``key`` +
+      ``config.distributedVirtualSwitch``, then the owning switch's
+      ``uuid`` — the walk govc performs for the same backing).
+    * ``STANDARD_PORTGROUP`` (the schema default) →
+      ``VirtualEthernetCardNetworkBackingInfo`` keyed by the network's
+      display name, resolved via the ``GET:/vcenter/network`` listing.
+    * anything else (``OPAQUE_NETWORK``) fails closed — it has no
+      implemented vim expression on this arm.
+    """
+    network = nic.get("network")
+    if not isinstance(network, str) or not network:
+        return None, "nic entry carries no ``network`` moid"
+    backing_type = nic.get("backing_type", _NIC_BACKING_STANDARD_PORTGROUP)
+    if backing_type == _NIC_BACKING_DISTRIBUTED_PORTGROUP:
+        portgroup_read = await connector._post_vmomi_json(
+            target,
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=_build_dvpg_retrieve_params(network),
+        )
+        portgroup_key = _extract_single_prop(portgroup_read, _PROP_DVPG_KEY)
+        switch_ref = _extract_single_prop(portgroup_read, _PROP_DVPG_DVS)
+        switch_moid = switch_ref.get("value") if isinstance(switch_ref, dict) else None
+        switch_type = switch_ref.get("type") if isinstance(switch_ref, dict) else None
+        if (
+            not isinstance(portgroup_key, str)
+            or not isinstance(switch_moid, str)
+            or not isinstance(switch_type, str)
+        ):
+            return None, (
+                f"distributed portgroup {network!r} did not resolve to a "
+                "portgroup key + owning switch"
+            )
+        uuid_read = await connector._post_vmomi_json(
+            target,
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=_build_single_prop_retrieve_params(switch_type, switch_moid, _PROP_DVS_UUID),
+        )
+        switch_uuid = _extract_single_prop(uuid_read, _PROP_DVS_UUID)
+        if not isinstance(switch_uuid, str) or not switch_uuid:
+            return None, f"switch {switch_moid!r} owning portgroup {network!r} has no uuid"
+        return {
+            _VMOMI_TYPE_NAME_KEY: _DV_PORT_BACKING_TYPE,
+            "port": {"switchUuid": switch_uuid, "portgroupKey": portgroup_key},
+        }, None
+    if backing_type == _NIC_BACKING_STANDARD_PORTGROUP:
+        listing = _unwrap_value(
+            await _read_sub_op(
+                connector, target, operator, _OP_LIST_NETWORK, {"filter.networks": [network]}
+            )
+        )
+        first = listing[0] if isinstance(listing, list) and listing else None
+        network_name = first.get("name") if isinstance(first, dict) else None
+        if not isinstance(network_name, str) or not network_name:
+            return None, f"network {network!r} did not resolve to a display name"
+        return {
+            _VMOMI_TYPE_NAME_KEY: _STANDARD_NETWORK_BACKING_TYPE,
+            "deviceName": network_name,
+        }, None
+    return None, (
+        f"nic backing_type {backing_type!r} has no vim expression on the pre-9.0 "
+        "CreateVM_Task arm; use DISTRIBUTED_PORTGROUP or STANDARD_PORTGROUP"
+    )
+
+
+def _build_vim_create_request(
+    *,
+    name: str,
+    guest_id: str,
+    cpu_count: int,
+    memory_mib: int,
+    datastore_name: str,
+    nic_backings: list[dict[str, Any]],
+    nested_hv: bool,
+    pool_moid: str,
+    host_moid: str | None,
+) -> dict[str, Any]:
+    """Assemble the ``Folder.CreateVM_Task`` request body (#3099).
+
+    ``CreateVMRequestType`` (spec-verified against the pinned
+    ``vi-json.yaml``): ``{config: VirtualMachineConfigSpec, pool:
+    ResourcePool-MoRef, host?: HostSystem-MoRef}``. The ConfigSpec carries
+    the same logical inputs the REST CreateSpec did — ``name`` /
+    ``guestId`` / ``numCPUs`` / ``memoryMB`` — plus the vim-only shape:
+    ``files.vmPathName`` (the VM home, ``"[<datastore-name>] <name>"``),
+    the NIC ``deviceChange`` adds (vmxnet3, negative temp keys — the new-
+    device convention), and ``nestedHVEnabled`` folded inline when the
+    operator asked for the #3093 leg.
+    """
+    config: dict[str, Any] = {
+        "name": name,
+        "guestId": guest_id,
+        "numCPUs": cpu_count,
+        "memoryMB": memory_mib,
+        "files": {"vmPathName": f"[{datastore_name}] {name}"},
+    }
+    if nested_hv:
+        config["nestedHVEnabled"] = True
+    if nic_backings:
+        config["deviceChange"] = [
+            {
+                "operation": "add",
+                "device": {
+                    _VMOMI_TYPE_NAME_KEY: _VIRTUAL_VMXNET3_TYPE,
+                    "key": -(index + 1),
+                    "backing": backing,
+                },
+            }
+            for index, backing in enumerate(nic_backings)
+        ]
+    body: dict[str, Any] = {"config": config, "pool": _moref(_RESOURCE_POOL_MO_TYPE, pool_moid)}
+    if host_moid is not None:
+        body["host"] = _moref(_HOST_SYSTEM_MO_TYPE, host_moid)
+    return body
+
+
+async def _issue_vim_create(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    folder_moid: str,
+    body: dict[str, Any],
+    gate_params: dict[str, Any],
+    name: str,
+) -> tuple[OperationResult | None, str | None, str | None]:
+    """Gate + issue ``CreateVM_Task`` and poll it to terminal (#3099).
+
+    Returns ``(gate, vm_id, failure_reason)``:
+
+    * ``(gate, None, None)`` — the #2254 seam parked/denied the write.
+    * ``(None, vm_id, None)`` — the task succeeded; ``vm_id`` is the new
+      VirtualMachine moid from ``TaskInfo.result``.
+    * ``(None, None, reason)`` — transport fault, task fault, poll timeout,
+      or an unreadable task result; the caller folds *reason* into the
+      ``rolled_back`` envelope (nothing was verifiably created, so there is
+      nothing to delete — a timed-out create may still land in the
+      background, which the reason spells out).
+    """
+    try:
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_CREATE_VM_TASK,
+            vmomi_path=f"/Folder/{folder_moid}/CreateVM_Task",
+            body=body,
+            params=gate_params,
+        )
+        if gate is not None:
+            return gate, None, None
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_CREATE_TASK_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        return None, None, f"create via CreateVM_Task failed: {exc}"
+    if outcome.state == TASK_STATE_ERROR:
+        return (
+            None,
+            None,
+            (
+                f"CreateVM_Task creating {name!r} faulted: "
+                f"{outcome.error_message or '<no fault reported>'}"
+            ),
+        )
+    if outcome.timed_out:
+        return (
+            None,
+            None,
+            (
+                f"CreateVM_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_VM_CREATE_TASK_TIMEOUT_SECONDS)}s; the create may still complete "
+                "in the background — poll the task or list the folder before retrying"
+            ),
+        )
+    vm_id = _extract_task_vm_moid(outcome.result)
+    if vm_id is None:
+        return None, None, "CreateVM_Task succeeded but its result carried no VirtualMachine moid"
+    return None, vm_id, None
+
+
+async def _power_on_created_vm(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_id: str,
+) -> tuple[OperationResult | None, str | None]:
+    """Issue the gated power-on leg of ``vm.create``; ``(gate, failure_reason)``.
+
+    Shared by the REST and vim create arms (#3099) — the power endpoint is
+    not part of the 8.0.x create defect, so both arms finish through the
+    same REST sub-op. A parked/denied gate rides back for the caller to
+    return verbatim; a transport fault becomes the failure reason the
+    caller folds into the rollback contract.
+    """
+    try:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
+        )
+    except httpx.HTTPError as exc:
+        return None, f"power_on failed: {exc}"
+    return gate, None
+
+
+async def _vm_create_via_vim(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """The pre-9.0 arm of :func:`vm_create_composite` (#3099): vim ``CreateVM_Task``.
+
+    Same logical inputs, same response envelope, same rollback contract as
+    the REST arm — only the create transport differs. NICs and the optional
+    ``nested_hv`` flag fold into the one ``VirtualMachineConfigSpec`` (the
+    create is atomic vCenter-side, so there are no per-NIC / per-flag
+    partial-failure legs), and the task is polled to terminal through the
+    shared #2893 substrate. Fail-closed validations run before any
+    sub-call: an unmapped ``guest_os`` enum, missing ``resource_pool`` /
+    ``datastore`` pins (vim needs an explicit pool and VM home — vCenter-
+    side placement defaulting exists only on the REST create), and an
+    unsupported NIC backing each return a structured ``rolled_back``.
+    """
+    folder_name = params["folder_name"]
+    name = params["name"]
+    guest_os = params["guest_os"]
+    cpu_count = int(params.get("cpu_count", 1))
+    memory_mib = int(params.get("memory_mib", 1024))
+    nics: list[dict[str, Any]] = list(params.get("nics") or [])
+    nested_hv = bool(params.get("nested_hv", False))
+    power_on = bool(params.get("power_on_after_create", False))
+    pool_moid = params.get("resource_pool")
+    datastore_moid = params.get("datastore")
+    host_moid = params.get("host")
+
+    guest_id = _VIM_GUEST_ID_BY_REST_GUEST_OS.get(guest_os)
+    if guest_id is None:
+        return _rolled_back(
+            steps=[],
+            failed_step="guest_id_mapping",
+            reason=(
+                f"guest_os {guest_os!r} has no vim guestId mapping for the pre-9.0 "
+                "CreateVM_Task arm; supported identifiers: "
+                + ", ".join(sorted(_VIM_GUEST_ID_BY_REST_GUEST_OS))
+            ),
+        )
+    if not isinstance(pool_moid, str) or not isinstance(datastore_moid, str):
+        return _rolled_back(
+            steps=[],
+            failed_step="placement_params",
+            reason=(
+                "resource_pool and datastore moids are required on a pre-9.0 target: "
+                "vim CreateVM_Task needs an explicit pool and a datastore for the VM "
+                "home (files.vmPathName) — vCenter-side placement defaulting exists "
+                "only on the REST create"
+            ),
+        )
+
+    steps: list[str] = []
+    folder_moid, folder_err = await _resolve_folder_moid(
+        connector=connector, target=target, operator=operator, folder_name=folder_name
+    )
+    if folder_moid is None:
+        return _rolled_back(steps=steps, failed_step="folder_lookup", reason=folder_err or "")
+    steps.append("folder_lookup")
+
+    datastore_name, datastore_err = await _resolve_datastore_name(
+        connector=connector, target=target, operator=operator, datastore_moid=datastore_moid
+    )
+    if datastore_name is None:
+        return _rolled_back(steps=steps, failed_step="datastore_lookup", reason=datastore_err or "")
+
+    nic_backings: list[dict[str, Any]] = []
+    for nic in nics:
+        backing, nic_err = await _resolve_vim_nic_backing(connector, target, operator, nic=nic)
+        if backing is None:
+            return _rolled_back(steps=steps, failed_step="network_lookup", reason=nic_err or "")
+        nic_backings.append(backing)
+
+    create_body = _build_vim_create_request(
+        name=name,
+        guest_id=guest_id,
+        cpu_count=cpu_count,
+        memory_mib=memory_mib,
+        datastore_name=datastore_name,
+        nic_backings=nic_backings,
+        nested_hv=nested_hv,
+        pool_moid=pool_moid,
+        host_moid=host_moid if isinstance(host_moid, str) else None,
+    )
+    # Identity-only gate params: the durable ApprovalRequest names the
+    # blast radius (what gets created, where) without the assembled vim
+    # body — mirroring the clone-from-template gate discipline.
+    gate_params = {
+        "name": name,
+        "folder_name": folder_name,
+        "folder": folder_moid,
+        "guest_os": guest_os,
+        "resource_pool": pool_moid,
+        "datastore": datastore_moid,
+        "host": host_moid,
+        "cpu_count": cpu_count,
+        "memory_mib": memory_mib,
+        "nics": [nic.get("network") for nic in nics],
+        "nested_hv": nested_hv,
+    }
+    gate, vm_id, create_failure = await _issue_vim_create(
+        connector=connector,
+        target=target,
+        operator=operator,
+        folder_moid=folder_moid,
+        body=create_body,
+        gate_params=gate_params,
+        name=name,
+    )
+    if gate is not None:
+        return gate
+    if create_failure is not None or vm_id is None:
+        return _rolled_back(steps=steps, failed_step="create", reason=create_failure or "")
+    steps.append("create")
+    if nics:
+        steps.append("nic_attach")
+    if nested_hv:
+        steps.append("nested_hv")
+
+    if power_on:
+        gate, power_failure = await _power_on_created_vm(
+            connector=connector, target=target, operator=operator, vm_id=vm_id
+        )
+        if gate is not None:
+            return gate
+        if power_failure is not None:
+            await _rollback_created_vm(
+                connector=connector, target=target, operator=operator, vm_id=vm_id
+            )
+            return _rolled_back(steps=steps, failed_step="power_on", reason=power_failure)
+        steps.append("power_on")
+
+    created: dict[str, Any] = {
+        "status": "created",
+        "vm_id": vm_id,
+        "steps_succeeded": steps,
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+    if "nested_hv" in params:
+        created["nested_hv"] = nested_hv
+    return created
+
+
 async def vm_create_composite(
     *,
     operator: Operator,
@@ -1061,7 +1576,20 @@ async def vm_create_composite(
     CreateSpec ``placement`` alongside the resolved folder moid; absent
     pins leave vCenter's placement defaulting untouched and keep the
     create body byte-identical to a pre-#3096 call.
+
+    Version-conditional create transport (#3099): when the live
+    ``about.version`` major is < 9 the whole create rides vim
+    ``Folder.CreateVM_Task`` (:func:`_vm_create_via_vim`) — bare REST
+    ``POST /api/vcenter/vm`` is vendor-defective on vCenter 8.0.x — with
+    NICs and ``nested_hv`` folded into the one ConfigSpec. 9.0+ and
+    unresolved versions keep the REST path below byte-identical.
     """
+    about_version = await connector._about_version(target, operator)
+    if _vim_create_required(about_version):
+        return await _vm_create_via_vim(
+            operator=operator, target=target, params=params, connector=connector
+        )
+
     folder_name = params["folder_name"]
     name = params["name"]
     guest_os = params["guest_os"]
@@ -1150,21 +1678,16 @@ async def vm_create_composite(
         steps.append("nested_hv")
 
     if power_on:
-        try:
-            gate, _ = await _write_sub_op(
-                connector, target, operator, _power_vm_op_id("start"), {"vm": vm_id}
-            )
-        except httpx.HTTPError as exc:
+        gate, power_failure = await _power_on_created_vm(
+            connector=connector, target=target, operator=operator, vm_id=vm_id
+        )
+        if gate is not None:
+            return gate
+        if power_failure is not None:
             await _rollback_created_vm(
                 connector=connector, target=target, operator=operator, vm_id=vm_id
             )
-            return _rolled_back(
-                steps=steps,
-                failed_step="power_on",
-                reason=f"power_on failed: {exc}",
-            )
-        if gate is not None:
-            return gate
+            return _rolled_back(steps=steps, failed_step="power_on", reason=power_failure)
         steps.append("power_on")
 
     created: dict[str, Any] = {
@@ -2990,13 +3513,14 @@ def _extract_config_template(retrieve_result: Any, vm_moid: str) -> bool | None:
     return None
 
 
-def _extract_cloned_vm_moid(task_result: Any) -> str | None:
-    """Pull the new VM moid out of a SUCCEEDED CloneVM_Task ``result`` MoRef.
+def _extract_task_vm_moid(task_result: Any) -> str | None:
+    """Pull the new VM moid out of a SUCCEEDED ``*_Task`` ``result`` MoRef.
 
-    ``TaskInfo.result`` for ``CloneVM_Task`` is the new VirtualMachine
-    ``ManagedObjectReference`` (``{"type": "VirtualMachine", "value":
-    "vm-99"}``); a bare moid string is tolerated. ``None`` when the shape is
-    neither -- the clone still succeeded, the moid is just unreadable.
+    ``TaskInfo.result`` for ``CloneVM_Task`` (#2894) and ``CreateVM_Task``
+    (#3099) is the new VirtualMachine ``ManagedObjectReference``
+    (``{"type": "VirtualMachine", "value": "vm-99"}``); a bare moid string
+    is tolerated. ``None`` when the shape is neither -- the task still
+    succeeded, the moid is just unreadable.
     """
     if isinstance(task_result, dict):
         value = task_result.get("value")
@@ -3296,7 +3820,7 @@ async def vm_clone_from_template_composite(
         source_template=source_template,
         source_template_id=template_moid,
         new_vm_name=new_vm_name,
-        new_vm_id=_extract_cloned_vm_moid(outcome.result),
+        new_vm_id=_extract_task_vm_moid(outcome.result),
         folder=folder_moid,
         task=outcome.task,
         customization_spec_name=customization_spec_name,

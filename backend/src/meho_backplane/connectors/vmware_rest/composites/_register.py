@@ -398,11 +398,17 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             "adapter create via POST:/vcenter/vm/{vm}/hardware/ethernet, "
             "an optional nested_hv vim ReconfigVM_Task (nestedHVEnabled, "
             "task-polled, applied before any power-on), and optional "
-            "POST:/vcenter/vm/{vm}/power start. Partial-failure rollback: "
-            "if any step after the create succeeds fails, the half-"
-            "created VM is removed via DELETE:/vcenter/vm/{vm} so the "
-            "caller knows the VM did not persist. Equivalent of 'govc "
-            "vm.create' for operator-facing dispatch."
+            "POST:/vcenter/vm/{vm}/power start. On pre-9.0 vCenter (live "
+            "about.version major < 9) the create instead rides vim "
+            "Folder.CreateVM_Task through the governed vmomi substrate, "
+            "task-polled, with NICs and nested_hv folded into the one "
+            "ConfigSpec — the bare REST create is vendor-defective on "
+            "8.0.x; resource_pool and datastore are required there. "
+            "Partial-failure rollback: if any step after the create "
+            "succeeds fails, the half-created VM is removed via "
+            "DELETE:/vcenter/vm/{vm} so the caller knows the VM did not "
+            "persist. Equivalent of 'govc vm.create' for operator-facing "
+            "dispatch."
         ),
         parameter_schema=VM_CREATE_PARAMETER_SCHEMA,
         response_schema=VM_CREATE_RESPONSE_SCHEMA,

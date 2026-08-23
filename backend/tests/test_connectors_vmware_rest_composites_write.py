@@ -312,11 +312,19 @@ def _retrieve_result(obj_type: str, moid: str, prop: str, val: Any) -> dict[str,
     }
 
 
-def _task_info_result(task_moid: str, state: str, error: str | None = None) -> dict[str, Any]:
-    """A ``Task.info`` RetrievePropertiesEx result in the requested state."""
+def _task_info_result(
+    task_moid: str, state: str, error: str | None = None, *, result: Any = None
+) -> dict[str, Any]:
+    """A ``Task.info`` RetrievePropertiesEx result in the requested state.
+
+    ``result`` seeds ``TaskInfo.result`` — the new-entity MoRef a
+    ``CreateVM_Task`` / ``CloneVM_Task`` success carries.
+    """
     info: dict[str, Any] = {"state": state}
     if error is not None:
         info["error"] = {"localizedMessage": error}
+    if result is not None:
+        info["result"] = result
     return _retrieve_result("Task", task_moid, "info", info)
 
 
@@ -876,6 +884,510 @@ async def test_vm_create_nested_hv_false_skips_leg_and_echoes_false(
         "rollback_reason": None,
         "nested_hv": False,
     }
+
+
+# ===========================================================================
+# vm.create — pre-9.0 vim CreateVM_Task arm (#3099)
+# ===========================================================================
+#
+# On vCenter 8.0.x the bare REST ``POST /api/vcenter/vm`` is vendor-
+# defective (opaque 500 UNABLE_TO_ALLOCATE_RESOURCE for every spec shape /
+# placement, proven live), so a resolvable pre-9.0 ``about.version`` major
+# routes the whole create through vim ``Folder.CreateVM_Task`` with NICs +
+# nested_hv folded into the one ConfigSpec. 9.0+/unresolved stay on the
+# REST arm byte-identical (the tests above run with about_version=None).
+
+_DVPG_BACKING_PROPS: dict[str, Any] = {
+    "objects": [
+        {
+            "obj": {"type": "DistributedVirtualPortgroup", "value": "dvportgroup-1015"},
+            "propSet": [
+                {"name": "key", "val": "dvportgroup-1015"},
+                {
+                    "name": "config.distributedVirtualSwitch",
+                    "val": {"type": "VmwareDistributedVirtualSwitch", "value": "dvs-21"},
+                },
+            ],
+        }
+    ]
+}
+
+_DVS_UUID = "50 1e ab cd 12 34 56 78-90 ab cd ef 12 34 56 78"
+
+
+def _pre9_conn(
+    rest: dict[str, Any] | None = None, vmomi: dict[str, Any] | None = None
+) -> _UnifiedRecordingConnector:
+    """A recording connector reporting a live vCenter 8.0.3 about.version."""
+    return _UnifiedRecordingConnector(rest or {}, about_version="8.0.3.00500", vmomi=vmomi or {})
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
+    """Pre-9.0: one CreateVM_Task carries placement, NIC, and nestedHVEnabled.
+
+    The full-shape proof: the REST create is never attempted, the DVPG
+    backing is resolved through the two vmomi property reads (portgroup
+    key + owning switch, then switch uuid — the govc walk), the ConfigSpec
+    folds the #3093 flag inline (no separate ReconfigVM_Task), and the
+    envelope is byte-identical to the REST arm's.
+    """
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "nested-lab"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+            "/api/vcenter/vm/vm-88/power?action=start": {},
+        },
+        vmomi={
+            "DistributedVirtualPortgroup": _DVPG_BACKING_PROPS,
+            "VmwareDistributedVirtualSwitch": _retrieve_result(
+                "VmwareDistributedVirtualSwitch", "dvs-21", "uuid", _DVS_UUID
+            ),
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-501"),
+            "Task": _task_info_result(
+                "task-501", "success", result={"type": "VirtualMachine", "value": "vm-88"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "nested-lab",
+            "name": "esx-nested-01",
+            "guest_os": "VMKERNEL_8",
+            "cpu_count": 8,
+            "memory_mib": 16384,
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "host": "host-14",
+            "nics": [{"network": "dvportgroup-1015", "backing_type": "DISTRIBUTED_PORTGROUP"}],
+            "nested_hv": True,
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    # The REST create never fired; the vim create + poll ride between the
+    # resolution reads and the (still-REST) power-on.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/folder"),
+        ("GET", "/api/vcenter/datastore/datastore-11"),
+        ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),  # DVPG key + owning switch
+        ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),  # switch uuid
+        ("POST-VMOMI", "/Folder/folder-7/CreateVM_Task"),
+        ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),  # task poll
+        ("POST", "/api/vcenter/vm/vm-88/power?action=start"),
+    ]
+    create_body = conn.vmomi_calls[2][1]
+    assert create_body == {
+        "config": {
+            "name": "esx-nested-01",
+            "guestId": "vmkernel8Guest",
+            "numCPUs": 8,
+            "memoryMB": 16384,
+            "files": {"vmPathName": "[datastore1] esx-nested-01"},
+            "nestedHVEnabled": True,
+            "deviceChange": [
+                {
+                    "operation": "add",
+                    "device": {
+                        "_typeName": "VirtualVmxnet3",
+                        "key": -1,
+                        "backing": {
+                            "_typeName": ("VirtualEthernetCardDistributedVirtualPortBackingInfo"),
+                            "port": {
+                                "switchUuid": _DVS_UUID,
+                                "portgroupKey": "dvportgroup-1015",
+                            },
+                        },
+                    },
+                }
+            ],
+        },
+        "pool": {"type": "ResourcePool", "value": "resgroup-8"},
+        "host": {"type": "HostSystem", "value": "host-14"},
+    }
+
+    # Governance: exactly the vim create + the power-on were gated — no
+    # separate ReconfigVM_Task (the #3093 leg folded into the ConfigSpec)
+    # and no REST create gate.
+    assert gate.gated_op_ids == [
+        "POST:/Folder/{moId}/CreateVM_Task",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    ]
+    assert gate.calls[0]["params"] == {
+        "name": "esx-nested-01",
+        "folder_name": "nested-lab",
+        "folder": "folder-7",
+        "guest_os": "VMKERNEL_8",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+        "host": "host-14",
+        "cpu_count": 8,
+        "memory_mib": 16384,
+        "nics": ["dvportgroup-1015"],
+        "nested_hv": True,
+    }
+
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-88",
+        "steps_succeeded": ["folder_lookup", "create", "nic_attach", "nested_hv", "power_on"],
+        "failed_step": None,
+        "rollback_reason": None,
+        "nested_hv": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("about_version", [None, "9.0.0.24755230"])
+async def test_vm_create_v9_and_unresolved_keep_rest_create_byte_identical(
+    gate: _GateRecorder, about_version: str | None
+) -> None:
+    """9.0+ and unresolved about.version: the REST arm is byte-identical (#3099).
+
+    The exact-envelope regression in the #3094/#3097 discipline: same
+    create body, same sub-op chain, same envelope — and zero vim traffic.
+    """
+    conn = _UnifiedRecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        },
+        about_version=about_version,
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "cpu_count": 2,
+            "memory_mib": 4096,
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.vmomi_calls == []
+    assert conn.calls[1]["body"] == {
+        "name": "web-01",
+        "guest_OS": "UBUNTU_64",
+        "placement": {
+            "folder": "folder-7",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        "cpu": {"count": 2},
+        "memory": {"size_MiB": 4096},
+    }
+    assert gate.gated_op_ids == ["POST:/vcenter/vm"]
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["folder_lookup", "create"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_unknown_guest_enum_fails_closed(gate: _GateRecorder) -> None:
+    """An unmapped guest_os enum refuses before any sub-call — never a guess."""
+    conn = _pre9_conn()
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "VMKERNEL8",  # typo: not a mapped enum
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "guest_id_mapping"
+    assert "'VMKERNEL8'" in out["rollback_reason"]
+    assert "VMKERNEL_8" in out["rollback_reason"]  # the supported list is named
+    assert conn.calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_requires_resource_pool_and_datastore(
+    gate: _GateRecorder,
+) -> None:
+    """Missing placement pins fail closed: vim create has no placement defaulting."""
+    conn = _pre9_conn()
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"folder_name": "Prod", "name": "web-01", "guest_os": "UBUNTU_64"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "placement_params"
+    assert "resource_pool and datastore" in out["rollback_reason"]
+    assert conn.calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_standard_portgroup_nic_uses_network_backing(
+    gate: _GateRecorder,
+) -> None:
+    """The default STANDARD_PORTGROUP backing maps to the deviceName vim backing."""
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+            "/api/vcenter/network": [
+                {"network": "network-33", "name": "VM Network", "type": "STANDARD_PORTGROUP"}
+            ],
+        },
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-502"),
+            "Task": _task_info_result(
+                "task-502", "success", result={"type": "VirtualMachine", "value": "vm-90"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "nics": [{"network": "network-33"}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # The network listing resolved the display name (bare param on /api, #2298).
+    network_reads = [c for c in conn.calls if c["path"] == "/api/vcenter/network"]
+    assert len(network_reads) == 1
+    assert network_reads[0]["query"] == {"networks": ["network-33"]}
+    create_body = conn.vmomi_calls[0][1]
+    assert create_body["config"]["deviceChange"] == [
+        {
+            "operation": "add",
+            "device": {
+                "_typeName": "VirtualVmxnet3",
+                "key": -1,
+                "backing": {
+                    "_typeName": "VirtualEthernetCardNetworkBackingInfo",
+                    "deviceName": "VM Network",
+                },
+            },
+        }
+    ]
+    assert out["status"] == "created"
+    assert out["steps_succeeded"] == ["folder_lookup", "create", "nic_attach"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_opaque_network_nic_fails_closed(gate: _GateRecorder) -> None:
+    """OPAQUE_NETWORK has no vim expression on this arm: structured refusal, no write."""
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "nics": [{"network": "net-77", "backing_type": "OPAQUE_NETWORK"}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "network_lookup"
+    assert "OPAQUE_NETWORK" in out["rollback_reason"]
+    assert gate.calls == []  # the CreateVM_Task write was never gated / issued
+    assert conn.vmomi_calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_datastore_without_name_fails_closed(
+    gate: _GateRecorder,
+) -> None:
+    """A datastore info payload without a name refuses before the vim write."""
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "datastore_lookup"
+    assert "datastore-11" in out["rollback_reason"]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_task_fault_returns_rolled_back(gate: _GateRecorder) -> None:
+    """A faulted CreateVM_Task surfaces the vim fault; nothing exists to delete."""
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+        },
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-503"),
+            "Task": _task_info_result("task-503", "error", "Insufficient capacity"),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "create"
+    assert "Insufficient capacity" in out["rollback_reason"]
+    # The create never landed, so no DELETE rollback fires.
+    assert "DELETE" not in [c["method"] for c in conn.calls]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_poll_timeout_returns_rolled_back(
+    gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A create task-poll timeout names the task; the VM may still land later."""
+    monkeypatch.setattr(_write, "_VM_CREATE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+        },
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-504"),
+            "Task": _task_info_result("task-504", "running"),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "create"
+    assert "task-504" in out["rollback_reason"]
+    assert "may still complete" in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_gate_short_circuits_before_create_vm_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated vim create returns awaiting_approval verbatim; no vmomi write fires."""
+    vim_op = "POST:/Folder/{moId}/CreateVM_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={vim_op: _awaiting(vim_op)}))
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == vim_op
+    assert conn.vmomi_calls == []
+    # Only the two resolution reads hit the session; no power-on either.
+    assert [c["method"] for c in conn.calls] == ["GET", "GET"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_power_on_failure_rolls_back_via_delete(
+    gate: _GateRecorder,
+) -> None:
+    """The vim arm keeps the REST rollback contract: power-on fault -> DELETE."""
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+            "/api/vcenter/vm/vm-90/power?action=start": _http_error(
+                500, "https://vc/api/vcenter/vm/vm-90/power?action=start"
+            ),
+            "/api/vcenter/vm/vm-90": {},  # DELETE rollback
+        },
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-505"),
+            "Task": _task_info_result(
+                "task-505", "success", result={"type": "VirtualMachine", "value": "vm-90"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "power_on_after_create": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert ("DELETE", "/api/vcenter/vm/vm-90") in [(c["method"], c["path"]) for c in conn.calls]
+    assert out["status"] == "rolled_back"
+    assert out["vm_id"] is None
+    assert out["failed_step"] == "power_on"
+    assert "power_on failed" in out["rollback_reason"]
 
 
 # ===========================================================================

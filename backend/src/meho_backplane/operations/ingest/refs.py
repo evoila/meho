@@ -11,6 +11,7 @@ across specs.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from meho_backplane.operations.ingest.exceptions import (
@@ -20,6 +21,9 @@ from meho_backplane.operations.ingest.exceptions import (
 
 __all__ = [
     "PREFERRED_MEDIA_TYPES",
+    "collect_component_schema_closure",
+    "find_unresolvable_local_refs",
+    "iter_schema_refs",
     "normalize_boolean_schema",
     "resolve_shallow_ref",
     "select_media_type_schema",
@@ -192,6 +196,176 @@ def _resolve_named_component(
     if name not in bucket:
         raise InvalidSchemaError(f"$ref points at missing component (got {ref!r})")
     return bucket[name]
+
+
+#: The one component bucket a ``$ref`` nested *inside* a JSON Schema can
+#: legally point at. Parameter / response / requestBody refs only occur at
+#: the OpenAPI-object level and are resolved before schema extraction.
+_SCHEMA_COMPONENT_REF_PREFIX = "#/components/schemas/"
+
+#: JSON Schema keywords whose values are **named maps of subschemas** —
+#: the child *keys* are arbitrary names (property names, definition
+#: names), and every child *value* is itself a schema. The ref walk must
+#: descend through the values without applying the data-key skip list to
+#: the names (a property literally named ``enum`` still carries a schema).
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"}
+)
+
+#: JSON Schema keywords whose values are **data payloads**, not
+#: subschemas. A ``$ref``-shaped object inside an ``example`` or ``enum``
+#: member is literal data the validator never resolves, so the ref walk
+#: must not collect it (a false positive here would fail an ingest over
+#: a ref the dispatcher would never dereference).
+_DATA_VALUE_KEYWORDS = frozenset({"enum", "const", "default", "example", "examples"})
+
+
+def iter_schema_refs(node: Any) -> Iterator[str]:
+    """Yield every ``$ref`` string in *node* that sits in a schema position.
+
+    Walks the schema the way a JSON Schema 2020-12 validator does:
+    generic keywords (``allOf`` / ``items`` / ``additionalProperties`` /
+    ...) recurse structurally, named-map keywords
+    (:data:`_SCHEMA_MAP_KEYWORDS`) recurse through their *values*, and
+    data-valued keywords (:data:`_DATA_VALUE_KEYWORDS`) plus vendor
+    ``x-*`` extensions are skipped entirely — refs inside them are
+    literal data the validator never dereferences. A bundled
+    ``components.schemas`` map (the shape
+    :func:`collect_component_schema_closure` produces) is walked as a
+    named map so lint passes over a stored descriptor cover the bundle.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from iter_schema_refs(item)
+        return
+    if not isinstance(node, dict):
+        return
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        yield ref
+    for key, value in node.items():
+        if key == "$ref":
+            continue
+        if key in _SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            for subschema in value.values():
+                yield from iter_schema_refs(subschema)
+            continue
+        if key == "components" and isinstance(value, dict):
+            schemas_bucket = value.get("schemas")
+            if isinstance(schemas_bucket, dict):
+                for subschema in schemas_bucket.values():
+                    yield from iter_schema_refs(subschema)
+            continue
+        if key in _DATA_VALUE_KEYWORDS or key.startswith("x-"):
+            continue
+        yield from iter_schema_refs(value)
+
+
+def _unescape_pointer_segment(segment: str) -> str:
+    """Apply RFC 6901 unescaping (``~1`` → ``/``, then ``~0`` → ``~``)."""
+    return segment.replace("~1", "/").replace("~0", "~")
+
+
+def collect_component_schema_closure(
+    schema: Any,
+    component_schemas: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the transitive ``#/components/schemas/*`` closure *schema* needs.
+
+    Walks every schema-position ``$ref`` in *schema* (via
+    :func:`iter_schema_refs`), resolves each
+    ``#/components/schemas/<name>`` against *component_schemas*, and
+    recurses into the referenced components until the set is closed.
+    Cycles (``A`` → ``B`` → ``A``, or self-referential components) are
+    handled by the seen-set — each component is bundled exactly once,
+    never expanded inline, so recursive vendor types terminate.
+
+    The returned dict is sorted by component name so the persisted
+    descriptor bytes are deterministic across ingests of the same spec.
+    Component values are the spec's schema objects verbatim (no copy) —
+    callers persist them via JSON serialization, never mutate them.
+
+    Refs of any other shape (``#/$defs/...``, anchors, ``#``) are left
+    for :func:`find_unresolvable_local_refs` to police against the final
+    stored document.
+
+    Raises:
+        InvalidSchemaError: A ref drills into a component subpath, or
+            names a component absent from *component_schemas* — same
+            posture as the top-level resolver
+            (:func:`resolve_shallow_ref`): a descriptor whose schema
+            references a missing component could never validate any
+            input, so the spec defect is surfaced at ingest time.
+    """
+    closure: dict[str, Any] = {}
+    pending = [
+        ref for ref in iter_schema_refs(schema) if ref.startswith(_SCHEMA_COMPONENT_REF_PREFIX)
+    ]
+    while pending:
+        ref = pending.pop()
+        segment = ref[len(_SCHEMA_COMPONENT_REF_PREFIX) :]
+        if "/" in segment:
+            raise InvalidSchemaError(
+                f"$ref drill-down into component subpaths is not supported (got {ref!r})"
+            )
+        name = _unescape_pointer_segment(segment)
+        if name in closure:
+            continue
+        if name not in component_schemas:
+            raise InvalidSchemaError(f"$ref points at missing component (got {ref!r})")
+        component = component_schemas[name]
+        closure[name] = component
+        pending.extend(
+            nested
+            for nested in iter_schema_refs(component)
+            if nested.startswith(_SCHEMA_COMPONENT_REF_PREFIX)
+        )
+    return dict(sorted(closure.items()))
+
+
+def find_unresolvable_local_refs(schema: Any) -> list[str]:
+    """Return every schema-position ``$ref`` in *schema* that does not resolve.
+
+    Resolution is what the dispatcher's jsonschema validator will do at
+    call time: each ``#/<json-pointer>`` fragment is walked against
+    *schema* itself (the stored document is the whole resolution
+    universe — no registry, no retrieval). ``#`` (whole-document
+    self-ref) resolves trivially; any non-fragment ref (cross-document)
+    and any ``#<anchor>`` plain-name fragment is reported as
+    unresolvable — the parser never stores either shape, so their
+    presence means the descriptor would fail at dispatch.
+
+    Returns a sorted, de-duplicated list; empty means the stored schema
+    validates standalone.
+    """
+    unresolvable: set[str] = set()
+    for ref in iter_schema_refs(schema):
+        if ref == "#":
+            continue
+        if not ref.startswith("#/"):
+            unresolvable.add(ref)
+            continue
+        node: Any = schema
+        for raw_segment in ref[2:].split("/"):
+            segment = _unescape_pointer_segment(raw_segment)
+            if isinstance(node, dict) and segment in node:
+                node = node[segment]
+                continue
+            # RFC 6901 array indices are ASCII digits only. ``str.isdigit``
+            # alone also accepts non-ASCII digit codepoints ("²") that
+            # ``int()`` then rejects with ValueError -- guard with
+            # ``isascii`` so a pathological ref is flagged, not crashed on.
+            if (
+                isinstance(node, list)
+                and segment.isascii()
+                and segment.isdigit()
+                and int(segment) < len(node)
+            ):
+                node = node[int(segment)]
+                continue
+            unresolvable.add(ref)
+            break
+    return sorted(unresolvable)
 
 
 def select_media_type_schema(

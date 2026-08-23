@@ -93,6 +93,7 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
         ├─ source_kind != 'ingested' ? → status=unavailable (not_ingested)
         ├─ validate_params → errors ? → status=error error_code=invalid_params
+        │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
         ├─ get_or_create_connector_instance(cls)   (cached singleton)
@@ -119,7 +120,7 @@ surfaces stay `OPERATOR`-gated at the route / tool layer.
 | `status` | meaning | extra fields |
 |---|---|---|
 | `ok` | request resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind` |
-| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail |
+| `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095) |
 | `unavailable` | not an HTTP-ingested op | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
 
 Operator-input faults come back **inside** the envelope (not as

@@ -31,6 +31,7 @@ from typing import Any
 
 import structlog
 from jsonschema import Draft202012Validator
+from referencing.exceptions import Unresolvable
 
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
@@ -40,10 +41,35 @@ from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "InvalidOpSchemaError",
     "compute_params_hash",
     "policy_gate",
     "validate_params",
 ]
+
+
+class InvalidOpSchemaError(Exception):
+    """The stored ``parameter_schema`` itself is broken — not the params.
+
+    Raised by :func:`validate_params` when jsonschema's reference
+    machinery cannot resolve a ``$ref`` inside the descriptor's stored
+    schema (``referencing.exceptions.Unresolvable`` —
+    ``PointerToNowhere`` / ``NoSuchAnchor``). The classic producer is a
+    descriptor ingested before #3095's component bundling: its body
+    schema carries ``$ref: "#/components/schemas/X"`` but ``X`` was
+    never materialized into the stored document, so *no* input could
+    ever validate. Callers map this to a structured
+    ``invalid_op_schema`` error (the descriptor is at fault; the
+    caller's params were never judged) instead of letting the
+    referencing error escape as an HTTP 500.
+
+    ``missing_ref`` carries the offending ``$ref`` in the spelling a
+    spec author would recognise (``#/...``).
+    """
+
+    def __init__(self, missing_ref: str) -> None:
+        self.missing_ref = missing_ref
+        super().__init__(f"stored parameter_schema contains an unresolvable $ref: {missing_ref}")
 
 
 def compute_params_hash(params: dict[str, Any]) -> str:
@@ -81,19 +107,33 @@ def validate_params(
     registered without a parameter_schema (or with ``{}``) accept any
     params; the dispatcher is permissive at the schema layer when the
     descriptor itself is.
+
+    Raises:
+        InvalidOpSchemaError: The stored schema carries a ``$ref`` the
+            validator cannot resolve within the schema document
+            (#3095). The fault is the descriptor's, not the caller's,
+            so it is a distinct typed exception rather than an entry in
+            the returned (caller-attributed) error list. Surfaces
+            lazily — jsonschema resolves refs while validating — which
+            is why the ``iter_errors`` loop sits inside the guard.
     """
     if not parameter_schema:
         return []
-    validator = Draft202012Validator(parameter_schema)
     out: list[dict[str, Any]] = []
-    for err in validator.iter_errors(params):
-        out.append(
-            {
-                "path": err.json_path,
-                "message": err.message,
-                "validator": err.validator,
-            }
-        )
+    try:
+        validator = Draft202012Validator(parameter_schema)
+        for err in validator.iter_errors(params):
+            out.append(
+                {
+                    "path": err.json_path,
+                    "message": err.message,
+                    "validator": err.validator,
+                }
+            )
+    except Unresolvable as exc:
+        pointer = str(exc.ref)
+        missing_ref = f"#{pointer}" if pointer.startswith("/") else pointer
+        raise InvalidOpSchemaError(missing_ref) from exc
     return out
 
 

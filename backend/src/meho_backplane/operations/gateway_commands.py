@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import (
     AuditLog,
+    EndpointDescriptor,
     GatewayCommand,
     GatewayCommandStatus,
     PermissionVerdict,
@@ -77,6 +78,7 @@ from meho_backplane.gateway.queue import (
 )
 from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations._validate import (
+    InvalidOpSchemaError,
     compute_params_hash,
     policy_gate,
     validate_params,
@@ -141,6 +143,7 @@ class MintRefusalCode(StrEnum):
 
     DESCRIPTOR_UNKNOWN = "descriptor_unknown"
     INVALID_PARAMS = "invalid_params"
+    INVALID_OP_SCHEMA = "invalid_op_schema"
     OP_NOT_SAFE = "op_not_safe"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
@@ -170,6 +173,55 @@ class MintResult:
 def _refused(code: MintRefusalCode, reason: str) -> MintResult:
     """Build a fail-closed refusal result (no rows written)."""
     return MintResult(refusal_code=code, refusal_reason=reason)
+
+
+def _refuse_unvalidatable_params(
+    *,
+    descriptor: EndpointDescriptor,
+    params: dict[str, Any],
+    op_id: str,
+    operator_sub: str,
+) -> MintResult | None:
+    """Mint ladder Step 3: refuse when params fail — or cannot be — validated.
+
+    ``None`` means the params validated cleanly and the ladder proceeds.
+    Two refusal shapes, distinguished because the fault differs:
+
+    * :attr:`MintRefusalCode.INVALID_PARAMS` — the caller's params
+      failed a sound stored schema.
+    * :attr:`MintRefusalCode.INVALID_OP_SCHEMA` (#3095) — the stored
+      schema itself carries a ``$ref`` that resolves nowhere, so *no*
+      params could ever validate; the descriptor is at fault and the
+      remediation (re-ingest the spec) rides in the refusal reason.
+    """
+    try:
+        validation_errors = validate_params(descriptor.parameter_schema, params)
+    except InvalidOpSchemaError as exc:
+        structlog.get_logger(__name__).info(
+            "gateway_command_mint_refused",
+            reason=MintRefusalCode.INVALID_OP_SCHEMA.value,
+            op_id=op_id,
+            operator_sub=operator_sub,
+            missing_ref=exc.missing_ref,
+        )
+        return _refused(
+            MintRefusalCode.INVALID_OP_SCHEMA,
+            f"stored parameter_schema for op {op_id!r} contains an "
+            f"unresolvable $ref ({exc.missing_ref}); re-ingest the "
+            f"connector's spec to repair the descriptor",
+        )
+    if validation_errors:
+        structlog.get_logger(__name__).info(
+            "gateway_command_mint_refused",
+            reason=MintRefusalCode.INVALID_PARAMS.value,
+            op_id=op_id,
+            operator_sub=operator_sub,
+        )
+        return _refused(
+            MintRefusalCode.INVALID_PARAMS,
+            f"params failed schema validation for op {op_id!r}",
+        )
+    return None
 
 
 async def _write_gateway_audit_row(
@@ -213,6 +265,11 @@ async def _write_gateway_audit_row(
     await session.flush()
 
 
+# Pre-existing mint-ladder size debt (~180 lines before #3095, which
+# net-shrinks it by extracting Step 3 into _refuse_unvalidatable_params);
+# splitting the remaining lookup / safe-wall / policy-gate / audit /
+# enqueue phases is its own refactor task, out of scope for #3095.
+# code-quality-allow: function-size — pre-existing ladder debt, net-shrunk here
 async def mint_gateway_command(
     session: AsyncSession,
     *,
@@ -233,7 +290,9 @@ async def mint_gateway_command(
     for a ``safety_level == 'safe'`` op:
 
     1. ``lookup_descriptor`` — unknown op → :attr:`MintRefusalCode.DESCRIPTOR_UNKNOWN`.
-    2. ``validate_params`` — invalid params → :attr:`MintRefusalCode.INVALID_PARAMS`.
+    2. ``validate_params`` — invalid params → :attr:`MintRefusalCode.INVALID_PARAMS`;
+       a stored schema whose own ``$ref`` cannot resolve (#3095) →
+       :attr:`MintRefusalCode.INVALID_OP_SCHEMA`.
     3. **safe-only wall** — ``descriptor.safety_level != 'safe'`` →
        :attr:`MintRefusalCode.OP_NOT_SAFE`. Checked **before** the policy
        gate so a non-``safe`` op is refused without even consulting it (and
@@ -297,18 +356,11 @@ async def mint_gateway_command(
         )
 
     # --- Step 3: parameter_schema validation -----------------------------
-    validation_errors = validate_params(descriptor.parameter_schema, params)
-    if validation_errors:
-        structlog.get_logger(__name__).info(
-            "gateway_command_mint_refused",
-            reason=MintRefusalCode.INVALID_PARAMS.value,
-            op_id=op_id,
-            operator_sub=operator.sub,
-        )
-        return _refused(
-            MintRefusalCode.INVALID_PARAMS,
-            f"params failed schema validation for op {op_id!r}",
-        )
+    params_refusal = _refuse_unvalidatable_params(
+        descriptor=descriptor, params=params, op_id=op_id, operator_sub=operator.sub
+    )
+    if params_refusal is not None:
+        return params_refusal
 
     # --- Safe-only wall (v1 read-only guarantee) -------------------------
     # Bound to the real op-identity metadata read straight off the

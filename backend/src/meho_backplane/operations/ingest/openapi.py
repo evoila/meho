@@ -33,10 +33,23 @@ Out of scope (no conversion performed in-process):
 * GraphQL SDL / WSDL / protobuf — separate parsers; v0.2.next.
 * Cross-document ``$ref`` (``$ref: "other.yaml#/..."``) — raises
   :exc:`UnsupportedSpecError`.
-* Deep ``$ref`` resolution — only top-level refs under each parameter
-  / body schema are inlined; nested ``$ref`` strings are preserved
-  verbatim for the dispatcher's jsonschema validator to resolve at
-  call time.
+
+Nested ``$ref`` handling (#3095): only the top-level ref under each
+parameter / body schema is inlined; nested ``$ref`` strings are
+preserved verbatim, and every ``#/components/schemas/*`` component they
+transitively reference is **bundled** into the stored
+``parameter_schema`` under its own ``components.schemas`` key. The
+dispatcher's jsonschema validator resolves the nested refs as plain
+JSON Pointers into the stored document itself — no registry, no spec
+re-read — so a stored descriptor validates params standalone. A nested
+ref to a component the spec never defines fails the ingest with
+:exc:`InvalidSchemaError` (same posture as a dangling top-level ref);
+before #3095 it was stored silently and crashed dispatch with an
+unhandled ``PointerToNowhere``. ``response_schema`` is deliberately
+**not** bundled: nothing validates against it at dispatch (its only
+consumer is the JSONFlux reducer, which never resolves refs), and
+bundling it would multiply storage for the large recursive response
+types the vCenter / NSX specs declare.
 
 Known limitation: when an operation declares two parameters with the
 same ``name`` in different ``in`` locations (e.g. a ``cluster`` path
@@ -78,6 +91,12 @@ from meho_backplane.operations.ingest.exceptions import (
     InvalidSpecError,
     UnsupportedSpecError,
     UpstreamNotSpecError,
+)
+from meho_backplane.operations.ingest.refs import (
+    collect_component_schema_closure as _collect_component_schema_closure,
+)
+from meho_backplane.operations.ingest.refs import (
+    find_unresolvable_local_refs as _find_unresolvable_local_refs,
 )
 from meho_backplane.operations.ingest.refs import (
     normalize_boolean_schema as _normalize_boolean_schema,
@@ -982,6 +1001,40 @@ def _assert_json_serializable(*, op_id: str, field: str, schema: object) -> None
         ) from exc
 
 
+def _assert_parameter_schema_standalone(
+    *,
+    op_id: str,
+    parameter_schema: dict[str, object],
+) -> None:
+    """Fail closed when the stored ``parameter_schema`` cannot self-resolve.
+
+    The ingest-time lint for #3095: every schema-position ``$ref`` in
+    the final stored document must resolve as a JSON Pointer into that
+    same document, because that is exactly — and only — what the
+    dispatcher's jsonschema validator can do at call time. A descriptor
+    that fails this check could never validate any input; every
+    dispatch would return ``invalid_op_schema``. The component-closure
+    bundling in :func:`_build_parameter_schema` makes real vendor specs
+    pass; what this catches is the residue (absolute ``#/$defs/...``
+    pointers into a component's own document, ``$anchor``-style plain
+    fragments, hand-mutated specs). Fail posture, not warn: like
+    :func:`_assert_json_serializable`, both the ``dry_run`` and the
+    effectful ingest legs funnel through this proto-build boundary, so
+    they refuse the dead-on-arrival descriptor identically at parse
+    time instead of shipping an op that fails on first use.
+    """
+    unresolvable = _find_unresolvable_local_refs(parameter_schema)
+    if unresolvable:
+        refs = ", ".join(repr(ref) for ref in unresolvable)
+        raise InvalidSchemaError(
+            f"{op_id}: parameter_schema contains $ref pointers that do not "
+            f"resolve within the stored schema document ({refs}); the "
+            f"descriptor could never validate params at dispatch. Define the "
+            f"referenced components in the spec, or rewrite the refs as "
+            f"#/components/schemas/* pointers the parser can bundle."
+        )
+
+
 def _build_proto(
     *,
     method: str,
@@ -1038,6 +1091,7 @@ def _build_proto(
     _assert_json_serializable(op_id=op_id, field="parameter_schema", schema=parameter_schema)
     if response_schema is not None:
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
+    _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
     return EndpointDescriptorProto(
         op_id=op_id,
@@ -1117,6 +1171,13 @@ def _build_parameter_schema(
     payload regardless of property name. Operations with no params
     at all get the empty-but-valid ``{"type": "object", "properties":
     {}}``.
+
+    Nested ``$ref`` strings inside the inlined schemas are preserved
+    verbatim, and the components they transitively reference are
+    bundled under the returned schema's ``components.schemas`` key
+    (#3095) — see :func:`~meho_backplane.operations.ingest.refs.collect_component_schema_closure`.
+    A nested ref to a component the spec never defines raises
+    :class:`InvalidSchemaError` naming the operation and the ref.
     """
     properties: dict[str, object] = {}
     required: list[str] = []
@@ -1159,7 +1220,36 @@ def _build_parameter_schema(
     schema: dict[str, object] = {"type": "object", "properties": properties}
     if required:
         schema["required"] = required
+    _attach_component_closure(
+        schema=schema, component_schemas=component_schemas, path=path, method=method
+    )
     return schema
+
+
+def _attach_component_closure(
+    *,
+    schema: dict[str, object],
+    component_schemas: dict[str, Any],
+    path: str,
+    method: str,
+) -> None:
+    """Bundle the components *schema*'s nested refs transitively reference.
+
+    #3095: nested ``$ref`` strings survive the shallow inline verbatim,
+    and the dispatcher validates against the stored schema standalone
+    (no registry). Attaching the closure under the document's own
+    ``components.schemas`` key lets ``#/components/schemas/<name>``
+    resolve as a plain JSON Pointer at call time. Schemas with no
+    nested component refs gain no key and persist byte-identically to
+    pre-#3095 ingests. A ref to a component the spec never defines
+    raises :class:`InvalidSchemaError` naming the operation.
+    """
+    try:
+        closure = _collect_component_schema_closure(schema, component_schemas)
+    except InvalidSchemaError as exc:
+        raise InvalidSchemaError(f"paths.{path}.{method.lower()}: {exc}") from exc
+    if closure:
+        schema["components"] = {"schemas": closure}
 
 
 def _populate_param_properties(

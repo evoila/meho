@@ -60,12 +60,44 @@ from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
 )
-from meho_backplane.operations._validate import validate_params
+from meho_backplane.operations._validate import InvalidOpSchemaError, validate_params
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
 __all__ = ["preview_dispatch"]
 
 _log = structlog.get_logger(__name__)
+
+
+def _invalid_op_schema_envelope(
+    *,
+    op_id: str,
+    connector_id: str,
+    source_kind: str,
+    missing_ref: str,
+) -> dict[str, Any]:
+    """Structured envelope for a self-broken stored ``parameter_schema`` (#3095).
+
+    Mirrors the dispatcher's ``result_invalid_op_schema`` shape: the
+    descriptor — not the caller's params — is at fault, and the missing
+    pointer rides in ``extras`` so the operator can repair the spec /
+    re-ingest.
+    """
+    return {
+        "status": "error",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": source_kind,
+        "error": (
+            f"invalid_op_schema: stored parameter_schema for {op_id!r} "
+            f"contains an unresolvable $ref ({missing_ref}); the op "
+            "cannot validate any params until its descriptor is repaired "
+            "(re-ingest the connector's spec)."
+        ),
+        "extras": {
+            "error_code": "invalid_op_schema",
+            "missing_ref": missing_ref,
+        },
+    }
 
 
 async def _resolve_previewable_descriptor(
@@ -86,6 +118,9 @@ async def _resolve_previewable_descriptor(
       ``composite`` op has no single literal HTTP request to preview.
     * ``invalid_params`` -- params failed the descriptor's
       ``parameter_schema`` (same validation ``dispatch`` runs).
+    * ``invalid_op_schema`` -- the stored ``parameter_schema`` itself
+      carries an unresolvable ``$ref`` (#3095); same structured envelope
+      ``dispatch`` returns for the same broken descriptor.
     """
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -141,25 +176,49 @@ async def _resolve_previewable_descriptor(
         }
 
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
-    validation_errors = validate_params(descriptor.parameter_schema, params)
+    try:
+        validation_errors = validate_params(descriptor.parameter_schema, params)
+    except InvalidOpSchemaError as exc:
+        return _invalid_op_schema_envelope(
+            op_id=op_id,
+            connector_id=connector_id,
+            source_kind=descriptor.source_kind,
+            missing_ref=exc.missing_ref,
+        )
     if validation_errors:
-        return {
-            "status": "error",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": (
-                "invalid_params: params failed the operation's parameter_schema; "
-                "fix the params shape (see extras.validation_errors) before "
-                "previewing."
-            ),
-            "extras": {
-                "error_code": "invalid_params",
-                "validation_errors": validation_errors,
-            },
-        }
+        return _invalid_params_envelope(
+            op_id=op_id,
+            connector_id=connector_id,
+            source_kind=descriptor.source_kind,
+            validation_errors=validation_errors,
+        )
 
     return descriptor
+
+
+def _invalid_params_envelope(
+    *,
+    op_id: str,
+    connector_id: str,
+    source_kind: str,
+    validation_errors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Structured envelope for params that failed the stored schema."""
+    return {
+        "status": "error",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": source_kind,
+        "error": (
+            "invalid_params: params failed the operation's parameter_schema; "
+            "fix the params shape (see extras.validation_errors) before "
+            "previewing."
+        ),
+        "extras": {
+            "error_code": "invalid_params",
+            "validation_errors": validation_errors,
+        },
+    }
 
 
 def _redact_request_body(

@@ -72,6 +72,13 @@ Detail payloads land in ``extras``. Codes:
 
 * ``unknown_op`` -- the natural key didn't resolve a descriptor.
 * ``invalid_params`` -- params failed JSON Schema validation.
+* ``invalid_op_schema`` -- the **stored** ``parameter_schema`` itself is
+  broken: it carries a ``$ref`` the validator cannot resolve within the
+  stored schema document (a descriptor ingested before #3095's
+  component bundling, or a hand-registered op with a dangling ref). The
+  caller's params were never judged; ``extras`` carries ``missing_ref``
+  and a ``remediation`` naming re-ingest as the durable fix. Before
+  #3095 this escaped as an unhandled ``PointerToNowhere`` -> HTTP 500.
 * ``no_connector`` -- resolver couldn't pick a connector for the target.
   ``extras["exception_message"]`` carries the
   :exc:`~meho_backplane.connectors.NoMatchingConnector` text when the
@@ -282,6 +289,7 @@ from meho_backplane.operations._errors import (
     result_connector_vault_write_forbidden,
     result_denied,
     result_handler_unreachable,
+    result_invalid_op_schema,
     result_invalid_params,
     result_no_connector,
     result_target_required,
@@ -307,6 +315,7 @@ from meho_backplane.operations._preview import (
     describe_preview_provenance,
 )
 from meho_backplane.operations._validate import (
+    InvalidOpSchemaError,
     compute_params_hash,
     policy_gate,
     validate_params,
@@ -2115,7 +2124,13 @@ async def dispatch(
         return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
     # --- Step 3: parameter_schema validation ------------------------------
-    validation_errors = validate_params(descriptor.parameter_schema, params)
+    try:
+        validation_errors = validate_params(descriptor.parameter_schema, params)
+    except InvalidOpSchemaError as exc:
+        # #3095: the stored schema itself is broken (dangling $ref) --
+        # the descriptor is at fault, not the caller. Structured error
+        # instead of letting PointerToNowhere escape as a 500.
+        return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 

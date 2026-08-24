@@ -136,6 +136,15 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 		len(r.Groups), r.TotalOpCount,
 	)
 	printProvenance(w, r.Provenance)
+	// #3102: rows flagged by the needs_reingest detect pass fail every
+	// dispatch with invalid_op_schema until the spec is re-ingested.
+	// Surface the count loudly here; the per-op flags ride the --json
+	// render (ConnectorReviewOp.needs_reingest) for enumeration.
+	if r.NeedsReingestOpCount != nil && *r.NeedsReingestOpCount > 0 {
+		fmt.Fprintf(w, "\nWARNING: %d op(s) need re-ingest — their stored parameter schemas predate an ingest-parser fix and fail dispatch with invalid_op_schema. Re-ingest the connector's spec to repair in place (enablement, groups, and curation are preserved).\n",
+			*r.NeedsReingestOpCount,
+		)
+	}
 	if len(r.Groups) == 0 {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return

@@ -96,6 +96,7 @@ from meho_backplane.operations.ingest._internals import (
     audit_profile_stamp,
     bulk_enable_read_ops,
     cascade_is_enabled,
+    count_needs_reingest_in_scope,
     count_ops_in_scope,
     enable_time_auto_shim_warnings,
     load_group,
@@ -508,6 +509,7 @@ class ReviewService:
                         requires_approval=op.requires_approval,
                         is_enabled=op.is_enabled,
                         tags=list(op.tags),
+                        needs_reingest=op.needs_reingest,
                     )
                     for op in ops_by_group[group.id]
                 ],
@@ -525,6 +527,11 @@ class ReviewService:
         # ``ungrouped_op_count`` is the reconciling remainder:
         # ``total_op_count + ungrouped_op_count == listing.operation_count``.
         all_op_count = await count_ops_in_scope(session, scope)
+        # #3102: full-universe count of rows whose stored schema cannot
+        # self-resolve — the operator's "how much of this connector needs
+        # a same-spec re-ingest" signal, including ungrouped ops the
+        # rendered groups never show.
+        needs_reingest_op_count = await count_needs_reingest_in_scope(session, scope)
         # #2291: durable per-spec provenance for this connector scope,
         # ordered by ``uri``. Empty for connectors ingested before the
         # provenance table landed — the surfaces render that gap rather
@@ -545,6 +552,7 @@ class ReviewService:
             groups=rendered_groups,
             total_op_count=grouped_op_count,
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
+            needs_reingest_op_count=needs_reingest_op_count,
             kind=kind,
             dispatchable=dispatchable,
             provenance=[

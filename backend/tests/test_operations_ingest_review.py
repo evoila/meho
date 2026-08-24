@@ -308,6 +308,62 @@ async def test_get_review_payload_returns_groups_with_counts() -> None:
         for op in group.ops:
             assert op.is_enabled is False
             assert op.safety_level == "safe"
+            assert op.needs_reingest is False
+    assert payload.needs_reingest_op_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_review_payload_surfaces_needs_reingest_flag_and_count() -> None:
+    """#3102: the per-op flag renders, and the rollup counts ungrouped rows too.
+
+    Migration 0076 flags descriptor rows whose stored ``parameter_schema``
+    cannot self-resolve. The review payload is the operator's enumeration
+    surface: each rendered op carries ``needs_reingest``, and
+    ``needs_reingest_op_count`` counts the **full** descriptor universe
+    (like ``total_op_count + ungrouped_op_count``) so a flagged op whose
+    ``group_id`` is null still shows up in the rollup.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=2)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        flagged = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "GET:/api/v1/group-0/0",
+                    EndpointDescriptor.tenant_id == tenant_id,
+                )
+            )
+        ).scalar_one()
+        flagged.needs_reingest = True
+        # A flagged row outside any group -- invisible to the rendered
+        # groups, but the rollup must still count it.
+        session.add(
+            EndpointDescriptor(
+                tenant_id=tenant_id,
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id="POST:/api/v1/ungrouped/upload",
+                source_kind="ingested",
+                method="POST",
+                path="/api/v1/ungrouped/upload",
+                group_id=None,
+                summary="Ungrouped flagged op",
+                is_enabled=True,
+                needs_reingest=True,
+            )
+        )
+        await session.commit()
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    payload = await service.get_review_payload("vmware-rest-9.0", tenant_id)
+
+    ops_by_id = {op.op_id: op for group in payload.groups for op in group.ops}
+    assert ops_by_id["GET:/api/v1/group-0/0"].needs_reingest is True
+    assert ops_by_id["GET:/api/v1/group-0/1"].needs_reingest is False
+    assert payload.needs_reingest_op_count == 2
+    assert payload.ungrouped_op_count == 1
 
 
 @pytest.mark.asyncio

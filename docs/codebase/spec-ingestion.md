@@ -1761,6 +1761,46 @@ defect class out:
   covering rows persisted by pre-#3095 ingests until they are
   re-ingested.
 
+### Repairing pre-#3095 rows (#3102)
+
+Both #3095 guards are ingest-time, so rows persisted by earlier ingests
+keep their dangling-ref schemas after a deploy — the ops stay
+undispatchable (live-hit: the governed content-library file-PULL on the
+consumer's pre-fix vCenter ingest). A re-bundling migration is
+impossible: the DB stores no spec document (`spec_provenance` records
+only `uri` + `sha256`; probe-derived and URL-sourced specs live on the
+network/appliance), so the component definitions the bundle needs are
+not recoverable server-side. The shipped repair path is
+**detect-and-flag + same-spec re-ingest**:
+
+* **Detect** — migration `0076` adds
+  `endpoint_descriptor.needs_reingest` (boolean, default false) and
+  runs a one-time pass over every `source_kind='ingested'` row (any
+  tenant scope), flagging those whose stored `parameter_schema` fails
+  the same self-resolution walk `find_unresolvable_local_refs` models
+  (the migration carries a frozen copy of the walk per the
+  data-migration self-containment rule; a drift-guard test pins the
+  copy against the live `refs` functions). `response_schema` is not
+  scanned — it is neither bundled nor linted (see above), and its refs
+  are inert at dispatch.
+* **Surface** — the review payload carries the flag per op
+  (`ConnectorReviewOp.needs_reingest`) plus a full-universe rollup
+  (`ConnectorReviewPayload.needs_reingest_op_count`, counted like
+  `total_op_count + ungrouped_op_count` so ungrouped ops are included).
+  Dispatch keeps returning the structured `invalid_op_schema` error
+  whose `extras.remediation` names the re-ingest remedy.
+* **Repair** — re-ingesting the *same* spec under the *same* connector
+  triple heals rows in place: the upsert's two existing-row branches
+  (`_upsert.py`) overwrite `parameter_schema` with the freshly bundled
+  document (the skip-re-embed branch included — a byte-identical spec
+  hits it, and it still refreshes the schema) and clear
+  `needs_reingest`, while leaving `is_enabled`, `group_id`, and the
+  operator's `custom_*` / `llm_instructions` untouched. No re-review is
+  needed; grouping is a zero-LLM-call no-op when every op is already
+  assigned. There is deliberately **no** separate "repair" verb — the
+  existing `meho connector ingest` / `POST /api/v1/connectors/ingest` /
+  `meho_connector_ingest` surfaces are the repair path.
+
 The four supported component buckets are: `#/components/schemas/*`,
 `#/components/parameters/*` (vi-json.yaml's shared `moId`),
 `#/components/responses/*` (the GitHub REST spec's 1.9k shared

@@ -3026,6 +3026,7 @@ type ConnectorReviewOp struct {
 	CustomDescription *string  `json:"custom_description"`
 	Description       *string  `json:"description"`
 	IsEnabled         bool     `json:"is_enabled"`
+	NeedsReingest     *bool    `json:"needs_reingest,omitempty"`
 	OpId              string   `json:"op_id"`
 	RequiresApproval  bool     `json:"requires_approval"`
 	SafetyLevel       string   `json:"safety_level"`
@@ -3062,17 +3063,18 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId      string                       `json:"connector_id"`
-	Dispatchable     *bool                        `json:"dispatchable,omitempty"`
-	Groups           []ConnectorReviewGroup       `json:"groups"`
-	ImplId           string                       `json:"impl_id"`
-	Kind             *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
-	Product          string                       `json:"product"`
-	Provenance       *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
-	TenantId         *openapi_types.UUID          `json:"tenant_id"`
-	TotalOpCount     int                          `json:"total_op_count"`
-	UngroupedOpCount *int                         `json:"ungrouped_op_count,omitempty"`
-	Version          string                       `json:"version"`
+	ConnectorId          string                       `json:"connector_id"`
+	Dispatchable         *bool                        `json:"dispatchable,omitempty"`
+	Groups               []ConnectorReviewGroup       `json:"groups"`
+	ImplId               string                       `json:"impl_id"`
+	Kind                 *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	NeedsReingestOpCount *int                         `json:"needs_reingest_op_count,omitempty"`
+	Product              string                       `json:"product"`
+	Provenance           *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId             *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount         int                          `json:"total_op_count"`
+	UngroupedOpCount     *int                         `json:"ungrouped_op_count,omitempty"`
+	Version              string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.

@@ -23569,6 +23569,11 @@
             },
             "type": "array",
             "title": "Tags"
+          },
+          "needs_reingest": {
+            "type": "boolean",
+            "title": "Needs Reingest",
+            "default": false
           }
         },
         "type": "object",
@@ -23648,6 +23653,11 @@
             "type": "array",
             "title": "Provenance",
             "default": []
+          },
+          "needs_reingest_op_count": {
+            "type": "integer",
+            "title": "Needs Reingest Op Count",
+            "default": 0
           }
         },
         "type": "object",

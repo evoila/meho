@@ -1536,6 +1536,23 @@ class EndpointDescriptor(Base):
         nullable=False,
         default=True,
     )
+    # #3102: the stored ``parameter_schema`` failed the standalone-
+    # resolution check (a schema-position ``$ref`` does not resolve as a
+    # JSON Pointer within the stored document), so dispatch returns
+    # ``invalid_op_schema`` for every call until the descriptor is
+    # repaired. Set by migration ``0076``'s one-time detect pass over
+    # rows ingested before #3095's component bundling; cleared by the
+    # ingest upsert (``operations/ingest/_upsert.py``) whenever a fresh
+    # parse rewrites ``parameter_schema`` — the parser's
+    # ``_assert_parameter_schema_standalone`` lint guarantees every
+    # newly written schema self-resolves. The remedy is a same-spec
+    # re-ingest, which repairs in place (``is_enabled`` / ``group_id`` /
+    # operator curation are untouched by the upsert's update branches).
+    needs_reingest: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
     # Nullable on both dialects — T1 ships the column shape only;
     # T4 populates it before the descriptor is dispatchable for
     # retrieval. Round-trips as list[float] via _PORTABLE_VECTOR_384

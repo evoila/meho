@@ -65,7 +65,7 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._lookup import connector_exists, parse_connector_id
 from meho_backplane.operations.ingest import (
     EndpointDescriptorProto,
@@ -1519,3 +1519,210 @@ async def test_aligned_ingest_reuses_handrolled_class_no_shim(
         impl_id="vrli-rest",
     )
     assert exists is True
+
+
+# ---------------------------------------------------------------------------
+# #3102 -- same-spec re-ingest repairs a pre-#3095 row in place
+# ---------------------------------------------------------------------------
+
+#: The stored shape a pre-#3095 ingest left behind: a nested ``$ref``
+#: with no ``components`` bundle, so the dispatcher's registry-free
+#: validator can never resolve it (every call -> ``invalid_op_schema``).
+_PRE_FIX_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "body": {
+            "type": "object",
+            "properties": {
+                "file_spec": {"$ref": "#/components/schemas/TransferEndpoint"},
+            },
+            "x-meho-param-loc": "body",
+        },
+    },
+    "required": ["body"],
+}
+
+#: What the fixed parser produces for the same operation: identical
+#: shallow shape plus the transitively bundled component closure.
+_BUNDLED_SCHEMA: dict[str, Any] = {
+    **_PRE_FIX_SCHEMA,
+    "components": {
+        "schemas": {
+            "TransferEndpoint": {
+                "type": "object",
+                "properties": {"uri": {"type": "string"}},
+            },
+        },
+    },
+}
+
+
+async def _seed_pre_fix_row(
+    *,
+    op_id: str = "POST:/pets/upload",
+    summary: str = "Upload a file",
+    description: str = "Push bytes to the library item.",
+    custom_description: str | None = None,
+    custom_notes: str | None = None,
+    llm_instructions: dict[str, Any] | None = None,
+    with_group: bool = False,
+) -> tuple[uuid.UUID, uuid.UUID | None]:
+    """Persist one enabled, flagged, pre-#3095-shaped ingested row.
+
+    Mirrors the post-migration-0076 state of a live catalog: the row was
+    ingested (and operator-enabled) before #3095's bundling, then the
+    0076 detect pass flagged it ``needs_reingest``. Returns
+    ``(row_id, group_id)``.
+    """
+    group_id: uuid.UUID | None = None
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        if with_group:
+            group_id = uuid.uuid4()
+            session.add(
+                OperationGroup(
+                    id=group_id,
+                    tenant_id=None,
+                    product="petstore",
+                    version="1.0",
+                    impl_id="petstore-rest",
+                    group_key="library",
+                    name="Library",
+                    when_to_use="Library item content transfer.",
+                    review_status="enabled",
+                )
+            )
+        row_id = uuid.uuid4()
+        session.add(
+            EndpointDescriptor(
+                id=row_id,
+                tenant_id=None,
+                product="petstore",
+                version="1.0",
+                impl_id="petstore-rest",
+                op_id=op_id,
+                source_kind="ingested",
+                method=op_id.split(":", 1)[0],
+                path=op_id.split(":", 1)[1],
+                handler_ref=None,
+                summary=summary,
+                description=description,
+                group_id=group_id,
+                tags=["pets", "spec:petstore.yaml"],
+                parameter_schema=_PRE_FIX_SCHEMA,
+                response_schema=None,
+                llm_instructions=llm_instructions,
+                safety_level="caution",
+                requires_approval=False,
+                is_enabled=True,
+                needs_reingest=True,
+                embedding=[0.5] * 384,
+                custom_description=custom_description,
+                custom_notes=custom_notes,
+            )
+        )
+        await session.commit()
+    return row_id, group_id
+
+
+def _bundled_proto(op_id: str = "POST:/pets/upload") -> EndpointDescriptorProto:
+    """The fixed parser's output for the seeded op -- bundled, self-resolving."""
+    return EndpointDescriptorProto(
+        op_id=op_id,
+        method=op_id.split(":", 1)[0],
+        path=op_id.split(":", 1)[1],
+        summary="Upload a file",
+        description="Push bytes to the library item.",
+        tags=["pets"],
+        parameter_schema=_BUNDLED_SCHEMA,
+        response_schema=None,
+        safety_level="caution",
+        requires_approval=False,
+    )
+
+
+async def _reload_row(row_id: uuid.UUID) -> EndpointDescriptor:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        return (
+            await fresh.execute(select(EndpointDescriptor).where(EndpointDescriptor.id == row_id))
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_reingest_repairs_flagged_row_on_skip_reembed_branch(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A byte-identical same-spec re-ingest repairs a flagged row in place.
+
+    #3102 regression, the operationally critical branch: re-ingesting
+    the *unchanged* spec through the *fixed* parser hash-matches the
+    embedding text and lands on the skip-re-embed branch -- which must
+    still replace the stored ``parameter_schema`` with the bundled
+    document and clear ``needs_reingest``, while leaving the operator's
+    review state (``is_enabled``, ``group_id``) untouched. This is what
+    makes "re-ingest the connector's spec" a repair, not a reset.
+    """
+    row_id, group_id = await _seed_pre_fix_row(with_group=True)
+
+    result = await register_ingested_operations(
+        product="petstore",
+        version="1.0",
+        impl_id="petstore-rest",
+        spec_source="petstore.yaml",
+        operations=[_bundled_proto()],
+        embedding_service=stub_embedding_service,
+    )
+
+    assert result.inserted_count == 0
+    assert result.updated_count == 0
+    assert result.skipped_count == 1
+    # Skip branch: the unchanged embedding text is never re-encoded.
+    assert stub_embedding_service.encode_one.call_count == 0
+
+    row = await _reload_row(row_id)
+    assert row.parameter_schema == _BUNDLED_SCHEMA
+    assert row.needs_reingest is False
+    assert row.is_enabled is True, "repair must not reset the operator's enable decision"
+    assert row.group_id == group_id, "repair must not detach the op from its group"
+    assert "spec:petstore.yaml" in row.tags
+
+
+@pytest.mark.asyncio
+async def test_reingest_repairs_curated_row_on_reembed_branch(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The re-embed branch also repairs + clears the flag, keeping curation.
+
+    A row the operator curated (``custom_description`` feeds the
+    embedding text) hash-mismatches and takes the re-embed branch; the
+    repair semantics must be identical -- schema replaced, flag cleared
+    -- and the curation fields the upsert never writes
+    (``custom_description`` / ``custom_notes`` / ``llm_instructions``)
+    must survive verbatim.
+    """
+    row_id, _ = await _seed_pre_fix_row(
+        custom_description="Curated: governed ISO/OVA import step 3.",
+        custom_notes="Falls back to govc library.import -pull.",
+        llm_instructions={"when_to_call": "during governed content-library PULL"},
+    )
+
+    result = await register_ingested_operations(
+        product="petstore",
+        version="1.0",
+        impl_id="petstore-rest",
+        spec_source="petstore.yaml",
+        operations=[_bundled_proto()],
+        embedding_service=stub_embedding_service,
+    )
+
+    assert result.updated_count == 1
+    assert result.skipped_count == 0
+
+    row = await _reload_row(row_id)
+    assert row.parameter_schema == _BUNDLED_SCHEMA
+    assert row.needs_reingest is False
+    assert row.is_enabled is True
+    assert row.custom_description == "Curated: governed ISO/OVA import step 3."
+    assert row.custom_notes == "Falls back to govc library.import -pull."
+    assert row.llm_instructions == {"when_to_call": "during governed content-library PULL"}

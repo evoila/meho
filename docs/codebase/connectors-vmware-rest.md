@@ -740,13 +740,44 @@ the shape every property read and task poll sends); every other body keeps
 an **explicit per-builder annotation** at its call site (spec-groundable
 and reviewable — deliberately no recursive type-inference magic). Server
 responses have always carried `_typeName` tags and the extraction helpers
-read fields by name, so response parsing is unchanged; the unit-test canned
+read fields by name; the unit-test canned
 payloads mirror the tagged live shapes to pin that tolerance. The
 annotation *vocabulary* is grounded by a reconcile lane in
 `tests/test_connectors_vmware_rest_composites_write_body_reconcile.py`:
 every `_typeName` literal the substrate emits must name a component schema
 in the pinned `vi-json.yaml` (shelf-gated), and the exact annotated
 single-prop retrieve body is pinned byte-for-byte in an always-on lane.
+
+**4. Boxed response values un-boxed at every vim property consumer
+(#3106).** The response-side twin of #3103: `DynamicProperty.val` (what
+every `RetrievePropertiesEx` propSet entry carries) is an **`Any`
+placeholder**, and VI-JSON *boxes* what lands in one — a primitive
+arrives as `{"_typeName": "string", "_value": "dvportgroup-1766"}`
+(live-observed on vCenter 8.0.3; the `PrimitiveBoolean` / `PrimitiveInt`
+/ enum-box components of the pinned `vi-json.yaml`, every one keying its
+payload `_value`) and an array as `{"_typeName": "ArrayOfString",
+"_value": [...]}` (`ArrayOfVirtualDevice`,
+`ArrayOfManagedObjectReference`, ... — same `_value` key), while MoRefs
+and DataObjects arrive as plain `_typeName`-annotated dicts, no box. The
+pre-#3106 extractors read `val` as the bare value, so every
+primitive-typed property read failed its type guard against live 8.0.x —
+observed as `vm.create`'s DVPG lookup failing `network_lookup` on a 200
+that carried both properties (the boxed `key` next to the plain MoRef).
+Mechanically: `vim_body.py` carries `unwrap_vim_value()`, a tolerant
+recursive un-boxer (strips `_value` boxes and `ArrayOf*` wrappers —
+including the SOAP-flavoured element-keyed variant — passes plain values
+through unchanged, keeps DataObject `_typeName` tags, and normalises
+nested `Any` positions like `TaskInfo.result` in the same pass), and
+**every** propSet consumer funnels `val` through it: the `_write.py`
+extractors (single-prop, `config.hardware.device`, `config.template`,
+`configurationEx.rule`), `_read.py`'s `_extract_object_props`,
+`vim_task.py`'s `Task.info` extraction (a boxed `info.state` /
+`error.localizedMessage` / `progress` still reaches terminal states), and
+the typed reads (`host.usage`, `vm.info`, `host.network_uplinks`,
+`object.collect`, `tasks.recent` — whose `recentTask` is a boxed MoRef
+array on live 8.0.x). Un-boxing happens at **response consumption only**
+— never on payloads that round-trip into request bodies (the resolved
+`CustomizationSpec` a clone embeds must keep its wire shape).
 
 **`vm.disk.grow` flow** (the proving op): read the VM's
 `config.hardware.device` (a *read* `RetrievePropertiesEx`, un-gated) to

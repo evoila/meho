@@ -917,19 +917,40 @@ async def test_vm_create_nested_hv_false_skips_leg_and_echoes_false(
 # nested_hv folded into the one ConfigSpec. 9.0+/unresolved stay on the
 # REST arm byte-identical (the tests above run with about_version=None).
 
+# Byte-shaped from the live vCenter 8.0.3 evidence on #3106: the
+# primitive-typed ``key`` arrives **boxed** (``{"_typeName": "string",
+# "_value": ...}`` -- ``DynamicProperty.val`` is an ``Any`` placeholder)
+# while the MoRef arrives as a plain ``_typeName``-annotated dict. The
+# pre-#3106 extractor read the box as the value and failed the DVPG
+# ``network_lookup`` despite a 200 carrying both properties.
 _DVPG_BACKING_PROPS: dict[str, Any] = {
+    "_typeName": "RetrieveResult",
     "objects": [
         {
-            "obj": {"type": "DistributedVirtualPortgroup", "value": "dvportgroup-1015"},
+            "_typeName": "ObjectContent",
+            "obj": {
+                "_typeName": "ManagedObjectReference",
+                "type": "DistributedVirtualPortgroup",
+                "value": "dvportgroup-1015",
+            },
             "propSet": [
-                {"name": "key", "val": "dvportgroup-1015"},
                 {
+                    "_typeName": "DynamicProperty",
+                    "name": "key",
+                    "val": {"_typeName": "string", "_value": "dvportgroup-1015"},
+                },
+                {
+                    "_typeName": "DynamicProperty",
                     "name": "config.distributedVirtualSwitch",
-                    "val": {"type": "VmwareDistributedVirtualSwitch", "value": "dvs-21"},
+                    "val": {
+                        "_typeName": "ManagedObjectReference",
+                        "type": "VmwareDistributedVirtualSwitch",
+                        "value": "dvs-21",
+                    },
                 },
             ],
         }
-    ]
+    ],
 }
 
 _DVS_UUID = "50 1e ab cd 12 34 56 78-90 ab cd ef 12 34 56 78"
@@ -960,8 +981,13 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
         },
         vmomi={
             "DistributedVirtualPortgroup": _DVPG_BACKING_PROPS,
+            # The switch ``uuid`` is a primitive read too -- boxed on live
+            # 8.0.3 (#3106).
             "VmwareDistributedVirtualSwitch": _retrieve_result(
-                "VmwareDistributedVirtualSwitch", "dvs-21", "uuid", _DVS_UUID
+                "VmwareDistributedVirtualSwitch",
+                "dvs-21",
+                "uuid",
+                {"_typeName": "string", "_value": _DVS_UUID},
             ),
             "/Folder/folder-7/CreateVM_Task": _task_moref("task-501"),
             "Task": _task_info_result(
@@ -2136,22 +2162,31 @@ async def test_vm_snapshot_revert_not_found(gate: _GateRecorder) -> None:
 
 
 def _drs_recommendation_vmomi(vm_moid: str, destination: str) -> dict[str, Any]:
-    """Canned ``ClusterComputeResource.drsRecommendation`` property read."""
+    """Canned ``ClusterComputeResource.drsRecommendation`` property read.
+
+    Array-valued ``Any`` placeholder -- live VI-JSON boxes it as
+    ``ArrayOfClusterDrsRecommendation`` with the rows under ``_value``
+    (#3106).
+    """
     return _retrieve_result(
         "ClusterComputeResource",
         "cluster-7",
         "drsRecommendation",
-        [
-            {
-                "key": "1",
-                "migrationList": [
-                    {
-                        "vm": {"type": "VirtualMachine", "value": vm_moid},
-                        "destination": {"type": "HostSystem", "value": destination},
-                    }
-                ],
-            }
-        ],
+        {
+            "_typeName": "ArrayOfClusterDrsRecommendation",
+            "_value": [
+                {
+                    "_typeName": "ClusterDrsRecommendation",
+                    "key": "1",
+                    "migrationList": [
+                        {
+                            "vm": {"type": "VirtualMachine", "value": vm_moid},
+                            "destination": {"type": "HostSystem", "value": destination},
+                        }
+                    ],
+                }
+            ],
+        },
     )
 
 
@@ -2938,11 +2973,13 @@ class _DiskGrowConnector:
             return {"type": "Task", "value": self.reconfig_task}
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "VirtualMachine":
+            # Live VI-JSON boxes the array-valued ``val`` (#3106).
+            boxed_devices = {"_typeName": "ArrayOfVirtualDevice", "_value": self.devices}
             return {
                 "objects": [
                     {
                         "obj": {"type": "VirtualMachine", "value": "vm-1"},
-                        "propSet": [{"name": "config.hardware.device", "val": self.devices}],
+                        "propSet": [{"name": "config.hardware.device", "val": boxed_devices}],
                     }
                 ]
             }
@@ -3178,7 +3215,13 @@ async def test_vm_disk_grow_reconfig_body_reaches_the_wire_respx(
         "objects": [
             {
                 "obj": {"type": "VirtualMachine", "value": "vm-1"},
-                "propSet": [{"name": "config.hardware.device", "val": [device]}],
+                "propSet": [
+                    {
+                        "name": "config.hardware.device",
+                        # Boxed array -- the live 8.0.3 ``Any``-placeholder shape (#3106).
+                        "val": {"_typeName": "ArrayOfVirtualDevice", "_value": [device]},
+                    }
+                ],
             }
         ]
     }
@@ -3317,11 +3360,13 @@ class _CloneFromTemplateConnector:
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "VirtualMachine":
             moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
+            # Live VI-JSON boxes the primitive ``config.template`` (#3106).
+            boxed_template = {"_typeName": "boolean", "_value": self.is_template}
             return {
                 "objects": [
                     {
                         "obj": {"type": "VirtualMachine", "value": moid},
-                        "propSet": [{"name": "config.template", "val": self.is_template}],
+                        "propSet": [{"name": "config.template", "val": boxed_template}],
                     }
                 ]
             }
@@ -3779,11 +3824,13 @@ class _DrsRuleConnector:
             return {"type": "Task", "value": self.reconfig_task}
         spec_type = json["specSet"][0]["propSet"][0]["type"]
         if spec_type == "ClusterComputeResource":
+            # Live VI-JSON boxes the array-valued rules read (#3106).
+            boxed_rules = {"_typeName": "ArrayOfClusterRuleInfo", "_value": self.existing_rules}
             return {
                 "objects": [
                     {
                         "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
-                        "propSet": [{"name": "configurationEx.rule", "val": self.existing_rules}],
+                        "propSet": [{"name": "configurationEx.rule", "val": boxed_rules}],
                     }
                 ]
             }

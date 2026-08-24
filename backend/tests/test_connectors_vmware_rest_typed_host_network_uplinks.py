@@ -137,14 +137,24 @@ class _FakeConnector:
 
 
 def _retrieve_result(moid: str, pnics: list[Any], proxy_switches: list[Any]) -> dict[str, Any]:
-    """Build a RetrievePropertiesEx ``RetrieveResult`` for one host."""
+    """Build a RetrievePropertiesEx ``RetrieveResult`` for one host.
+
+    The array-valued ``Any`` placeholders arrive **boxed** (``ArrayOfX``
+    with the rows under ``_value``) on live VI-JSON (#3106).
+    """
     return {
         "objects": [
             {
                 "obj": {"type": "HostSystem", "value": moid},
                 "propSet": [
-                    {"name": "config.network.pnic", "val": pnics},
-                    {"name": "config.network.proxySwitch", "val": proxy_switches},
+                    {
+                        "name": "config.network.pnic",
+                        "val": {"_typeName": "ArrayOfPhysicalNic", "_value": pnics},
+                    },
+                    {
+                        "name": "config.network.proxySwitch",
+                        "val": {"_typeName": "ArrayOfHostProxySwitch", "_value": proxy_switches},
+                    },
                 ],
             }
         ]

@@ -90,7 +90,31 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — VI-JSON bodies carry `_typeName` discriminators throughout the vim substrate (#3103)
+### Fixed — VI-JSON boxed response values un-boxed at every vim property consumer (#3106)
+
+- The response-side twin of #3103: `DynamicProperty.val` is an `Any`
+  placeholder, and live vCenter 8.0.3 VI-JSON **boxes** what lands in one —
+  primitives arrive as `{"_typeName": "string", "_value":
+  "dvportgroup-1766"}` (live-observed) and arrays as
+  `{"_typeName": "ArrayOfX", "_value": [...]}` (every `PrimitiveX` /
+  `ArrayOfX` / enum-box component of the pinned `vi-json.yaml` keys its
+  payload `_value`), while MoRefs / DataObjects arrive as plain annotated
+  dicts. The substrate's extractors read `val` bare, so every
+  primitive-typed vim property read failed its type guard against real
+  8.0.x — observed live as `vm.create`'s DVPG lookup failing
+  `network_lookup` on a 200 that carried both properties. A tolerant
+  recursive un-boxer (`unwrap_vim_value` in `vim_body.py`, beside the
+  request-side #3103 helpers) now runs at **every** vim property consumer:
+  the write-composite extractors (single-prop, device list,
+  `config.template`, DRS rules), the read-composite props flattener, the
+  `Task.info` poll (a boxed `info.state` / fault message / progress still
+  reaches terminal states), and all five typed reads (incl. `tasks.recent`'s
+  boxed `recentTask` MoRef array). Plain (un-boxed) values pass through
+  unchanged — tolerant both ways, so 9.x / vcsim shapes keep working —
+  DataObject `_typeName` tags survive (the disk-grow `VirtualDisk` pick
+  still keys on them), and un-boxing is response-side only (payloads that
+  round-trip into request bodies keep their wire shape). Live-shaped
+  fixtures updated to the boxed forms byte-shaped from the #3106 evidence.
 
 - Every vim (VI-JSON) request body the vmware-rest connector sends now tags
   every DataObject with its `_typeName` discriminator, per the pinned

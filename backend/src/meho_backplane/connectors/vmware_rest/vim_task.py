@@ -59,6 +59,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops import _unwrap_value
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     build_task_info_retrieve_params,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import unwrap_vim_value
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -161,6 +162,12 @@ def _extract_task_info(retrieve_result: Any, task_moid: str) -> dict[str, Any] |
     back to the first object's ``info`` (single-object query). Returns
     ``None`` when the property is absent -- the caller treats that as "not
     terminal yet", never an exception.
+
+    The ``val`` sits in an ``Any`` placeholder, so it funnels through
+    :func:`unwrap_vim_value` (#3106): a boxed ``info.state`` /
+    ``error.localizedMessage`` / ``progress`` / ``result`` primitive
+    normalises to its bare value here, which is what makes the downstream
+    terminal-state, fault-message, and progress reads box-tolerant.
     """
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
@@ -174,7 +181,7 @@ def _extract_task_info(retrieve_result: Any, task_moid: str) -> dict[str, Any] |
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_INFO:
-                val = prop.get("val")
+                val = unwrap_vim_value(prop.get("val"))
                 return val if isinstance(val, dict) else None
     return None
 

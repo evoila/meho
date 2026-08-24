@@ -275,13 +275,23 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
 
 @pytest.mark.asyncio
 async def test_cluster_drs_recommendations_history_flag_widens_read_and_surfaces_recs() -> None:
-    """``include_recommendations_history=True`` reads ``drsRecommendation`` too."""
+    """``include_recommendations_history=True`` reads ``drsRecommendation`` too.
+
+    The array-valued ``drsRecommendation`` arrives **boxed** on live
+    VI-JSON (#3106); the composite surfaces the un-boxed rows.
+    """
     recs = [{"key": "1", "rating": 5, "migrationList": []}]
     conn = _RecordingConnector(
         {
             "/api/vcenter/cluster/domain-c123": {"name": "Cluster-A"},
             _RETRIEVE_PROPERTIES_PATH: _retrieve_result(
-                {"configurationEx.drsConfig": {"enabled": True}, "drsRecommendation": recs}
+                {
+                    "configurationEx.drsConfig": {"enabled": True},
+                    "drsRecommendation": {
+                        "_typeName": "ArrayOfClusterDrsRecommendation",
+                        "_value": recs,
+                    },
+                }
             ),
         }
     )

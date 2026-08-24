@@ -59,19 +59,24 @@
     <section aria-label="Operation">
       <h3 class="text-sm font-semibold uppercase opacity-60">Operation</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">operator</dt>
+        <dt class="opacity-60">Operator</dt>
         <dd class="font-mono break-all">{{ row.operator_sub }}</dd>
-        <dt class="opacity-60">method</dt>
+        <dt class="opacity-60">Method</dt>
         <dd>
           <span class="badge badge-outline badge-xs">{{ row.method }}</span>
           <span class="font-mono text-xs break-all">{{ row.path }}</span>
         </dd>
-        <dt class="opacity-60">status</dt>
+        <dt class="opacity-60">Status</dt>
         <dd>{{ row.status_code }}</dd>
-        <dt class="opacity-60">occurred_at</dt>
-        <dd>{{ row.occurred_at.isoformat() }}</dd>
+        <dt class="opacity-60">Occurred</dt>
+        {# Console-standard timestamp: ``%Y-%m-%d %H:%M UTC`` for display,
+           full ISO retained in the ``<time datetime>`` for machines
+           (mirrors ``topology/_drawer.html``). #}
+        <dd>
+          <time datetime="{{ row.occurred_at.isoformat() }}">{{ row.occurred_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+        </dd>
         {% if row.duration_ms is not none %}
-          <dt class="opacity-60">duration_ms</dt>
+          <dt class="opacity-60">Duration (ms)</dt>
           <dd>{{ row.duration_ms }}</dd>
         {% endif %}
       </dl>
@@ -81,13 +86,13 @@
     <section aria-label="Identifiers">
       <h3 class="text-sm font-semibold uppercase opacity-60">Identifiers</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">audit_id</dt>
+        <dt class="opacity-60">Audit ID</dt>
         <dd class="font-mono break-all">{{ row.id }}</dd>
-        <dt class="opacity-60">request_id</dt>
+        <dt class="opacity-60">Request ID</dt>
         <dd class="font-mono break-all">
           {% if row.request_id %}{{ row.request_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
         </dd>
-        <dt class="opacity-60">event_id</dt>
+        <dt class="opacity-60">Event ID</dt>
         <dd class="font-mono break-all">
           {% if event_id %}{{ event_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
         </dd>

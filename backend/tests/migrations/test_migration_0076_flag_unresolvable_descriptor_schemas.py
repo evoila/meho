@@ -224,9 +224,7 @@ def test_detect_pass_flags_exactly_the_broken_rows(
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
 
-    dangling = _insert_descriptor_row(
-        sync_url, parameter_schema=_DANGLING_SCHEMA, op_id="POST:/a"
-    )
+    dangling = _insert_descriptor_row(sync_url, parameter_schema=_DANGLING_SCHEMA, op_id="POST:/a")
     bundled = _insert_descriptor_row(sync_url, parameter_schema=_BUNDLED_SCHEMA, op_id="POST:/b")
     ref_free = _insert_descriptor_row(sync_url, parameter_schema=_REF_FREE_SCHEMA, op_id="GET:/c")
     ref_in_enum = _insert_descriptor_row(
@@ -354,9 +352,7 @@ def _load_migration_0076() -> Any:
         ),
         pytest.param(
             {
-                "components": {
-                    "schemas": {"A": {"$ref": "#/components/schemas/MissingSibling"}}
-                },
+                "components": {"schemas": {"A": {"$ref": "#/components/schemas/MissingSibling"}}},
             },
             id="dangling-ref-inside-bundle",
         ),

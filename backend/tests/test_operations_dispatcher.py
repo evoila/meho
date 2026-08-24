@@ -2951,6 +2951,5 @@ async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
         params=params,
     )
     assert (repaired.extras or {}).get("error_code") != "invalid_op_schema", (
-        "the repaired descriptor must pass dispatch-time schema validation; "
-        f"got {repaired.error!r}"
+        f"the repaired descriptor must pass dispatch-time schema validation; got {repaired.error!r}"
     )

@@ -85,7 +85,13 @@ parameter, not an envelope).
   any other post-create step; the `created` envelope echoes the applied
   `nested_hv` state.
 - The composite resolves the folder by display name, attaches NICs, and
-  rolls back (`DELETE:/vcenter/vm/{vm}`) on partial failure.
+  rolls back (`DELETE:/vcenter/vm/{vm}`) on partial failure. **On a
+  multi-datacenter vCenter (#3115)** a name matching more than one folder
+  (every datacenter ships a default VM folder named `vm`) is re-scoped to
+  the placement pins' datacenter; residual ambiguity refuses with the
+  candidate moids in `candidate_folders`. An explicit `folder` moid (in
+  place of `folder_name`) skips the lookup entirely — the deterministic
+  spelling for automation.
 - **Placement is first-class on the composite (#3096):** optional
   `resource_pool`, `datastore`, `host` (moids) thread into the CreateSpec
   `placement` alongside the resolved folder moid — the way to pin a

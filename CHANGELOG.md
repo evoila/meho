@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vm.create folder lookup is datacenter-aware and fail-loud on ambiguity (#3115)
+
+- `vmware.composite.vm.create` resolved `folder_name` via an **unscoped**
+  `GET:/vcenter/folder` name filter and silently took the first row — on a
+  multi-datacenter vCenter (where every datacenter ships a default VM
+  folder named `vm`) that mixed a wrong-datacenter folder into the
+  caller's placement, and `CreateVM_Task` faulted only later with
+  "entities that did not belong to the same datacenter" (proven live on
+  8.0.3). Now a multi-match lookup reverse-maps a placement pin
+  (host / resource pool / datastore, #3096) to its datacenter via the
+  listing FilterSpec intersections and re-issues the lookup scoped with
+  `filter.datacenters`; residual ambiguity returns a structured
+  `rolled_back` naming the candidate moids (`candidate_folders`) instead
+  of guessing. A new optional `folder` moid param pins the target folder
+  explicitly and skips the lookup on both create arms (one of
+  `folder` / `folder_name` is now required via `anyOf`). Unique-name
+  lookups keep the pre-#3115 read pattern byte-identical.
+
 ### Fixed — VI-JSON boxed response values un-boxed at every vim property consumer (#3106)
 
 - The response-side twin of #3103: `DynamicProperty.val` is an `Any`

@@ -604,7 +604,10 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 #: create rides vim ``Folder.CreateVM_Task`` instead — the bare REST
 #: create is vendor-defective on 8.0.x — with NICs and ``nested_hv``
 #: folded into the one ConfigSpec; ``resource_pool`` and ``datastore``
-#: are required on that arm.
+#: are required on that arm. The target folder is spelled as either a
+#: display name (``folder_name``, resolved with #3115's
+#: datacenter-scoped, fail-loud-on-ambiguity lookup) or an explicit
+#: ``folder`` moid pin that skips the lookup.
 VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -614,7 +617,28 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Display name of the target VM folder. Resolved via "
                 "``GET:/vcenter/folder?filter.names=...`` to the moid "
-                "passed to ``POST:/vcenter/vm``."
+                "passed to ``POST:/vcenter/vm``. Display names are not "
+                "unique across datacenters (every datacenter ships a "
+                "default VM folder named ``vm``), so a multi-match "
+                "lookup is re-scoped to the placement pins' datacenter "
+                "via ``filter.datacenters`` (#3115); a residual "
+                "ambiguity fails with a structured ``rolled_back`` "
+                "carrying ``candidate_folders`` — pass ``folder`` to "
+                "disambiguate. Ignored when ``folder`` is supplied."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional VM folder moid pin (#3115), mirroring the "
+                "#3096 placement-pin pattern. When present the "
+                "``folder_name`` display-name lookup is skipped "
+                "entirely and this moid rides the CreateSpec "
+                "``placement`` (REST arm) / ``CreateVM_Task`` parent "
+                "(pre-9.0 vim arm) verbatim; the ``folder_lookup`` "
+                "entry is omitted from ``steps_succeeded``. One of "
+                "``folder`` / ``folder_name`` is required."
             ),
         },
         "resource_pool": {
@@ -749,7 +773,15 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["folder_name", "name", "guest_os"],
+    "required": ["name", "guest_os"],
+    # #3115: the create-target folder is spelled either as a display name
+    # (``folder_name``, resolved) or an explicit moid pin (``folder``,
+    # verbatim) — at least one must be present. Mirrors the vm.resize
+    # at-least-one-of ``anyOf`` shape.
+    "anyOf": [
+        {"required": ["folder_name"]},
+        {"required": ["folder"]},
+    ],
     "additionalProperties": False,
 }
 
@@ -1281,7 +1313,10 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Per-step success ledger: ``folder_lookup``, "
-                "``create``, ``nic_attach``, ``nested_hv``, ``power_on``."
+                "``create``, ``nic_attach``, ``nested_hv``, ``power_on``. "
+                "``folder_lookup`` is omitted when the request pinned "
+                "the folder moid via the ``folder`` param (#3115 — no "
+                "lookup ran)."
             ),
         },
         "failed_step": {
@@ -1308,6 +1343,17 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "carried the ``nested_hv`` param — a param-absent call "
                 "keeps the pre-#3093 envelope byte-identical. ``true`` "
                 "iff the ``ReconfigVM_Task`` leg completed."
+            ),
+        },
+        "candidate_folders": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Folder moids an ambiguous ``folder_name`` matched "
+                "(#3115). Present only on a ``folder_lookup`` rollback "
+                "when the name matched more than one folder (or matched "
+                "only outside the placement pins' datacenter); re-issue "
+                "with the intended moid as the ``folder`` param."
             ),
         },
     },

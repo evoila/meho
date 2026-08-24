@@ -247,6 +247,20 @@ _NIC_BACKING_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 # datastore display name off this to build the vim
 # ``files.vmPathName = "[<name>] <vm>"`` home path.
 _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
+# #3115 folder-lookup datacenter-scoping reads. ``GET:/vcenter/folder``
+# matches display names across every datacenter — and each datacenter ships
+# a default VM folder named ``vm`` — so a multi-match resolution re-scopes
+# via the placement pins' datacenter: the datacenter listing enumerates the
+# candidate datacenters, and one identity+``datacenters`` intersection
+# listing per datacenter reverse-maps a pin (host / resource pool /
+# datastore) to the datacenter that owns it (no listing row carries a
+# parent-datacenter key, so the intersection filter is the REST-native
+# reverse map). All three listings are pinned-spec-served
+# (``Vcenter.Datacenter_list`` / ``Vcenter.ResourcePool_list`` /
+# ``Vcenter.Datastore_list``); the host probe rides ``_OP_LIST_HOSTS``.
+_OP_LIST_DATACENTERS = "GET:/vcenter/datacenter"
+_OP_LIST_RESOURCE_POOLS = "GET:/vcenter/resource-pool"
+_OP_LIST_DATASTORES = "GET:/vcenter/datastore"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
 _OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
@@ -741,6 +755,13 @@ _SUB_OPS_VM_CREATE: tuple[str, ...] = (
     # display name for a standard-portgroup NIC backing.
     _OP_GET_DATASTORE,
     _OP_LIST_NETWORK,
+    # #3115 folder-lookup datacenter-scoping reads (all REST,
+    # vcenter.yaml-served): the datacenter listing plus the three
+    # pin-to-datacenter intersection probes.
+    _OP_LIST_DATACENTERS,
+    _OP_LIST_HOSTS,
+    _OP_LIST_RESOURCE_POOLS,
+    _OP_LIST_DATASTORES,
 )
 _SUB_OPS_VM_CLONE: tuple[str, ...] = (
     _OP_GET_VM,
@@ -1054,31 +1075,193 @@ async def _resolve_cluster_hosts(
 # ===========================================================================
 
 
-async def _resolve_folder_moid(
+def _folder_lookup_rolled_back(
+    steps: list[str], reason: str | None, candidates: list[str]
+) -> dict[str, Any]:
+    """``rolled_back`` envelope for a failed folder resolution (#3115).
+
+    Non-empty *candidates* (the moids an ambiguous ``folder_name``
+    matched) surface as ``candidate_folders`` so the operator can
+    re-issue with the intended moid as the ``folder`` param.
+    """
+    envelope = _rolled_back(steps=steps, failed_step="folder_lookup", reason=reason or "")
+    if candidates:
+        envelope["candidate_folders"] = candidates
+    return envelope
+
+
+async def _resolve_pin_datacenter(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    pins: dict[str, Any],
+) -> str | None:
+    """Best-effort: the datacenter moid the placement pins live in (#3115).
+
+    No REST listing row carries a parent-datacenter key, so the reverse
+    map rides the listing FilterSpecs instead: every
+    ``GET:/vcenter/<kind>`` intersects an identity filter (``hosts`` /
+    ``resource_pools`` / ``datastores``) with ``datacenters``, so probing
+    each datacenter with a pin returns a row only in the datacenter that
+    owns the pin. Pins are tried most-specific-first (host, resource
+    pool, datastore); a probe kind whose listing faults falls through to
+    the next kind.
+
+    Best-effort by design: returns ``None`` (unknown) when the target
+    has fewer than two datacenters (scoping cannot change the outcome),
+    when the datacenter listing faults, or when no datacenter claims any
+    pin (stale moids). The caller then keeps the unscoped lookup — the
+    ambiguity refusal in :func:`_resolve_folder_moid` stays the hard
+    correctness net either way.
+    """
+    try:
+        listing = await _read_sub_op(connector, target, operator, _OP_LIST_DATACENTERS, {})
+    except httpx.HTTPError:
+        return None
+    rows = _unwrap_value(listing)
+    if not isinstance(rows, list):
+        return None
+    datacenter_moids: list[str] = [
+        row["datacenter"]
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("datacenter"), str)
+    ]
+    if len(datacenter_moids) < 2:
+        return None
+    probes = [
+        (op_id, filter_key, pin)
+        for pin_key, op_id, filter_key in (
+            ("host", _OP_LIST_HOSTS, "filter.hosts"),
+            ("resource_pool", _OP_LIST_RESOURCE_POOLS, "filter.resource_pools"),
+            ("datastore", _OP_LIST_DATASTORES, "filter.datastores"),
+        )
+        if isinstance(pin := pins.get(pin_key), str)
+    ]
+    for op_id, filter_key, pin in probes:
+        for datacenter_moid in datacenter_moids:
+            try:
+                found = await _read_sub_op(
+                    connector,
+                    target,
+                    operator,
+                    op_id,
+                    {filter_key: [pin], "filter.datacenters": [datacenter_moid]},
+                )
+            except httpx.HTTPError:
+                break  # this listing is unusable on the live target; next pin kind
+            found_rows = _unwrap_value(found)
+            if isinstance(found_rows, list) and any(isinstance(row, dict) for row in found_rows):
+                return datacenter_moid
+    return None
+
+
+async def _list_folder_moids(
     *,
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     folder_name: str,
-) -> tuple[str | None, str | None]:
-    """Look up a folder moid by display name.
+    datacenter_moid: str | None = None,
+) -> tuple[list[str], str | None]:
+    """``(moids, failure_reason)`` for one ``GET:/vcenter/folder`` name lookup.
 
-    Returns ``(moid, None)`` on success or ``(None, reason)`` on
-    failure -- the caller folds the reason into a ``rolled_back``
-    envelope. Failure modes: empty match list, listing row missing
-    the ``folder`` key.
+    ``datacenter_moid`` scopes the listing via the ``datacenters``
+    filter. Failure modes: empty match list, no listing row carrying a
+    string ``folder`` key.
     """
-    folder_listing = await _read_sub_op(
-        connector, target, operator, _OP_LIST_FOLDERS, {"filter.names": [folder_name]}
-    )
+    query: dict[str, Any] = {"filter.names": [folder_name]}
+    if datacenter_moid is not None:
+        query["filter.datacenters"] = [datacenter_moid]
+    folder_listing = await _read_sub_op(connector, target, operator, _OP_LIST_FOLDERS, query)
     folder_entries = _unwrap_value(folder_listing)
     if not isinstance(folder_entries, list) or not folder_entries:
-        return None, f"folder name {folder_name!r} did not resolve to any moid"
-    first_entry = folder_entries[0]
-    folder_moid_raw = first_entry.get("folder") if isinstance(first_entry, dict) else None
-    if not isinstance(folder_moid_raw, str):
-        return None, "folder listing row missing ``folder`` key"
-    return folder_moid_raw, None
+        return [], f"folder name {folder_name!r} did not resolve to any moid"
+    moids: list[str] = [
+        entry["folder"]
+        for entry in folder_entries
+        if isinstance(entry, dict) and isinstance(entry.get("folder"), str)
+    ]
+    if not moids:
+        return [], "folder listing row missing ``folder`` key"
+    return moids, None
+
+
+async def _resolve_folder_moid(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    folder_name: str | None,
+    placement_pins: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    """Resolve the create-target VM folder moid from its display name.
+
+    Returns ``(moid, None, [])`` on success or ``(None, reason,
+    candidate_moids)`` on failure -- the caller folds the reason (and,
+    when non-empty, the candidates) into a ``rolled_back`` envelope via
+    :func:`_folder_lookup_rolled_back`.
+
+    Folder display names are unique only per parent folder, and every
+    datacenter ships a default VM folder named ``vm`` — so on a
+    multi-datacenter vCenter an unscoped name lookup can match several
+    folders, and silently taking the first row created VMs in the wrong
+    datacenter (#3115, proven live: datacenter-A placement pins mixed
+    with a datacenter-B folder fault ``CreateVM_Task`` only at create
+    time). Resolution ladder:
+
+    1. unscoped ``filter.names`` lookup — a unique match wins (the
+       pre-#3115 read pattern, byte-identical: no extra reads);
+    2. multi-match with *placement_pins*: reverse-map one pin to its
+       datacenter (:func:`_resolve_pin_datacenter`) and re-issue the
+       lookup scoped via ``filter.datacenters``;
+    3. still ambiguous — or ambiguous with no resolvable datacenter —
+       → refuse with the candidate moids, never the first row.
+    """
+    if not isinstance(folder_name, str) or not folder_name:
+        return None, "neither a `folder` moid nor a `folder_name` was supplied", []
+    moids, failure = await _list_folder_moids(
+        connector=connector, target=target, operator=operator, folder_name=folder_name
+    )
+    if failure is not None:
+        return None, failure, []
+    if len(moids) == 1:
+        return moids[0], None, []
+    datacenter_moid = None
+    if placement_pins:
+        datacenter_moid = await _resolve_pin_datacenter(
+            connector=connector, target=target, operator=operator, pins=placement_pins
+        )
+    if datacenter_moid is not None:
+        scoped_moids, scoped_failure = await _list_folder_moids(
+            connector=connector,
+            target=target,
+            operator=operator,
+            folder_name=folder_name,
+            datacenter_moid=datacenter_moid,
+        )
+        if scoped_failure is not None:
+            return (
+                None,
+                (
+                    f"folder name {folder_name!r} has no usable match in the placement "
+                    f"pins' datacenter {datacenter_moid}; the unscoped matches "
+                    f"({', '.join(moids)}) belong to other datacenters"
+                ),
+                moids,
+            )
+        if len(scoped_moids) == 1:
+            return scoped_moids[0], None, []
+        moids = scoped_moids
+    return (
+        None,
+        (
+            f"folder name {folder_name!r} matched {len(moids)} folders "
+            f"({', '.join(moids)}); pass the intended moid as the `folder` param "
+            "to disambiguate"
+        ),
+        moids,
+    )
 
 
 async def _rollback_created_vm(
@@ -1469,7 +1652,7 @@ async def _vm_create_via_vim(
     side placement defaulting exists only on the REST create), and an
     unsupported NIC backing each return a structured ``rolled_back``.
     """
-    folder_name = params["folder_name"]
+    folder_name = params.get("folder_name")
     name = params["name"]
     guest_os = params["guest_os"]
     cpu_count = int(params.get("cpu_count", 1))
@@ -1505,12 +1688,27 @@ async def _vm_create_via_vim(
         )
 
     steps: list[str] = []
-    folder_moid, folder_err = await _resolve_folder_moid(
-        connector=connector, target=target, operator=operator, folder_name=folder_name
-    )
-    if folder_moid is None:
-        return _rolled_back(steps=steps, failed_step="folder_lookup", reason=folder_err or "")
-    steps.append("folder_lookup")
+    folder_moid: str | None
+    folder_pin = params.get("folder")
+    if isinstance(folder_pin, str):
+        # #3115 explicit pin: the moid rides ``CreateVM_Task`` verbatim — no
+        # display-name lookup, no ``folder_lookup`` ledger entry.
+        folder_moid = folder_pin
+    else:
+        folder_moid, folder_err, folder_candidates = await _resolve_folder_moid(
+            connector=connector,
+            target=target,
+            operator=operator,
+            folder_name=folder_name,
+            placement_pins={
+                "host": host_moid,
+                "resource_pool": pool_moid,
+                "datastore": datastore_moid,
+            },
+        )
+        if folder_moid is None:
+            return _folder_lookup_rolled_back(steps, folder_err, folder_candidates)
+        steps.append("folder_lookup")
 
     datastore_name, datastore_err = await _resolve_datastore_name(
         connector=connector, target=target, operator=operator, datastore_moid=datastore_moid
@@ -1616,6 +1814,15 @@ async def vm_create_composite(
     pins leave vCenter's placement defaulting untouched and keep the
     create body byte-identical to a pre-#3096 call.
 
+    Folder resolution (#3115): an explicit ``folder`` moid pin skips the
+    display-name lookup entirely (on both arms; the ``folder_lookup``
+    ledger entry is omitted); a multi-match ``folder_name`` lookup
+    re-scopes via the placement pins' datacenter
+    (:func:`_resolve_folder_moid`), and a residual ambiguity refuses with
+    the candidate moids (``candidate_folders``) instead of silently
+    taking the first row — the silent first-row pick created VMs in the
+    wrong datacenter on multi-datacenter vCenters.
+
     Version-conditional create transport (#3099): when the live
     ``about.version`` major is < 9 the whole create rides vim
     ``Folder.CreateVM_Task`` (:func:`_vm_create_via_vim`) — bare REST
@@ -1629,7 +1836,7 @@ async def vm_create_composite(
             operator=operator, target=target, params=params, connector=connector
         )
 
-    folder_name = params["folder_name"]
+    folder_name = params.get("folder_name")
     name = params["name"]
     guest_os = params["guest_os"]
     cpu_count = int(params.get("cpu_count", 1))
@@ -1643,12 +1850,24 @@ async def vm_create_composite(
 
     steps: list[str] = []
 
-    folder_moid, folder_err = await _resolve_folder_moid(
-        connector=connector, target=target, operator=operator, folder_name=folder_name
-    )
-    if folder_moid is None:
-        return _rolled_back(steps=steps, failed_step="folder_lookup", reason=folder_err or "")
-    steps.append("folder_lookup")
+    folder_moid: str | None
+    folder_pin = params.get("folder")
+    if isinstance(folder_pin, str):
+        # #3115 explicit pin: the moid rides the CreateSpec placement
+        # verbatim — no display-name lookup, no ``folder_lookup`` ledger
+        # entry.
+        folder_moid = folder_pin
+    else:
+        folder_moid, folder_err, folder_candidates = await _resolve_folder_moid(
+            connector=connector,
+            target=target,
+            operator=operator,
+            folder_name=folder_name,
+            placement_pins=placement_pins,
+        )
+        if folder_moid is None:
+            return _folder_lookup_rolled_back(steps, folder_err, folder_candidates)
+        steps.append("folder_lookup")
 
     create_spec = {
         "name": name,

@@ -24,8 +24,8 @@ helpers, never the mutating sub-ops.
                           total_resolved}``
 ``cluster.patch``         ``{cluster, resolved, total_resolved}``
 ``vm.create``             echo: name, guest_os, sizing, placement pins
-                          (folder_name, resource_pool, datastore, host),
-                          networks, VHV, power-on
+                          (folder_name, folder, resource_pool, datastore,
+                          host), networks, VHV, power-on
 ``vm.clone``              echo: source_vm, target_name, library_item
 ``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
                           resource_pool, datastore, host, power_on,
@@ -309,6 +309,7 @@ async def _vm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "name": name,
         "guest_os": guest_os,
         "folder_name": ctx.params.get("folder_name"),
+        "folder": ctx.params.get("folder"),
         "resource_pool": ctx.params.get("resource_pool"),
         "datastore": ctx.params.get("datastore"),
         "host": ctx.params.get("host"),

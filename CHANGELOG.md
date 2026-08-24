@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vim task fault messages no longer swallowed (#3116)
+
+- A faulted vim `*_Task` (live-observed: `CreateVM_Task` on vCenter 8.0.3)
+  surfaced as `<no fault reported>` while the `TaskInfo` carried a
+  perfectly good localized message: the poll helper's fault extraction
+  required `error.localizedMessage` to be a plain string and discarded
+  every other piece of fault content. The extraction now falls back
+  `localizedMessage` → `fault.faultMessage[*].message` (joined) →
+  `fault._typeName`, so `<no fault reported>` remains only for a
+  `TaskInfo` that truly carries no fault content — and every vim-arm
+  composite (create / reconfigure / clone / disk.grow / snapshot /
+  migrate / maintenance) inherits the legible `rollback_reason` through
+  the shared `VimTaskResult.error_message`. Box tolerance for the #3106
+  class is pinned end-to-end by a composite-level regression fixture
+  (a fully boxed faulted `TaskInfo`'s message survives into `vm.create`'s
+  `rollback_reason`). (#3116 / #3119)
+
 ### Fixed — VI-JSON boxed response values un-boxed at every vim property consumer (#3106)
 
 - The response-side twin of #3103: `DynamicProperty.val` is an `Any`

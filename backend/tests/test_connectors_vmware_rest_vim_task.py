@@ -41,19 +41,24 @@ def _task_info_result(
     state: Any,
     result: Any = None,
     error_message: Any = None,
+    error: Any = None,
     progress: Any = None,
 ) -> dict[str, Any]:
     """Build a single-Task ``RetrievePropertiesEx`` result carrying one ``TaskInfo``.
 
     Fields are ``Any``-typed so tests can seed either the bare primitives
     or the boxed ``{"_typeName": ..., "_value": ...}`` forms live VI-JSON
-    puts in ``Any`` placeholders (#3106).
+    puts in ``Any`` placeholders (#3106). ``error_message`` shorthands a
+    fault that carries only ``localizedMessage``; ``error`` seeds the full
+    ``LocalizedMethodFault`` object for the fallback-chain tests (#3116).
     """
     info: dict[str, Any] = {"state": state}
     if result is not None:
         info["result"] = result
     if error_message is not None:
         info["error"] = {"localizedMessage": error_message}
+    if error is not None:
+        info["error"] = error
     if progress is not None:
         info["progress"] = progress
     return {
@@ -239,6 +244,167 @@ async def test_poll_surfaces_fault_from_boxed_error_state_and_message() -> None:
     assert outcome.state == TASK_STATE_ERROR
     assert outcome.error_message == "Boxed boom."
     assert outcome.result is None
+
+
+async def test_poll_fault_without_localized_message_joins_fault_message_texts() -> None:
+    """No ``localizedMessage``: the joined ``fault.faultMessage[*].message`` surfaces (#3116)."""
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state="error",
+                error={
+                    "_typeName": "LocalizedMethodFault",
+                    "fault": {
+                        "_typeName": "InvalidArgument",
+                        "faultMessage": [
+                            {
+                                "_typeName": "LocalizableMessage",
+                                "key": "com.vmware.wcp.arg.invalid",
+                                "message": "The argument is invalid.",
+                            },
+                            {
+                                "_typeName": "LocalizableMessage",
+                                "key": "com.vmware.wcp.arg.detail",
+                                "message": "Entity crosses datacenter boundary.",
+                            },
+                        ],
+                    },
+                },
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "The argument is invalid.; Entity crosses datacenter boundary."
+
+
+async def test_poll_fault_without_any_message_falls_back_to_fault_type_name() -> None:
+    """No ``localizedMessage`` and no message texts: ``fault._typeName`` surfaces (#3116)."""
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state="error",
+                error={
+                    "_typeName": "LocalizedMethodFault",
+                    "fault": {
+                        "_typeName": "InvalidArgument",
+                        "faultMessage": [
+                            {"_typeName": "LocalizableMessage", "key": "com.vmware.no.text"}
+                        ],
+                    },
+                },
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "InvalidArgument"
+
+
+async def test_poll_fault_with_boxed_nested_primitives_surfaces_fallback_chain() -> None:
+    """Fully boxed fault content (#3106 live-8.0.3 shape) still surfaces a message (#3116).
+
+    Every nested primitive rides a ``{"_typeName": ..., "_value": ...}``
+    box and the ``faultMessage`` array rides its ``ArrayOfLocalizableMessage``
+    box; the recursive unwrap at ``Task.info`` extraction plus the fallback
+    chain must compose to the joined message texts -- never
+    ``<no fault reported>``.
+    """
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state={"_typeName": "string", "_value": "error"},
+                error={
+                    "_typeName": "LocalizedMethodFault",
+                    "fault": {
+                        "_typeName": "InvalidArgument",
+                        "faultMessage": {
+                            "_typeName": "ArrayOfLocalizableMessage",
+                            "_value": [
+                                {
+                                    "_typeName": "LocalizableMessage",
+                                    "key": {
+                                        "_typeName": "string",
+                                        "_value": "com.vmware.arg.invalid",
+                                    },
+                                    "message": {
+                                        "_typeName": "string",
+                                        "_value": "The argument is invalid.",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                },
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "The argument is invalid."
+
+
+async def test_poll_fault_blank_localized_message_falls_through_to_fault_body() -> None:
+    """A whitespace-only ``localizedMessage`` is absent, not a fault description (#3116)."""
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state="error",
+                error={
+                    "_typeName": "LocalizedMethodFault",
+                    "localizedMessage": "   ",
+                    "fault": {"_typeName": "TaskInProgress"},
+                },
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "TaskInProgress"
+
+
+async def test_poll_fault_with_no_usable_content_reports_none() -> None:
+    """A faulted TaskInfo with no fault content at all keeps ``error_message=None``."""
+    conn = _SeqTaskConnector(
+        [_task_info_result("task-1", state="error", error={"fault": "not-a-dict"})]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message is None
 
 
 async def test_poll_times_out_when_never_terminal() -> None:

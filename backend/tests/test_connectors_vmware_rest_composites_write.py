@@ -1563,6 +1563,63 @@ async def test_vm_create_pre9_task_fault_returns_rolled_back(gate: _GateRecorder
 
 
 @pytest.mark.asyncio
+async def test_vm_create_pre9_boxed_task_fault_message_survives_to_rollback_reason(
+    gate: _GateRecorder,
+) -> None:
+    """A live-8.0.3 boxed faulted ``TaskInfo`` keeps its message in ``rollback_reason`` (#3116).
+
+    RetrievePropertiesEx delivers ``TaskInfo`` through an ``anyType`` val and
+    live 8.0.3 boxes every nested primitive (``{"_typeName": "string",
+    "_value": ...}`` -- the #3106/#3109 class). The fault's
+    ``localizedMessage`` must survive the unwrap + extraction into the
+    composite's ``rollback_reason`` -- the pre-#3116 extractor degraded this
+    exact shape to ``<no fault reported>``.
+    """
+    boxed_fault_info = {
+        "_typeName": "TaskInfo",
+        "state": {"_typeName": "string", "_value": "error"},
+        "error": {
+            "_typeName": "LocalizedMethodFault",
+            "localizedMessage": {
+                "_typeName": "string",
+                "_value": "The input arguments had entities that did not belong "
+                "to the same datacenter.",
+            },
+            "fault": {"_typeName": "InvalidArgument"},
+        },
+    }
+    conn = _pre9_conn(
+        rest={
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/datastore/datastore-11": {"name": "datastore1"},
+        },
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-509"),
+            "Task": _retrieve_result("Task", "task-509", "info", boxed_fault_info),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "create"
+    assert (
+        "The input arguments had entities that did not belong to the same datacenter."
+        in out["rollback_reason"]
+    )
+    assert "<no fault reported>" not in out["rollback_reason"]
+
+
+@pytest.mark.asyncio
 async def test_vm_create_pre9_poll_timeout_returns_rolled_back(
     gate: _GateRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

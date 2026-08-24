@@ -711,7 +711,13 @@ task, timeout_seconds=600, poll_interval=2)` re-reads `Task.info` (via
 `_post_vmomi_json` + the shared `build_task_info_retrieve_params` request
 builder generalized from `tasks.recent`) on a fixed cadence until the vim
 state is `success` / `error` or the wall-clock deadline elapses, returning
-a `VimTaskResult{task, state, result, error_message, progress}`. It does
+a `VimTaskResult{task, state, result, error_message, progress}`. On a
+fault, `error_message` carries the best available description via a
+fallback chain (#3116): `error.localizedMessage` (optional on the wire) →
+the joined `fault.faultMessage[*].message` texts → the concrete fault's
+`_typeName` (e.g. `InvalidArgument`) — so every vim-arm composite's
+`rollback_reason` degrades to `<no fault reported>` only when the
+`TaskInfo` truly carries no fault content. It does
 **not** raise on a task *fault* — the outcome is a legible value each
 caller maps to its own status envelope (a clone surfaces `result` as the
 new VM MoRef; disk-grow raises on a fault so the dispatcher wraps it

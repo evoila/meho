@@ -173,7 +173,11 @@ def test_build_retrieve_params_is_single_vm_property_filter() -> None:
     assert "guestHeartbeatStatus" in prop_spec["pathSet"]
     assert "storage.perDatastoreUsage" in prop_spec["pathSet"]
     (obj_spec,) = spec["objectSet"]
-    assert obj_spec["obj"] == {"type": "VirtualMachine", "value": "vm-42"}
+    assert obj_spec["obj"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "VirtualMachine",
+        "value": "vm-42",
+    }
 
 
 # ---------------------------------------------------------------------------

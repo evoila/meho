@@ -89,18 +89,28 @@ class _FakeConnector:
 
 
 def _recent_task_result(moids: list[str]) -> dict[str, Any]:
+    # ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
     return {
+        "_typeName": "RetrieveResult",
         "objects": [
             {
-                "obj": {"type": "TaskManager", "value": "TaskManager"},
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "TaskManager",
+                    "value": "TaskManager",
+                },
                 "propSet": [
                     {
                         "name": "recentTask",
-                        "val": [{"type": "Task", "value": m} for m in moids],
+                        "val": [
+                            {"_typeName": "ManagedObjectReference", "type": "Task", "value": m}
+                            for m in moids
+                        ],
                     }
                 ],
             }
-        ]
+        ],
     }
 
 
@@ -146,8 +156,12 @@ def test_build_task_info_params_one_objectset_entry_per_task() -> None:
     body = build_task_info_retrieve_params(["task-1", "task-2"])
     (spec,) = body["specSet"]
     (prop_spec,) = spec["propSet"]
-    assert prop_spec == {"type": "Task", "pathSet": ["info"]}
+    assert prop_spec == {"_typeName": "PropertySpec", "type": "Task", "pathSet": ["info"]}
     assert [o["obj"]["value"] for o in spec["objectSet"]] == ["task-1", "task-2"]
+    # The task-poll read is annotated end to end (#3103).
+    assert all(o["_typeName"] == "ObjectSpec" for o in spec["objectSet"])
+    assert all(o["obj"]["_typeName"] == "ManagedObjectReference" for o in spec["objectSet"])
+    assert body["options"] == {"_typeName": "RetrieveOptions"}
 
 
 # ---------------------------------------------------------------------------

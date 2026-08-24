@@ -136,18 +136,27 @@ class _FakeConnector:
 
 
 def _retrieve_result(moid: str, quick_stats: Any, hardware: Any, in_maint: Any) -> dict[str, Any]:
-    """Build a RetrievePropertiesEx ``RetrieveResult`` for one host."""
+    """Build a RetrievePropertiesEx ``RetrieveResult`` for one host.
+
+    ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
+    """
     return {
+        "_typeName": "RetrieveResult",
         "objects": [
             {
-                "obj": {"type": "HostSystem", "value": moid},
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "HostSystem",
+                    "value": moid,
+                },
                 "propSet": [
                     {"name": "summary.quickStats", "val": quick_stats},
                     {"name": "summary.hardware", "val": hardware},
                     {"name": "runtime.inMaintenanceMode", "val": in_maint},
                 ],
             }
-        ]
+        ],
     }
 
 
@@ -168,19 +177,37 @@ _HW_FULL = {
 
 
 def test_build_retrieve_params_shape_is_single_host_property_filter() -> None:
+    """Pins the exact ``_typeName``-annotated body (#3103, live-verified shape)."""
     body = build_host_usage_retrieve_params("host-42")
-    assert set(body) == {"specSet", "options"}
-    assert body["options"] == {}
-    (spec,) = body["specSet"]
-    (prop_spec,) = spec["propSet"]
-    assert prop_spec["type"] == "HostSystem"
-    assert prop_spec["pathSet"] == [
-        "summary.quickStats",
-        "summary.hardware",
-        "runtime.inMaintenanceMode",
-    ]
-    (obj_spec,) = spec["objectSet"]
-    assert obj_spec["obj"] == {"type": "HostSystem", "value": "host-42"}
+    assert body == {
+        "specSet": [
+            {
+                "_typeName": "PropertyFilterSpec",
+                "propSet": [
+                    {
+                        "_typeName": "PropertySpec",
+                        "type": "HostSystem",
+                        "pathSet": [
+                            "summary.quickStats",
+                            "summary.hardware",
+                            "runtime.inMaintenanceMode",
+                        ],
+                    }
+                ],
+                "objectSet": [
+                    {
+                        "_typeName": "ObjectSpec",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "HostSystem",
+                            "value": "host-42",
+                        },
+                    }
+                ],
+            }
+        ],
+        "options": {"_typeName": "RetrieveOptions"},
+    }
 
 
 # ---------------------------------------------------------------------------

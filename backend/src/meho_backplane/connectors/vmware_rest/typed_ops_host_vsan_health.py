@@ -36,6 +36,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
+from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -107,12 +108,13 @@ def build_vsan_query_health_params(cluster_moid: str) -> dict[str, Any]:
     The ``vsan-cluster-health-system`` singleton moId rides the request
     path (:data:`_VSAN_QUERY_HEALTH_PATH`); the body carries the method's
     ``cluster`` argument -- the target cluster's MoRef (a
-    ``ClusterComputeResource``). Every other parameter of the method
+    ``ClusterComputeResource``), ``_typeName``-annotated per the vim wire
+    format (#3103). Every other parameter of the method
     (``includeObjUuids`` / ``fields`` / …) is optional and left to the
     health service's defaults so the read returns the full summary.
     """
     return {
-        "cluster": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid},
+        "cluster": vim_moref(_CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid),
     }
 
 

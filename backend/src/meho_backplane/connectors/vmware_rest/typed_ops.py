@@ -61,6 +61,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -155,22 +156,10 @@ def build_host_usage_retrieve_params(host_moid: str) -> dict[str, Any]:
     property paths. The singleton ``propertyCollector`` moId is carried
     in the URL (:data:`_RETRIEVE_PROPERTIES_PATH`), so the body is just
     the method arguments ``specSet`` + ``options`` -- the VI-JSON
-    ``RetrievePropertiesExRequestType`` shape.
+    ``RetrievePropertiesExRequestType`` shape, ``_typeName``-annotated
+    via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {
-                        "type": _HOST_SYSTEM_MO_TYPE,
-                        "pathSet": list(_HOST_USAGE_PATH_SET),
-                    }
-                ],
-                "objectSet": [{"obj": {"type": _HOST_SYSTEM_MO_TYPE, "value": host_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_HOST_SYSTEM_MO_TYPE, [host_moid], _HOST_USAGE_PATH_SET)
 
 
 def _extract_host_props(retrieve_result: Any) -> dict[str, Any]:

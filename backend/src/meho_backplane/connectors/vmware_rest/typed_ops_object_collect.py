@@ -41,6 +41,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -91,17 +92,10 @@ def build_object_collect_retrieve_params(
     ``TraversalSpec`` -- the read cannot leave the named object. The
     singleton ``propertyCollector`` moId rides the request path
     (:data:`_RETRIEVE_PROPERTIES_PATH`), so the body is just the
-    ``specSet`` + ``options`` method arguments.
+    ``specSet`` + ``options`` method arguments, ``_typeName``-annotated
+    via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": mo_type, "pathSet": list(properties)}],
-                "objectSet": [{"obj": {"type": mo_type, "value": moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(mo_type, [moid], properties)
 
 
 def _extract_object_content(retrieve_result: Any) -> tuple[dict[str, Any], list[str]]:

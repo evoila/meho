@@ -720,6 +720,34 @@ new VM MoRef; disk-grow raises on a fault so the dispatcher wraps it
 *does* propagate — it is a load-bearing failure, not "still running". The
 600 s bound mirrors the `vm.clone` `GET:/cis/tasks/{task}` convention.
 
+**3. `_typeName` annotations on every vim request body (#3103).** VI-JSON's
+wire format requires the `_typeName` discriminator on **every DataObject**
+in a request body — the pinned `vi-json.yaml` derives all data objects from
+`Any`, whose `required` list names `_typeName`, and a live vCenter 8.0.3
+**rejects** un-annotated bodies outright: a controlled differential against
+`POST /sdk/vim25/8.0.3.0/PropertyCollector/propertyCollector/RetrievePropertiesEx`
+returned `500 InvalidArgument` (vim fault `Invalid MoRef field: pathSet`)
+for the bare body and `200 RetrieveResult` for the same body annotated. The
+pre-#3103 substrate tagged only base-typed polymorphic fields (device
+backings, `ClusterConfigSpecEx`); the differential disproved that premise —
+the 8.0.x deserialiser demands the tag even where declared type == runtime
+type. 9.x accepts annotated bodies (it is the spec'd format), so annotation
+is **unconditional** — no version gate. Mechanically: the shared
+`vim_body.py` module carries `vim_moref()` (the annotated MoRef) and
+`retrieve_properties_body()` (the annotated
+`PropertyFilterSpec`/`PropertySpec`/`ObjectSpec` trio + `RetrieveOptions` —
+the shape every property read and task poll sends); every other body keeps
+an **explicit per-builder annotation** at its call site (spec-groundable
+and reviewable — deliberately no recursive type-inference magic). Server
+responses have always carried `_typeName` tags and the extraction helpers
+read fields by name, so response parsing is unchanged; the unit-test canned
+payloads mirror the tagged live shapes to pin that tolerance. The
+annotation *vocabulary* is grounded by a reconcile lane in
+`tests/test_connectors_vmware_rest_composites_write_body_reconcile.py`:
+every `_typeName` literal the substrate emits must name a component schema
+in the pinned `vi-json.yaml` (shelf-gated), and the exact annotated
+single-prop retrieve body is pinned byte-for-byte in an always-on lane.
+
 **`vm.disk.grow` flow** (the proving op): read the VM's
 `config.hardware.device` (a *read* `RetrievePropertiesEx`, un-gated) to
 find the full `VirtualDisk` device (the `VirtualDeviceConfigSpec` requires

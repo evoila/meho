@@ -110,9 +110,20 @@ def test_build_params_is_single_object_no_traversal() -> None:
     )
     (spec,) = body["specSet"]
     (prop_spec,) = spec["propSet"]
-    assert prop_spec == {"type": "Datastore", "pathSet": ["summary.freeSpace", "summary.capacity"]}
+    assert prop_spec == {
+        "_typeName": "PropertySpec",
+        "type": "Datastore",
+        "pathSet": ["summary.freeSpace", "summary.capacity"],
+    }
     (obj_spec,) = spec["objectSet"]
-    assert obj_spec == {"obj": {"type": "Datastore", "value": "datastore-5"}}
+    assert obj_spec == {
+        "_typeName": "ObjectSpec",
+        "obj": {
+            "_typeName": "ManagedObjectReference",
+            "type": "Datastore",
+            "value": "datastore-5",
+        },
+    }
     # No traversal spec / selectSet anywhere -> cannot walk the inventory.
     assert "selectSet" not in obj_spec
 

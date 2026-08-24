@@ -157,15 +157,33 @@ def _retrieve_result(moid: str, pnics: list[Any], proxy_switches: list[Any]) -> 
 
 
 def test_build_retrieve_params_shape_is_single_host_property_filter() -> None:
+    """Pins the exact ``_typeName``-annotated body (#3103, live-verified shape)."""
     body = build_host_network_uplinks_retrieve_params("host-42")
-    assert set(body) == {"specSet", "options"}
-    assert body["options"] == {}
-    (spec,) = body["specSet"]
-    (prop_spec,) = spec["propSet"]
-    assert prop_spec["type"] == "HostSystem"
-    assert prop_spec["pathSet"] == ["config.network.pnic", "config.network.proxySwitch"]
-    (obj_spec,) = spec["objectSet"]
-    assert obj_spec["obj"] == {"type": "HostSystem", "value": "host-42"}
+    assert body == {
+        "specSet": [
+            {
+                "_typeName": "PropertyFilterSpec",
+                "propSet": [
+                    {
+                        "_typeName": "PropertySpec",
+                        "type": "HostSystem",
+                        "pathSet": ["config.network.pnic", "config.network.proxySwitch"],
+                    }
+                ],
+                "objectSet": [
+                    {
+                        "_typeName": "ObjectSpec",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "HostSystem",
+                            "value": "host-42",
+                        },
+                    }
+                ],
+            }
+        ],
+        "options": {"_typeName": "RetrieveOptions"},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +244,11 @@ async def test_lists_then_reads_props_per_host_mounted() -> None:
         "config.network.pnic",
         "config.network.proxySwitch",
     ]
-    assert spec["objectSet"][0]["obj"] == {"type": "HostSystem", "value": "host-1"}
+    assert spec["objectSet"][0]["obj"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "HostSystem",
+        "value": "host-1",
+    }
 
     hosts = out["hosts"]
     assert len(hosts) == 2

@@ -96,6 +96,11 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    VIM_TYPE_NAME_KEY,
+    retrieve_properties_body,
+    vim_moref,
+)
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
 from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
 
@@ -292,8 +297,10 @@ _VIM_SUB_OPS_VM_DISK_GROW: tuple[str, ...] = (
 # VI-JSON polymorphic-type discriminator (``Any._typeName`` in
 # vi-json.yaml) + the VirtualDisk data-object type name. A device read
 # from ``config.hardware.device`` carries ``_typeName`` so the handler can
-# pick the VirtualDisk out of the mixed device list.
-_VMOMI_TYPE_NAME_KEY = "_typeName"
+# pick the VirtualDisk out of the mixed device list. Request-side, every
+# DataObject in a vim body carries the tag too (#3103; see
+# :mod:`..vim_body` for the live-differential grounding).
+_VMOMI_TYPE_NAME_KEY = VIM_TYPE_NAME_KEY
 _VIRTUAL_DISK_TYPE = "VirtualDisk"
 _VIRTUAL_MACHINE_MO_TYPE = "VirtualMachine"
 _PROP_CONFIG_HARDWARE_DEVICE = "config.hardware.device"
@@ -373,20 +380,40 @@ _VIM_GUEST_ID_BY_REST_GUEST_OS: Final[dict[str, str]] = {
     "WINDOWS_11_64": "windows11_64Guest",
 }
 
-# vim NIC shape for the pre-9.0 create arm (#3099). The ConfigSpec's
-# ``deviceChange`` entries are ``VirtualDeviceConfigSpec`` (declared type ==
-# runtime type, no ``_typeName``), but the ``device`` is declared as the base
-# ``VirtualDevice`` and the ``backing`` as the base
-# ``VirtualDeviceBackingInfo``, so both subtypes carry the ``_typeName``
-# discriminator for the vim25-JSON binding to deserialise them — the
-# ``ClusterConfigSpecEx`` precedent (#2895, spec-verified). The DVPG backing's
-# ``port`` is a ``DistributedVirtualSwitchPortConnection`` (declared ==
-# runtime, no tag) whose ``switchUuid`` / ``portgroupKey`` are resolved from
-# the portgroup moid via the un-gated vmomi property reads below — the same
-# ``key`` + ``config.distributedVirtualSwitch`` → ``uuid`` walk govc performs.
+# vim NIC shape for the pre-9.0 create arm (#3099). The ``device`` is
+# declared as the base ``VirtualDevice`` and the ``backing`` as the base
+# ``VirtualDeviceBackingInfo``, so both carry their concrete-subtype
+# ``_typeName`` for the vim25-JSON binding to pick the subtype — and since
+# #3103 every enclosing DataObject (the ``VirtualDeviceConfigSpec`` entry,
+# the ConfigSpec, its ``files``) carries its own tag as well: the live
+# 8.0.3 differential disproved the earlier "declared type == runtime type
+# needs no ``_typeName``" premise. The DVPG backing's ``port`` is a
+# ``DistributedVirtualSwitchPortConnection`` whose ``switchUuid`` /
+# ``portgroupKey`` are resolved from the portgroup moid via the un-gated
+# vmomi property reads below — the same ``key`` +
+# ``config.distributedVirtualSwitch`` → ``uuid`` walk govc performs.
 _VIRTUAL_VMXNET3_TYPE = "VirtualVmxnet3"
 _DV_PORT_BACKING_TYPE = "VirtualEthernetCardDistributedVirtualPortBackingInfo"
 _STANDARD_NETWORK_BACKING_TYPE = "VirtualEthernetCardNetworkBackingInfo"
+_DV_PORT_CONNECTION_TYPE = "DistributedVirtualSwitchPortConnection"
+
+# vim data-object ``_typeName`` discriminators for the request-body specs
+# the write composites assemble by hand (#3103, all spec-verified against
+# the pinned ``vi-json.yaml``): the ConfigSpec rides ``ReconfigVMRequestType
+# .spec`` / ``CreateVMRequestType.config``, ``files`` is its
+# ``VirtualMachineFileInfo``, ``deviceChange`` entries are
+# ``VirtualDeviceConfigSpec``, the clone body is ``CloneVMRequestType.spec``
+# (``VirtualMachineCloneSpec``) with a ``VirtualMachineRelocateSpec``
+# ``location``, and the DVS detach spec is ``ReconfigureDvsRequestType.spec``
+# (``DVSConfigSpec``) with ``DistributedVirtualSwitchHostMemberConfigSpec``
+# member entries.
+_VM_CONFIG_SPEC_TYPE = "VirtualMachineConfigSpec"
+_VM_FILE_INFO_TYPE = "VirtualMachineFileInfo"
+_VIRTUAL_DEVICE_CONFIG_SPEC_TYPE = "VirtualDeviceConfigSpec"
+_VM_CLONE_SPEC_TYPE = "VirtualMachineCloneSpec"
+_VM_RELOCATE_SPEC_TYPE = "VirtualMachineRelocateSpec"
+_DVS_CONFIG_SPEC_TYPE = "DVSConfigSpec"
+_DVS_HOST_MEMBER_CONFIG_SPEC_TYPE = "DistributedVirtualSwitchHostMemberConfigSpec"
 _DVPG_MO_TYPE = "DistributedVirtualPortgroup"
 _PROP_DVPG_KEY = "key"
 _PROP_DVPG_DVS = "config.distributedVirtualSwitch"
@@ -394,8 +421,11 @@ _PROP_DVS_UUID = "uuid"
 
 # The one-field ``VirtualMachineConfigSpec`` the VHV reconfigure sends. The
 # ``"spec"`` key is the vim request type's genuine required parameter (the
-# legacy-envelope sweep #2973 does not apply to vim bodies).
-_NESTED_HV_RECONFIG_BODY: Final[dict[str, Any]] = {"spec": {"nestedHVEnabled": True}}
+# legacy-envelope sweep #2973 does not apply to vim bodies); the spec value
+# is a DataObject, so it carries its ``_typeName`` (#3103).
+_NESTED_HV_RECONFIG_BODY: Final[dict[str, Any]] = {
+    "spec": {VIM_TYPE_NAME_KEY: _VM_CONFIG_SPEC_TYPE, "nestedHVEnabled": True}
+}
 
 # vim (VI-JSON) op_ids for the folder-template clone write path (#2894).
 # Same ``METHOD:/path`` shape the ingest parser emits from ``vi-json.yaml``
@@ -423,7 +453,8 @@ _VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE: tuple[str, ...] = (
 )
 
 # vim ManagedObjectReference type discriminators for the clone placement
-# MoRefs. A vim MoRef serialises as ``{"type": <T>, "value": <moid>}`` — the
+# MoRefs. A request-side vim MoRef serialises as ``{"_typeName":
+# "ManagedObjectReference", "type": <T>, "value": <moid>}`` (#3103) — the
 # handler wraps the operator-supplied placement moids into these.
 _FOLDER_MO_TYPE = "Folder"
 _RESOURCE_POOL_MO_TYPE = "ResourcePool"
@@ -471,11 +502,13 @@ _OP_CREATE_FOLDER = "POST:/Folder/{moId}/CreateFolder"
 # reconfigure must tag the spec ``ClusterConfigSpecEx`` for the vim25-JSON
 # binding to deserialise the subtype; likewise ``ClusterRuleSpec.info`` is
 # declared as the base ``ClusterRuleInfo``, so the affinity / anti-affinity
-# subtype is tagged. The ``ClusterRuleSpec`` array item and the
-# ``VirtualMachine`` MoRefs need no ``_typeName`` (declared type == runtime
-# type), mirroring the disk-grow ``VirtualDeviceConfigSpec`` precedent
-# (spec-verified against the pinned ``vi-json.yaml``).
+# subtype is tagged. Since #3103 the ``ClusterRuleSpec`` array items and
+# the ``VirtualMachine`` MoRefs are tagged too — the live 8.0.3
+# differential disproved the earlier "declared type == runtime type needs
+# no ``_typeName``" premise (spec-verified against the pinned
+# ``vi-json.yaml``, whose ``Any.required`` names ``_typeName``).
 _CLUSTER_CONFIG_SPEC_EX_TYPE = "ClusterConfigSpecEx"
+_CLUSTER_RULE_SPEC_TYPE = "ClusterRuleSpec"
 _CLUSTER_AFFINITY_RULE_TYPE = "ClusterAffinityRuleSpec"
 _CLUSTER_ANTI_AFFINITY_RULE_TYPE = "ClusterAntiAffinityRuleSpec"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
@@ -1175,16 +1208,11 @@ def _build_dvpg_retrieve_params(portgroup_moid: str) -> dict[str, Any]:
     ``config.distributedVirtualSwitch`` off the ``DistributedVirtualPortgroup``
     — the two properties the ``DistributedVirtualSwitchPortConnection``
     needs (the DVS moid is then resolved to its ``uuid`` in a second read).
+    ``_typeName``-annotated via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": _DVPG_MO_TYPE, "pathSet": [_PROP_DVPG_KEY, _PROP_DVPG_DVS]}],
-                "objectSet": [{"obj": {"type": _DVPG_MO_TYPE, "value": portgroup_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(
+        _DVPG_MO_TYPE, [portgroup_moid], [_PROP_DVPG_KEY, _PROP_DVPG_DVS]
+    )
 
 
 async def _resolve_vim_nic_backing(
@@ -1244,7 +1272,11 @@ async def _resolve_vim_nic_backing(
             return None, f"switch {switch_moid!r} owning portgroup {network!r} has no uuid"
         return {
             _VMOMI_TYPE_NAME_KEY: _DV_PORT_BACKING_TYPE,
-            "port": {"switchUuid": switch_uuid, "portgroupKey": portgroup_key},
+            "port": {
+                _VMOMI_TYPE_NAME_KEY: _DV_PORT_CONNECTION_TYPE,
+                "switchUuid": switch_uuid,
+                "portgroupKey": portgroup_key,
+            },
         }, None
     if backing_type == _NIC_BACKING_STANDARD_PORTGROUP:
         listing = _unwrap_value(
@@ -1288,20 +1320,26 @@ def _build_vim_create_request(
     ``files.vmPathName`` (the VM home, ``"[<datastore-name>] <name>"``),
     the NIC ``deviceChange`` adds (vmxnet3, negative temp keys — the new-
     device convention), and ``nestedHVEnabled`` folded inline when the
-    operator asked for the #3093 leg.
+    operator asked for the #3093 leg. Every DataObject in the body carries
+    its ``_typeName`` discriminator (#3103).
     """
     config: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VM_CONFIG_SPEC_TYPE,
         "name": name,
         "guestId": guest_id,
         "numCPUs": cpu_count,
         "memoryMB": memory_mib,
-        "files": {"vmPathName": f"[{datastore_name}] {name}"},
+        "files": {
+            _VMOMI_TYPE_NAME_KEY: _VM_FILE_INFO_TYPE,
+            "vmPathName": f"[{datastore_name}] {name}",
+        },
     }
     if nested_hv:
         config["nestedHVEnabled"] = True
     if nic_backings:
         config["deviceChange"] = [
             {
+                _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
                 "operation": "add",
                 "device": {
                     _VMOMI_TYPE_NAME_KEY: _VIRTUAL_VMXNET3_TYPE,
@@ -2232,17 +2270,10 @@ def _build_single_prop_retrieve_params(mo_type: str, moid: str, prop: str) -> di
     A single ``PropertyFilterSpec`` scoped directly to the managed object;
     the singleton ``propertyCollector`` moId rides the path, so the body is
     only the method args (the shape the typed reads + the disk-grow /
-    clone-template config reads send).
+    clone-template config reads send), ``_typeName``-annotated via the
+    shared trio helper — the live-verified 200 shape (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": mo_type, "pathSet": [prop]}],
-                "objectSet": [{"obj": {"type": mo_type, "value": moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(mo_type, [moid], [prop])
 
 
 def _extract_single_prop(retrieve_result: Any, prop: str) -> Any:
@@ -2976,9 +3007,11 @@ async def host_detach_from_vds_composite(
         vmomi_path=f"/{_DVS_MO_TYPE}/{dvs_moid}/ReconfigureDvs_Task",
         body={
             "spec": {
+                _VMOMI_TYPE_NAME_KEY: _DVS_CONFIG_SPEC_TYPE,
                 "configVersion": config_version,
                 "host": [
                     {
+                        _VMOMI_TYPE_NAME_KEY: _DVS_HOST_MEMBER_CONFIG_SPEC_TYPE,
                         "operation": "remove",
                         "host": _moref(_HOST_SYSTEM_MO_TYPE, host_moid),
                     }
@@ -3212,19 +3245,12 @@ def _build_vm_devices_retrieve_params(vm_moid: str) -> dict[str, Any]:
     its VI-JSON ``_typeName`` discriminator so the disk-grow handler can
     pick the ``VirtualDisk`` out. The singleton ``propertyCollector`` moId
     rides the path, so the body is only the method args (the shape the
-    typed reads send).
+    typed reads send), ``_typeName``-annotated via the shared trio helper
+    (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {"type": _VIRTUAL_MACHINE_MO_TYPE, "pathSet": [_PROP_CONFIG_HARDWARE_DEVICE]}
-                ],
-                "objectSet": [{"obj": {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": vm_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(
+        _VIRTUAL_MACHINE_MO_TYPE, [vm_moid], [_PROP_CONFIG_HARDWARE_DEVICE]
+    )
 
 
 def _extract_vm_devices(retrieve_result: Any) -> list[Any]:
@@ -3390,11 +3416,20 @@ async def vm_disk_grow_composite(
             ),
         }
 
+    # The edited device is the server-read ``VirtualDisk`` echoed back
+    # ("fully specified" per the spec), so it already carries its own
+    # ``_typeName`` from the response; the enclosing ConfigSpec and
+    # ``VirtualDeviceConfigSpec`` entry are tagged here (#3103).
     reconfig_spec = {
         "spec": {
+            _VMOMI_TYPE_NAME_KEY: _VM_CONFIG_SPEC_TYPE,
             "deviceChange": [
-                {"operation": "edit", "device": {**device, "capacityInBytes": requested}}
-            ]
+                {
+                    _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+                    "operation": "edit",
+                    "device": {**device, "capacityInBytes": requested},
+                }
+            ],
         }
     }
     gate, task_payload = await _write_vmomi_sub_op(
@@ -3465,8 +3500,8 @@ async def vm_disk_grow_composite(
 
 
 def _moref(mo_type: str, moid: str) -> dict[str, str]:
-    """A vim ``ManagedObjectReference`` JSON object (``{type, value}``)."""
-    return {"type": mo_type, "value": moid}
+    """An annotated vim ``ManagedObjectReference`` (shared helper, #3103)."""
+    return vim_moref(mo_type, moid)
 
 
 def _build_config_template_retrieve_params(vm_moid: str) -> dict[str, Any]:
@@ -3476,17 +3511,10 @@ def _build_config_template_retrieve_params(vm_moid: str) -> dict[str, Any]:
     ``config.template`` -- the boolean that distinguishes a marked-as-template
     VM from a regular one. The singleton ``propertyCollector`` moId rides the
     path, so the body is only the method args (the shape the typed reads +
-    the disk-grow config read send).
+    the disk-grow config read send), ``_typeName``-annotated via the shared
+    trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": _VIRTUAL_MACHINE_MO_TYPE, "pathSet": [_PROP_CONFIG_TEMPLATE]}],
-                "objectSet": [{"obj": {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": vm_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_VIRTUAL_MACHINE_MO_TYPE, [vm_moid], [_PROP_CONFIG_TEMPLATE])
 
 
 def _extract_config_template(retrieve_result: Any, vm_moid: str) -> bool | None:
@@ -3619,15 +3647,23 @@ def _build_clone_body(
     (``pool`` + ``datastore`` MoRefs, optional ``host`` pin), ``template:
     false`` (clone to a VM, never a template) and ``powerOn``. ``customization``
     (an inline ``CustomizationSpec``) is added only when a GOSC spec was
-    requested.
+    requested -- it is the server-resolved ``GetCustomizationSpec`` object
+    echoed back, so it round-trips its own ``_typeName`` tags; the
+    hand-assembled DataObjects here carry theirs explicitly (#3103).
     """
     location: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VM_RELOCATE_SPEC_TYPE,
         "pool": _moref(_RESOURCE_POOL_MO_TYPE, pool_moid),
         "datastore": _moref(_DATASTORE_MO_TYPE, datastore_moid),
     }
     if host_moid is not None:
         location["host"] = _moref(_HOST_SYSTEM_MO_TYPE, host_moid)
-    clone_spec: dict[str, Any] = {"location": location, "template": False, "powerOn": power_on}
+    clone_spec: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VM_CLONE_SPEC_TYPE,
+        "location": location,
+        "template": False,
+        "powerOn": power_on,
+    }
     if customization is not None:
         clone_spec["customization"] = customization
     return {"folder": _moref(_FOLDER_MO_TYPE, folder_moid), "name": new_vm_name, "spec": clone_spec}
@@ -3850,24 +3886,12 @@ def _build_cluster_rules_retrieve_params(cluster_moid: str) -> dict[str, Any]:
     name-collision check reads this before any write so a duplicate rule
     name returns a structured status instead of a raw vim ``DuplicateName``
     fault. The singleton ``propertyCollector`` moId rides the path, so the
-    body is only the method args (the shape the typed reads send).
+    body is only the method args (the shape the typed reads send),
+    ``_typeName``-annotated via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {
-                        "type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
-                        "pathSet": [_PROP_CONFIGURATION_EX_RULE],
-                    }
-                ],
-                "objectSet": [
-                    {"obj": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid}}
-                ],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(
+        _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], [_PROP_CONFIGURATION_EX_RULE]
+    )
 
 
 def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
@@ -4035,15 +4059,13 @@ async def cluster_drs_rule_create_composite(
             _VMOMI_TYPE_NAME_KEY: _CLUSTER_CONFIG_SPEC_EX_TYPE,
             "rulesSpec": [
                 {
+                    _VMOMI_TYPE_NAME_KEY: _CLUSTER_RULE_SPEC_TYPE,
                     "operation": "add",
                     "info": {
                         _VMOMI_TYPE_NAME_KEY: rule_info_type,
                         "name": rule_name,
                         "enabled": enabled,
-                        "vm": [
-                            {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": row["vm"]}
-                            for row in resolved
-                        ],
+                        "vm": [vim_moref(_VIRTUAL_MACHINE_MO_TYPE, row["vm"]) for row in resolved],
                     },
                 }
             ],

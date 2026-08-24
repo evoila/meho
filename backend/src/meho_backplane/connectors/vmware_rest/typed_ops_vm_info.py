@@ -49,6 +49,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -103,22 +104,10 @@ def build_vm_info_retrieve_params(vm_moid: str) -> dict[str, Any]:
     runtime / storage property paths. The singleton ``propertyCollector``
     moId rides the path (:data:`_RETRIEVE_PROPERTIES_PATH`), so the body
     is just the ``specSet`` + ``options`` method arguments -- the VI-JSON
-    ``RetrievePropertiesExRequestType`` shape ``vmware.host.usage`` sends.
+    ``RetrievePropertiesExRequestType`` shape ``vmware.host.usage`` sends,
+    ``_typeName``-annotated via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {
-                        "type": _VIRTUAL_MACHINE_MO_TYPE,
-                        "pathSet": list(_VM_INFO_PATH_SET),
-                    }
-                ],
-                "objectSet": [{"obj": {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": vm_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_VIRTUAL_MACHINE_MO_TYPE, [vm_moid], _VM_INFO_PATH_SET)
 
 
 def _extract_vm_props(retrieve_result: Any) -> dict[str, Any]:

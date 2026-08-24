@@ -423,9 +423,14 @@ async def test_write_composite_parameter_schemas_persist_with_required_fields(
             .all()
         )
     by_op = {row.op_id: row for row in rows}
-    # vm.create requires folder_name / name / guest_os.
+    # vm.create requires name / guest_os plus one of folder_name / folder
+    # (the #3115 at-least-one-of anyOf shape).
     create_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.create"].parameter_schema)
-    assert set(create_schema["required"]) == {"folder_name", "name", "guest_os"}
+    assert set(create_schema["required"]) == {"name", "guest_os"}
+    assert create_schema["anyOf"] == [
+        {"required": ["folder_name"]},
+        {"required": ["folder"]},
+    ]
     # vm.clone requires source_vm / target_name / library_item.
     clone_schema: dict[str, Any] = dict(by_op["vmware.composite.vm.clone"].parameter_schema)
     assert set(clone_schema["required"]) == {"source_vm", "target_name", "library_item"}

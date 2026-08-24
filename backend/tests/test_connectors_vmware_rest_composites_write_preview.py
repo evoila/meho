@@ -396,6 +396,7 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
         "name": "vm-new",
         "guest_os": "UBUNTU_64",
         "folder_name": "prod",
+        "folder": None,
         "resource_pool": "resgroup-8",
         "datastore": "datastore-11",
         "host": "host-14",
@@ -405,6 +406,16 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
         "nested_hv": True,
         "power_on_after_create": True,
     }
+
+
+async def test_vm_create_preview_echoes_folder_moid_pin() -> None:
+    """The #3115 ``folder`` moid pin is part of the approver-visible blast radius."""
+    preview = await _write_preview._vm_create_preview(
+        _make_preview_ctx({"folder": "group-v55", "name": "vm-new", "guest_os": "UBUNTU_64"})
+    )
+    assert preview is not None
+    assert preview["folder"] == "group-v55"
+    assert preview["folder_name"] is None
 
 
 async def test_vm_create_preview_mirrors_handler_defaults() -> None:
@@ -935,6 +946,7 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
             "name": "vm-new",
             "guest_os": "UBUNTU_64",
             "folder_name": "prod",
+            "folder": None,
             "resource_pool": None,
             "datastore": None,
             "host": None,

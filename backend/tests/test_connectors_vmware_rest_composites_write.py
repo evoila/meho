@@ -75,6 +75,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_resize_composite,
     vm_snapshot_revert_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites.schemas import VM_CREATE_RESPONSE_SCHEMA
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -588,6 +589,129 @@ async def test_vm_create_folder_lookup_empty_returns_rolled_back_no_create(
 
 
 @pytest.mark.asyncio
+async def test_vm_create_multi_dc_ambiguous_folder_rescopes_via_placement_pins(
+    gate: _GateRecorder,
+) -> None:
+    """A multi-DC folder-name collision resolves inside the pins' datacenter (#3115).
+
+    The live failure shape: ``folder_name='vm'`` matches every datacenter's
+    default VM folder, and the pre-#3115 lookup silently took the first row
+    — a wrong-datacenter folder mixed with datacenter-B placement pins.
+    Now the multi-match reverse-maps the host pin to its datacenter (one
+    identity+``datacenters`` intersection probe per datacenter) and
+    re-issues the folder lookup scoped via ``filter.datacenters``.
+    """
+    conn = _RecordingConnector(
+        [
+            # Unscoped folder GET: both datacenters' default ``vm`` folders.
+            [{"folder": "group-v3", "name": "vm"}, {"folder": "group-v22", "name": "vm"}],
+            # Datacenter listing.
+            [
+                {"datacenter": "datacenter-2", "name": "DC-A"},
+                {"datacenter": "datacenter-9", "name": "DC-B"},
+            ],
+            [],  # host∩DC-A probe: miss
+            [{"host": "host-14", "name": "esx-b1"}],  # host∩DC-B probe: hit
+            [{"folder": "group-v22", "name": "vm"}],  # rescoped folder GET: unique
+            {"value": "vm-99"},  # create POST
+        ]
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "vm",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "host": "host-14",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/folder"),
+        ("GET", "/api/vcenter/datacenter"),
+        ("GET", "/api/vcenter/host"),
+        ("GET", "/api/vcenter/host"),
+        ("GET", "/api/vcenter/folder"),
+        ("POST", "/api/vcenter/vm"),
+    ]
+    # Bare param names on /api (#2298) — the live 8.0.x dialect.
+    assert conn.calls[0]["query"] == {"names": ["vm"]}
+    assert conn.calls[1]["query"] is None
+    assert conn.calls[2]["query"] == {"hosts": ["host-14"], "datacenters": ["datacenter-2"]}
+    assert conn.calls[3]["query"] == {"hosts": ["host-14"], "datacenters": ["datacenter-9"]}
+    assert conn.calls[4]["query"] == {"names": ["vm"], "datacenters": ["datacenter-9"]}
+    # The create lands on the pins' datacenter's folder — never group-v3.
+    assert conn.calls[5]["body"]["placement"] == {
+        "folder": "group-v22",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+        "host": "host-14",
+    }
+    assert out["status"] == "created"
+    assert out["steps_succeeded"] == ["folder_lookup", "create"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_ambiguous_folder_without_pins_returns_structured_rolled_back(
+    gate: _GateRecorder,
+) -> None:
+    """>1 folder match with no pins refuses with candidate moids — never row one (#3115)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/folder": [
+                {"folder": "group-v3", "name": "vm"},
+                {"folder": "group-v22", "name": "vm"},
+            ]
+        }
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"folder_name": "vm", "name": "web-01", "guest_os": "UBUNTU_64"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["vm_id"] is None
+    assert out["failed_step"] == "folder_lookup"
+    assert out["candidate_folders"] == ["group-v3", "group-v22"]
+    # The reason names every candidate and the disambiguation path.
+    assert "group-v3" in out["rollback_reason"]
+    assert "group-v22" in out["rollback_reason"]
+    assert "`folder`" in out["rollback_reason"]
+    # Pins absent -> no datacenter scoping was even attempted; nothing gated.
+    assert len(conn.calls) == 1
+    assert gate.calls == []
+    # The grown envelope stays schema-valid.
+    Draft202012Validator(VM_CREATE_RESPONSE_SCHEMA).validate(out)
+
+
+@pytest.mark.asyncio
+async def test_vm_create_folder_moid_pin_skips_lookup_rest_arm(gate: _GateRecorder) -> None:
+    """An explicit ``folder`` moid rides the placement verbatim — zero lookup reads (#3115)."""
+    conn = _RecordingConnector({"/api/vcenter/vm": {"value": "vm-99"}})
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"folder": "group-v55", "name": "web-01", "guest_os": "UBUNTU_64"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [("POST", "/api/vcenter/vm")]
+    assert conn.calls[0]["body"]["placement"] == {"folder": "group-v55"}
+    # No lookup ran, so the ledger carries no folder_lookup entry.
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-99",
+        "steps_succeeded": ["create"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_vm_create_gated_create_returns_awaiting_approval_no_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1094,6 +1218,106 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
         "rollback_reason": None,
         "nested_hv": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_folder_moid_pin_skips_lookup(gate: _GateRecorder) -> None:
+    """The #3115 ``folder`` pin parents ``CreateVM_Task`` verbatim on the vim arm."""
+    conn = _pre9_conn(
+        rest={"/api/vcenter/datastore/datastore-11": {"name": "datastore1"}},
+        vmomi={
+            "/Folder/group-v55/CreateVM_Task": _task_moref("task-77"),
+            "Task": _task_info_result(
+                "task-77", "success", result={"type": "VirtualMachine", "value": "vm-88"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "group-v55",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # No folder GET — the first read is the datastore-name resolution.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/datastore/datastore-11"),
+        ("POST-VMOMI", "/Folder/group-v55/CreateVM_Task"),
+        ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),  # task poll
+    ]
+    # The durable ApprovalRequest names the pinned moid; folder_name was
+    # never supplied (the #3115 anyOf allows either spelling).
+    assert gate.calls[0]["params"]["folder"] == "group-v55"
+    assert gate.calls[0]["params"]["folder_name"] is None
+    assert out == {
+        "status": "created",
+        "vm_id": "vm-88",
+        "steps_succeeded": ["create"],
+        "failed_step": None,
+        "rollback_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_ambiguous_folder_rescopes_then_refuses_residual(
+    gate: _GateRecorder,
+) -> None:
+    """Vim arm: pins re-scope the lookup; same-DC duplicates still refuse (#3115).
+
+    No host pin here, so the reverse map falls through to the
+    resource-pool probe (second pin kind), which hits in the first
+    datacenter — and the rescoped lookup still matching two folders
+    (nested same-name folders inside one datacenter) refuses with the
+    scoped candidates before any vim traffic.
+    """
+    conn = _UnifiedRecordingConnector(
+        [
+            # Unscoped folder GET: cross- and same-DC name collisions.
+            [{"folder": "group-v3", "name": "vm"}, {"folder": "group-v22", "name": "vm"}],
+            [
+                {"datacenter": "datacenter-2", "name": "DC-A"},
+                {"datacenter": "datacenter-9", "name": "DC-B"},
+            ],
+            [{"resource_pool": "resgroup-8"}],  # resource-pool∩DC-A probe: hit
+            # Rescoped folder GET: still two matches inside DC-A.
+            [{"folder": "group-v3", "name": "vm"}, {"folder": "group-v31", "name": "vm"}],
+        ],
+        about_version="8.0.3.00500",
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "vm",
+            "name": "esx-nested-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/folder"),
+        ("GET", "/api/vcenter/datacenter"),
+        ("GET", "/api/vcenter/resource-pool"),
+        ("GET", "/api/vcenter/folder"),
+    ]
+    assert conn.calls[2]["query"] == {
+        "resource_pools": ["resgroup-8"],
+        "datacenters": ["datacenter-2"],
+    }
+    assert conn.calls[3]["query"] == {"names": ["vm"], "datacenters": ["datacenter-2"]}
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "folder_lookup"
+    assert out["candidate_folders"] == ["group-v3", "group-v31"]
+    # The CreateVM_Task never fired; nothing was gated.
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
 
 
 @pytest.mark.asyncio

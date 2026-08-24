@@ -231,6 +231,15 @@ def _apply_skip_reembed(existing: EndpointDescriptor, ctx: UpsertContext) -> Non
     Leave ``summary`` / ``description`` / ``tags`` alone (the hash
     match proved they're equal) so the ORM identity map stays
     consistent; only refresh the proto-derived non-embedding fields.
+
+    ``needs_reingest`` is cleared on both existing-row branches (#3102):
+    the freshly parsed ``parameter_schema`` just replaced the stored one
+    and passed the parser's ``_assert_parameter_schema_standalone`` lint
+    by construction, so a same-spec re-ingest is the repair path for a
+    row migration ``0076`` flagged. The skip-re-embed branch matters
+    here — a byte-identical spec re-ingested through the *fixed* parser
+    lands on this branch (unchanged embedding text) yet still carries
+    the newly bundled schema.
     """
     existing.method = ctx.proto.method
     existing.path = ctx.proto.path
@@ -238,6 +247,7 @@ def _apply_skip_reembed(existing: EndpointDescriptor, ctx: UpsertContext) -> Non
     existing.response_schema = ctx.proto.response_schema
     existing.safety_level = ctx.proto.safety_level
     existing.requires_approval = ctx.proto.requires_approval
+    existing.needs_reingest = False
     existing.updated_at = ctx.now
 
 
@@ -246,7 +256,12 @@ def _apply_reembed_update(
     ctx: UpsertContext,
     embedding: list[float],
 ) -> None:
-    """Re-embed path: existing row, embedding text changed."""
+    """Re-embed path: existing row, embedding text changed.
+
+    Clears ``needs_reingest`` for the same reason as
+    :func:`_apply_skip_reembed` — the incoming schema self-resolves by
+    construction (#3102).
+    """
     existing.method = ctx.proto.method
     existing.path = ctx.proto.path
     existing.summary = ctx.proto.summary
@@ -256,6 +271,7 @@ def _apply_reembed_update(
     existing.response_schema = ctx.proto.response_schema
     existing.safety_level = ctx.proto.safety_level
     existing.requires_approval = ctx.proto.requires_approval
+    existing.needs_reingest = False
     existing.embedding = embedding
     existing.updated_at = ctx.now
 
@@ -286,6 +302,7 @@ def _build_new_descriptor(
         safety_level=ctx.proto.safety_level,
         requires_approval=ctx.proto.requires_approval,
         is_enabled=False,
+        needs_reingest=False,
         embedding=embedding,
         custom_description=None,
         custom_notes=None,

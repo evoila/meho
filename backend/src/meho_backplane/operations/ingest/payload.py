@@ -93,6 +93,12 @@ class ConnectorReviewOp(BaseModel):
     requires_approval: bool
     is_enabled: bool
     tags: list[str]
+    # #3102: the stored ``parameter_schema`` cannot self-resolve (a
+    # pre-#3095 ingest left a dangling ``$ref``), so dispatch refuses
+    # every call with ``invalid_op_schema`` until the connector's spec
+    # is re-ingested. Additive with a default so existing construction
+    # call sites keep working; the service sets it from the row.
+    needs_reingest: bool = False
 
 
 class ConnectorReviewGroup(BaseModel):
@@ -173,3 +179,12 @@ class ConnectorReviewPayload(BaseModel):
     # Additive with a default so existing construction call sites keep
     # working; the service always sets it from the persisted rows.
     provenance: list[ConnectorReviewProvenance] = []
+    # #3102: how many descriptor rows in this connector's scope carry
+    # ``needs_reingest`` — counted over the same full descriptor
+    # universe as ``total_op_count + ungrouped_op_count`` (group or
+    # not), so a flagged op outside any rendered group still surfaces.
+    # ``> 0`` means the stored schemas predate an ingest-parser fix and
+    # a same-spec re-ingest repairs them in place (enablement, groups,
+    # and operator curation are preserved by the upsert). Additive with
+    # a default so existing construction call sites keep working.
+    needs_reingest_op_count: int = 0

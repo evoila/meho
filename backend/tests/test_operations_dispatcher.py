@@ -60,7 +60,7 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
     PassThroughReducer,
     dispatch,
@@ -68,7 +68,9 @@ from meho_backplane.operations import (
     register_typed_operation,
     reset_dispatcher_caches,
 )
+from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
+from meho_backplane.operations.ingest import parse_openapi, register_ingested_operations
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -2784,3 +2786,170 @@ def test_compute_params_hash_handles_non_json_natives() -> None:
     h = compute_params_hash({"id": uuid.UUID("00000000-0000-0000-0000-000000000001")})
     assert isinstance(h, str)
     assert len(h) == 64
+
+
+# ---------------------------------------------------------------------------
+# #3102 -- a pre-#3095 stored row is repaired end-to-end by same-spec re-ingest
+# ---------------------------------------------------------------------------
+
+#: Minimal spec whose request body carries a nested component ref -- the
+#: exact defect class of the live content-library file-PULL op: the top
+#: -level ``UploadSpec`` ref is shallow-inlined at parse time, and the
+#: nested ``TransferEndpoint`` ref survives verbatim inside it.
+_REPAIR_SPEC_YAML = """\
+openapi: 3.0.0
+info:
+  title: Repair fixture
+  version: "1.0"
+paths:
+  /api/library/upload-file:
+    post:
+      summary: Upload a file
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadSpec'
+      responses:
+        '200':
+          description: ok
+components:
+  schemas:
+    UploadSpec:
+      type: object
+      properties:
+        file_spec:
+          $ref: '#/components/schemas/TransferEndpoint'
+    TransferEndpoint:
+      type: object
+      properties:
+        uri:
+          type: string
+"""
+
+
+@pytest.mark.asyncio
+async def test_reingest_repairs_pre_fix_row_through_dispatch_validation(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#3102 end-to-end: flagged pre-fix row -> ``invalid_op_schema``; re-ingest -> repaired.
+
+    The full deploy-then-heal loop the issue demands:
+
+    1. A stored descriptor shaped like a pre-#3095 ingest (nested
+       ``$ref``, no ``components`` bundle) and flagged by migration
+       0076 refuses dispatch with the structured ``invalid_op_schema``.
+    2. A same-spec re-ingest through the fixed parser
+       (``parse_openapi`` bundles the closure) upserts the row in
+       place: bundled schema, ``needs_reingest`` cleared,
+       ``is_enabled`` untouched.
+    3. Dispatch validation now accepts the same params -- the op no
+       longer fails as ``invalid_op_schema`` (it proceeds to connector
+       resolution), and ``validate_params`` returns zero errors against
+       the repaired stored schema.
+    """
+    op_id = "POST:/api/library/upload-file"
+    pre_fix_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "body": {
+                "type": "object",
+                "properties": {
+                    "file_spec": {"$ref": "#/components/schemas/TransferEndpoint"},
+                },
+                "x-meho-param-loc": "body",
+            },
+        },
+        "required": ["body"],
+    }
+    row_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            EndpointDescriptor(
+                id=row_id,
+                tenant_id=None,
+                product="library",
+                version="1.0",
+                impl_id="library-rest",
+                op_id=op_id,
+                source_kind="ingested",
+                method="POST",
+                path="/api/library/upload-file",
+                handler_ref=None,
+                summary="Upload a file",
+                description=None,
+                group_id=None,
+                tags=["repair.yaml", "spec:repair.yaml"],
+                parameter_schema=pre_fix_schema,
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="caution",
+                requires_approval=False,
+                is_enabled=True,
+                needs_reingest=True,
+                embedding=[0.5] * 384,
+                custom_description=None,
+                custom_notes=None,
+            )
+        )
+        await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="library")
+    params = {"body": {"file_spec": {"uri": "https://datastore.example/iso"}}}
+
+    # --- 1. Pre-repair: the stored schema cannot validate any input. ---
+    broken = await dispatch(
+        operator=operator,
+        connector_id="library-rest-1.0",
+        op_id=op_id,
+        target=target,
+        params=params,
+    )
+    assert broken.status == "error"
+    assert broken.extras["error_code"] == "invalid_op_schema"
+    assert broken.extras["missing_ref"] == "#/components/schemas/TransferEndpoint"
+
+    # --- 2. Repair: re-ingest the same spec through the fixed parser. ---
+    protos = parse_openapi(
+        "file:///repair.yaml",
+        spec_source="repair.yaml",
+        content=_REPAIR_SPEC_YAML,
+    )
+    assert [proto.op_id for proto in protos] == [op_id]
+    await register_ingested_operations(
+        product="library",
+        version="1.0",
+        impl_id="library-rest",
+        spec_source="repair.yaml",
+        operations=protos,
+        embedding_service=stub_embedding_service,
+    )
+
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(select(EndpointDescriptor).where(EndpointDescriptor.id == row_id))
+        ).scalar_one()
+    assert row.needs_reingest is False, "the upsert must clear the 0076 flag"
+    assert row.is_enabled is True, "repair must not reset the operator's enable decision"
+    bundled = row.parameter_schema.get("components")
+    assert isinstance(bundled, dict)
+    assert "TransferEndpoint" in bundled.get("schemas", {})
+    # The repaired stored document validates the same params standalone --
+    # exactly what the dispatcher's registry-free validator does.
+    assert validate_params(row.parameter_schema, params) == []
+
+    # --- 3. Post-repair dispatch clears schema validation. ---
+    repaired = await dispatch(
+        operator=operator,
+        connector_id="library-rest-1.0",
+        op_id=op_id,
+        target=target,
+        params=params,
+    )
+    assert (repaired.extras or {}).get("error_code") != "invalid_op_schema", (
+        f"the repaired descriptor must pass dispatch-time schema validation; got {repaired.error!r}"
+    )

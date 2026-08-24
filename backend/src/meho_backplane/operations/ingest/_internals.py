@@ -346,6 +346,29 @@ async def count_ops_in_scope(session: AsyncSession, scope: ConnectorScope) -> in
     return int(await session.scalar(stmt) or 0)
 
 
+async def count_needs_reingest_in_scope(session: AsyncSession, scope: ConnectorScope) -> int:
+    """Count *scope*'s descriptor rows flagged ``needs_reingest`` (#3102).
+
+    Same full-universe predicate as :func:`count_ops_in_scope` (group or
+    not) plus the flag filter, so an undispatchable op whose ``group_id``
+    is null — or whose group is unrendered — still surfaces on the
+    review payload's ``needs_reingest_op_count``. ``> 0`` tells the
+    operator the stored schemas predate an ingest-parser fix and a
+    same-spec re-ingest repairs them in place.
+    """
+    stmt = select(func.count(EndpointDescriptor.id)).where(
+        EndpointDescriptor.product == scope.product,
+        EndpointDescriptor.version == scope.version,
+        EndpointDescriptor.impl_id == scope.impl_id,
+        EndpointDescriptor.needs_reingest.is_(True),
+    )
+    if scope.tenant_id is None:
+        stmt = stmt.where(EndpointDescriptor.tenant_id.is_(None))
+    else:
+        stmt = stmt.where(EndpointDescriptor.tenant_id == scope.tenant_id)
+    return int(await session.scalar(stmt) or 0)
+
+
 # ---------------------------------------------------------------------------
 # Audit emission
 # ---------------------------------------------------------------------------

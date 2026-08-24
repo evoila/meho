@@ -89,7 +89,9 @@ class _FakeConnector:
 
 
 def _recent_task_result(moids: list[str]) -> dict[str, Any]:
-    # ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
+    # ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance);
+    # the array-valued ``Any`` placeholder arrives **boxed** as
+    # ``ArrayOfManagedObjectReference`` on live 8.0.x (#3106).
     return {
         "_typeName": "RetrieveResult",
         "objects": [
@@ -103,10 +105,13 @@ def _recent_task_result(moids: list[str]) -> dict[str, Any]:
                 "propSet": [
                     {
                         "name": "recentTask",
-                        "val": [
-                            {"_typeName": "ManagedObjectReference", "type": "Task", "value": m}
-                            for m in moids
-                        ],
+                        "val": {
+                            "_typeName": "ArrayOfManagedObjectReference",
+                            "_value": [
+                                {"_typeName": "ManagedObjectReference", "type": "Task", "value": m}
+                                for m in moids
+                            ],
+                        },
                     }
                 ],
             }

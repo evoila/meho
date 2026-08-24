@@ -139,21 +139,29 @@ def _vm_retrieve_result(moid: str, props: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Live-shaped (#3106): ``DynamicProperty.val`` is an ``Any`` placeholder,
+# so primitives / enums arrive **boxed** (``{"_typeName": ..., "_value":
+# ...}``) and arrays boxed as ``ArrayOfX`` -- the sibling by-name tests
+# keep bare vals to pin the tolerant both-ways contract.
 _POWERED_ON_NO_IP = {
-    "name": "hung-appliance",
-    "runtime.powerState": "poweredOn",
-    "guestHeartbeatStatus": "red",
-    "guest.toolsStatus": "toolsOk",
-    "guest.toolsRunningStatus": "guestToolsRunning",
+    "name": {"_typeName": "string", "_value": "hung-appliance"},
+    "runtime.powerState": {"_typeName": "VirtualMachinePowerState", "_value": "poweredOn"},
+    "guestHeartbeatStatus": {"_typeName": "ManagedEntityStatus", "_value": "red"},
+    "guest.toolsStatus": {"_typeName": "VirtualMachineToolsStatus", "_value": "toolsOk"},
+    "guest.toolsRunningStatus": {"_typeName": "string", "_value": "guestToolsRunning"},
     # guest.ipAddress + guest.hostName deliberately absent -> the hung tell.
-    "storage.perDatastoreUsage": [
-        {
-            "datastore": {"type": "Datastore", "value": "datastore-9"},
-            "committed": 42949672960,
-            "uncommitted": 10737418240,
-            "unshared": 42949672960,
-        }
-    ],
+    "storage.perDatastoreUsage": {
+        "_typeName": "ArrayOfVirtualMachineUsageOnDatastore",
+        "_value": [
+            {
+                "_typeName": "VirtualMachineUsageOnDatastore",
+                "datastore": {"type": "Datastore", "value": "datastore-9"},
+                "committed": 42949672960,
+                "uncommitted": 10737418240,
+                "unshared": 42949672960,
+            }
+        ],
+    },
 }
 
 

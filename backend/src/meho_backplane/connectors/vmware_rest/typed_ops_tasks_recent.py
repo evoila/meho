@@ -37,7 +37,10 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
-from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    retrieve_properties_body,
+    unwrap_vim_value,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -117,7 +120,7 @@ def _extract_recent_task_moids(retrieve_result: Any) -> list[str]:
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_RECENT_TASK:
-                raw = prop.get("val")
+                raw = unwrap_vim_value(prop.get("val"))
                 if isinstance(raw, list):
                     return [m for m in (_moref_value(r) for r in raw) if m is not None]
     return []
@@ -163,7 +166,7 @@ def _parse_task_info_results(retrieve_result: Any) -> dict[str, Any]:
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_INFO:
-                info_by_moid[moid] = prop.get("val")
+                info_by_moid[moid] = unwrap_vim_value(prop.get("val"))
     return info_by_moid
 
 

@@ -38,12 +38,17 @@ _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrieveProper
 def _task_info_result(
     task_moid: str,
     *,
-    state: str,
+    state: Any,
     result: Any = None,
-    error_message: str | None = None,
-    progress: int | None = None,
+    error_message: Any = None,
+    progress: Any = None,
 ) -> dict[str, Any]:
-    """Build a single-Task ``RetrievePropertiesEx`` result carrying one ``TaskInfo``."""
+    """Build a single-Task ``RetrievePropertiesEx`` result carrying one ``TaskInfo``.
+
+    Fields are ``Any``-typed so tests can seed either the bare primitives
+    or the boxed ``{"_typeName": ..., "_value": ...}`` forms live VI-JSON
+    puts in ``Any`` placeholders (#3106).
+    """
     info: dict[str, Any] = {"state": state}
     if result is not None:
         info["result"] = result
@@ -167,6 +172,72 @@ async def test_poll_returns_error_with_localized_message() -> None:
     assert outcome.state == TASK_STATE_ERROR
     assert outcome.succeeded is False
     assert outcome.error_message == "The disk cannot be shrunk."
+    assert outcome.result is None
+
+
+async def test_poll_reaches_terminal_states_on_boxed_task_info_fields() -> None:
+    """Boxed ``TaskInfo`` primitives (#3106) unbox: wrapped ``info.state`` terminates the poll.
+
+    VI-JSON boxes primitives in ``Any`` placeholders (live 8.0.3, #3106);
+    the tolerant unwrap must normalise a boxed ``state`` / ``progress`` /
+    ``result`` so the poll recognises terminal states instead of spinning
+    to timeout, while an un-boxed MoRef ``result`` passes through intact.
+    """
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state={"_typeName": "string", "_value": "running"},
+                progress={"_typeName": "int", "_value": 40},
+            ),
+            _task_info_result(
+                "task-1",
+                state={"_typeName": "string", "_value": "success"},
+                result={
+                    "_typeName": "ManagedObjectReference",
+                    "type": "VirtualMachine",
+                    "value": "vm-9",
+                },
+            ),
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_SUCCESS
+    assert outcome.succeeded is True
+    assert outcome.result == {
+        "_typeName": "ManagedObjectReference",
+        "type": "VirtualMachine",
+        "value": "vm-9",
+    }
+    assert len(conn.calls) == 2
+
+
+async def test_poll_surfaces_fault_from_boxed_error_state_and_message() -> None:
+    """A boxed ``error`` state + boxed ``localizedMessage`` surface the fault (#3106)."""
+    conn = _SeqTaskConnector(
+        [
+            _task_info_result(
+                "task-1",
+                state={"_typeName": "string", "_value": "error"},
+                error_message={"_typeName": "string", "_value": "Boxed boom."},
+            )
+        ]
+    )
+    outcome = await poll_vim_task(
+        conn,  # type: ignore[arg-type]
+        object(),
+        object(),  # type: ignore[arg-type]
+        task="task-1",
+        poll_interval=0.0,
+    )
+    assert outcome.state == TASK_STATE_ERROR
+    assert outcome.error_message == "Boxed boom."
     assert outcome.result is None
 
 

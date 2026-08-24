@@ -128,7 +128,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    retrieve_properties_body,
+    unwrap_vim_value,
+)
 
 from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
 
@@ -340,7 +343,7 @@ def _extract_object_props(retrieve_result: Any) -> dict[str, Any]:
         for entry in obj.get("propSet", []) or []:
             name = entry.get("name") if isinstance(entry, dict) else None
             if isinstance(name, str):
-                props[name] = entry.get("val")
+                props[name] = unwrap_vim_value(entry.get("val"))
     return props
 
 

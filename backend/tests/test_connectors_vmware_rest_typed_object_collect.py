@@ -135,11 +135,15 @@ def test_build_params_is_single_object_no_traversal() -> None:
 
 @pytest.mark.asyncio
 async def test_object_collect_reads_datastore_properties() -> None:
+    """Boxed primitive vals (#3106): live VI-JSON boxes ``Any``-placeholder longs."""
     conn = _FakeConnector(
         props_result=_object_content(
             "Datastore",
             "datastore-5",
-            {"summary.freeSpace": 1073741824, "summary.capacity": 5368709120},
+            {
+                "summary.freeSpace": {"_typeName": "long", "_value": 1073741824},
+                "summary.capacity": {"_typeName": "long", "_value": 5368709120},
+            },
             [],
         )
     )

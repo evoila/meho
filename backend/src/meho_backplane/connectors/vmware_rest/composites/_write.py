@@ -99,6 +99,7 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
     retrieve_properties_body,
+    unwrap_vim_value,
     vim_moref,
 )
 from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, poll_vim_task
@@ -2277,7 +2278,11 @@ def _build_single_prop_retrieve_params(mo_type: str, moid: str, prop: str) -> di
 
 
 def _extract_single_prop(retrieve_result: Any, prop: str) -> Any:
-    """Pull one property's ``val`` off a single-object RetrievePropertiesEx result."""
+    """Pull one property's ``val`` off a single-object RetrievePropertiesEx result.
+
+    ``val`` is an ``Any`` placeholder, so live VI-JSON boxes primitives and
+    arrays in it -- :func:`unwrap_vim_value` strips the boxes (#3106).
+    """
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
     if not isinstance(objects, list):
@@ -2287,7 +2292,7 @@ def _extract_single_prop(retrieve_result: Any, prop: str) -> Any:
             continue
         for entry in obj.get("propSet", []) or []:
             if isinstance(entry, dict) and entry.get("name") == prop:
-                return entry.get("val")
+                return unwrap_vim_value(entry.get("val"))
     return None
 
 
@@ -3254,7 +3259,12 @@ def _build_vm_devices_retrieve_params(vm_moid: str) -> dict[str, Any]:
 
 
 def _extract_vm_devices(retrieve_result: Any) -> list[Any]:
-    """Pull the ``config.hardware.device`` list off a RetrievePropertiesEx result."""
+    """Pull the ``config.hardware.device`` list off a RetrievePropertiesEx result.
+
+    Live VI-JSON boxes the array-valued ``val`` as ``ArrayOfVirtualDevice``
+    (``{"_typeName": ..., "_value": [...]}``) -- unwrap before the list
+    check, tolerating the bare-list shape too (#3106).
+    """
     payload = _unwrap_value(retrieve_result)
     objects = payload.get("objects", []) if isinstance(payload, dict) else payload
     if not isinstance(objects, list):
@@ -3264,7 +3274,7 @@ def _extract_vm_devices(retrieve_result: Any) -> list[Any]:
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_CONFIG_HARDWARE_DEVICE:
-                val = prop.get("val")
+                val = unwrap_vim_value(prop.get("val"))
                 return val if isinstance(val, list) else []
     return []
 
@@ -3536,7 +3546,7 @@ def _extract_config_template(retrieve_result: Any, vm_moid: str) -> bool | None:
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and prop.get("name") == _PROP_CONFIG_TEMPLATE:
-                val = prop.get("val")
+                val = unwrap_vim_value(prop.get("val"))
                 return val if isinstance(val, bool) else None
     return None
 
@@ -3907,7 +3917,8 @@ def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
         for prop in obj.get("propSet", []) or []:
             if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_RULE:
                 continue
-            for rule in prop.get("val") or []:
+            rules = unwrap_vim_value(prop.get("val"))
+            for rule in rules if isinstance(rules, list) else []:
                 if isinstance(rule, dict) and isinstance(rule.get("name"), str):
                     names.add(rule["name"])
     return names

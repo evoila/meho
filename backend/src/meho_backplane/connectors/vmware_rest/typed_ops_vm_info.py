@@ -49,7 +49,10 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
-from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
+from meho_backplane.connectors.vmware_rest.vim_body import (
+    retrieve_properties_body,
+    unwrap_vim_value,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -132,7 +135,7 @@ def _extract_vm_props(retrieve_result: Any) -> dict[str, Any]:
             continue
         for prop in obj.get("propSet", []) or []:
             if isinstance(prop, dict) and isinstance(prop.get("name"), str):
-                prop_by_name[prop["name"]] = prop.get("val")
+                prop_by_name[prop["name"]] = unwrap_vim_value(prop.get("val"))
     return prop_by_name
 
 

@@ -139,7 +139,13 @@ def _retrieve_result(moid: str, quick_stats: Any, hardware: Any, in_maint: Any) 
     """Build a RetrievePropertiesEx ``RetrieveResult`` for one host.
 
     ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
+    The primitive ``runtime.inMaintenanceMode`` bool arrives **boxed**
+    (``{"_typeName": "boolean", "_value": ...}``) on live 8.0.x (#3106);
+    non-bool sentinels (``None`` -- prop absent / unreadable) stay bare.
     """
+    boxed_maint = (
+        {"_typeName": "boolean", "_value": in_maint} if isinstance(in_maint, bool) else in_maint
+    )
     return {
         "_typeName": "RetrieveResult",
         "objects": [
@@ -153,7 +159,7 @@ def _retrieve_result(moid: str, quick_stats: Any, hardware: Any, in_maint: Any) 
                 "propSet": [
                     {"name": "summary.quickStats", "val": quick_stats},
                     {"name": "summary.hardware", "val": hardware},
-                    {"name": "runtime.inMaintenanceMode", "val": in_maint},
+                    {"name": "runtime.inMaintenanceMode", "val": boxed_maint},
                 ],
             }
         ],

@@ -28,11 +28,12 @@ Poll semantics
 * **success** -- ``TaskInfo.state == "success"``; the
   :class:`VimTaskResult` carries ``TaskInfo.result`` (e.g. the new VM
   MoRef a ``CloneVM_Task`` produced) so the caller can thread it forward.
-* **error** -- ``TaskInfo.state == "error"``; the result carries the
-  localized fault message (``TaskInfo.error.localizedMessage``). The poll
-  helper does **not** raise on a task fault -- it returns the outcome so
-  each caller maps it to its own status envelope (a disk-grow fault and a
-  clone fault surface differently).
+* **error** -- ``TaskInfo.state == "error"``; the result carries the best
+  available fault description (``TaskInfo.error.localizedMessage``, falling
+  back through ``fault.faultMessage[*].message`` to ``fault._typeName`` --
+  #3116). The poll helper does **not** raise on a task fault -- it returns
+  the outcome so each caller maps it to its own status envelope (a
+  disk-grow fault and a clone fault surface differently).
 * **timeout** -- the deadline elapsed before a terminal state; the result
   carries the last-observed progress. The task itself may still complete
   in the background -- the wall-clock bound mirrors the 600 s convention
@@ -112,9 +113,10 @@ class VimTaskResult:
         result: ``TaskInfo.result`` on success -- e.g. the new VM MoRef a
             ``CloneVM_Task`` produced. ``None`` on error / timeout, and on a
             success whose task produces no result (``ReconfigVM_Task``).
-        error_message: The localized fault message
-            (``TaskInfo.error.localizedMessage``) on error; ``None``
-            otherwise.
+        error_message: The best available fault description on error --
+            ``TaskInfo.error.localizedMessage``, falling back through the
+            joined ``fault.faultMessage[*].message`` texts to the fault's
+            ``_typeName`` (#3116); ``None`` otherwise.
         progress: Last-observed ``TaskInfo.progress`` (0-100) -- present on
             a timeout so the caller can report how far the background task
             got.
@@ -187,12 +189,47 @@ def _extract_task_info(retrieve_result: Any, task_moid: str) -> dict[str, Any] |
 
 
 def _fault_message(info: dict[str, Any]) -> str | None:
-    """Return the localized fault message from a faulted ``TaskInfo``."""
+    """Return the best fault description from a faulted ``TaskInfo`` (#3116).
+
+    ``TaskInfo.error`` is a ``LocalizedMethodFault`` -- ``localizedMessage``
+    plus the concrete ``fault`` DataObject -- and ``localizedMessage`` is
+    optional on the wire, so the extraction falls back through the fault
+    body rather than discarding it:
+
+    1. ``error.localizedMessage`` -- the server-localized text, when present;
+    2. ``fault.faultMessage[*].message`` joined -- each ``LocalizableMessage``
+       carries an optional per-message text;
+    3. ``fault._typeName`` -- the concrete fault class (``InvalidArgument``,
+       ...), always tagged on a live VI-JSON DataObject.
+
+    Returns ``None`` -- the callers' ``<no fault reported>`` path -- only
+    when the ``TaskInfo`` carries no usable fault content at all. Boxed
+    nested primitives (the #3106 live-8.0.3 shape) are already bare here:
+    :func:`_extract_task_info` funnels the whole ``TaskInfo`` through the
+    recursive :func:`unwrap_vim_value` before any field read.
+    """
     error = info.get("error")
     if not isinstance(error, dict):
         return None
     localized = error.get("localizedMessage")
-    return localized if isinstance(localized, str) else None
+    if isinstance(localized, str) and localized.strip():
+        return localized
+    fault = error.get("fault")
+    if not isinstance(fault, dict):
+        return None
+    fault_messages = fault.get("faultMessage")
+    if isinstance(fault_messages, list):
+        texts = [
+            message
+            for entry in fault_messages
+            if isinstance(entry, dict)
+            and isinstance(message := entry.get("message"), str)
+            and message.strip()
+        ]
+        if texts:
+            return "; ".join(texts)
+    type_name = fault.get("_typeName")
+    return type_name if isinstance(type_name, str) and type_name.strip() else None
 
 
 def _progress(info: dict[str, Any]) -> int | None:

@@ -248,16 +248,27 @@ async def test_cluster_drs_recommendations_reads_summary_then_vim_drs_config() -
     assert body == {
         "specSet": [
             {
+                "_typeName": "PropertyFilterSpec",
                 "propSet": [
                     {
+                        "_typeName": "PropertySpec",
                         "type": "ClusterComputeResource",
                         "pathSet": ["configurationEx.drsConfig"],
                     }
                 ],
-                "objectSet": [{"obj": {"type": "ClusterComputeResource", "value": "domain-c123"}}],
+                "objectSet": [
+                    {
+                        "_typeName": "ObjectSpec",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "ClusterComputeResource",
+                            "value": "domain-c123",
+                        },
+                    }
+                ],
             }
         ],
-        "options": {},
+        "options": {"_typeName": "RetrieveOptions"},
     }
     assert out == {"cluster": cluster_payload, "drs": drs_config}
 

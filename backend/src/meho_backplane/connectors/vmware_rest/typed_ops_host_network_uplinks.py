@@ -36,6 +36,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -162,22 +163,9 @@ def build_host_network_uplinks_retrieve_params(host_moid: str) -> dict[str, Any]
     request path (:data:`_RETRIEVE_PROPERTIES_PATH`), so the body is just
     the ``specSet`` + ``options`` method arguments -- the VI-JSON
     ``RetrievePropertiesExRequestType`` shape ``vmware.host.usage``
-    sends.
+    sends, ``_typeName``-annotated via the shared trio helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {
-                        "type": _HOST_SYSTEM_MO_TYPE,
-                        "pathSet": list(_HOST_NET_PATH_SET),
-                    }
-                ],
-                "objectSet": [{"obj": {"type": _HOST_SYSTEM_MO_TYPE, "value": host_moid}}],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_HOST_SYSTEM_MO_TYPE, [host_moid], _HOST_NET_PATH_SET)
 
 
 async def _read_host_uplink_row(

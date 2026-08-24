@@ -172,3 +172,153 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
             f"{op_id}: still a single-`spec` wrapper in the pinned spec -- the flat-body "
             "contract this task relies on does not hold for it."
         )
+
+
+# ---------------------------------------------------------------------------
+# vim (VI-JSON) ``_typeName`` annotation reconcile (#3103)
+# ---------------------------------------------------------------------------
+#
+# VI-JSON request bodies must tag every DataObject with its ``_typeName``
+# discriminator: the pinned ``vi-json.yaml`` derives all data objects from
+# ``Any`` (whose ``required`` list names ``_typeName``), and a live vCenter
+# 8.0.3 rejects un-annotated bodies (``500 InvalidArgument`` — the #3103
+# controlled differential; the annotated body returns ``200``). The
+# byte-for-byte body pins live in the always-on unit lanes
+# (``test_connectors_vmware_rest_composites_write.py`` and the typed-op
+# tests); this lane grounds the annotation *vocabulary*: every ``_typeName``
+# literal the substrate can emit must name a real component schema in the
+# pinned ``vi-json.yaml``.
+
+from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
+    MOREF_TYPE_NAME,
+    retrieve_properties_body,
+)
+
+#: Every ``_typeName`` value the vim substrate emits, sourced from the
+#: emitting constants themselves (a rename/typo there fails this lane's
+#: spec grounding immediately). New hand-assembled vim bodies add their
+#: type names here; the unit-test byte pins force that addition.
+_EMITTED_VIM_TYPE_NAMES: set[str] = {
+    MOREF_TYPE_NAME,
+    _write._VIRTUAL_DISK_TYPE,
+    _write._VIRTUAL_VMXNET3_TYPE,
+    _write._DV_PORT_BACKING_TYPE,
+    _write._STANDARD_NETWORK_BACKING_TYPE,
+    _write._DV_PORT_CONNECTION_TYPE,
+    _write._VM_CONFIG_SPEC_TYPE,
+    _write._VM_FILE_INFO_TYPE,
+    _write._VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+    _write._VM_CLONE_SPEC_TYPE,
+    _write._VM_RELOCATE_SPEC_TYPE,
+    _write._DVS_CONFIG_SPEC_TYPE,
+    _write._DVS_HOST_MEMBER_CONFIG_SPEC_TYPE,
+    _write._CLUSTER_CONFIG_SPEC_EX_TYPE,
+    _write._CLUSTER_RULE_SPEC_TYPE,
+    _write._CLUSTER_AFFINITY_RULE_TYPE,
+    _write._CLUSTER_ANTI_AFFINITY_RULE_TYPE,
+}
+
+
+def _collect_type_names(node: object) -> set[str]:
+    """Collect every ``_typeName`` value in a *built* body (test-side walk)."""
+    found: set[str] = set()
+    if isinstance(node, dict):
+        tag = node.get("_typeName")
+        if isinstance(tag, str):
+            found.add(tag)
+        for value in node.values():
+            found |= _collect_type_names(value)
+    elif isinstance(node, list):
+        for item in node:
+            found |= _collect_type_names(item)
+    return found
+
+
+def test_single_prop_retrieve_body_is_the_live_verified_annotated_shape() -> None:
+    """Pin the exact annotated single-prop retrieve body (always runs, no shelf).
+
+    Byte-for-byte (modulo values) the body the #3103 live differential
+    proved: un-annotated → ``500 InvalidArgument`` (``Invalid MoRef field:
+    pathSet``), annotated → ``200 RetrieveResult`` on vCenter 8.0.3.
+    """
+    body = _write._build_single_prop_retrieve_params("VirtualMachine", "vm-42", "snapshot")
+    assert body == {
+        "specSet": [
+            {
+                "_typeName": "PropertyFilterSpec",
+                "propSet": [
+                    {
+                        "_typeName": "PropertySpec",
+                        "type": "VirtualMachine",
+                        "pathSet": ["snapshot"],
+                    }
+                ],
+                "objectSet": [
+                    {
+                        "_typeName": "ObjectSpec",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "VirtualMachine",
+                            "value": "vm-42",
+                        },
+                    }
+                ],
+            }
+        ],
+        "options": {"_typeName": "RetrieveOptions"},
+    }
+
+
+def test_trio_helper_annotates_every_data_object_and_nothing_else() -> None:
+    """The shared retrieve trio emits exactly the five annotation names."""
+    body = retrieve_properties_body("HostSystem", ["host-1", "host-2"], ["summary.quickStats"])
+    assert _collect_type_names(body) == {
+        "PropertyFilterSpec",
+        "PropertySpec",
+        "ObjectSpec",
+        "ManagedObjectReference",
+        "RetrieveOptions",
+    }
+    # One annotated ObjectSpec per moid — multi-object reads (the task
+    # poll shape) stay fully annotated too.
+    object_set = body["specSet"][0]["objectSet"]
+    assert [o["obj"]["value"] for o in object_set] == ["host-1", "host-2"]
+
+
+def _vi_json_component_schema_exists(spec_text: str, name: str) -> bool:
+    """Whether *name* is a component schema key in the pinned ``vi-json.yaml``.
+
+    Line-scans rather than parsing the ~10 MB YAML (the
+    ``_vi_json_path_item_has_post`` precedent in the l2 ingest reconcile):
+    component schemas are keyed at 4-space indent (``    VirtualDisk:``),
+    and the CamelCase vim type names collide with no other 4-indent key
+    family in the document.
+    """
+    return f"\n    {name}:\n" in spec_text
+
+
+def test_every_emitted_vim_type_name_is_a_pinned_vi_json_schema() -> None:
+    """Each ``_typeName`` the substrate emits names a schema in the pinned spec.
+
+    The #3103 grounding lane: the annotation vocabulary — the retrieve trio
+    + options, the MoRef tag, and every hand-assembled write-spec tag —
+    must exist as component schemas in the pinned ``vi-json.yaml``. A
+    fictional or misspelled discriminator fails here before it ever
+    reaches a live vCenter. Skips uniformly without the spec shelf.
+    """
+    spec_path = require_shelf_spec("vcenter-9.0", "vi-json.yaml")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    trio_names = _collect_type_names(
+        retrieve_properties_body("VirtualMachine", ["vm-1"], ["snapshot"])
+    )
+    missing = [
+        name
+        for name in sorted(_EMITTED_VIM_TYPE_NAMES | trio_names)
+        if not _vi_json_component_schema_exists(spec_text, name)
+    ]
+    assert not missing, (
+        f"_typeName value(s) {missing} are not component schemas in the pinned "
+        "vi-json.yaml — a fictional/misspelled vim discriminator would be "
+        "rejected (or mis-deserialised) by a live vCenter. "
+        "Protocol: docs/decisions/spec-reconcile-guards-standard.md."
+    )

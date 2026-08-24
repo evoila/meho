@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — VI-JSON bodies carry `_typeName` discriminators throughout the vim substrate (#3103)
+
+- Every vim (VI-JSON) request body the vmware-rest connector sends now tags
+  every DataObject with its `_typeName` discriminator, per the pinned
+  `vi-json.yaml` wire format (`Any.required` names `_typeName`). A live
+  vCenter 8.0.3 rejects un-annotated bodies outright — a controlled
+  differential against `RetrievePropertiesEx` returned `500 InvalidArgument`
+  (`Invalid MoRef field: pathSet`) bare and `200 RetrieveResult` annotated —
+  so every vim-riding composite and typed read 500'd against real 8.0.x.
+  Covered end to end: the shared `RetrievePropertiesEx` trio +
+  `RetrieveOptions` (all property reads, task polls, config pre-reads, via
+  the new `vim_body.py` helpers), MoRefs everywhere (`ManagedObjectReference`
+  tags on placement pins, DRS-rule VM lists, the vSAN health cluster ref),
+  `ReconfigVM_Task` specs (`nested_hv`, disk grow), the pre-9.0
+  `CreateVM_Task` ConfigSpec (files, NIC deviceChange, DVPG port
+  connection), `CloneVM_Task` (clone + relocate specs), `ReconfigureDvs_Task`
+  (DVS config + host member specs) and the DRS `ClusterRuleSpec` entries.
+  Annotation is unconditional — 9.x accepts the spec'd format, so no version
+  gate. Response parsing is unchanged (tags were always present in
+  responses); unit fixtures now mirror the tagged live shapes to pin
+  tolerance, exact annotated bodies are pinned byte-for-byte, and a
+  reconcile lane grounds every emitted `_typeName` against the pinned
+  `vi-json.yaml` component schemas.
+
 ### Fixed — `vm.create` rides the vim substrate on pre-9.0 vCenter (#3099)
 
 - `vmware.composite.vm.create` now creates through vim `Folder.CreateVM_Task`

@@ -128,6 +128,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
 
@@ -315,19 +316,10 @@ def _build_cluster_props_retrieve_body(cluster_moid: str, path_set: list[str]) -
     One ``PropertyFilterSpec`` scoped directly to the cluster's MoRef;
     the singleton ``propertyCollector`` moId rides the path, so the body
     is only the method args -- the same shape the write composites'
-    config reads send.
+    config reads send, ``_typeName``-annotated via the shared trio
+    helper (#3103).
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "pathSet": path_set}],
-                "objectSet": [
-                    {"obj": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid}}
-                ],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_CLUSTER_COMPUTE_RESOURCE_MO_TYPE, [cluster_moid], path_set)
 
 
 def _extract_object_props(retrieve_result: Any) -> dict[str, Any]:

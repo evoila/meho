@@ -296,19 +296,29 @@ def _http_error(status: int, url: str) -> httpx.HTTPStatusError:
 
 
 def _task_moref(value: str) -> dict[str, str]:
-    """A vim Task ``ManagedObjectReference`` as a ``*_Task`` method returns it."""
-    return {"type": "Task", "value": value}
+    """A vim Task ``ManagedObjectReference`` as a ``*_Task`` method returns it.
+
+    Live VI-JSON responses tag every DataObject with ``_typeName`` — the
+    canned payloads mirror that so the tests double as the #3103
+    response-tolerance proof.
+    """
+    return {"_typeName": "ManagedObjectReference", "type": "Task", "value": value}
 
 
 def _retrieve_result(obj_type: str, moid: str, prop: str, val: Any) -> dict[str, Any]:
-    """A single-object ``RetrievePropertiesEx`` result carrying one property."""
+    """A single-object ``RetrievePropertiesEx`` result carrying one property.
+
+    ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
+    """
     return {
+        "_typeName": "RetrieveResult",
         "objects": [
             {
-                "obj": {"type": obj_type, "value": moid},
-                "propSet": [{"name": prop, "val": val}],
+                "_typeName": "ObjectContent",
+                "obj": {"_typeName": "ManagedObjectReference", "type": obj_type, "value": moid},
+                "propSet": [{"_typeName": "DynamicProperty", "name": prop, "val": val}],
             }
-        ]
+        ],
     }
 
 
@@ -318,11 +328,12 @@ def _task_info_result(
     """A ``Task.info`` RetrievePropertiesEx result in the requested state.
 
     ``result`` seeds ``TaskInfo.result`` — the new-entity MoRef a
-    ``CreateVM_Task`` / ``CloneVM_Task`` success carries.
+    ``CreateVM_Task`` / ``CloneVM_Task`` success carries. ``_typeName``-tagged
+    like a live VI-JSON response (#3103 tolerance).
     """
-    info: dict[str, Any] = {"state": state}
+    info: dict[str, Any] = {"_typeName": "TaskInfo", "state": state}
     if error is not None:
-        info["error"] = {"localizedMessage": error}
+        info["error"] = {"_typeName": "LocalizedMethodFault", "localizedMessage": error}
     if result is not None:
         info["result"] = result
     return _retrieve_result("Task", task_moid, "info", info)
@@ -331,9 +342,17 @@ def _task_info_result(
 def _snapshot_tree_node(
     moid: str, name: str, children: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
-    """A ``VirtualMachineSnapshotTree`` node as the ``snapshot`` property returns it."""
+    """A ``VirtualMachineSnapshotTree`` node as the ``snapshot`` property returns it.
+
+    ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance).
+    """
     return {
-        "snapshot": {"type": "VirtualMachineSnapshot", "value": moid},
+        "_typeName": "VirtualMachineSnapshotTree",
+        "snapshot": {
+            "_typeName": "ManagedObjectReference",
+            "type": "VirtualMachineSnapshot",
+            "value": moid,
+        },
         "name": name,
         "childSnapshotList": children or [],
     }
@@ -661,10 +680,11 @@ async def test_vm_create_nested_hv_reconfigures_before_power_on(gate: _GateRecor
         ("POST-VMOMI", _VMOMI_TASK_INFO_READ_PATH),
         ("POST", "/api/vcenter/vm/vm-99/power?action=start"),
     ]
-    # The reconfigure body is the one-field VirtualMachineConfigSpec.
+    # The reconfigure body is the one-field VirtualMachineConfigSpec,
+    # ``_typeName``-annotated per the vim wire format (#3103).
     assert conn.vmomi_calls[0] == (
         "/VirtualMachine/vm-99/ReconfigVM_Task",
-        {"spec": {"nestedHVEnabled": True}},
+        {"spec": {"_typeName": "VirtualMachineConfigSpec", "nestedHVEnabled": True}},
     )
 
     # Governance: the vim write is gated under its canonical vi-json op_id,
@@ -982,14 +1002,19 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
     create_body = conn.vmomi_calls[2][1]
     assert create_body == {
         "config": {
+            "_typeName": "VirtualMachineConfigSpec",
             "name": "esx-nested-01",
             "guestId": "vmkernel8Guest",
             "numCPUs": 8,
             "memoryMB": 16384,
-            "files": {"vmPathName": "[datastore1] esx-nested-01"},
+            "files": {
+                "_typeName": "VirtualMachineFileInfo",
+                "vmPathName": "[datastore1] esx-nested-01",
+            },
             "nestedHVEnabled": True,
             "deviceChange": [
                 {
+                    "_typeName": "VirtualDeviceConfigSpec",
                     "operation": "add",
                     "device": {
                         "_typeName": "VirtualVmxnet3",
@@ -997,6 +1022,7 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
                         "backing": {
                             "_typeName": ("VirtualEthernetCardDistributedVirtualPortBackingInfo"),
                             "port": {
+                                "_typeName": "DistributedVirtualSwitchPortConnection",
                                 "switchUuid": _DVS_UUID,
                                 "portgroupKey": "dvportgroup-1015",
                             },
@@ -1005,8 +1031,12 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
                 }
             ],
         },
-        "pool": {"type": "ResourcePool", "value": "resgroup-8"},
-        "host": {"type": "HostSystem", "value": "host-14"},
+        "pool": {
+            "_typeName": "ManagedObjectReference",
+            "type": "ResourcePool",
+            "value": "resgroup-8",
+        },
+        "host": {"_typeName": "ManagedObjectReference", "type": "HostSystem", "value": "host-14"},
     }
 
     # Governance: exactly the vim create + the power-on were gated — no
@@ -1176,6 +1206,7 @@ async def test_vm_create_pre9_standard_portgroup_nic_uses_network_backing(
     create_body = conn.vmomi_calls[0][1]
     assert create_body["config"]["deviceChange"] == [
         {
+            "_typeName": "VirtualDeviceConfigSpec",
             "operation": "add",
             "device": {
                 "_typeName": "VirtualVmxnet3",
@@ -2647,11 +2678,17 @@ async def test_host_detach_from_vds_happy_path(gate: _GateRecorder) -> None:
             "/DistributedVirtualSwitch/dvs-1/ReconfigureDvs_Task",
             {
                 "spec": {
+                    "_typeName": "DVSConfigSpec",
                     "configVersion": "42",
                     "host": [
                         {
+                            "_typeName": "DistributedVirtualSwitchHostMemberConfigSpec",
                             "operation": "remove",
-                            "host": {"type": "HostSystem", "value": "host-9"},
+                            "host": {
+                                "_typeName": "ManagedObjectReference",
+                                "type": "HostSystem",
+                                "value": "host-9",
+                            },
                         }
                     ],
                 }
@@ -3368,16 +3405,31 @@ async def test_vm_clone_from_template_happy_path_clones_and_polls(gate: _GateRec
     }
 
     # The CloneVM_Task body: folder MoRef + name + CloneSpec (template:false,
-    # powerOn, relocate placement pool+datastore, no host pin, no customization).
+    # powerOn, relocate placement pool+datastore, no host pin, no
+    # customization), every DataObject ``_typeName``-annotated (#3103).
     assert len(conn.clone_bodies) == 1
     body = conn.clone_bodies[0]
-    assert body["folder"] == {"type": "Folder", "value": "group-v10"}
+    assert body["folder"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "Folder",
+        "value": "group-v10",
+    }
     assert body["name"] == "web-01"
     spec = body["spec"]
+    assert spec["_typeName"] == "VirtualMachineCloneSpec"
     assert spec["template"] is False
     assert spec["powerOn"] is True
-    assert spec["location"]["pool"] == {"type": "ResourcePool", "value": "resgroup-8"}
-    assert spec["location"]["datastore"] == {"type": "Datastore", "value": "datastore-15"}
+    assert spec["location"]["_typeName"] == "VirtualMachineRelocateSpec"
+    assert spec["location"]["pool"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "ResourcePool",
+        "value": "resgroup-8",
+    }
+    assert spec["location"]["datastore"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "Datastore",
+        "value": "datastore-15",
+    }
     assert "host" not in spec["location"]
     assert "customization" not in spec
 
@@ -3394,7 +3446,11 @@ async def test_vm_clone_from_template_host_pin_included_when_given(gate: _GateRe
     assert isinstance(out, dict)
     assert out["status"] == "cloned"
     body = conn.clone_bodies[0]
-    assert body["spec"]["location"]["host"] == {"type": "HostSystem", "value": "host-19"}
+    assert body["spec"]["location"]["host"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "HostSystem",
+        "value": "host-19",
+    }
     assert gate.calls[0]["params"]["host"] == "host-19"
 
 
@@ -3639,12 +3695,22 @@ async def test_vm_clone_from_template_clone_body_reaches_the_wire_respx(
         assert out["new_vm_id"] == "vm-99"
         assert clone.called
         body = json.loads(clone.calls[0].request.content)
-        assert body["folder"] == {"type": "Folder", "value": "group-v10"}
+        assert body["folder"] == {
+            "_typeName": "ManagedObjectReference",
+            "type": "Folder",
+            "value": "group-v10",
+        }
         assert body["name"] == "web-01"
+        assert body["spec"]["_typeName"] == "VirtualMachineCloneSpec"
         assert body["spec"]["template"] is False
         assert body["spec"]["powerOn"] is True
-        assert body["spec"]["location"]["pool"] == {"type": "ResourcePool", "value": "resgroup-8"}
+        assert body["spec"]["location"]["pool"] == {
+            "_typeName": "ManagedObjectReference",
+            "type": "ResourcePool",
+            "value": "resgroup-8",
+        }
         assert body["spec"]["location"]["datastore"] == {
+            "_typeName": "ManagedObjectReference",
             "type": "Datastore",
             "value": "datastore-15",
         }
@@ -3784,14 +3850,15 @@ async def test_drs_rule_create_happy_path_adds_anti_affinity_and_polls(gate: _Ga
     assert body["spec"]["_typeName"] == "ClusterConfigSpecEx"
     rules_spec = body["spec"]["rulesSpec"]
     assert len(rules_spec) == 1
+    assert rules_spec[0]["_typeName"] == "ClusterRuleSpec"
     assert rules_spec[0]["operation"] == "add"
     info = rules_spec[0]["info"]
     assert info["_typeName"] == "ClusterAntiAffinityRuleSpec"
     assert info["name"] == "keep-apart"
     assert info["enabled"] is True
     assert info["vm"] == [
-        {"type": "VirtualMachine", "value": "vm-1"},
-        {"type": "VirtualMachine", "value": "vm-2"},
+        {"_typeName": "ManagedObjectReference", "type": "VirtualMachine", "value": "vm-1"},
+        {"_typeName": "ManagedObjectReference", "type": "VirtualMachine", "value": "vm-2"},
     ]
 
 
@@ -3990,12 +4057,13 @@ async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
         assert body["modify"] is True
         assert body["spec"]["_typeName"] == "ClusterConfigSpecEx"
         assert len(body["spec"]["rulesSpec"]) == 1
+        assert body["spec"]["rulesSpec"][0]["_typeName"] == "ClusterRuleSpec"
         assert body["spec"]["rulesSpec"][0]["operation"] == "add"
         info = body["spec"]["rulesSpec"][0]["info"]
         assert info["_typeName"] == "ClusterAntiAffinityRuleSpec"
         assert info["vm"] == [
-            {"type": "VirtualMachine", "value": "vm-1"},
-            {"type": "VirtualMachine", "value": "vm-2"},
+            {"_typeName": "ManagedObjectReference", "type": "VirtualMachine", "value": "vm-1"},
+            {"_typeName": "ManagedObjectReference", "type": "VirtualMachine", "value": "vm-2"},
         ]
     finally:
         await connector.aclose()

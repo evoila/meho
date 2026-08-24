@@ -123,8 +123,15 @@ def _vsan_summary(overall: str, groups: list[Any]) -> dict[str, Any]:
 
 
 def test_build_query_params_scopes_to_cluster_moref() -> None:
+    """Pins the exact ``_typeName``-annotated MoRef body (#3103)."""
     body = build_vsan_query_health_params("domain-c123")
-    assert body == {"cluster": {"type": "ClusterComputeResource", "value": "domain-c123"}}
+    assert body == {
+        "cluster": {
+            "_typeName": "ManagedObjectReference",
+            "type": "ClusterComputeResource",
+            "value": "domain-c123",
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +177,13 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
     assert len(conn.post_calls) == 1
     path, body = conn.post_calls[0]
     assert path == _VSAN_PATH
-    assert body == {"cluster": {"type": "ClusterComputeResource", "value": "domain-c123"}}
+    assert body == {
+        "cluster": {
+            "_typeName": "ManagedObjectReference",
+            "type": "ClusterComputeResource",
+            "value": "domain-c123",
+        }
+    }
 
     assert out["cluster"] == "domain-c123"
     assert out["overall_health"] == "green"

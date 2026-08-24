@@ -37,6 +37,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vmware_rest.session import VsphereTargetLike
 from meho_backplane.connectors.vmware_rest.typed_ops import VmwareTypedOp, _unwrap_value
+from meho_backplane.connectors.vmware_rest.vim_body import retrieve_properties_body
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
@@ -71,18 +72,13 @@ TASKS_RECENT_GROUP_KEY = "vmware-tasks-recent"
 
 
 def build_recent_tasks_retrieve_params() -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` body reading ``TaskManager.recentTask``."""
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": _TASK_MANAGER_MO_TYPE, "pathSet": [_PROP_RECENT_TASK]}],
-                "objectSet": [
-                    {"obj": {"type": _TASK_MANAGER_MO_TYPE, "value": _TASK_MANAGER_MOID}}
-                ],
-            }
-        ],
-        "options": {},
-    }
+    """Build the ``RetrievePropertiesEx`` body reading ``TaskManager.recentTask``.
+
+    ``_typeName``-annotated via the shared trio helper (#3103).
+    """
+    return retrieve_properties_body(
+        _TASK_MANAGER_MO_TYPE, [_TASK_MANAGER_MOID], [_PROP_RECENT_TASK]
+    )
 
 
 def build_task_info_retrieve_params(task_moids: list[str]) -> dict[str, Any]:
@@ -90,19 +86,12 @@ def build_task_info_retrieve_params(task_moids: list[str]) -> dict[str, Any]:
 
     One ``PropertyFilterSpec`` with a ``propSet`` for the ``Task.info``
     property and one ``objectSet`` entry per task moid -- a single round
-    trip for every task, no traversal.
+    trip for every task, no traversal. ``_typeName``-annotated via the
+    shared trio helper (#3103) -- this is the task-poll read shape every
+    ``*_Task`` write drives to terminal through
+    :func:`~meho_backplane.connectors.vmware_rest.vim_task.poll_vim_task`.
     """
-    return {
-        "specSet": [
-            {
-                "propSet": [{"type": _TASK_MO_TYPE, "pathSet": [_PROP_INFO]}],
-                "objectSet": [
-                    {"obj": {"type": _TASK_MO_TYPE, "value": moid}} for moid in task_moids
-                ],
-            }
-        ],
-        "options": {},
-    }
+    return retrieve_properties_body(_TASK_MO_TYPE, task_moids, [_PROP_INFO])
 
 
 def _moref_value(ref: Any) -> str | None:

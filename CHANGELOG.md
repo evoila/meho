@@ -90,7 +90,9 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added — air-gapped depot lifecycle ops on the installer connector (#3121)
+## [0.30.0] - 2026-08-25
+
+### Added — air-gapped depot lifecycle ops on the installer connector (#3121 / #3125)
 
 - A governed air-gapped VCF 9.1 bring-up had to leave the governed path at
   exactly the step that gates everything else: configuring the release
@@ -117,7 +119,7 @@ connector-related release-notes line.
   discovery time what this program learned from validator errors and
   inventory stack traces.
 
-### Fixed — `installer.sddc.bringup.status` reduces the ~260-row sub-task array (#3122)
+### Fixed — `installer.sddc.bringup.status` reduces the ~260-row sub-task array (#3122 / #3126)
 
 - Polling a live VCF 9.1 management-domain bring-up returned the whole vendor
   `SddcTask` document inline on every 150 s poll — including the full
@@ -137,7 +139,7 @@ connector-related release-notes line.
   (`start` / `retry` / `status`); the #2113 exemption is unchanged for every op
   that does not register the hint.
 
-### Added — governed bring-up retry: `installer.sddc.bringup.retry` (#3123)
+### Added — governed bring-up retry: `installer.sddc.bringup.retry` (#3123 / #3124)
 
 - A failed VCF management-domain bring-up was unrecoverable through the
   governed path: the vendor's only recovery — resume from the failed
@@ -156,7 +158,7 @@ connector-related release-notes line.
   spec-reconcile lane pins the new `PATCH:/v1/sddcs/{id}` against the
   vendored 9.1 OpenAPI.
 
-### Fixed — vm.create folder lookup is datacenter-aware and fail-loud on ambiguity (#3115)
+### Fixed — vm.create folder lookup is datacenter-aware and fail-loud on ambiguity (#3115 / #3120)
 
 - `vmware.composite.vm.create` resolved `folder_name` via an **unscoped**
   `GET:/vcenter/folder` name filter and silently took the first row — on a
@@ -191,7 +193,7 @@ connector-related release-notes line.
   (a fully boxed faulted `TaskInfo`'s message survives into `vm.create`'s
   `rollback_reason`). (#3116 / #3119)
 
-### Fixed — VI-JSON boxed response values un-boxed at every vim property consumer (#3106)
+### Fixed — VI-JSON boxed response values un-boxed at every vim property consumer (#3106 / #3109)
 
 - The response-side twin of #3103: `DynamicProperty.val` is an `Any`
   placeholder, and live vCenter 8.0.3 VI-JSON **boxes** what lands in one —
@@ -217,6 +219,8 @@ connector-related release-notes line.
   round-trip into request bodies keep their wire shape). Live-shaped
   fixtures updated to the boxed forms byte-shaped from the #3106 evidence.
 
+### Fixed — every VI-JSON request body carries `_typeName` discriminators (#3103 / #3105)
+
 - Every vim (VI-JSON) request body the vmware-rest connector sends now tags
   every DataObject with its `_typeName` discriminator, per the pinned
   `vi-json.yaml` wire format (`Any.required` names `_typeName`). A live
@@ -239,7 +243,7 @@ connector-related release-notes line.
   reconcile lane grounds every emitted `_typeName` against the pinned
   `vi-json.yaml` component schemas.
 
-### Fixed — `vm.create` rides the vim substrate on pre-9.0 vCenter (#3099)
+### Fixed — `vm.create` rides the vim substrate on pre-9.0 vCenter (#3099 / #3101)
 
 - `vmware.composite.vm.create` now creates through vim `Folder.CreateVM_Task`
   (task-polled via the governed vmomi write seam) when the live
@@ -261,7 +265,7 @@ connector-related release-notes line.
   lanes pin the new vim path + both sides of the guestId map against the
   pinned `vcenter-9.0` specs.
 
-### Added — `vm.create` placement passthrough: resource_pool / datastore / host pins (#3096)
+### Added — `vm.create` placement passthrough: resource_pool / datastore / host pins (#3096 / #3097)
 
 - `vmware.composite.vm.create` accepts optional `resource_pool`, `datastore`
   and `host` moid params and threads the supplied ones into the CreateSpec
@@ -277,7 +281,7 @@ connector-related release-notes line.
   pins, and the pinned `Vcenter.VM.PlacementSpec` field set is reconciled
   in the nested-ESXi spec lane.
 
-### Added — `vm.create` `nested_hv`: governed VHV enable via the vim substrate (#3093)
+### Added — `vm.create` `nested_hv`: governed VHV enable via the vim substrate (#3093 / #3094)
 
 - `vmware.composite.vm.create` grows an optional `nested_hv: boolean` param:
   when true, the composite enables nested hardware-assisted virtualization
@@ -295,7 +299,7 @@ connector-related release-notes line.
   to before. Reconcile lane pins the vim paths + `nestedHVEnabled` against
   the pinned `vcenter-9.0/vi-json.yaml`.
 
-### Added — governed content-library ISO import-from-URL + iso.image mount recipe (#3086)
+### Added — governed content-library ISO import-from-URL + iso.image mount recipe (#3086 / #3088)
 
 - Verified + documented the fully-governed path for pulling a bootable ISO
   from an HTTP depot into a vCenter content library and mounting it on a VM,
@@ -310,7 +314,7 @@ connector-related release-notes line.
   `vcenter-9.0/vcenter.yaml`. Recipe + explicit gap statement (PUSH upload
   cannot ride the generic dispatcher; caller owns the poll loop):
   `docs/codebase/vmware-rest-governed-iso-path.md`.
-### Added — governed nested-hypervisor VM shape recipe (#3087)
+### Added — governed nested-hypervisor VM shape recipe (#3087 / #3089)
 
 - Verified + documented the governed recipe for building a
   nested-hypervisor-ready VM (a VM that can itself run ESXi) through the
@@ -347,7 +351,7 @@ connector-related release-notes line.
   before. Docs: `docs/architecture/jsonflux.md` § *Preserved scalar
   siblings*.
 
-### Added — VCF Installer 9.1 governed submit/poll bring-up primitives (Initiative #2907, task #3078)
+### Added — VCF Installer 9.1 governed submit/poll bring-up primitives (Initiative #2907, task #3078 / #3080)
 
 - Four typed primitives decompose the Installer bring-up surface into short
   governed submit/poll calls — the dispatch surface the deploy-automation
@@ -401,6 +405,235 @@ connector-related release-notes line.
   deploy → poll — a `dangerous` + `requires_approval` composite) lands in a
   following increment. Docs:
   [`connectors-vcf-installer.md`](docs/codebase/connectors-vcf-installer.md).
+
+### Added — `fleet-lcm` typed read core restores VCF Fleet 9.x dispatch (#3047 / #3055)
+
+- The "modern default now" resolver decision (initiative #3033) left the
+  `fleet-lcm` connector registered but with **no dispatchable ops**, so a VCF
+  Fleet 9.x target could resolve to it and then dispatch nothing. A curated
+  13-op **typed read core** across five operator-reviewed groups (system /
+  sddc / components / tasks / lifecycle) closes the gap — typed ops register
+  `is_enabled=True`, so merging this *is* the 9.0 read-dispatch restoration
+  with no dangling operator `meho connector ingest` + `enable_reads` step.
+  Both auth seams are covered (HTTP Basic default, and
+  `Authorization: Bearer <token>` when the loaded credentials carry a token),
+  by-id path segments are percent-encoded so a reserved char in a
+  caller-supplied id can't leak path structure, and a spec-reconcile lane pins
+  all 13 `/v1/*` templates against the pinned Apache-2.0
+  `fleet-lcm-openapi.yaml`. Ships as **dispatch + catalog** (typed read core,
+  verified end-to-end through the full dispatcher against a respx-mocked
+  service, both auth seams exercised); the ingested 51-op breadth + writes and
+  live Bearer verification against a real appliance remain the documented tail
+  of #3047.
+
+### Added — VMware Cloud Director net-new typed read core (#3057 / #3060)
+
+- VMware Cloud Director (vCD) is a legacy migration-source estate MEHO reads
+  during discovery and onboarding, and it is a **distinct product** from
+  `vcf-automation` (VCFA absorbed only vCD's provider control plane), so it
+  ships as its own fingerprint-resolved `product="vcd"` connector
+  (`impl_id="vcd-rest"`), not a `vcfa` dual-impl. A 7-op typed read core across
+  three groups reads the provider/System-scoped migration inventory —
+  `vcd-inventory` (org / vdc / vApp / vm / catalog), `vcd-networking`
+  (edge-gateway), `vcd-tasks` (task) — over vCD's dual surface (cloudapi plus
+  the classic query service) on one token minted via
+  `POST /cloudapi/1.0.0/sessions/provider` (the JWT rides back in the
+  `X-VMWARE-VCLOUD-ACCESS-TOKEN` response header, cached per target, re-minted
+  on a 401 via the dispatcher's credential-recovery arm). Because Broadcom
+  publishes no committable spec for vCD, the reconcile lane is a manifest pin
+  plus an evidenced exclusion (`spec-reconcile-guards-standard.md` updated).
+  Ships as **dispatch + catalog** (typed reads enabled at register time, all
+  7 verified via respx, session-mint / per-target isolation / 401-recovery /
+  fail-closed all unit-covered); live dispatch against a real vCD provider
+  appliance is the documented deferred tail. Docs:
+  `docs/codebase/connectors-vcd.md`.
+
+### Added — vRealize Automation 8.x legacy dual-impl read core (#3058 / #3063)
+
+- vRA 8 is the direct predecessor of VCF Automation 9.x and a migration-source
+  estate MEHO must inventory, so it ships as a **second** fingerprint-resolved
+  implementation of `product="vcfa"` (`impl_id="vcfa-vra8"`, band
+  `>=8.0,<9.0`) — the second real two-impl case after `fleet`, under the
+  migration-source coverage initiative (#3056). A 6-op typed read core covers
+  inventory (project / deployment / about) and content (blueprint /
+  catalog-item); it is **typed** rather than ingested because the vendor ships
+  only Swagger 2.0 and MEHO's ingest is OpenAPI-3-only (#2090). Bands are
+  disjoint and the legacy impl registers **only** its versioned triple — the
+  modern `vcf-automation` owns the `("vcfa","","")` wildcard — so an
+  unfingerprinted target resolves to modern and a vRA 8 target must carry an
+  8.x operator-asserted version. Auth is the two-step CSP → IaaS token exchange
+  (`/csp/gateway/am/api/login` → refresh token → `/iaas/api/login` → bearer)
+  with a dispatcher-driven single-retry 401 self-heal. Ships as **dispatch +
+  catalog** (typed reads enabled at register time, respx-verified across auth /
+  dispatch / dual-impl resolution / reconcile); live-appliance verification is
+  the documented deferred tail. Docs: `docs/codebase/connectors-vra8.md`.
+
+### Added — VCF 5.x SDDC Manager legacy dual-impl read core (#3059 / #3064)
+
+- VCF 5.x SDDC Manager is the legacy predecessor of the modern VCF 9.x
+  `sddc-rest` and a migration-source estate, so it ships as a **second**
+  fingerprint-resolved implementation of `product="sddc"`
+  (`impl_id="sddc-vcf5"`, band `>=5.0,<9.0`) — the third real two-impl case
+  after `fleet` and `vcfa`, completing the migration-source coverage
+  initiative (#3056). A 7-op typed read core covers inventory (domain /
+  cluster / host / vcenter / nsxt-cluster / manager) and tasks; it is **typed**
+  because 5.x publishes only Swagger 2.0. Bands are disjoint and only the
+  versioned triple registers (the modern `sddc-manager` owns the wildcard);
+  unlike vRA 8, a VCF 5.x appliance fingerprints a **real** product version off
+  `GET /v1/sddc-managers`, so it resolves to the legacy impl by fingerprint
+  alone. Auth reuses the shared VCF `POST /v1/tokens` → Bearer flow with a 401
+  self-heal, and — SDDC Manager having no unauthenticated endpoint — the
+  fingerprint probe is authenticated and fails closed operator-less; the
+  secret-bearing credential-read and host-commissioning reads of the modern
+  connector are deliberately excluded from this source-inventory core. Ships as
+  **dispatch + catalog** (typed reads enabled at register time, respx-verified
+  across auth / dispatch / dual-impl resolution / reconcile); live-appliance
+  verification is the documented deferred tail. Docs:
+  `docs/codebase/connectors-sddc-vcf5.md`.
+
+### Added — vROps 8.x + vRLI 8.x legacy dual-impls as thin subclasses (#3067, #3068 / #3069)
+
+- vRealize Operations 8.x and vRealize Log Insight 8.x are the monitoring and
+  logging tiers of a VCF-5.x-era migration source and legacy predecessors of
+  the shipped modern 9.x connectors (`vrops-rest` / `vrli-rest`) — the 4th and
+  5th real two-impl cases, completing the candidate tail of the
+  migration-source coverage initiative (#3056). Because the 8.x REST surfaces
+  are **identical** to 9.x (the vROps Suite API `/suite-api/api/*` is stable
+  since 6.6/7.0; the vRLI `/api/v2/*` surface shipped in 8.0), each is a **thin
+  subclass** of its modern sibling rather than a ~600-line copy: `vrops-vrops8`
+  (band `>=8.0,<9.0`) overrides **only** the token *scheme* — 8.x appliances
+  predate the `OpsToken` alias and accept only the pre-9.x `vRealizeOpsToken` —
+  and reuses the modern audited 4-op typed set (liveness / alert.list /
+  resource.query / resource.stats); `vrli-vrli8` (band `>=8.0,<9.0`) needs no
+  auth override (Bearer is identical to 9.x) and is five class attributes
+  reusing the modern `vrli.event.query` op. Both register **only** their
+  versioned triple (the modern impl owns the wildcard, disjoint bands), and the
+  dispatcher rebinds the inherited typed handlers onto the resolver-chosen 8.x
+  instance so they run with the 8.x scheme. A parse-only reconcile lane per
+  connector guards that each reuses **exactly** the modern op-set and adds no
+  paths of its own (a future 9.x-only op can't silently inherit into the 8.x
+  surface); neither product publishes a committable 8.x spec, so exclusion is
+  evidenced. Ships as **dispatch + catalog** (typed reads enabled at register
+  time, respx-verified; dispatch rebind onto the 8.x instance confirmed against
+  a real DB with no `endpoint_descriptor`/`OperationGroup` collision);
+  live-appliance verification is the documented deferred tail.
+
+### Fixed — content-library `find` bodies use the flat `/api` shape, not the `/rest` `{spec}` envelope (#3071 / #3073)
+
+- `vmware.composite.vm.deploy_from_library` returned `400 INVALID_ARGUMENT` on
+  a vCenter 8.0.3 target for **every** OVF item while an identical
+  `govc library.deploy` with the same inputs succeeded: the composite's
+  content-library name-resolution step (`_find_content_library_ids`) sent the
+  legacy `/rest` `{"spec": FindSpec}` envelope, which the modern `/api` surface
+  rejects — the same class as #2973, whose fix explicitly deferred these
+  content-library `find` bodies as an adjacent finding. The
+  `Content.Library[.Item].find` ops take a single `spec` parameter, so `/api`
+  wants the `FindSpec` **flat at the top level**; flattened. Separately, the
+  find fault had escaped the composite **uncaught** as a bare
+  `connector_error: HTTPStatusError` (no status, url, or vendor message); it is
+  now caught and mapped to a structured **`resolve_error`** carrying the
+  vCenter HTTP status, `error_type`, and localized
+  `messages[].default_message` (mirroring the existing `deploy_error` arm), so
+  the next 4xx is diagnosable from the result envelope alone. The two-parameter
+  OVF deploy body was already the correct flat `/api` shape and is unchanged.
+
+### Fixed — version-aware OVF-deploy EULA field name for pre-9.0 vCenter (#3074 / #3075)
+
+- `vmware.composite.vm.deploy_from_library` always sent the OVF
+  `ResourcePoolDeploymentSpec` EULA flag as `accept_all_eula` (the pinned 9.0
+  Automation spec name), which vCenter **8.0.x** — and every pre-9.0 release —
+  rejects with `400 UNEXPECTED_INPUT`, expecting the legacy Automation name
+  `accept_all_EULA` (confirmed against govmomi's canonical serialization and a
+  live `govc library.deploy` onto 8.0.3). The wire key is now resolved off the
+  live `about.version` major via the same version-gated dispatch seam the vim
+  path uses: pre-9.0 → `accept_all_EULA`, 9.0+ → `accept_all_eula`, an
+  unresolved version → the lowercase pinned form, so **9.0 dispatch is
+  byte-identical**. The fix is a field-level conditional, **not** a separate
+  `vmware-rest-8.0` connector — the divergence is one key name, not a surface
+  bifurcation (contrast the dual-impl products). Version-aware naming was
+  chosen over omit-when-falsy because it also covers EULA-bearing OVAs, where
+  the flag must be sent `true` under the 8.0.x-accepted key.
+
+### Fixed — synchronous library-item deploys use a long per-request timeout (#3076 / #3077)
+
+- The two **synchronous** vCenter library-item deploys — the OVF
+  `?action=deploy` in `vmware.composite.vm.deploy_from_library` and the VMTX
+  template `?action=deploy` in `vmware.composite.vm.clone` — hold the POST
+  connection open for the entire multi-GB disk copy with no `vmw-task=true`
+  variant to poll (#2970), but the connector's pooled client bakes a 30s
+  read/write default, so any real appliance deploy raised `httpx.ReadTimeout`
+  at ~30s and surfaced a **false** `deploy_error` (a raw `connector_error` for
+  `vm.clone`) while vCenter finished the copy server-side. An optional
+  per-request `timeout` override now threads composite → `_write_sub_op` →
+  `_post_json` → `client.request(timeout=)`, defaulting to the client default
+  so **every other call keeps the unchanged 30s ceiling**; the two deploy
+  sub-ops pass a 30-minute read/write timeout while keeping connect/pool fast
+  so a dead target still fails fast. The empty `str(httpx.ReadTimeout())` that
+  had left a bare `transport fault:` tail is fixed by folding the exception
+  type name into the rendered detail (`transport fault (ReadTimeout)`).
+
+### Fixed — 204 / empty-body write acks return `{}` instead of raising `JSONDecodeError` (#3082 / #3083)
+
+- `HttpConnector._post_json` / `_request_json` ended in an unconditional
+  `resp.json()`, but vCenter's power actions
+  (`POST /vcenter/vm/{vm}/power?action=<verb>`) acknowledge with **204 No
+  Content** — so a live `vmware.composite.vm.power` dispatch powered the VM on
+  at the vendor and *then* failed with `connector_error: JSONDecodeError`, a
+  false error on a succeeded write that makes envelope-driven automation retry
+  an operation that already executed. A new adapter helper
+  (`json_payload_or_empty`) returns a benign `{}` for a 204 or any empty body
+  while parsing non-empty bodies exactly as before (the create vm-id unwrap,
+  deploy payloads, and the bare session-token string stay byte-identical). The
+  same guard is applied inside the VCF Automation connector's own 401-retry
+  transport override for contract parity, and a related best-effort
+  VM-rollback swallow that caught only `httpx.HTTPError` — letting the
+  `JSONDecodeError` (`ValueError`) escape and mask the original create failure
+  — is closed. A call-site audit table in the PR pins every 204-returning
+  vendor endpoint.
+
+### Fixed — dangling `$ref` in a stored op schema no longer 500s dispatch: bundle refs at ingest, structured error at dispatch (#3095 / #3098)
+
+- A nested `$ref` into `#/components/schemas/*` in an ingested op's parameter
+  schema was left unresolved in the stored descriptor, so the dispatcher's
+  registry-free `Draft202012Validator` raised a `referencing`
+  `Unresolvable`/`PointerToNowhere` that escaped as a **500** on
+  `operations/call`. Ingest now bundles the transitive `components.schemas`
+  closure of every nested `$ref` into the stored schema's own
+  `components.schemas` key (schema-position-aware walk, cycle-safe, sorted keys
+  for deterministic bytes), so a descriptor validates its params **standalone**;
+  schemas with no nested refs gain no key and persist **byte-identically**, and
+  `response_schema` is deliberately left un-bundled (its only dispatch-time
+  consumer, the JSONFlux reducer, never resolves refs). A nested ref to a
+  component the spec never defines now **fails the parse**, matching the
+  dangling-top-level-ref posture. At dispatch, the previously-uncaught
+  `Unresolvable` is mapped to a structured **`invalid_op_schema`** error
+  (carrying `extras.missing_ref` and a re-ingest remediation, across the
+  dispatcher, the request preview, and the gateway mint) that blames the
+  descriptor rather than the caller — covering rows persisted by pre-fix
+  ingests until they are re-ingested.
+
+### Fixed — repair path for pre-#3095 descriptor rows: `needs_reingest` detect-and-flag (#3102 / #3104)
+
+- The #3095 ref-bundling fix applies only at ingest time, so
+  `endpoint_descriptor` rows persisted **before** it keep their dangling-ref
+  `parameter_schema` and fail every dispatch with `invalid_op_schema` after
+  deploy (hit live on the governed content-library file-PULL). A re-bundling
+  data migration is genuinely impossible — the database retains no spec
+  document to re-bundle from (`spec_provenance` stores only `uri` + `sha256`)
+  — so the repair posture is **detect-and-flag, not migrate-and-rebundle**.
+  Migration `0076` adds `endpoint_descriptor.needs_reingest` (boolean, NOT NULL
+  default false; real `drop_column` downgrade) and runs a one-time pass over
+  `source_kind='ingested'` rows in every tenant scope, flagging rows whose
+  stored schema fails the exact self-resolution walk the dispatcher performs
+  (a frozen copy of the ref walk, drift-guarded against the live module per the
+  migration self-containment rule; typed/composite rows and `response_schema`
+  are exempt). A same-spec re-ingest is the repair and now provably clears the
+  flag while preserving `is_enabled`, grouping, and operator curation
+  (`custom_*`, `llm_instructions`) — even on the byte-identical skip-re-embed
+  branch. No new verb: the existing `meho connector ingest` / REST / MCP
+  surfaces are the path, and `meho connector review` prints a WARNING with the
+  per-op `needs_reingest_op_count` so operators can find affected connectors
+  after an upgrade.
 
 ## [0.29.0] - 2026-08-19
 

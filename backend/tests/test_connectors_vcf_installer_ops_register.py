@@ -47,6 +47,12 @@ _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "installer.sddc.bringup.start": ("dangerous", True),
     "installer.sddc.bringup.retry": ("dangerous", True),
     "installer.sddc.bringup.status": ("safe", False),
+    "installer.system.depot.get": ("safe", False),
+    "installer.system.depot.set": ("caution", True),
+    "installer.system.trusted-certificates.list": ("safe", False),
+    "installer.system.trusted-certificates.add": ("caution", True),
+    "installer.bundles.list": ("safe", False),
+    "installer.bundles.download": ("caution", True),
 }
 
 
@@ -88,9 +94,7 @@ async def _fetch_installer_rows() -> dict[str, EndpointDescriptor]:
         rows = (
             (
                 await fresh.execute(
-                    select(EndpointDescriptor).where(
-                        EndpointDescriptor.op_id.like("installer.sddc.%")
-                    )
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.like("installer.%"))
                 )
             )
             .scalars()
@@ -143,21 +147,33 @@ async def test_rows_resolve_their_bound_method_handlers(
 async def test_rows_persist_the_result_scalars_reduction_hint(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Every persisted row carries the #3084 ``result_scalars`` hint with ``id``.
+    """Every submit/poll row carries the #3084 ``result_scalars`` hint with ``id``.
 
     The dispatcher lifts ``llm_instructions["result_scalars"]`` off the
     *persisted* descriptor row (``_result_scalars_from_descriptor``), so the
     hint must survive the DB round-trip — otherwise a reduce of the vendor
     ``Validation`` / ``SddcTask`` swallows the poll ``id`` again and the
-    submit → poll loop breaks exactly as observed live.
+    submit → poll loop breaks exactly as observed live. The #3121 depot
+    family declares no hint (its envelopes are small or handled by the
+    generic reduction path), so the round-trip contract is asserted exactly
+    for the ops that declare one — and only those.
     """
     await register_installer_typed_operations(embedding_service=stub_embedding_service)
     rows = await _fetch_installer_rows()
+    hinted = 0
     for op in INSTALLER_TYPED_OPS:
         row = rows[op.op_id]
         assert isinstance(row.llm_instructions, dict), op.op_id
-        hint = row.llm_instructions.get("result_scalars")
-        assert isinstance(hint, dict), f"{op.op_id} must persist a result_scalars hint"
         assert op.llm_instructions is not None
-        assert hint == op.llm_instructions["result_scalars"], op.op_id
+        declared = op.llm_instructions.get("result_scalars")
+        hint = row.llm_instructions.get("result_scalars")
+        if declared is None:
+            assert hint is None, f"{op.op_id} persisted an undeclared result_scalars hint"
+            continue
+        hinted += 1
+        assert isinstance(hint, dict), f"{op.op_id} must persist a result_scalars hint"
+        assert hint == declared, op.op_id
         assert "id" in hint["keys"], f"{op.op_id}: the poll id must be a preserved scalar"
+    # The five submit/poll primitives all declare the hint — the loop must
+    # never go vacuous.
+    assert hinted == 5

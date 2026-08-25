@@ -99,6 +99,31 @@ machinery exist here.
 | `installer.sddc.bringup.start` | `POST /v1/sddcs` → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.retry` | `PATCH /v1/sddcs/{id}` (`retrySddc`) → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.status` | `GET /v1/sddcs/{id}` → `SddcTask` | `safe` |
+| `installer.system.depot.get` | `GET /v1/system/settings/depot` → `DepotSettings` (passwords scrubbed) | `safe` |
+| `installer.system.depot.set` | `PUT /v1/system/settings/depot` (sync connection check) | `caution` + `requires_approval` |
+| `installer.system.trusted-certificates.list` | `GET /v1/sddc-manager/trusted-certificates` | `safe` |
+| `installer.system.trusted-certificates.add` | `POST /v1/sddc-manager/trusted-certificates` | `caution` + `requires_approval` |
+| `installer.bundles.list` | `GET /v1/bundles` → `PageOfBundle` | `safe` |
+| `installer.bundles.download` | `PATCH /v1/bundles/{id}` per id (one approved batch) | `caution` + `requires_approval` |
+
+The bottom six rows are the **air-gapped depot lifecycle** (#3121, group
+`installer-depot`) — the steps that used to force a governed bring-up
+out-of-band: configure the depot (`depot.set` maps the vendor rejection to a
+structured `depot_error`, with inline remediation for the common
+`VMWARE_DEPOT_CONNECT_FAILURE` TLS-trust case → `trusted-certificates.add`,
+then retry), then explicitly download the release bundles
+(`bundles.download`, one approval per batch; per-bundle failures collected as
+`status="partial"`, not fatal) **before** validating a spec — a freshly
+connected installer pins components to the newest catalog versions and
+hard-fails Versions-and-Bundles when those binaries are absent. `depot.get`
+scrubs every `password` key at every depth before the settings echo crosses
+the governed surface; `depot.set`'s park-time preview echoes
+hostname/port/mode + account username only, `trusted-certificates.add`'s a
+SHA-256 fingerprint, `bundles.download`'s the id batch (truncated past 20).
+The group's `when_to_use` and the `spec` parameter hint on the submit
+primitives carry the 9.1 field rules proven live (three unique
+`vspClusterSpec` FQDNs outside the pool, ≤20-char core passwords, the
+derived `vcf-identity` FQDN, `esaConfig` for all-flash/nested).
 
 `spec.validate` submits the caller's `SddcSpec` verbatim as a non-mutating
 dry-run; `validation.status` polls the returned id to a terminal

@@ -436,6 +436,66 @@ class InstallerConnector(HttpConnector):
 
         return await installer_sddc_bringup_status_impl(self, operator, target, params)
 
+    async def system_depot_get(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.depot.get`` shim — depot settings read (scrubbed)."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_depot_settings_get_impl,
+        )
+
+        return await installer_depot_settings_get_impl(self, operator, target, params)
+
+    async def system_depot_set(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.depot.set`` shim — depot configure write."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_depot_settings_set_impl,
+        )
+
+        return await installer_depot_settings_set_impl(self, operator, target, params)
+
+    async def system_trusted_certificates_list(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.trusted-certificates.list`` shim — trust store read."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_trusted_certificates_list_impl,
+        )
+
+        return await installer_trusted_certificates_list_impl(self, operator, target, params)
+
+    async def system_trusted_certificate_add(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.system.trusted-certificates.add`` shim — trust store write."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_trusted_certificate_add_impl,
+        )
+
+        return await installer_trusted_certificate_add_impl(self, operator, target, params)
+
+    async def bundles_list(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.bundles.list`` shim — bundle inventory read."""
+        from meho_backplane.connectors.vcf_installer.typed_reads import (
+            installer_bundles_list_impl,
+        )
+
+        return await installer_bundles_list_impl(self, operator, target, params)
+
+    async def bundles_download(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.bundles.download`` shim — batch bundle-download write."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_bundles_download_impl,
+        )
+
+        return await installer_bundles_download_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool."""
         async with self._session_lock:

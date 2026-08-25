@@ -61,6 +61,7 @@ secrets (e.g. the GOSC composites). It is *not* redacted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -72,6 +73,9 @@ from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
+    INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
+    INSTALLER_DEPOT_SET_OP_ID,
+    INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
@@ -554,6 +558,73 @@ async def _sddc_bringup_retry_preview(ctx: PreviewContext) -> dict[str, Any] | N
     return preview
 
 
+async def _depot_set_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Park-time preview for ``installer.system.depot.set`` (#3121).
+
+    Echoes depot identity only — hostname / port / mode and which account
+    kind carries credentials (plus its username) — never a ``password``
+    value or key.
+    """
+    settings = ctx.params.get("settings")
+    if not isinstance(settings, dict):
+        return None
+    config = settings.get("depotConfiguration")
+    config = config if isinstance(config, dict) else {}
+    preview: dict[str, Any] = {
+        "operation": "Configure Installer release depot",
+        "is_offline_depot": config.get("isOfflineDepot"),
+        "hostname": config.get("hostname"),
+        "port": config.get("port"),
+    }
+    for account_key in ("offlineAccount", "vmwareAccount"):
+        account = settings.get(account_key)
+        if isinstance(account, dict):
+            preview["account"] = account_key
+            preview["account_username"] = account.get("username")
+            break
+    return preview
+
+
+async def _trusted_certificate_add_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Park-time preview for ``installer.system.trusted-certificates.add`` (#3121).
+
+    Certificates are public material, but a preview should be reviewable at a
+    glance — echo the usage type and a SHA-256 fingerprint of the PEM, not
+    the PEM body.
+    """
+    certificate = ctx.params.get("certificate")
+    if not isinstance(certificate, str) or not certificate:
+        return None
+    fingerprint = hashlib.sha256(certificate.encode()).hexdigest()
+    return {
+        "operation": "Trust outbound TLS certificate on Installer",
+        "certificate_usage_type": ctx.params.get("certificate_usage_type")
+        or "TRUSTED_FOR_OUTBOUND",
+        "certificate_sha256": fingerprint,
+        "certificate_length": len(certificate),
+    }
+
+
+async def _bundles_download_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Park-time preview for ``installer.bundles.download`` (#3121).
+
+    One approval covers the batch — the approver sees how many and which
+    bundle ids will download (ids truncated past 20 to keep the preview
+    reviewable).
+    """
+    bundle_ids = ctx.params.get("bundle_ids")
+    if not isinstance(bundle_ids, list) or not bundle_ids:
+        return None
+    preview: dict[str, Any] = {
+        "operation": "Download release bundles on Installer",
+        "bundle_count": len(bundle_ids),
+        "bundle_ids": bundle_ids[:20],
+    }
+    if len(bundle_ids) > 20:
+        preview["bundle_ids_truncated"] = len(bundle_ids) - 20
+    return preview
+
+
 # Side-effect: register the park-time preview builders at import time (#1608),
 # mirroring how ``connectors/vmware_rest/composites/_write_preview`` wires its
 # builders. This module is imported by the package ``__init__`` (which pulls in
@@ -566,3 +637,8 @@ async def _sddc_bringup_retry_preview(ctx: PreviewContext) -> dict[str, Any] | N
 register_preview_builder(INSTALLER_BRINGUP_OP_ID, _sddc_bringup_preview)
 register_preview_builder(INSTALLER_BRINGUP_START_OP_ID, _sddc_bringup_preview)
 register_preview_builder(INSTALLER_BRINGUP_RETRY_OP_ID, _sddc_bringup_retry_preview)
+# The #3121 depot-lifecycle writes park too; their previews live here as well
+# (this module is the connector's single preview home).
+register_preview_builder(INSTALLER_DEPOT_SET_OP_ID, _depot_set_preview)
+register_preview_builder(INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID, _trusted_certificate_add_preview)
+register_preview_builder(INSTALLER_BUNDLES_DOWNLOAD_OP_ID, _bundles_download_preview)

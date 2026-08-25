@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — air-gapped depot lifecycle ops on the installer connector (#3121)
+
+- A governed air-gapped VCF 9.1 bring-up had to leave the governed path at
+  exactly the step that gates everything else: configuring the release
+  depot, trusting its TLS certificate, and explicitly pre-downloading the
+  release bundles all had no connector ops (performed out-of-band during
+  the live bring-up program, documented on the issue). Six new typed
+  primitives close the gap (group `installer-depot`):
+  `installer.system.depot.get`/`.set` (settings read is password-scrubbed
+  at every depth; the PUT runs the vendor connection check synchronously
+  and maps rejections to a structured `depot_error` — the common
+  `VMWARE_DEPOT_CONNECT_FAILURE` TLS-trust case carries its remediation
+  inline), `installer.system.trusted-certificates.list`/`.add` (the
+  depot-trust fix; preview echoes a SHA-256 fingerprint, never the PEM),
+  and `installer.bundles.list`/`.download` (the mandatory explicit GA
+  pre-download — one approval per batch, per-bundle vendor rejections
+  collected as `partial`, not fatal). Writes are `caution` +
+  `requires_approval` with secret-free park-time previews. The submit
+  primitives' `spec` hint and the new group's `when_to_use` now carry the
+  live-proven 9.1 SddcSpec field rules (three unique `vspClusterSpec`
+  FQDNs each resolving outside the services pool — omitting `fleetFqdn`
+  passes validation but fails bring-up at "Save VCF Management
+  Components"; ≤20-char core passwords; the derived `vcf-identity` FQDN;
+  `esaConfig` for all-flash/nested), so the next operator reads at
+  discovery time what this program learned from validator errors and
+  inventory stack traces.
+
 ### Added — governed bring-up retry: `installer.sddc.bringup.retry` (#3123)
 
 - A failed VCF management-domain bring-up was unrecoverable through the

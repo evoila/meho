@@ -475,6 +475,67 @@ async def test_bringup_retry_preview_returns_none_without_id() -> None:
     assert await _bringup._sddc_bringup_retry_preview(ctx) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.asyncio
+async def test_depot_set_preview_echoes_identity_never_secrets() -> None:
+    ctx = SimpleNamespace(
+        params={
+            "settings": {
+                "offlineAccount": {"username": "depot-svc", "password": "SECRET-depot"},
+                "depotConfiguration": {
+                    "isOfflineDepot": True,
+                    "hostname": "depot.test.invalid",
+                    "port": 80,
+                },
+            }
+        }
+    )
+    preview = await _bringup._depot_set_preview(ctx)  # type: ignore[arg-type]
+
+    assert preview == {
+        "operation": "Configure Installer release depot",
+        "is_offline_depot": True,
+        "hostname": "depot.test.invalid",
+        "port": 80,
+        "account": "offlineAccount",
+        "account_username": "depot-svc",
+    }
+    dumped = json.dumps(preview)
+    assert "SECRET" not in dumped
+    assert "password" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_depot_set_preview_returns_none_without_settings() -> None:
+    ctx = SimpleNamespace(params={})
+    assert await _bringup._depot_set_preview(ctx) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_trusted_certificate_add_preview_echoes_fingerprint_not_pem() -> None:
+    import hashlib
+
+    pem = "-----BEGIN CERTIFICATE-----\nMIIBdummy\n-----END CERTIFICATE-----\n"
+    ctx = SimpleNamespace(params={"certificate": pem})
+    preview = await _bringup._trusted_certificate_add_preview(ctx)  # type: ignore[arg-type]
+
+    assert preview is not None
+    assert preview["certificate_usage_type"] == "TRUSTED_FOR_OUTBOUND"
+    assert preview["certificate_sha256"] == hashlib.sha256(pem.encode()).hexdigest()
+    assert "BEGIN CERTIFICATE" not in json.dumps(preview)
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_preview_truncates_past_twenty_ids() -> None:
+    ids = [f"bundle-{i}" for i in range(25)]
+    ctx = SimpleNamespace(params={"bundle_ids": ids})
+    preview = await _bringup._bundles_download_preview(ctx)  # type: ignore[arg-type]
+
+    assert preview is not None
+    assert preview["bundle_count"] == 25
+    assert len(preview["bundle_ids"]) == 20
+    assert preview["bundle_ids_truncated"] == 5
+
+
 # --------------------------------------------------------------- guards / plumbing
 
 

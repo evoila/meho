@@ -19,6 +19,15 @@ a fresh boot with zero catalog ingest:
 * ``installer.sddc.bringup.status`` — poll one bring-up task
   (``GET /v1/sddcs/{id}``; ``safe``).
 
+Plus the **air-gapped depot lifecycle** family (#3121, group
+``installer-depot``): ``installer.system.depot.get`` / ``.set`` (read /
+configure the release depot, PUT running the vendor connection check
+synchronously), ``installer.system.trusted-certificates.list`` / ``.add``
+(outbound trust store — the depot TLS-trust fix), and
+``installer.bundles.list`` / ``.download`` (bundle inventory + the mandatory
+explicit GA pre-download). Reads are ``safe``; the three writes are
+``caution`` + ``requires_approval``.
+
 The vendor bring-up API is natively asynchronous — every submit returns its
 tracking object in seconds and progress rides the status polls — so each
 primitive is a short call and the standard park → approve → resume machinery
@@ -44,7 +53,10 @@ import structlog
 from meho_backplane.connectors.vcf_installer.typed_writes import (
     INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
+    INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
+    INSTALLER_DEPOT_SET_OP_ID,
     INSTALLER_SPEC_VALIDATE_OP_ID,
+    INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +72,7 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 _GROUP_BRINGUP = "installer-bringup"
+_GROUP_DEPOT = "installer-depot"
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,26 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "approval-gated) resumes the task from its failed sub-task. The "
         "one-shot governed validate-then-deploy unit is "
         "installer.composite.sddc.bringup."
+    ),
+    _GROUP_DEPOT: (
+        "Use to make an air-gapped/offline Installer ready to deploy — the "
+        "mandatory pre-bring-up depot lifecycle, in order: "
+        "installer.system.depot.get reads the current depot settings and "
+        "connection status; installer.system.depot.set (approval-gated) "
+        "configures the release depot and runs the vendor connection check "
+        "synchronously — on a VMWARE_DEPOT_CONNECT_FAILURE for an HTTPS "
+        "depot, first import the depot's TLS certificate via "
+        "installer.system.trusted-certificates.add (approval-gated; "
+        "installer.system.trusted-certificates.list reads the trust store) "
+        "and retry; after a successful connect the catalog ingests and "
+        "installer.bundles.list populates within about a minute; then "
+        "installer.bundles.download (approval-gated, one batch) explicitly "
+        "downloads the release bundles BEFORE validating a spec — a freshly "
+        "connected installer pins components to the newest catalog versions "
+        "and hard-fails Versions-and-Bundles when those binaries are absent "
+        "from the depot, so the explicit GA download is a required step, not "
+        "an optimization. Poll installer.bundles.list downloadStatus until "
+        "the set is SUCCESSFUL."
     ),
 }
 
@@ -155,6 +188,31 @@ _SDDC_TASK_RESULT_SCALARS: tuple[str, ...] = (
 )
 
 
+#: The shared ``spec`` parameter hint for the submit primitives — carrying the
+#: 9.1 SddcSpec shape rules that are undocumented upstream and were each paid
+#: for with a live bring-up iteration (#3121 follow-up; c3-class program,
+#: 2026-08-25). Field names pinned by the vendored ``vcf-installer-9.1``
+#: OpenAPI; the FLEET_LCM consequence observed live in the SDDC Manager
+#: inventory translation.
+_SDDC_SPEC_HINT = (
+    "The full SddcSpec object, POSTed verbatim. 9.1 shape rules proven live: "
+    "(1) vspClusterSpec needs THREE unique FQDNs — platformFqdn, "
+    "instanceFqdn AND fleetFqdn — each resolving (A+PTR) to its OWN address "
+    "OUTSIDE vspClusterSpec.ipv4Pool; omitting fleetFqdn PASSES validation "
+    "but fails bring-up later at 'Save VCF Management Components' "
+    "(FLEET_LCM fqdn=null -> INVENTORY_INTERNAL_SERVER_ERROR 500), while "
+    "reusing vcfOperationsFleetManagementSpec.hostname as fleetFqdn crashes "
+    "the Network Configuration validation with IllegalStateException "
+    "'Duplicate key'. (2) The five core passwords (sddcManagerSpec "
+    "root/ssh/localUser, vcenterSpec rootVcenter/adminUserSso) are limited "
+    "to 20 characters. (3) vidbSpec's FQDN defaults to "
+    "vcf-identity.<dnsSpec.subdomain> — pre-create that DNS record or set "
+    "it explicitly. (4) All-flash/nested labs pass the vSAN check via "
+    "datastoreSpec.vsanSpec.esaConfig.enabled=false. (5) The ipv4Pool "
+    "ipRange needs >=12 free addresses for a small deployment."
+)
+
+
 def _sddc_spec_parameter_schema(posted_to: str) -> dict[str, Any]:
     """The shared ``{"spec": <SddcSpec>}`` parameter schema of the two submits."""
     return {
@@ -206,7 +264,7 @@ _SPEC_VALIDATE = InstallerTypedOp(
             "a JSONFlux handle, id / executionStatus / resultStatus stay "
             "top-level on the result."
         ),
-        parameter_hints={"spec": "The full SddcSpec object, POSTed verbatim."},
+        parameter_hints={"spec": _SDDC_SPEC_HINT},
         result_scalars=_VALIDATION_RESULT_SCALARS,
     ),
 )
@@ -289,7 +347,7 @@ _BRINGUP_START = InstallerTypedOp(
             "task's sub-task list reduces to a JSONFlux handle, id / status "
             "stay top-level on the result."
         ),
-        parameter_hints={"spec": "The full SddcSpec object, POSTed verbatim."},
+        parameter_hints={"spec": _SDDC_SPEC_HINT},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
     ),
 )
@@ -355,7 +413,10 @@ _BRINGUP_RETRY = InstallerTypedOp(
         ),
         parameter_hints={
             "id": "The failed bring-up (SDDC) task id from the deploy.",
-            "spec": "Optional corrected SddcSpec (edit-and-retry); usually omitted.",
+            "spec": (
+                "Optional corrected SddcSpec (edit-and-retry); usually omitted. "
+                "Same 9.1 shape rules as installer.sddc.spec.validate's spec hint."
+            ),
         },
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
     ),
@@ -409,15 +470,286 @@ _BRINGUP_STATUS = InstallerTypedOp(
 )
 
 
+_EMPTY_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+_DEPOT_GET = InstallerTypedOp(
+    op_id="installer.system.depot.get",
+    handler_attr="system_depot_get",
+    summary="Read the Installer's release-depot settings and connection status.",
+    description=(
+        "Reads GET /v1/system/settings/depot — the DepotSettings object "
+        "(vmwareAccount / offlineAccount / depotConfiguration with "
+        "isOfflineDepot, hostname, port). Every password key is scrubbed at "
+        "every depth before the result crosses the governed surface; the "
+        "account status/message fields (e.g. DEPOT_CONNECTION_SUCCESSFUL) "
+        "survive, so this is the read that tells you whether a depot is "
+        "connected. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "depot", "system"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to check whether (and which) release depot the Installer "
+            "is connected to before configuring one or triggering downloads."
+        ),
+        output_shape=(
+            "{vmwareAccount?, offlineAccount?, depotConfiguration: "
+            "{isOfflineDepot, hostname, port, url}}. Account status carries "
+            "the connection verdict (e.g. DEPOT_CONNECTION_SUCCESSFUL); "
+            "password keys are scrubbed and never present."
+        ),
+        parameter_hints={},
+    ),
+)
+
+_DEPOT_SET = InstallerTypedOp(
+    op_id=INSTALLER_DEPOT_SET_OP_ID,
+    handler_attr="system_depot_set",
+    summary="Configure the Installer's release depot (vendor connection check inline).",
+    description=(
+        "Submits the DepotSettings object to PUT /v1/system/settings/depot. "
+        "The appliance runs its depot connection check synchronously, so the "
+        "result is the verdict: status='ok' with the scrubbed settings echo "
+        "on success, or the structured status='depot_error' (http_status + "
+        "vendor error_code + message) on rejection — the common "
+        "VMWARE_DEPOT_CONNECT_FAILURE TLS-trust case carries its remediation "
+        "inline (import the depot certificate via "
+        "installer.system.trusted-certificates.add first). caution + "
+        "requires_approval — appliance-scoped configuration that gates what "
+        "any later bring-up may install; the approval preview echoes "
+        "hostname/port/mode and username only, never a password."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "settings": {
+                "type": "object",
+                "description": (
+                    "The vendor DepotSettings object, PUT verbatim: "
+                    "depotConfiguration {isOfflineDepot, hostname, port} plus "
+                    "offlineAccount {username, password} for offline depots "
+                    "(or vmwareAccount for the online Broadcom depot)."
+                ),
+                "additionalProperties": True,
+            },
+        },
+        "required": ["settings"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("vcf", "installer", "depot", "system", "write"),
+    safety_level="caution",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to point the Installer at a release depot (offline/air-gapped "
+            "or the online Broadcom depot). Parks for approval. On depot_error "
+            "with VMWARE_DEPOT_CONNECT_FAILURE, follow the inline remediation."
+        ),
+        output_shape=(
+            "{status: 'ok', settings: {...scrubbed echo...}} or {status: "
+            "'depot_error', http_status, error_code, message, remediation?}."
+        ),
+        parameter_hints={
+            "settings": (
+                "DepotSettings verbatim. Offline example shape: "
+                "{offlineAccount: {username, password}, depotConfiguration: "
+                "{isOfflineDepot: true, hostname, port}}."
+            ),
+        },
+    ),
+)
+
+_TRUSTED_CERTIFICATES_LIST = InstallerTypedOp(
+    op_id="installer.system.trusted-certificates.list",
+    handler_attr="system_trusted_certificates_list",
+    summary="List the Installer's outbound trusted certificates.",
+    description=(
+        "Reads GET /v1/sddc-manager/trusted-certificates — the appliance "
+        "outbound trust store (public certificate material). The read half "
+        "of the depot TLS-trust flow. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "certificates", "system"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call to see which outbound TLS certificates the Installer "
+            "already trusts (e.g. before/after adding a depot certificate)."
+        ),
+        output_shape="Vendor page of trusted certificates (public material).",
+        parameter_hints={},
+    ),
+)
+
+_TRUSTED_CERTIFICATE_ADD = InstallerTypedOp(
+    op_id=INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID,
+    handler_attr="system_trusted_certificate_add",
+    summary="Trust an outbound TLS certificate on the Installer (depot TLS trust).",
+    description=(
+        "POSTs {certificate, certificateUsageType} to "
+        "/v1/sddc-manager/trusted-certificates. The fix for "
+        "VMWARE_DEPOT_CONNECT_FAILURE against an HTTPS depot with a "
+        "self-signed/private-CA certificate: import the depot's certificate "
+        "(usage TRUSTED_FOR_OUTBOUND, the default), then re-run "
+        "installer.system.depot.set. Certificates are public material — the "
+        "PEM rides the params verbatim and the preview echoes a fingerprint. "
+        "caution + requires_approval."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "certificate": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The PEM-encoded certificate to trust.",
+            },
+            "certificate_usage_type": {
+                "type": "string",
+                "description": (
+                    "Vendor certificateUsageType; defaults to "
+                    "TRUSTED_FOR_OUTBOUND (the depot-trust case)."
+                ),
+            },
+        },
+        "required": ["certificate"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("vcf", "installer", "certificates", "system", "write"),
+    safety_level="caution",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call when installer.system.depot.set returns depot_error with "
+            "VMWARE_DEPOT_CONNECT_FAILURE for an HTTPS depot: trust the "
+            "depot's certificate, then retry depot.set."
+        ),
+        output_shape="{status: 'ok', result: <vendor echo>}.",
+        parameter_hints={
+            "certificate": "PEM string of the depot/CA certificate.",
+            "certificate_usage_type": "Omit for TRUSTED_FOR_OUTBOUND.",
+        },
+    ),
+)
+
+_BUNDLES_LIST = InstallerTypedOp(
+    op_id="installer.bundles.list",
+    handler_attr="bundles_list",
+    summary="List the Installer's bundle inventory (download states).",
+    description=(
+        "Reads GET /v1/bundles — the PageOfBundle inventory the catalog "
+        "ingest populates after a successful depot connect (typically within "
+        "about a minute; empty before any connect). Each element carries "
+        "id / version / downloadStatus / components — the poll target after "
+        "installer.bundles.download. safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("read-only", "vcf", "installer", "bundles", "depot"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call after a depot connect to enumerate available bundles and "
+            "their download states, and to poll downloads to SUCCESSFUL "
+            "after installer.bundles.download."
+        ),
+        output_shape=(
+            "{elements: [{id, version, downloadStatus, components, ...}], "
+            "pageMetadata}. A 9.1 release depot advertises ~180 bundles — "
+            "filter by downloadStatus/version instead of dumping elements."
+        ),
+        parameter_hints={},
+    ),
+)
+
+_BUNDLES_DOWNLOAD = InstallerTypedOp(
+    op_id=INSTALLER_BUNDLES_DOWNLOAD_OP_ID,
+    handler_attr="bundles_download",
+    summary="Trigger release-bundle downloads on the Installer (one approved batch).",
+    description=(
+        "PATCHes {bundleDownloadSpec: {downloadNow: true}} to "
+        "/v1/bundles/{id} for every id in bundle_ids — the mandatory "
+        "pre-download step of an air-gapped bring-up: a freshly connected "
+        "installer pins components to the newest catalog versions and "
+        "hard-fails the Versions-and-Bundles validation when those binaries "
+        "are absent, so the release bundles must be explicitly downloaded "
+        "BEFORE spec validation. Per-bundle vendor rejections are collected "
+        "(status 'partial'), not fatal; re-triggering an in-flight bundle is "
+        "harmless. Poll installer.bundles.list to SUCCESSFUL afterwards. "
+        "caution + requires_approval — one approval covers the batch; the "
+        "preview echoes the bundle count and ids."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "bundle_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "description": "Bundle ids (from installer.bundles.list) to download.",
+            },
+        },
+        "required": ["bundle_ids"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_DEPOT,
+    tags=("vcf", "installer", "bundles", "depot", "write"),
+    safety_level="caution",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call after the bundle inventory populates to download the "
+            "release (GA) bundles before validating an SddcSpec. One "
+            "approval covers the whole batch."
+        ),
+        output_shape=(
+            "{status: 'ok'|'partial', accepted, failed, results: [{id, "
+            "status: 'accepted'|'failed', task_id?, error_code?, "
+            "message?}]}. Then poll installer.bundles.list."
+        ),
+        parameter_hints={
+            "bundle_ids": (
+                "Ids from installer.bundles.list (e.g. every bundle of the target release)."
+            ),
+        },
+    ),
+)
+
+
 #: The typed ops :class:`InstallerConnector` registers at lifespan startup,
 #: in submit → poll order per primitive pair (the bring-up trio adds the
-#: failed-task retry between its submit and its poll).
+#: failed-task retry between its submit and its poll; the depot family runs
+#: in its air-gapped lifecycle order: settings read/write → trust store
+#: read/write → bundle inventory read/download).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
     _BRINGUP_START,
     _BRINGUP_RETRY,
     _BRINGUP_STATUS,
+    _DEPOT_GET,
+    _DEPOT_SET,
+    _TRUSTED_CERTIFICATES_LIST,
+    _TRUSTED_CERTIFICATE_ADD,
+    _BUNDLES_LIST,
+    _BUNDLES_DOWNLOAD,
 )
 
 

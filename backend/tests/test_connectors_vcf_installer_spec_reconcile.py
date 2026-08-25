@@ -77,7 +77,13 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
     constant — or a new one that skips the suffix convention — can't silently
     shrink the reconciled set to a vacuous pass.
     """
-    assert sorted(_typed_read_paths()) == ["_SDDC_STATUS_PATH", "_VALIDATION_STATUS_PATH"]
+    assert sorted(_typed_read_paths()) == [
+        "_BUNDLES_PATH",
+        "_DEPOT_SETTINGS_PATH",
+        "_SDDC_STATUS_PATH",
+        "_TRUSTED_CERTIFICATES_PATH",
+        "_VALIDATION_STATUS_PATH",
+    ]
 
 
 def test_typed_write_declared_op_ids_are_pinned() -> None:
@@ -92,6 +98,9 @@ def test_typed_write_declared_op_ids_are_pinned() -> None:
                 "POST:/v1/sddcs/validations",
                 "POST:/v1/sddcs",
                 "PATCH:/v1/sddcs/{id}",
+                "PUT:/v1/system/settings/depot",
+                "POST:/v1/sddc-manager/trusted-certificates",
+                "PATCH:/v1/bundles/{id}",
             }
         )
         == _typed_writes.TYPED_WRITE_DECLARED_OP_IDS

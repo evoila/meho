@@ -69,7 +69,10 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import OperationResult
-from meho_backplane.connectors.vcf_installer.typed_writes import INSTALLER_BRINGUP_START_OP_ID
+from meho_backplane.connectors.vcf_installer.typed_writes import (
+    INSTALLER_BRINGUP_RETRY_OP_ID,
+    INSTALLER_BRINGUP_START_OP_ID,
+)
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 from meho_backplane.operations.composite import enforce_subop_policy
 
@@ -520,6 +523,37 @@ async def register_installer_composite_operations(
     )
 
 
+async def _sddc_bringup_retry_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Park-time approval preview for ``installer.sddc.bringup.retry`` (#3123).
+
+    The retry's normal params carry only the failed task's ``id`` — the preview
+    names the operation and echoes that id so the approver knows exactly which
+    bring-up resumes. For the edit-and-retry flow (an ``SddcSpec`` in params)
+    the composite's secret-hygienic identity/network blast-radius is appended —
+    via :func:`_blast_radius`, which never reads a secret field. Returns
+    ``None`` if the id is missing so the dispatcher falls back to its
+    identifier-only default.
+    """
+    task_id = ctx.params.get("id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    preview: dict[str, Any] = {
+        "operation": "VCF bring-up retry (resume a failed installation task)",
+        "sddc_task_id": task_id,
+    }
+    spec = ctx.params.get("spec")
+    if isinstance(spec, dict):
+        br = _blast_radius(spec)
+        preview["edit_and_retry"] = True
+        preview["sddc_id"] = br["sddc_id"]
+        preview["vcf_instance_name"] = br["vcf_instance_name"]
+        preview["vcenter_hostname"] = br["vcenter_hostname"]
+        preview["sddc_manager_hostname"] = br["sddc_manager_hostname"]
+        preview["host_count"] = br["host_count"]
+        preview["management_networks"] = br["networks"]
+    return preview
+
+
 # Side-effect: register the park-time preview builders at import time (#1608),
 # mirroring how ``connectors/vmware_rest/composites/_write_preview`` wires its
 # builders. This module is imported by the package ``__init__`` (which pulls in
@@ -527,5 +561,8 @@ async def register_installer_composite_operations(
 # before any dispatch can park. The ``installer.sddc.bringup.start`` primitive
 # (#3078) parks the same ``{"spec": <SddcSpec>}`` params shape the composite
 # does, so it shares the composite's secret-hygienic identity/network preview.
+# The ``installer.sddc.bringup.retry`` primitive (#3123) parks ``{"id", "spec"?}``
+# and gets its own task-id-first preview.
 register_preview_builder(INSTALLER_BRINGUP_OP_ID, _sddc_bringup_preview)
 register_preview_builder(INSTALLER_BRINGUP_START_OP_ID, _sddc_bringup_preview)
+register_preview_builder(INSTALLER_BRINGUP_RETRY_OP_ID, _sddc_bringup_retry_preview)

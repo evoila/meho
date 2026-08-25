@@ -3,9 +3,9 @@
 
 """Typed (bound-method) write implementations for :class:`InstallerConnector`.
 
-The two governed bring-up *submit* primitives (#3078). The vendor bring-up
-API is natively asynchronous — each POST returns its tracking object in
-seconds and progress is polled via the short status GETs in
+The governed bring-up *submit* primitives (#3078, retry #3123). The vendor
+bring-up API is natively asynchronous — each POST/PATCH returns its tracking
+object in seconds and progress is polled via the short status GETs in
 :mod:`.typed_reads` — so every call here is short, the standard
 park → approve → resume machinery governs the write as-is, and no
 long-blocking loop or async dispatch machinery exists in this module. The
@@ -24,15 +24,23 @@ deploy-automation add-on, not this connector.
   parks the call for approval *before* this handler runs, and the park-time
   preview (registered in :mod:`.bringup`, shared with the composite) echoes
   SDDC identity + network blast-radius only, never a password.
+* ``installer.sddc.bringup.retry`` — ``PATCH /v1/sddcs/{id}`` (the vendor
+  ``retrySddc`` operation), resuming a ``COMPLETED_WITH_FAILURE`` bring-up
+  from its failed sub-task and returning the same ``SddcTask`` to poll. The
+  ``SddcSpec`` body is optional: omitted, the appliance retries the stored
+  spec as-is; provided, it is the vendor's documented edit-and-retry flow.
+  Same posture as the start — ``dangerous`` + ``requires_approval=True``,
+  with its own park-time preview (task id + optional spec identity) in
+  :mod:`.bringup`.
 
 Each write is issued directly on the connector's own authenticated token
 session via :meth:`HttpConnector._post_json`. A raw ``401`` (the Installer's
 expired-token signal) propagates as :class:`httpx.HTTPStatusError` to the
 dispatcher's #2067 recovery arm, which evicts the cached session token via
 the connector's public :meth:`InstallerConnector.invalidate_session` hook and
-re-dispatches once. That retry is safe even for these non-idempotent POSTs:
-a ``401`` means the request was rejected at auth *before* the server
-processed it, so the first attempt had no effect — the same argument
+re-dispatches once. That retry is safe even for these non-idempotent
+POSTs/PATCHes: a ``401`` means the request was rejected at auth *before* the
+server processed it, so the first attempt had no effect — the same argument
 :meth:`InstallerConnector._post_json_with_session_retry` documents for the
 composite's internal sub-calls.
 """
@@ -47,9 +55,11 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_installer.session import InstallerTargetLike
 
 __all__ = [
+    "INSTALLER_BRINGUP_RETRY_OP_ID",
     "INSTALLER_BRINGUP_START_OP_ID",
     "INSTALLER_SPEC_VALIDATE_OP_ID",
     "TYPED_WRITE_DECLARED_OP_IDS",
+    "installer_sddc_bringup_retry_impl",
     "installer_sddc_bringup_start_impl",
     "installer_sddc_spec_validate_impl",
 ]
@@ -58,6 +68,8 @@ __all__ = [
 INSTALLER_SPEC_VALIDATE_OP_ID: Final[str] = "installer.sddc.spec.validate"
 #: ``installer.sddc.bringup.start`` — start the management-domain bring-up.
 INSTALLER_BRINGUP_START_OP_ID: Final[str] = "installer.sddc.bringup.start"
+#: ``installer.sddc.bringup.retry`` — resume a failed bring-up from its failed sub-task.
+INSTALLER_BRINGUP_RETRY_OP_ID: Final[str] = "installer.sddc.bringup.retry"
 
 # --- Hand-coded wire paths — the spec-reconcile lane's introspection source
 # (module constants introspected by value, the #2944 pattern). ---
@@ -65,6 +77,8 @@ INSTALLER_BRINGUP_START_OP_ID: Final[str] = "installer.sddc.bringup.start"
 _SPEC_VALIDATE_PATH = "/v1/sddcs/validations"
 #: ``POST`` — start the bring-up (the estate mutation).
 _BRINGUP_START_PATH = "/v1/sddcs"
+#: ``PATCH`` — retry a failed bring-up (the vendor ``retrySddc`` operation).
+_BRINGUP_RETRY_PATH = "/v1/sddcs/{id}"
 
 #: The exact ``METHOD:/path`` set these write primitives hand-code. The
 #: reconcile lane (:mod:`tests.test_connectors_vcf_installer_spec_reconcile`)
@@ -74,6 +88,7 @@ TYPED_WRITE_DECLARED_OP_IDS: frozenset[str] = frozenset(
     {
         f"POST:{_SPEC_VALIDATE_PATH}",
         f"POST:{_BRINGUP_START_PATH}",
+        f"PATCH:{_BRINGUP_RETRY_PATH}",
     }
 )
 
@@ -115,4 +130,31 @@ async def installer_sddc_bringup_start_impl(
     """
     return await connector._post_json(
         target, _BRINGUP_START_PATH, operator=operator, json=params["spec"]
+    )
+
+
+async def installer_sddc_bringup_retry_impl(
+    connector: InstallerConnector,
+    operator: Operator,
+    target: InstallerTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``installer.sddc.bringup.retry`` — ``PATCH /v1/sddcs/{id}`` (``retrySddc``).
+
+    Resumes a ``COMPLETED_WITH_FAILURE`` bring-up from its failed sub-task and
+    returns the vendor ``SddcTask`` the moment the retry is accepted; poll
+    ``installer.sddc.bringup.status`` with the same ``id`` to a terminal state.
+    ``params["spec"]`` is optional: omitted, no request body is sent and the
+    appliance retries the stored spec as-is (the common transient-failure
+    case); provided, the ``SddcSpec`` rides the PATCH verbatim — the vendor's
+    documented edit-and-retry flow. The op is registered ``dangerous`` +
+    ``requires_approval=True``, so the dispatcher has already parked and an
+    approver has already resumed this call by the time the handler runs.
+    """
+    return await connector._post_json(
+        target,
+        _BRINGUP_RETRY_PATH.replace("{id}", params["id"]),
+        operator=operator,
+        verb="PATCH",
+        json=params.get("spec"),
     )

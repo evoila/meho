@@ -3,15 +3,18 @@
 
 """Typed-op metadata + registrar for :class:`InstallerConnector`.
 
-The Installer's governed bring-up surface ships as four submit/poll typed
-primitives (``source_kind="typed"``, #3078) so they dispatch on a fresh boot
-with zero catalog ingest:
+The Installer's governed bring-up surface ships as five submit/poll typed
+primitives (``source_kind="typed"``, #3078; retry #3123) so they dispatch on
+a fresh boot with zero catalog ingest:
 
 * ``installer.sddc.spec.validate`` — submit an ``SddcSpec`` validation
   dry-run (``POST /v1/sddcs/validations``; ``caution``).
 * ``installer.sddc.validation.status`` — poll one validation
   (``GET /v1/sddcs/validations/{id}``; ``safe``).
 * ``installer.sddc.bringup.start`` — start the bring-up (``POST /v1/sddcs``;
+  ``dangerous`` + ``requires_approval``).
+* ``installer.sddc.bringup.retry`` — resume a failed bring-up from its
+  failed sub-task (``PATCH /v1/sddcs/{id}``, the vendor ``retrySddc``;
   ``dangerous`` + ``requires_approval``).
 * ``installer.sddc.bringup.status`` — poll one bring-up task
   (``GET /v1/sddcs/{id}``; ``safe``).
@@ -39,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from meho_backplane.connectors.vcf_installer.typed_writes import (
+    INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
     INSTALLER_SPEC_VALIDATE_OP_ID,
 )
@@ -92,8 +96,11 @@ INSTALLER_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "its verdict; installer.sddc.bringup.start (dangerous, approval-gated) "
         "starts the bring-up and installer.sddc.bringup.status polls the task's "
         "lifecycle state (IN_PROGRESS / COMPLETED_WITH_SUCCESS / "
-        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks. The one-shot governed "
-        "validate-then-deploy unit is installer.composite.sddc.bringup."
+        "COMPLETED_WITH_FAILURE) and per-stage sub-tasks; on "
+        "COMPLETED_WITH_FAILURE, installer.sddc.bringup.retry (dangerous, "
+        "approval-gated) resumes the task from its failed sub-task. The "
+        "one-shot governed validate-then-deploy unit is "
+        "installer.composite.sddc.bringup."
     ),
 }
 
@@ -287,6 +294,73 @@ _BRINGUP_START = InstallerTypedOp(
     ),
 )
 
+_BRINGUP_RETRY = InstallerTypedOp(
+    op_id=INSTALLER_BRINGUP_RETRY_OP_ID,
+    handler_attr="sddc_bringup_retry",
+    summary="Retry a failed VCF management-domain bring-up from its failed sub-task.",
+    description=(
+        "Resumes a COMPLETED_WITH_FAILURE bring-up via PATCH /v1/sddcs/{id} — "
+        "the vendor retrySddc operation — and returns the same SddcTask the "
+        "moment the retry is accepted. The task re-runs from its failed "
+        "sub-task, not from scratch; poll installer.sddc.bringup.status with "
+        "the same id to a terminal state. The spec body is optional: omit it "
+        "to retry the stored SddcSpec as-is (the common transient-failure "
+        "case), or pass a corrected spec for the vendor's edit-and-retry "
+        "flow. dangerous + requires_approval — the dispatch parks first and "
+        "the approver sees the task id (plus, for edit-and-retry, the SDDC "
+        "identity/network preview), never passwords. Triage the failure via "
+        "installer.sddc.bringup.status (failed sub-tasks carry errors[]) "
+        "before retrying."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "The bring-up (SDDC) task id whose status is COMPLETED_WITH_FAILURE."
+                ),
+            },
+            "spec": {
+                "type": "object",
+                "description": (
+                    "Optional corrected SddcSpec for the vendor edit-and-retry "
+                    "flow; omitted, the appliance retries the stored spec "
+                    "as-is."
+                ),
+                "additionalProperties": True,
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": False,
+    },
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_BRINGUP,
+    tags=("vcf", "installer", "bringup", "retry", "dangerous"),
+    safety_level="dangerous",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a failed bring-up task id to resume the deployment "
+            "from its failed sub-task. Parks for human approval before "
+            "anything runs. Read installer.sddc.bringup.status first to see "
+            "which sub-task failed and why."
+        ),
+        output_shape=(
+            "{id, name, status, vcfInstanceName, ...} (SddcTask). The id is "
+            "unchanged — keep polling installer.sddc.bringup.status with it "
+            "to terminal. When the task's sub-task list reduces to a JSONFlux "
+            "handle, id / status stay top-level on the result."
+        ),
+        parameter_hints={
+            "id": "The failed bring-up (SDDC) task id from the deploy.",
+            "spec": "Optional corrected SddcSpec (edit-and-retry); usually omitted.",
+        },
+        result_scalars=_SDDC_TASK_RESULT_SCALARS,
+    ),
+)
+
 _BRINGUP_STATUS = InstallerTypedOp(
     op_id="installer.sddc.bringup.status",
     handler_attr="sddc_bringup_status",
@@ -336,11 +410,13 @@ _BRINGUP_STATUS = InstallerTypedOp(
 
 
 #: The typed ops :class:`InstallerConnector` registers at lifespan startup,
-#: in submit → poll order per primitive pair.
+#: in submit → poll order per primitive pair (the bring-up trio adds the
+#: failed-task retry between its submit and its poll).
 INSTALLER_TYPED_OPS: tuple[InstallerTypedOp, ...] = (
     _SPEC_VALIDATE,
     _VALIDATION_STATUS,
     _BRINGUP_START,
+    _BRINGUP_RETRY,
     _BRINGUP_STATUS,
 )
 

@@ -45,6 +45,7 @@ _EXPECTED_POSTURE: dict[str, tuple[str, bool]] = {
     "installer.sddc.spec.validate": ("caution", False),
     "installer.sddc.validation.status": ("safe", False),
     "installer.sddc.bringup.start": ("dangerous", True),
+    "installer.sddc.bringup.retry": ("dangerous", True),
     "installer.sddc.bringup.status": ("safe", False),
 }
 

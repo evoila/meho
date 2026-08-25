@@ -36,6 +36,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vcf_installer import (
+    INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
     InstallerConnector,
     InstallerTargetLike,
@@ -291,3 +292,107 @@ def test_bringup_start_shares_the_composite_preview_builder() -> None:
     so it registers the composite's secret-hygienic identity/network preview
     (whose no-password property is pinned by the bring-up test module)."""
     assert _PREVIEW_BUILDERS.get(INSTALLER_BRINGUP_START_OP_ID) is _bringup._sddc_bringup_preview
+
+
+# --------------------------------------------------------------- bringup.retry
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_patches_the_task_with_no_body() -> None:
+    """The common transient-failure retry: PATCH the task id, no request body —
+    the appliance resumes the stored spec from the failed sub-task."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        retry_route = mock.patch(f"{_SDDCS_PATH}/sddc-task-1").respond(
+            202, json={"id": "sddc-task-1", "status": "IN_PROGRESS"}
+        )
+        result = await connector.sddc_bringup_retry(
+            _make_operator(), _TARGET, {"id": "sddc-task-1"}
+        )
+
+    assert result == {"id": "sddc-task-1", "status": "IN_PROGRESS"}
+    assert retry_route.call_count == 1
+    request = retry_route.calls[0].request
+    assert request.method == "PATCH"
+    assert request.content == b""
+    assert request.headers.get("authorization") == "Bearer tok-abc"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_patches_a_corrected_spec_when_provided() -> None:
+    """Edit-and-retry: an SddcSpec in params rides the PATCH verbatim."""
+    connector = _make_connector()
+    spec = _sddc_spec()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        retry_route = mock.patch(f"{_SDDCS_PATH}/sddc-task-1").respond(
+            202, json={"id": "sddc-task-1", "status": "IN_PROGRESS"}
+        )
+        result = await connector.sddc_bringup_retry(
+            _make_operator(), _TARGET, {"id": "sddc-task-1", "spec": spec}
+        )
+
+    assert result["id"] == "sddc-task-1"
+    assert json.loads(retry_route.calls[0].request.content) == spec
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_propagates_vendor_400_unretried() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        retry_route = mock.patch(f"{_SDDCS_PATH}/sddc-task-1").respond(
+            400, json={"errorCode": "SDDC_NOT_RETRIABLE", "message": "not in a failed state"}
+        )
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.sddc_bringup_retry(_make_operator(), _TARGET, {"id": "sddc-task-1"})
+
+    assert exc_info.value.response.status_code == 400
+    # A 400 is not an auth failure: no re-login, no second submit.
+    assert token_route.call_count == 1
+    assert retry_route.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_recovers_after_session_invalidation() -> None:
+    """A 401 on the retry is rejected at auth before the server processes it,
+    so the dispatcher's evict → re-dispatch-once recovery cannot double-apply
+    the write; the re-issued PATCH carries the fresh token."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH)
+        token_route.side_effect = [
+            respx.MockResponse(201, json={"accessToken": "tok-1"}),
+            respx.MockResponse(201, json={"accessToken": "tok-2"}),
+        ]
+        retry_route = mock.patch(f"{_SDDCS_PATH}/sddc-task-1")
+        retry_route.side_effect = [
+            respx.MockResponse(401, json={"message": "token expired"}),
+            respx.MockResponse(202, json={"id": "sddc-task-1", "status": "IN_PROGRESS"}),
+        ]
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.sddc_bringup_retry(_make_operator(), _TARGET, {"id": "sddc-task-1"})
+        assert exc_info.value.response.status_code == 401
+
+        await connector.invalidate_session(_TARGET)
+        result = await connector.sddc_bringup_retry(
+            _make_operator(), _TARGET, {"id": "sddc-task-1"}
+        )
+
+    assert result["id"] == "sddc-task-1"
+    assert token_route.call_count == 2
+    assert retry_route.calls[1].request.headers.get("authorization") == "Bearer tok-2"
+    await connector.aclose()
+
+
+def test_bringup_retry_registers_its_own_preview_builder() -> None:
+    """The retry parks ``{"id", "spec"?}`` — not the composite's spec shape —
+    so it registers its own task-id-first preview builder."""
+    assert (
+        _PREVIEW_BUILDERS.get(INSTALLER_BRINGUP_RETRY_OP_ID) is _bringup._sddc_bringup_retry_preview
+    )

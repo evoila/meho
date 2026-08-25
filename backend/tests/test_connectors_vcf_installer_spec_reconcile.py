@@ -91,6 +91,7 @@ def test_typed_write_declared_op_ids_are_pinned() -> None:
             {
                 "POST:/v1/sddcs/validations",
                 "POST:/v1/sddcs",
+                "PATCH:/v1/sddcs/{id}",
             }
         )
         == _typed_writes.TYPED_WRITE_DECLARED_OP_IDS

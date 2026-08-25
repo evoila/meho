@@ -396,3 +396,221 @@ def test_bringup_retry_registers_its_own_preview_builder() -> None:
     assert (
         _PREVIEW_BUILDERS.get(INSTALLER_BRINGUP_RETRY_OP_ID) is _bringup._sddc_bringup_retry_preview
     )
+
+
+# --------------------------------------------------------------- depot family (#3121)
+
+_DEPOT_PATH = "/v1/system/settings/depot"
+_CERTS_PATH = "/v1/sddc-manager/trusted-certificates"
+_BUNDLES_PATH = "/v1/bundles"
+
+
+def _depot_settings() -> dict[str, object]:
+    return {
+        "offlineAccount": {"username": "depot-svc", "password": "SECRET-depot"},
+        "depotConfiguration": {
+            "isOfflineDepot": True,
+            "hostname": "depot.test.invalid",
+            "port": 80,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_depot_get_scrubs_every_password_key() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_DEPOT_PATH).respond(
+            200,
+            json={
+                "offlineAccount": {
+                    "username": "depot-svc",
+                    "password": "SECRET-depot",
+                    "status": "DEPOT_CONNECTION_SUCCESSFUL",
+                },
+                "depotConfiguration": {"isOfflineDepot": True, "hostname": "depot.test.invalid"},
+            },
+        )
+        result = await connector.system_depot_get(_make_operator(), _TARGET, {})
+
+    assert result["offlineAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
+    assert "password" not in result["offlineAccount"]
+    assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_set_puts_settings_and_returns_scrubbed_ok() -> None:
+    connector = _make_connector()
+    settings = _depot_settings()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        put_route = mock.put(_DEPOT_PATH).respond(
+            202,
+            json={
+                "offlineAccount": {
+                    "username": "depot-svc",
+                    "password": "SECRET-depot",
+                    "status": "DEPOT_CONNECTION_SUCCESSFUL",
+                },
+                "depotConfiguration": settings["depotConfiguration"],
+            },
+        )
+        result = await connector.system_depot_set(_make_operator(), _TARGET, {"settings": settings})
+
+    # The DepotSettings body reaches the wire verbatim (credentials included) …
+    assert json.loads(put_route.calls[0].request.content) == settings
+    # … but the governed echo is scrubbed.
+    assert result["status"] == "ok"
+    assert result["settings"]["offlineAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
+    assert "SECRET" not in json.dumps(result)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_set_maps_vendor_rejection_to_depot_error() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.put(_DEPOT_PATH).respond(
+            500,
+            json={
+                "errorCode": "VMWARE_DEPOT_CONNECT_FAILURE",
+                "message": "Secure protocol communication error",
+            },
+        )
+        result = await connector.system_depot_set(
+            _make_operator(), _TARGET, {"settings": _depot_settings()}
+        )
+
+    assert result["status"] == "depot_error"
+    assert result["http_status"] == 500
+    assert result["error_code"] == "VMWARE_DEPOT_CONNECT_FAILURE"
+    assert "trusted-certificates.add" in result["remediation"]
+    # A vendor rejection is not an auth failure: no re-login.
+    assert token_route.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_depot_set_propagates_401_for_session_recovery() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.put(_DEPOT_PATH).respond(401, json={"message": "token expired"})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.system_depot_set(
+                _make_operator(), _TARGET, {"settings": _depot_settings()}
+            )
+
+    # The raw 401 must reach the dispatcher's #2067 recovery arm, never map
+    # to depot_error.
+    assert exc_info.value.response.status_code == 401
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_trusted_certificates_list_reads_store() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_CERTS_PATH).respond(200, json={"elements": []})
+        result = await connector.system_trusted_certificates_list(_make_operator(), _TARGET, {})
+
+    assert result == {"elements": []}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_trusted_certificate_add_defaults_usage_type() -> None:
+    connector = _make_connector()
+    pem = "-----BEGIN CERTIFICATE-----\nMIIBdummy\n-----END CERTIFICATE-----\n"
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        add_route = mock.post(_CERTS_PATH).respond(200, json={})
+        result = await connector.system_trusted_certificate_add(
+            _make_operator(), _TARGET, {"certificate": pem}
+        )
+
+    assert json.loads(add_route.calls[0].request.content) == {
+        "certificate": pem,
+        "certificateUsageType": "TRUSTED_FOR_OUTBOUND",
+    }
+    assert result["status"] == "ok"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bundles_list_reads_inventory() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.get(_BUNDLES_PATH).respond(
+            200, json={"elements": [{"id": "bundle-1", "downloadStatus": "PENDING"}]}
+        )
+        result = await connector.bundles_list(_make_operator(), _TARGET, {})
+
+    assert result["elements"][0]["id"] == "bundle-1"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_collects_partial_failures() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        ok_route = mock.patch(f"{_BUNDLES_PATH}/bundle-1").respond(
+            202, json={"id": "task-1", "name": "Download BUNDLE - X"}
+        )
+        mock.patch(f"{_BUNDLES_PATH}/bundle-2").respond(
+            400, json={"errorCode": "BUNDLE_ALREADY_DOWNLOADED", "message": "already local"}
+        )
+        result = await connector.bundles_download(
+            _make_operator(), _TARGET, {"bundle_ids": ["bundle-1", "bundle-2"]}
+        )
+
+    assert json.loads(ok_route.calls[0].request.content) == {
+        "bundleDownloadSpec": {"downloadNow": True}
+    }
+    assert result["status"] == "partial"
+    assert result["accepted"] == 1
+    assert result["failed"] == 1
+    assert result["results"][0] == {
+        "id": "bundle-1",
+        "status": "accepted",
+        "task_id": "task-1",
+        "task_name": "Download BUNDLE - X",
+    }
+    assert result["results"][1]["error_code"] == "BUNDLE_ALREADY_DOWNLOADED"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bundles_download_propagates_401_for_session_recovery() -> None:
+    connector = _make_connector()
+    async with respx.mock(base_url="https://installer-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(201, json={"accessToken": "tok-abc"})
+        mock.patch(f"{_BUNDLES_PATH}/bundle-1").respond(401, json={"message": "token expired"})
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await connector.bundles_download(
+                _make_operator(), _TARGET, {"bundle_ids": ["bundle-1"]}
+            )
+
+    assert exc_info.value.response.status_code == 401
+    await connector.aclose()
+
+
+def test_depot_family_registers_preview_builders() -> None:
+    """Each #3121 write parks — each registers its own preview builder."""
+    from meho_backplane.connectors.vcf_installer import typed_writes as _tw
+
+    assert _PREVIEW_BUILDERS.get(_tw.INSTALLER_DEPOT_SET_OP_ID) is _bringup._depot_set_preview
+    assert (
+        _PREVIEW_BUILDERS.get(_tw.INSTALLER_TRUSTED_CERTIFICATE_ADD_OP_ID)
+        is _bringup._trusted_certificate_add_preview
+    )
+    assert (
+        _PREVIEW_BUILDERS.get(_tw.INSTALLER_BUNDLES_DOWNLOAD_OP_ID)
+        is _bringup._bundles_download_preview
+    )

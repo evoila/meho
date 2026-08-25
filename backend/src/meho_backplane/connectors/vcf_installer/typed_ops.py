@@ -144,6 +144,7 @@ def _instructions(
     output_shape: str,
     parameter_hints: dict[str, str],
     result_scalars: tuple[str, ...] | None = None,
+    result_digest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     instructions: dict[str, Any] = {
         "when_to_use": when_to_use,
@@ -157,6 +158,13 @@ def _instructions(
         # summary so the submit → poll loop stays drivable through the
         # governed surface (the reducer's ``_preserved_scalars`` contract).
         instructions["result_scalars"] = {"keys": list(result_scalars)}
+    if result_digest is not None:
+        # #3122: the row-digest hint — names the collection to reduce (so a
+        # two-list SddcTask reduces sddcSubTasks[] instead of passing through
+        # the reducer's multi-list detail-object exemption) and drives the
+        # inline per-state counts / IN_PROGRESS names / FAILED-rows-with-errors
+        # digest (the reducer's ``_row_digest`` contract).
+        instructions["result_digest"] = dict(result_digest)
     return instructions
 
 
@@ -186,6 +194,27 @@ _SDDC_TASK_RESULT_SCALARS: tuple[str, ...] = (
     "vcfInstanceName",
     "creationTimestamp",
 )
+
+#: ``SddcTask`` row-digest hint (#3122). On a live management-domain bring-up
+#: ``sddcSubTasks[]`` runs to ~260 rows AND the vendor ``SddcTask`` carries a
+#: populated ``milestones[]`` — two list fields, so the reducer's #2113
+#: dict-of-arrays detail-object exemption would pass the whole document
+#: through UNREDUCED (tens of KB every 150 s poll). This hint names
+#: ``sddcSubTasks`` as THE collection to reduce (so it reduces despite the
+#: sibling ``milestones``) and drives the inline digest: per-``status`` counts,
+#: the ``name`` of every IN_PROGRESS sub-task, and every FAILED /
+#: COMPLETED_WITH_FAILURE sub-task preserved WHOLE (with its ``errors[]``) so
+#: the restart-from-failed flow (installer.sddc.bringup.retry) never needs a
+#: drill-in. The full ``sddcSubTasks`` array stays behind the result handle for
+#: ``result_query`` drill-in. Status field names match the vendored
+#: ``vcf-installer-9.1`` OpenAPI (``components.schemas.SddcSubTask.status``).
+_SDDC_TASK_RESULT_DIGEST: dict[str, Any] = {
+    "collection": "sddcSubTasks",
+    "status_field": "status",
+    "name_field": "name",
+    "active_states": ["IN_PROGRESS"],
+    "failed_states": ["FAILED", "COMPLETED_WITH_FAILURE"],
+}
 
 
 #: The shared ``spec`` parameter hint for the submit primitives — carrying the
@@ -344,11 +373,13 @@ _BRINGUP_START = InstallerTypedOp(
         output_shape=(
             "{id, name, status, vcfInstanceName, ...} (SddcTask). Keep the id "
             "and poll installer.sddc.bringup.status to terminal. When the "
-            "task's sub-task list reduces to a JSONFlux handle, id / status "
-            "stay top-level on the result."
+            "sub-task list reduces to a JSONFlux handle, id / status stay "
+            "top-level and a status_counts / in_progress / failed digest of "
+            "the sub-tasks rides inline (see installer.sddc.bringup.status)."
         ),
         parameter_hints={"spec": _SDDC_SPEC_HINT},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
+        result_digest=_SDDC_TASK_RESULT_DIGEST,
     ),
 )
 
@@ -408,8 +439,9 @@ _BRINGUP_RETRY = InstallerTypedOp(
         output_shape=(
             "{id, name, status, vcfInstanceName, ...} (SddcTask). The id is "
             "unchanged — keep polling installer.sddc.bringup.status with it "
-            "to terminal. When the task's sub-task list reduces to a JSONFlux "
-            "handle, id / status stay top-level on the result."
+            "to terminal. When the sub-task list reduces to a JSONFlux handle, "
+            "id / status stay top-level and a status_counts / in_progress / "
+            "failed digest of the sub-tasks rides inline."
         ),
         parameter_hints={
             "id": "The failed bring-up (SDDC) task id from the deploy.",
@@ -419,6 +451,7 @@ _BRINGUP_RETRY = InstallerTypedOp(
             ),
         },
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
+        result_digest=_SDDC_TASK_RESULT_DIGEST,
     ),
 )
 
@@ -461,11 +494,17 @@ _BRINGUP_STATUS = InstallerTypedOp(
         output_shape=(
             "{id, name, status, vcfInstanceName, sddcSubTasks: [...], "
             "milestones: [...]}. Surface the top-level status and any failed "
-            "sub-task. When the task's sub-task list reduces to a JSONFlux "
-            "handle, id / status stay top-level on the result."
+            "sub-task. On a live bring-up the ~260-row sddcSubTasks reduces to "
+            "a JSONFlux handle; the inline summary then keeps id / status and "
+            "carries a sub-task digest — status_counts (per-state counts), "
+            "in_progress (names of IN_PROGRESS sub-tasks), and failed "
+            "(FAILED / COMPLETED_WITH_FAILURE sub-tasks WITH their errors[], so "
+            "no drill-in is needed to triage or retry). Drill into the full "
+            "sddcSubTasks via result_query on the handle."
         ),
         parameter_hints={"id": "The bring-up (SDDC) task id from the deploy."},
         result_scalars=_SDDC_TASK_RESULT_SCALARS,
+        result_digest=_SDDC_TASK_RESULT_DIGEST,
     ),
 )
 

@@ -204,6 +204,23 @@ _SAMPLE_TAIL = "tail"
 #: submit → poll loop of #3084).
 _RESULT_SCALARS_CONTEXT_KEY = "result_scalars"
 
+#: ``context`` key carrying the op's row-digest hint (#3122). Extends the
+#: ``result_scalars`` pattern to the *collection* the reduction spills: the
+#: connector author registers ``llm_instructions["result_digest"] =
+#: {"collection": ..., "status_field": ..., "name_field": ..., "active_states":
+#: [...], "failed_states": [...]}`` on an op whose dict payload is a
+#: dict-of-arrays where ONE array is THE collection and the sibling arrays are
+#: companions (VCF Installer's ``SddcTask``: ``sddcSubTasks[]`` beside a
+#: populated ``milestones[]``). The hint does two jobs: (1) it names the
+#: collection to reduce, so :func:`_detect_collection` reduces it directly
+#: instead of hitting the #2113 multi-list detail-object exemption and passing
+#: the whole document through UNREDUCED; (2) it drives the inline digest
+#: :func:`_row_digest` writes onto the summary — per-``status_field`` counts,
+#: the ``name_field`` of every row in an ``active_states`` state, and every row
+#: in a ``failed_states`` state preserved WHOLE (with its nested ``errors[]``)
+#: so a failure never requires a drill-in (the #3084 drivability lesson).
+_RESULT_DIGEST_CONTEXT_KEY = "result_digest"
+
 #: Summary keys the reducer itself owns. A hinted scalar key colliding with
 #: one of these is skipped (with a warning) — the reduction bookkeeping is
 #: load-bearing for every consumer and must never be shadowed by a vendor
@@ -373,7 +390,11 @@ class JsonFluxReducer:
         """
         del schema  # schema is inferred from the registered table
 
-        envelope_key, rows = _detect_collection(payload)
+        # Resolve the digest hint once (#3122) so both the collection detection
+        # and the row-digest read the same validated spec — a single warning on
+        # a malformed hint, not one per consumer.
+        digest_spec = _resolve_digest_hint(context)
+        envelope_key, rows = _detect_collection(payload, digest_spec)
         if rows is None:
             # Not a set-shaped payload (scalar, dict-of-scalars, None) —
             # nothing to reduce.
@@ -385,7 +406,10 @@ class JsonFluxReducer:
         materialized = self._materialize(rows, context)
         spill_outcome = await self._spill(materialized, context)
         preserved_scalars = _preserved_scalars(payload, envelope_key, context)
-        return self._assemble(materialized, envelope_key, context, spill_outcome, preserved_scalars)
+        digest = _row_digest(rows, envelope_key, digest_spec)
+        return self._assemble(
+            materialized, envelope_key, context, spill_outcome, preserved_scalars, digest
+        )
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
         """True when *rows* exceeds the row OR byte threshold.
@@ -537,6 +561,7 @@ class JsonFluxReducer:
         context: dict[str, Any] | None,
         spill_outcome: _SpillOutcome,
         preserved_scalars: dict[str, Any] | None = None,
+        digest: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], ResultHandle]:
         """Build the inline summary + the :class:`ResultHandle`.
 
@@ -551,6 +576,12 @@ class JsonFluxReducer:
         never shadow ``row_count`` / ``total`` / ``sample_rows_returned``
         / ``sample_bytes`` / ``source_key`` even if the helper's reserved
         filter is bypassed.
+
+        ``digest`` (#3122) carries the reduced collection's inline digest
+        (:func:`_row_digest`): per-state ``status_counts`` plus, when the op
+        configured them, the ``in_progress`` row names and the whole
+        ``failed`` rows (errors included). It is merged after the scalars and
+        before the bookkeeping, so the reducer-owned keys still win.
 
         The inline sample is serialized **exactly once** (#134): it lives
         only on :attr:`ResultHandle.sample_rows` -- the audit hoist
@@ -591,9 +622,12 @@ class JsonFluxReducer:
         # serialized size the reducer bounded the preview to, so an agent
         # reading the summary knows a preview exists and where to find it
         # without re-measuring the handle. Hinted scalar siblings (#3084)
-        # seed the dict first; the reducer-owned bookkeeping keys are
-        # written after them and therefore always win.
+        # seed the dict first, then the collection digest (#3122); the
+        # reducer-owned bookkeeping keys are written after both and
+        # therefore always win.
         summary: dict[str, Any] = dict(preserved_scalars or {})
+        if digest:
+            summary.update(digest)
         summary.update(
             {
                 "row_count": total_rows,
@@ -619,13 +653,28 @@ class JsonFluxReducer:
         return get_settings().jsonflux_sample_byte_budget
 
 
-def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
+def _detect_collection(
+    payload: Any, digest_spec: _RowDigestSpec | None = None
+) -> tuple[str | None, list[Any] | None]:
     """Locate the primary set-shaped collection in *payload*.
 
     Returns ``(envelope_key, rows)`` where ``envelope_key`` is the dict
     key the list was found under (``None`` for a bare top-level list)
     and ``rows`` is the list itself, or ``(None, None)`` when *payload*
     carries no *paginable* list-shaped collection.
+
+    Author-named collection (#3122)
+    -------------------------------
+    When *digest_spec* names a ``collection`` (the op registered a
+    ``result_digest`` hint) and *payload* is a dict carrying that key as a
+    list, that list is THE collection — returned directly, ahead of every
+    heuristic below. This is what lets an op opt a dict-of-arrays payload
+    OUT of the multi-list detail-object exemption: the VCF Installer's
+    ``SddcTask`` carries ``sddcSubTasks[]`` (~260 rows on a live bring-up)
+    beside a populated ``milestones[]``, so without the hint the >1-real-list
+    rule below would exempt it and pass the whole document through UNREDUCED.
+    A named collection that is absent or not a list falls through to the
+    heuristics — the hint is additive, never a hard failure.
 
     Resolution order:
 
@@ -669,6 +718,12 @@ def _detect_collection(payload: Any) -> tuple[str | None, list[Any] | None]:
     paginated collections while leaving the pod-info detail object (whose
     arrays are all real coordinate fields) at >1 and still exempt.
     """
+    if digest_spec is not None and isinstance(payload, dict):
+        named = payload.get(digest_spec.collection)
+        if isinstance(named, list):
+            return digest_spec.collection, named
+        # Named collection absent or not a list — fall through to the
+        # heuristics so the op still reduces on the shape it does emit.
     if isinstance(payload, list):
         return None, payload
     if not isinstance(payload, dict):
@@ -875,6 +930,151 @@ def _preserved_scalars(
             continue
         preserved[key] = value
     return preserved
+
+
+@dataclass(frozen=True, slots=True)
+class _RowDigestSpec:
+    """A validated ``result_digest`` hint (#3122).
+
+    Built once per reduce by :func:`_resolve_digest_hint` and shared by
+    :func:`_detect_collection` (which uses :attr:`collection` to reduce the
+    named array directly) and :func:`_row_digest` (which uses the rest to
+    build the inline digest). ``active_states`` / ``failed_states`` are
+    frozensets for O(1) membership; either may be empty (a counts-only
+    digest is valid).
+    """
+
+    collection: str
+    status_field: str
+    name_field: str
+    active_states: frozenset[str]
+    failed_states: frozenset[str]
+
+
+def _coerce_state_list(value: Any, context: dict[str, Any] | None, field: str) -> frozenset[str]:
+    """Coerce an ``active_states`` / ``failed_states`` hint value to a frozenset.
+
+    ``None`` (unset) → empty. A list of strings → that set. Anything else is a
+    malformed extra: logged once and treated as empty, so the digest degrades
+    to counts-only rather than raising or silently mis-bucketing — the
+    never-raise discipline the sibling hint paths follow.
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return frozenset(value)
+    _log.warning(
+        "jsonflux_result_digest_invalid_states",
+        op_id=context.get("op_id") if context else None,
+        field=field,
+        received_type=type(value).__name__,
+    )
+    return frozenset()
+
+
+def _resolve_digest_hint(context: dict[str, Any] | None) -> _RowDigestSpec | None:
+    """Validate ``context['result_digest']`` into a :class:`_RowDigestSpec` or ``None``.
+
+    The connector author registers ``llm_instructions["result_digest"]`` on an
+    op whose dict payload is a dict-of-arrays with one dominant collection (the
+    VCF Installer's ``SddcTask``); the dispatcher forwards it verbatim under
+    :data:`_RESULT_DIGEST_CONTEXT_KEY`. ``collection`` and ``status_field`` are
+    load-bearing (they select the array to reduce and the per-row state field),
+    so a missing/non-string value for either disables the hint wholesale
+    (``None`` → the reducer falls back to auto-detection). The enrichment
+    extras degrade gracefully: ``name_field`` defaults to ``"name"`` and the
+    two state lists default to empty via :func:`_coerce_state_list`. Every
+    rejection logs once and never raises — matching the ``result_scalars`` /
+    ``result_ordering`` / ``pagination_hint`` never-raise discipline.
+    """
+    if not context:
+        return None
+    raw = context.get(_RESULT_DIGEST_CONTEXT_KEY)
+    if raw is None:
+        return None
+    op_id = context.get("op_id")
+    if not isinstance(raw, dict):
+        _log.warning(
+            "jsonflux_result_digest_invalid_shape",
+            op_id=op_id,
+            received_type=type(raw).__name__,
+        )
+        return None
+    collection = raw.get("collection")
+    if not isinstance(collection, str) or not collection:
+        _log.warning(
+            "jsonflux_result_digest_invalid_collection",
+            op_id=op_id,
+            received_type=type(collection).__name__,
+        )
+        return None
+    status_field = raw.get("status_field")
+    if not isinstance(status_field, str) or not status_field:
+        _log.warning(
+            "jsonflux_result_digest_invalid_status_field",
+            op_id=op_id,
+            received_type=type(status_field).__name__,
+        )
+        return None
+    name_raw = raw.get("name_field", "name")
+    name_field = name_raw if isinstance(name_raw, str) and name_raw else "name"
+    return _RowDigestSpec(
+        collection=collection,
+        status_field=status_field,
+        name_field=name_field,
+        active_states=_coerce_state_list(raw.get("active_states"), context, "active_states"),
+        failed_states=_coerce_state_list(raw.get("failed_states"), context, "failed_states"),
+    )
+
+
+def _row_digest(
+    rows: list[Any],
+    envelope_key: str | None,
+    digest_spec: _RowDigestSpec | None,
+) -> dict[str, Any]:
+    """Digest the reduced collection into poll-sufficient inline aggregates (#3122).
+
+    Runs only when *digest_spec* is set AND the collection that actually reduced
+    is the one it names (``digest_spec.collection == envelope_key``) — so if the
+    named array was absent and the reducer fell back to a different collection,
+    the digest is skipped rather than computed against the wrong rows.
+
+    Emits, over the FULL collection (not the bounded sample):
+
+    * ``status_counts`` — ``{status: count}`` for every row (a row whose
+      ``status_field`` is missing/non-string buckets under ``"UNKNOWN"``, so
+      ``sum(status_counts.values()) == total_rows``);
+    * ``in_progress`` (only when ``active_states`` is configured) — the
+      ``name_field`` of every row in an active state;
+    * ``failed`` (only when ``failed_states`` is configured) — every row in a
+      failed state, **whole** (nested ``errors[]`` included) so the
+      restart-from-failed flow never needs a drill-in.
+
+    The reduced full collection is still reachable via the result handle; this
+    digest is the drivable summary that rides inline alongside it.
+    """
+    if digest_spec is None or digest_spec.collection != envelope_key:
+        return {}
+    counts: dict[str, int] = {}
+    in_progress: list[Any] = []
+    failed: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        state = row.get(digest_spec.status_field)
+        bucket = state if isinstance(state, str) else "UNKNOWN"
+        counts[bucket] = counts.get(bucket, 0) + 1
+        if isinstance(state, str):
+            if state in digest_spec.active_states:
+                in_progress.append(row.get(digest_spec.name_field))
+            if state in digest_spec.failed_states:
+                failed.append(row)
+    digest: dict[str, Any] = {"status_counts": counts}
+    if digest_spec.active_states:
+        digest["in_progress"] = in_progress
+    if digest_spec.failed_states:
+        digest["failed"] = failed
+    return digest
 
 
 def _serialize(payload: Any) -> bytes:

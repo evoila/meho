@@ -70,6 +70,8 @@ from meho_backplane.operations.jsonflux_reducer import (
     _fit_sample_to_budget,
     _preserved_scalars,
     _query_sample,
+    _resolve_digest_hint,
+    _row_digest,
     _sample_from_tail,
     _serialize,
 )
@@ -1406,6 +1408,185 @@ def test_detect_collection_reduces_paginated_collection_with_hateoas_metadata() 
         "``links`` metadata array"
     )
     assert rows == payload["resourceList"]
+
+
+# ---------------------------------------------------------------------------
+# #3122 — result_digest hint: explicit collection override + inline digest
+# ---------------------------------------------------------------------------
+
+
+def test_detect_collection_digest_hint_overrides_multi_list_exemption() -> None:
+    """A named collection reduces even when a sibling array would exempt it.
+
+    Two real list fields normally hit the #2113 detail-object exemption
+    (``(None, None)``). A ``result_digest`` hint naming one of them makes
+    ``_detect_collection`` return that array directly — the opt-in that lets
+    an SddcTask (``sddcSubTasks`` beside ``milestones``) reduce.
+    """
+    payload = {
+        "id": "task-1",
+        "sddcSubTasks": [{"name": f"s-{i}", "status": "PENDING"} for i in range(60)],
+        "milestones": [{"name": "m-0", "status": "PENDING"}],
+    }
+    # Without the hint: exempt (two real lists).
+    assert _detect_collection(payload) == (None, None)
+
+    spec = _resolve_digest_hint(
+        {"result_digest": {"collection": "sddcSubTasks", "status_field": "status"}}
+    )
+    envelope_key, rows = _detect_collection(payload, spec)
+
+    assert envelope_key == "sddcSubTasks"
+    assert rows == payload["sddcSubTasks"]
+
+
+def test_detect_collection_digest_hint_absent_collection_falls_through() -> None:
+    """A named collection that isn't present falls back to the heuristics.
+
+    The hint is additive: if the named array is absent (or not a list) the
+    reducer still reduces whatever single-list collection the payload does
+    carry, rather than failing to detect anything.
+    """
+    payload = {"pod": "p", "lines": ["a", "b", "c"]}
+    spec = _resolve_digest_hint(
+        {"result_digest": {"collection": "sddcSubTasks", "status_field": "status"}}
+    )
+
+    envelope_key, rows = _detect_collection(payload, spec)
+
+    assert envelope_key == "lines"
+    assert rows == ["a", "b", "c"]
+
+
+def test_row_digest_counts_active_and_failed_over_full_set() -> None:
+    """The digest counts every row, lists active names, keeps failures whole."""
+    rows = [
+        {"name": "a", "status": "IN_PROGRESS"},
+        {"name": "b", "status": "COMPLETED_WITH_SUCCESS"},
+        {"name": "c", "status": "FAILED", "errors": [{"message": "boom"}]},
+        {"name": "d", "status": "COMPLETED_WITH_FAILURE", "errors": [{"message": "bang"}]},
+        {"name": "e"},  # missing status -> UNKNOWN bucket
+    ]
+    spec = _resolve_digest_hint(
+        {
+            "result_digest": {
+                "collection": "subs",
+                "status_field": "status",
+                "name_field": "name",
+                "active_states": ["IN_PROGRESS"],
+                "failed_states": ["FAILED", "COMPLETED_WITH_FAILURE"],
+            }
+        }
+    )
+
+    digest = _row_digest(rows, "subs", spec)
+
+    assert digest["status_counts"] == {
+        "IN_PROGRESS": 1,
+        "COMPLETED_WITH_SUCCESS": 1,
+        "FAILED": 1,
+        "COMPLETED_WITH_FAILURE": 1,
+        "UNKNOWN": 1,
+    }
+    assert sum(digest["status_counts"].values()) == len(rows)
+    assert digest["in_progress"] == ["a"]
+    assert [row["name"] for row in digest["failed"]] == ["c", "d"]
+    assert digest["failed"][0]["errors"] == [{"message": "boom"}]
+
+
+def test_row_digest_skipped_when_reduced_collection_is_not_the_named_one() -> None:
+    """A digest is not computed against the wrong rows.
+
+    When the named collection was absent and a different array reduced, the
+    envelope key won't match the hint's collection, so no digest is emitted.
+    """
+    spec = _resolve_digest_hint({"result_digest": {"collection": "subs", "status_field": "status"}})
+    assert _row_digest([{"status": "X"}], "lines", spec) == {}
+    assert _row_digest([{"status": "X"}], "subs", None) == {}
+
+
+def test_resolve_digest_hint_rejects_missing_required_fields() -> None:
+    """Missing/invalid collection or status_field disables the hint wholesale."""
+    assert _resolve_digest_hint(None) is None
+    assert _resolve_digest_hint({}) is None
+    assert _resolve_digest_hint({"result_digest": "nope"}) is None
+    assert _resolve_digest_hint({"result_digest": {"status_field": "status"}}) is None
+    assert _resolve_digest_hint({"result_digest": {"collection": "subs"}}) is None
+    assert _resolve_digest_hint({"result_digest": {"collection": "", "status_field": "s"}}) is None
+
+
+def test_resolve_digest_hint_defaults_optional_fields() -> None:
+    """name_field defaults to 'name'; malformed state lists degrade to empty."""
+    spec = _resolve_digest_hint(
+        {
+            "result_digest": {
+                "collection": "subs",
+                "status_field": "status",
+                "active_states": "IN_PROGRESS",  # not a list -> empty
+            }
+        }
+    )
+    assert spec is not None
+    assert spec.name_field == "name"
+    assert spec.active_states == frozenset()
+    assert spec.failed_states == frozenset()
+
+
+async def test_reduce_digest_hint_reduces_two_list_payload_end_to_end() -> None:
+    """End-to-end: a two-list payload reduces the named array + emits the digest."""
+    reducer = JsonFluxReducer(sample_size=5, sample_byte_budget=4096)
+    payload = {
+        "id": "task-1",
+        "status": "IN_PROGRESS",
+        "sddcSubTasks": [
+            {"name": f"s-{i}", "status": "IN_PROGRESS" if i < 2 else "COMPLETED_WITH_SUCCESS"}
+            for i in range(60)
+        ],
+        "milestones": [{"name": "m-0", "status": "PENDING"}],
+    }
+    context = {
+        "op_id": "x",
+        "result_scalars": {"keys": ["id", "status"]},
+        "result_digest": {
+            "collection": "sddcSubTasks",
+            "status_field": "status",
+            "name_field": "name",
+            "active_states": ["IN_PROGRESS"],
+            "failed_states": ["FAILED"],
+        },
+    }
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is not None, "the named collection must reduce despite milestones"
+    assert handle.total_rows == 60
+    assert reduced["id"] == "task-1"
+    assert reduced["source_key"] == "sddcSubTasks"
+    assert "sddcSubTasks" not in reduced
+    assert reduced["status_counts"] == {"IN_PROGRESS": 2, "COMPLETED_WITH_SUCCESS": 58}
+    assert reduced["in_progress"] == ["s-0", "s-1"]
+    assert reduced["failed"] == []  # failed_states configured -> key present, empty
+
+
+async def test_reduce_digest_hint_malformed_falls_back_to_heuristics() -> None:
+    """A malformed digest hint never raises; detection falls back, no digest.
+
+    Matches the never-raise discipline of the sibling hints: a broken hint
+    degrades to the pre-#3122 behavior (heuristic detection) rather than
+    failing the read. A two-list payload then re-hits the exemption.
+    """
+    reducer = JsonFluxReducer(sample_size=5)
+    payload = {
+        "id": "task-1",
+        "sddcSubTasks": [{"name": f"s-{i}", "status": "PENDING"} for i in range(60)],
+        "milestones": [{"name": "m-0", "status": "PENDING"}],
+    }
+    context = {"op_id": "x", "result_digest": {"status_field": "status"}}  # no collection
+
+    reduced, handle = await reducer.reduce(payload, None, context)
+
+    assert handle is None, "malformed hint -> heuristic detection -> two-list exemption"
+    assert reduced is payload
 
 
 def _large_application_pod(now: datetime) -> Any:

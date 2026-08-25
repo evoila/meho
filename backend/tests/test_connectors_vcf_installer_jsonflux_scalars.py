@@ -36,7 +36,11 @@ _OPS_BY_ID = {op.op_id: op for op in INSTALLER_TYPED_OPS}
 #: The vendor object each op returns, keyed by op_id — the two submit/poll
 #: pairs share their response shape, so the expected scalar keys pair up.
 _VALIDATION_OPS = ("installer.sddc.spec.validate", "installer.sddc.validation.status")
-_SDDC_TASK_OPS = ("installer.sddc.bringup.start", "installer.sddc.bringup.status")
+_SDDC_TASK_OPS = (
+    "installer.sddc.bringup.start",
+    "installer.sddc.bringup.retry",
+    "installer.sddc.bringup.status",
+)
 
 
 def _registered_scalars_context(op_id: str) -> dict[str, Any]:
@@ -95,7 +99,7 @@ def _sddc_task(subtask_count: int, *, with_milestones: bool) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_primitives_register_the_result_scalars_hint() -> None:
+def test_all_primitives_register_the_result_scalars_hint() -> None:
     """The hint is registered per response shape, poll key first.
 
     ``id`` must be listed for every op — it is the poll key the live

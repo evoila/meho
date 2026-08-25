@@ -438,6 +438,43 @@ async def test_bringup_preview_returns_none_without_spec() -> None:
     assert await _bringup._sddc_bringup_preview(ctx) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.asyncio
+async def test_bringup_retry_preview_echoes_the_task_id() -> None:
+    """The plain retry parks with only the failed task id — the preview names
+    the operation and that id, nothing else (#3123)."""
+    ctx = SimpleNamespace(params={"id": "sddc-task-1"})
+    preview = await _bringup._sddc_bringup_retry_preview(ctx)  # type: ignore[arg-type]
+
+    assert preview == {
+        "operation": "VCF bring-up retry (resume a failed installation task)",
+        "sddc_task_id": "sddc-task-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_preview_edit_and_retry_echoes_identity_never_secrets() -> None:
+    """Edit-and-retry appends the composite's blast-radius identity — and
+    inherits its no-password property."""
+    ctx = SimpleNamespace(params={"id": "sddc-task-1", "spec": _spec_with_secrets()})
+    preview = await _bringup._sddc_bringup_retry_preview(ctx)  # type: ignore[arg-type]
+
+    assert preview is not None
+    assert preview["edit_and_retry"] is True
+    assert preview["sddc_task_id"] == "sddc-task-1"
+    assert preview["sddc_id"] == "mgmt-domain"
+    assert preview["vcenter_hostname"] == "vc01.evba.lab"
+    dumped = json.dumps(preview)
+    assert "SECRET" not in dumped
+    for secret_key in ("rootVcenterPassword", "credentials", "sshPassword"):
+        assert secret_key not in dumped
+
+
+@pytest.mark.asyncio
+async def test_bringup_retry_preview_returns_none_without_id() -> None:
+    ctx = SimpleNamespace(params={})
+    assert await _bringup._sddc_bringup_retry_preview(ctx) is None  # type: ignore[arg-type]
+
+
 # --------------------------------------------------------------- guards / plumbing
 
 

@@ -21,7 +21,8 @@ governed bring-up **write** `installer.composite.sddc.bringup` — a `dangerous`
 `requires_approval` composite (validate → deploy) — because the
 highest-blast-radius write in the product must carry the preview + sub-op-policy
 machinery a raw op cannot. [#3078](https://github.com/evoila/meho/issues/3078)
-then decomposed the surface into four **submit/poll typed primitives** (the
+then decomposed the surface into **submit/poll typed primitives** — five since
+the [#3123](https://github.com/evoila/meho/issues/3123) failed-task retry — (the
 vendor bring-up API is natively asynchronous, so every governed call is short
 and the standard park → approve → resume machinery works as-is): the durable
 multi-hour orchestration loop belongs to the deploy-automation add-on, which
@@ -82,9 +83,9 @@ authenticated request covers reachability and auth-challenge.
 
 ## Operations
 
-### The four submit/poll primitives (typed, [#3078](https://github.com/evoila/meho/issues/3078))
+### The five submit/poll primitives (typed, [#3078](https://github.com/evoila/meho/issues/3078), retry [#3123](https://github.com/evoila/meho/issues/3123))
 
-All four are typed ops (`source_kind="typed"`), dispatchable on a fresh boot
+All five are typed ops (`source_kind="typed"`), dispatchable on a fresh boot
 with zero catalog ingest; read bodies live in `typed_reads.py`, submit bodies
 in `typed_writes.py`, a bound-method shim on the connector exposes each. Every
 call is short — the submits return their tracking object in seconds and the
@@ -96,6 +97,7 @@ machinery exist here.
 | `installer.sddc.spec.validate` | `POST /v1/sddcs/validations` → `Validation` | `caution` (writes to the installer, mutates no estate) |
 | `installer.sddc.validation.status` | `GET /v1/sddcs/validations/{id}` → `Validation` | `safe` |
 | `installer.sddc.bringup.start` | `POST /v1/sddcs` → `SddcTask` | `dangerous` + `requires_approval` |
+| `installer.sddc.bringup.retry` | `PATCH /v1/sddcs/{id}` (`retrySddc`) → `SddcTask` | `dangerous` + `requires_approval` |
 | `installer.sddc.bringup.status` | `GET /v1/sddcs/{id}` → `SddcTask` | `safe` |
 
 `spec.validate` submits the caller's `SddcSpec` verbatim as a non-mutating
@@ -105,15 +107,20 @@ dry-run; `validation.status` polls the returned id to a terminal
 mutation: the dispatcher parks it for approval before the handler runs, and its
 park-time preview is the composite's `_blast_radius`-backed identity/network
 echo (registered for both op_ids in `bringup.py`) — never a password.
-`bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
+`bringup.retry` (#3123) resumes a `COMPLETED_WITH_FAILURE` task from its failed
+sub-task under the same posture: the `SddcSpec` body is optional (omitted, the
+appliance retries the stored spec as-is — the common transient-failure case;
+provided, it is the vendor's edit-and-retry flow), and its own park-time
+preview leads with the failed task id, appending the blast-radius identity only
+when a spec rides along. `bringup.status` polls the `SddcTask` (`IN_PROGRESS` /
 `COMPLETED_WITH_SUCCESS` / `COMPLETED_WITH_FAILURE`, plus `sddcSubTasks[]` /
-`milestones[]`). Session-expiry recovery for all four rides the dispatcher's
+`milestones[]`). Session-expiry recovery for all five rides the dispatcher's
 #2067 arm (raw `401` → `invalidate_session` → re-dispatch once — safe for the
-POSTs too, since a `401` is rejected at auth before the server processes the
-request).
+POSTs/PATCH too, since a `401` is rejected at auth before the server processes
+the request).
 
 **Poll scalars survive JSONFlux reduction
-([#3084](https://github.com/evoila/meho/issues/3084)).** All four
+([#3084](https://github.com/evoila/meho/issues/3084)).** All five
 primitives register the `result_scalars` reduction hint (see
 `docs/architecture/jsonflux.md` § *Preserved scalar siblings*): when an
 over-threshold `validationChecks[]` / `sddcSubTasks[]` rides the JSONFlux
@@ -213,8 +220,10 @@ shelf is unconfigured). Standard:
 - The composite **kicks off** the bring-up and returns the `SddcTask` id; it does
   not block on the multi-hour deployment. Terminal state (`COMPLETED_WITH_SUCCESS`
   / `ROLLBACK_SUCCESS` / `COMPLETED_WITH_FAILURE`) is reached by polling
-  `installer.sddc.bringup.status`. Durable orchestration of that wait (retry, resume) is
-  the deploy-automation add-on's DBOS workflow, not this connector.
+  `installer.sddc.bringup.status`. A `COMPLETED_WITH_FAILURE` resumes via the
+  `installer.sddc.bringup.retry` primitive (#3123); *durable* orchestration of
+  the wait-and-retry loop is the deploy-automation add-on's DBOS workflow, not
+  this connector.
 - `WARNING`-result validations proceed to deploy (VCF treats them as non-fatal);
   the return always echoes `validation_result_status` (and the leaf WARNING
   checks when present), but the approver saw the preview *before* validation ran.

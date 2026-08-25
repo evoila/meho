@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — governed bring-up retry: `installer.sddc.bringup.retry` (#3123)
+
+- A failed VCF management-domain bring-up was unrecoverable through the
+  governed path: the vendor's only recovery — resume from the failed
+  sub-task via `PATCH /v1/sddcs/{id}` (`retrySddc`) — had no connector op,
+  forcing the operator out-of-band at the most sensitive moment of the
+  bring-up lifecycle (hit live at 262/263 sub-tasks green on a transient
+  first-boot `INVENTORY_INTERNAL_SERVER_ERROR`). The new
+  `installer.sddc.bringup.retry` typed primitive resumes the task under
+  the same posture as the start (`dangerous` + `requires_approval`): the
+  spec body is optional (omit to retry the stored `SddcSpec` as-is — the
+  common transient-failure case; pass a corrected spec for the vendor's
+  edit-and-retry flow), the park-time preview leads with the failed task
+  id (plus the secret-hygienic identity/network blast-radius when a spec
+  rides along), and the returned `SddcTask` keeps its id, so
+  `installer.sddc.bringup.status` polling continues unchanged. The
+  spec-reconcile lane pins the new `PATCH:/v1/sddcs/{id}` against the
+  vendored 9.1 OpenAPI.
+
 ### Fixed — vm.create folder lookup is datacenter-aware and fail-loud on ambiguity (#3115)
 
 - `vmware.composite.vm.create` resolved `folder_name` via an **unscoped**

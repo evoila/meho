@@ -44,6 +44,7 @@ from meho_backplane.connectors.vcf_installer.typed_ops import (
     register_installer_typed_operations,
 )
 from meho_backplane.connectors.vcf_installer.typed_writes import (
+    INSTALLER_BRINGUP_RETRY_OP_ID,
     INSTALLER_BRINGUP_START_OP_ID,
     INSTALLER_SPEC_VALIDATE_OP_ID,
 )
@@ -83,6 +84,7 @@ register_typed_op_registrar(register_installer_composite_operations)
 
 __all__ = [
     "INSTALLER_BRINGUP_OP_ID",
+    "INSTALLER_BRINGUP_RETRY_OP_ID",
     "INSTALLER_BRINGUP_START_OP_ID",
     "INSTALLER_CONNECTOR_ID",
     "INSTALLER_EXECUTION_PROFILE",

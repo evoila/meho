@@ -416,6 +416,16 @@ class InstallerConnector(HttpConnector):
 
         return await installer_sddc_bringup_start_impl(self, operator, target, params)
 
+    async def sddc_bringup_retry(
+        self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``installer.sddc.bringup.retry`` shim — failed bring-up resume."""
+        from meho_backplane.connectors.vcf_installer.typed_writes import (
+            installer_sddc_bringup_retry_impl,
+        )
+
+        return await installer_sddc_bringup_retry_impl(self, operator, target, params)
+
     async def sddc_bringup_status(
         self, operator: Operator, target: InstallerTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

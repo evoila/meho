@@ -1679,6 +1679,35 @@ def _result_scalars_from_descriptor(descriptor: EndpointDescriptor) -> dict[str,
     return None
 
 
+def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract ``result_digest`` from a descriptor's ``llm_instructions``.
+
+    #3122. Connectors whose op returns a dict-of-arrays with one dominant
+    collection that must reduce even though a sibling array is present (the VCF
+    Installer's ``SddcTask``: ``sddcSubTasks[]`` beside a populated
+    ``milestones[]``) attach ``{"collection": ..., "status_field": ...,
+    "active_states": [...], "failed_states": [...]}`` under
+    ``llm_instructions.result_digest``; the reducer reads it via the
+    dispatcher-supplied context to (1) reduce the named array instead of hitting
+    the multi-list detail-object exemption and (2) write a per-state count /
+    active-names / failed-rows digest inline. Mirrors
+    :func:`_result_scalars_from_descriptor` exactly — a plain dict is returned
+    (not a validated model) so this layer stays free of a connectors-schema
+    import; the reducer validates it.
+
+    ``None`` outcomes (op didn't register the hint, ``llm_instructions`` is
+    ``None``, or the slot's value is not a dict) all flow to the reducer as
+    "no hint" — it detects the collection heuristically and writes no digest.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_digest")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 async def _reduce_or_error(
     *,
     op_id: str,
@@ -1763,6 +1792,16 @@ async def _reduce_or_error(
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:
         reducer_context["result_scalars"] = result_scalars
+    # #3122: forward the op's row-digest hint (when the connector author
+    # registered one via ``llm_instructions``) so the reducer reduces the
+    # named collection even in the presence of a sibling array and writes the
+    # per-state counts / in-progress names / failed-rows digest inline.
+    # ``None`` on ops without a hint -- the reducer detects the collection
+    # heuristically and writes no digest. Pulled here (vs. in the reducer) for
+    # the same decoupling reason as the three hints above.
+    result_digest = _result_digest_from_descriptor(descriptor)
+    if result_digest is not None:
+        reducer_context["result_digest"] = result_digest
     try:
         return await _DEFAULT_REDUCER.reduce(
             raw,

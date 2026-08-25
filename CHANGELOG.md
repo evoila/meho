@@ -117,6 +117,26 @@ connector-related release-notes line.
   discovery time what this program learned from validator errors and
   inventory stack traces.
 
+### Fixed — `installer.sddc.bringup.status` reduces the ~260-row sub-task array (#3122)
+
+- Polling a live VCF 9.1 management-domain bring-up returned the whole vendor
+  `SddcTask` document inline on every 150 s poll — including the full
+  `sddcSubTasks[]` array (~260 rows, tens of KB) — with no JSONFlux handle and
+  no reduction, violating v0.1-spec §4. Root cause: the live `SddcTask` carries
+  **both** `sddcSubTasks[]` and a populated `milestones[]`, so the reducer's
+  #2113 multi-list detail-object exemption classified it as a dict-of-arrays
+  and passed it through unreduced — the `result_scalars` hint (#3084) never even
+  fired. New opt-in `result_digest` reducer hint (threaded like `result_scalars`
+  / `result_ordering` / `pagination_hint`): an op names its dominant collection,
+  so the reducer reduces it despite the sibling array, and writes a drivable
+  inline digest — per-`status` counts, the names of `IN_PROGRESS` sub-tasks, and
+  every `FAILED` / `COMPLETED_WITH_FAILURE` sub-task preserved **whole with its
+  `errors[]`** so the restart-from-failed flow (`installer.sddc.bringup.retry`)
+  never needs a drill-in. The full `sddcSubTasks` array stays behind the result
+  handle for `result_query`. Applied to the three `SddcTask` bring-up ops
+  (`start` / `retry` / `status`); the #2113 exemption is unchanged for every op
+  that does not register the hint.
+
 ### Added — governed bring-up retry: `installer.sddc.bringup.retry` (#3123)
 
 - A failed VCF management-domain bring-up was unrecoverable through the

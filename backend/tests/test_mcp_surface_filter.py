@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -439,6 +440,33 @@ def test_extract_scopes_list_claim_tolerated() -> None:
     claims = {"scope": ["openid", "mcp:admin"]}
     result = _extract_scopes(claims, _StubSettings())  # type: ignore[arg-type]
     assert result == frozenset({"openid", "mcp:admin"})
+
+
+def test_extract_scopes_duplicate_array_does_not_warn() -> None:
+    """A well-formed array that repeats a scope collapses without warning.
+
+    The ``non_string_entries_dropped`` diagnostic must fire only when a
+    *non-string* entry is dropped — not when the frozenset merely
+    de-duplicates a repeated string. A genuine non-string entry still
+    warns.
+    """
+    with patch("meho_backplane.auth.jwt.structlog") as mock_structlog:
+        mock_log = mock_structlog.get_logger.return_value
+
+        dup = _extract_scopes(
+            {"scope": ["mcp:admin", "mcp:admin"]},
+            _StubSettings(),  # type: ignore[arg-type]
+        )
+        assert dup == frozenset({"mcp:admin"})
+        mock_log.warning.assert_not_called()
+
+        dropped = _extract_scopes(
+            {"scope": ["mcp:admin", 42]},
+            _StubSettings(),  # type: ignore[arg-type]
+        )
+        assert dropped == frozenset({"mcp:admin"})
+        mock_log.warning.assert_called_once()
+        assert mock_log.warning.call_args.kwargs["reason"] == "non_string_entries_dropped"
 
 
 def test_extract_scopes_absent_claim_is_empty_fail_closed() -> None:

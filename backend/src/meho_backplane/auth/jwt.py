@@ -794,15 +794,20 @@ def _extract_scopes(claims: Any, settings: Settings) -> frozenset[str]:
     if isinstance(raw, str):
         return frozenset(raw.split())
     if isinstance(raw, (list, tuple)):
-        values = {item for item in raw if isinstance(item, str)}
-        if len(values) != len(raw):
+        # Count string entries with duplicates preserved: comparing a
+        # de-duplicated set against ``len(raw)`` would spuriously report
+        # ``non_string_entries_dropped`` for a well-formed array that
+        # merely repeats a scope (``["mcp:admin", "mcp:admin"]``). The
+        # frozenset still collapses duplicates in the returned value.
+        string_items = [item for item in raw if isinstance(item, str)]
+        if len(string_items) != len(raw):
             log = structlog.get_logger(__name__)
             log.warning(
                 "malformed_scope_claim",
                 claim_name=claim_name,
                 reason="non_string_entries_dropped",
             )
-        return frozenset(values)
+        return frozenset(string_items)
     log = structlog.get_logger(__name__)
     log.warning(
         "malformed_scope_claim",

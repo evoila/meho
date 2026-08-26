@@ -3,7 +3,7 @@
 
 """Admin MCP tools for the agent permission grant surface.
 
-G11.2-T6 (#819) under Initiative #803 — five ``meho_agents_grant_*``
+G11.2-T6 (#819) under Initiative #803 — four ``meho_agents_grant_*``
 tools that mirror the REST surface
 (``/api/v1/agents/grants``) onto the MCP transport:
 
@@ -13,10 +13,17 @@ tools that mirror the REST surface
   Role: ``tenant_admin``.
 * ``meho_agents_grant_create`` — create a grant (permanent or
   time-bounded). Role: ``tenant_admin``.
-* ``meho_agents_grant_elevate`` — create a time-bounded elevation
-  (``expires_at`` required). Role: ``tenant_admin``.
 * ``meho_agents_grant_revoke`` — revoke (delete) a grant.
   Role: ``tenant_admin``.
+
+The dedicated elevation verb — ``meho_agents_grant_elevate`` — has
+**no MCP path under any claim set** (#3155, Initiative #3153):
+granting a time-bounded privilege elevation is a human-only operator
+action, so it is not agent-invocable. It stays on the REST / CLI /
+console surfaces (``POST /api/v1/agents/grants/elevate``, ``meho agent
+grant elevate``), which are untouched. The wire name is pinned in
+:mod:`meho_backplane.mcp.human_only` so a ``tools/call`` on it returns
+a remediation naming those paths.
 
 RBAC enforcement
 ================
@@ -53,7 +60,6 @@ import structlog
 from pydantic import ValidationError
 
 from meho_backplane.agents.grant_schemas import (
-    AgentElevationCreate,
     AgentGrantCreate,
     AgentGrantRead,
     GrantVerdict,
@@ -69,7 +75,6 @@ _GRANT_OP_IDS: Final[dict[str, str]] = {
     "list": "agent.grant.list",
     "show": "agent.grant.show",
     "create": "agent.grant.create",
-    "elevate": "agent.grant.elevate",
     "revoke": "agent.grant.revoke",
 }
 
@@ -290,84 +295,6 @@ register_mcp_tool(
         op_class="write",
     ),
     handler=_create_grant_handler,
-)
-
-
-# ---------------------------------------------------------------------------
-# meho_agents_grant_elevate
-# ---------------------------------------------------------------------------
-
-
-async def _elevate_grant_handler(
-    operator: Operator,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    try:
-        payload = AgentElevationCreate.model_validate(arguments)
-    except ValidationError as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_GRANT_OP_IDS["elevate"],
-        audit_op_class="write",
-        audit_agent_name=payload.principal_sub,
-    )
-    service = AgentGrantService()
-    try:
-        entry = await service.grant(operator.tenant_id, operator.sub, payload)
-    except GrantValidationError as exc:
-        raise McpInvalidParamsError(exc.message) from exc
-    return _row_to_dict(entry)
-
-
-register_mcp_tool(
-    definition=ToolDefinition(
-        feature="agent_runtime",
-        name="meho_agents_grant_elevate",
-        description=(
-            "Grant a time-bounded elevation to an agent principal (G11.2-T6). "
-            "expires_at is required. The grant-expiry sweeper reverts the "
-            "agent to baseline automatically after the window ends. The "
-            "created row carries `grant_id` (accepted verbatim by "
-            "meho_agents_grant_show / meho_agents_grant_revoke) alongside the native `id`. "
-            "Enforcement scope: elevations gate ONLY tokens carrying the "
-            "principal_kind=agent claim (registered agent principals); "
-            "human/service tokens are never gated. principal_sub must name a "
-            "registered, non-revoked agent principal (its agent:<name> "
-            "handle) or creation is rejected."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "principal_sub": {
-                    "type": "string",
-                    "description": "JWT sub of the agent principal.",
-                },
-                "op_pattern": {
-                    "type": "string",
-                    "description": "fnmatch glob matching operation IDs.",
-                },
-                "target_scope": {
-                    "type": "string",
-                    "description": "Target UUID or '*' for any target (optional).",
-                },
-                "verdict": {
-                    "type": "string",
-                    "enum": [v.value for v in GrantVerdict],
-                    "description": "Permission verdict for the elevation window.",
-                },
-                "expires_at": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "Required UTC expiry for the elevation.",
-                },
-            },
-            "required": ["principal_sub", "op_pattern", "verdict", "expires_at"],
-            "additionalProperties": False,
-        },
-        required_role=TenantRole.TENANT_ADMIN,
-        op_class="write",
-    ),
-    handler=_elevate_grant_handler,
 )
 
 

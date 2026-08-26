@@ -2245,55 +2245,13 @@ async def test_decide_approve_redispatches_direct_op_with_stored_params(
     clear_registry()
 
 
-@pytest.mark.asyncio
-async def test_mcp_approve_redispatches_direct_op_with_stored_params(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A parked direct op approved via MCP by-id executes once (#1503, AC1).
-
-    Mirrors the ``/decide`` test for the MCP ``meho_approvals_approve``
-    surface: approve by id alone → the handler re-dispatches with the
-    stored params, runs once, and returns the dispatch outcome under
-    ``dispatch``.
-    """
-    from meho_backplane.connectors.registry import clear_registry
-    from meho_backplane.mcp.tools.approvals import _approve_handler
-    from meho_backplane.operations import dispatch, reset_dispatcher_caches
-
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    get_settings.cache_clear()
-
-    _RECORDED_EXECUTIONS.clear()
-    reset_dispatcher_caches()
-    clear_registry()
-    await _register_recording_requires_approval_op(monkeypatch)
-
-    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
-    params = {"path": "secret/api", "value": "tok-123"}
-
-    result1 = await dispatch(
-        operator=requester,
-        connector_id="rectest-1.x",
-        op_id="rectest.write",
-        target=None,
-        params=params,
-    )
-    assert result1.status == "awaiting_approval", result1.error
-    approval_request_id = uuid.UUID(result1.extras["approval_request_id"])
-
-    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
-    out = await _approve_handler(reviewer, {"approval_request_id": str(approval_request_id)})
-
-    assert out["status"] == ApprovalRequestStatus.APPROVED.value
-    assert out["dispatch"]["status"] == "ok", out["dispatch"]["error"]
-    assert out["dispatch"]["op_id"] == "rectest.write"
-    assert len(_RECORDED_EXECUTIONS) == 1
-    assert _RECORDED_EXECUTIONS[0]["params"] == params
-
-    reset_dispatcher_caches()
-    clear_registry()
+# NOTE (#3155): the MCP-approve twin of the ``/decide`` direct-op
+# stored-params test was removed with the MCP approve tool — approving a
+# parked operation is human-only now (console/CLI), with no
+# ``meho_approvals_approve`` handler. The #1503 AC1 re-dispatch-with-stored-
+# params behaviour stays covered by
+# ``test_decide_approve_redispatches_direct_op_with_stored_params`` on the
+# ``/decide`` REST surface that still exists.
 
 
 async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:

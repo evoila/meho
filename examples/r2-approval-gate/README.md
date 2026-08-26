@@ -265,18 +265,22 @@ execution on the broadcast event, not on the REST round-trip.
 
 ### MCP
 
-For operators driving Claude Code (or any other MCP-aware client):
+For operators driving Claude Code (or any other MCP-aware client),
+the MCP surface exposes the **read** half only:
 
 ```
 meho_approvals_list                            # pending requests
 meho_approvals_get(request_id="…")             # inspect proposed_effect
-meho_approvals_approve(request_id="…")         # approve
-meho_approvals_reject(request_id="…", reason="…")  # reject
 ```
 
-Same wire format as the REST surface; tools auto-load when the
-operator's MCP client connects to `$MEHO_INSTANCE/mcp`. Tool
-definitions live in [`mcp/tools/approvals.py`][mcp].
+The **decision** verbs (approve / reject) have no MCP path under any
+claim set (#3155): approving or rejecting a parked operation is a human
+decision (v0.1-spec §7), so a model session — even one holding an
+elevated operator token — cannot approve its own parked op. Decide via
+the CLI (`meho approvals approve|reject <request-id>`) or the operator
+console instead; a `tools/call` on `meho_approvals_approve` /
+`meho_approvals_reject` returns a not-found error naming those paths.
+Read-tool definitions live in [`mcp/tools/approvals.py`][mcp].
 
 ### CLI
 

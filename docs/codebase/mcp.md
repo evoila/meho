@@ -163,6 +163,32 @@ two tool descriptions therefore cross-reference the `kb` REST/CLI surface
 and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
 or `meho kb delete` — there is no MCP delete tool).
 
+### Proactive-trigger wording on the coordination levers (#3132)
+
+The three coordination levers — knowledge (`search_knowledge` /
+`add_to_knowledge`), memory (`search_memory` / `add_to_memory`), and
+broadcast (`meho_broadcast_recent` / `meho_broadcast_announce`) — are
+*optional* capabilities: an agent can complete an operation without
+ever touching them. Current Claude models under-reach for optional
+capabilities, and Anthropic's tool-use guidance is that a prescriptive
+"call this when …" trigger in the description measurably lifts
+should-call rates. So each of these six descriptions carries an
+explicit **proactive-trigger** sentence in its when-to-call part that
+names the *unprompted* case — search before answering, capture the
+moment something is learned, read the broadcast window before the first
+`call_operation`, announce before a mutating op — not only the reactive
+case where the operator explicitly asked. The read-before-start /
+announce-before-mutate / write-back-after-learning discipline was
+previously stated only in the tenant preamble and Layer-2 skills
+(advisory context the model does not re-read at call time); moving the
+trigger into the per-tool description puts it where the model actually
+consults it. The wording is load-bearing per the `operations.py`
+description contract — a future edit that drops the proactive sentence
+is a behavioural regression, and the substring guards in
+`tests/test_mcp_tools_knowledge.py` / `test_mcp_tools_memory.py` pin
+the load-bearing pieces. The maturity prefix (#2675) and the kb
+REST/CLI cross-references (#2486) are unchanged by this wording pass.
+
 ### Runbook family canonicalisation (#1612)
 
 The 11 runbook tools were the last flat multi-verb family

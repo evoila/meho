@@ -73,7 +73,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay)",
+		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay / reflex)",
 		Long: "Query the WORM-grade audit log written by the backplane on " +
 			"every authenticated request. Wraps the G8.1-T2 REST surface " +
 			"(/api/v1/audit/*). All verbs are tenant-scoped via the operator's " +
@@ -86,6 +86,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newWhoTouchedCmd())
 	cmd.AddCommand(newMyRecentCmd())
 	cmd.AddCommand(newReplayCmd())
+	cmd.AddCommand(newReflexCmd())
 	return cmd
 }
 

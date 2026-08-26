@@ -477,6 +477,12 @@ const (
 	SurfaceChecklistVerdictREVIEWMANUALLY SurfaceChecklistVerdict = "REVIEW MANUALLY"
 )
 
+// Defines values for SurfaceMetricsSurface.
+const (
+	SurfaceMetricsSurfaceAgent   SurfaceMetricsSurface = "agent"
+	SurfaceMetricsSurfaceCliRest SurfaceMetricsSurface = "cli_rest"
+)
+
 // Defines values for SurfaceResultBaselineVerdict.
 const (
 	SurfaceResultBaselineVerdictGreen  SurfaceResultBaselineVerdict = "green"
@@ -5579,6 +5585,20 @@ type ReassignRunResponse struct {
 	RunId        openapi_types.UUID `json:"run_id"`
 }
 
+// ReflexReport Top-level shape returned by :func:`compute_reflex_report` + the route.
+//
+// “surfaces“ is always ordered “[agent, cli_rest]“ so table
+// renderers and “--json“ consumers see a stable shape even for an
+// empty window (both surfaces present with zero-valued / “None“
+// metrics). “tenant_id“ is the scope the report was computed for
+// (the operator's own tenant, or a “platform_admin“ filter).
+type ReflexReport struct {
+	Since    time.Time           `json:"since"`
+	Surfaces []SurfaceMetrics    `json:"surfaces"`
+	TenantId *openapi_types.UUID `json:"tenant_id"`
+	Until    time.Time           `json:"until"`
+}
+
 // RefreshResult Per-target reconcile outcome returned by :func:`refresh_target_topology`.
 //
 // Counts are disjoint per object class: a node is counted in exactly
@@ -7134,6 +7154,29 @@ type SurfaceChecklistSurface string
 // SurfaceChecklistVerdict defines model for SurfaceChecklist.Verdict.
 type SurfaceChecklistVerdict string
 
+// SurfaceMetrics The four reflex metrics for one surface (“agent“ / “cli_rest“).
+//
+// Each ratio is reported as a rounded percentage/rate together with
+// the raw numerator and denominator, so a consumer can re-derive the
+// ratio and a zero-denominator surface reads as “None“ (N/A) rather
+// than a misleading “0.0“. Frozen so report instances can be passed
+// around without accidental mutation.
+type SurfaceMetrics struct {
+	AnnounceCoverageAnnounced int                   `json:"announce_coverage_announced"`
+	AnnounceCoveragePct       *float32              `json:"announce_coverage_pct"`
+	AnnounceCoverageWriteOps  int                   `json:"announce_coverage_write_ops"`
+	ReadBeforeActPct          *float32              `json:"read_before_act_pct"`
+	ReadBeforeActReadFirst    int                   `json:"read_before_act_read_first"`
+	ReadBeforeActSessions     int                   `json:"read_before_act_sessions"`
+	Surface                   SurfaceMetricsSurface `json:"surface"`
+	WriteBackAddCalls         int                   `json:"write_back_add_calls"`
+	WriteBackCallOperations   int                   `json:"write_back_call_operations"`
+	WriteBackPer100CallOps    *float32              `json:"write_back_per_100_call_ops"`
+}
+
+// SurfaceMetricsSurface defines model for SurfaceMetrics.Surface.
+type SurfaceMetricsSurface string
+
 // SurfaceResult Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.
 //
 // The verdict band is computed from the macro-mean metrics against
@@ -8276,6 +8319,14 @@ type MyRecentApiV1AuditMyRecentGetParams struct {
 // QueryApiV1AuditQueryPostParams defines parameters for QueryApiV1AuditQueryPost.
 type QueryApiV1AuditQueryPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReflexEndpointApiV1AuditReflexGetParams defines parameters for ReflexEndpointApiV1AuditReflexGet.
+type ReflexEndpointApiV1AuditReflexGetParams struct {
+	Since         *string             `form:"since,omitempty" json:"since,omitempty"`
+	Until         *string             `form:"until,omitempty" json:"until,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // ReplayApiV1AuditSessionsSessionIdReplayGetParams defines parameters for ReplayApiV1AuditSessionsSessionIdReplayGet.
@@ -11254,6 +11305,9 @@ type ClientInterface interface {
 
 	QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ReflexEndpointApiV1AuditReflexGet request
+	ReflexEndpointApiV1AuditReflexGet(ctx context.Context, params *ReflexEndpointApiV1AuditReflexGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ReplayApiV1AuditSessionsSessionIdReplayGet request
 	ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13037,6 +13091,18 @@ func (c *Client) QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *Q
 
 func (c *Client) QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewQueryApiV1AuditQueryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReflexEndpointApiV1AuditReflexGet(ctx context.Context, params *ReflexEndpointApiV1AuditReflexGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReflexEndpointApiV1AuditReflexGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -20718,6 +20784,102 @@ func NewQueryApiV1AuditQueryPostRequestWithBody(server string, params *QueryApiV
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReflexEndpointApiV1AuditReflexGetRequest generates requests for ReflexEndpointApiV1AuditReflexGet
+func NewReflexEndpointApiV1AuditReflexGetRequest(server string, params *ReflexEndpointApiV1AuditReflexGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/reflex")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -38992,6 +39154,9 @@ type ClientWithResponsesInterface interface {
 
 	QueryApiV1AuditQueryPostWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
 
+	// ReflexEndpointApiV1AuditReflexGetWithResponse request
+	ReflexEndpointApiV1AuditReflexGetWithResponse(ctx context.Context, params *ReflexEndpointApiV1AuditReflexGetParams, reqEditors ...RequestEditorFn) (*ReflexEndpointApiV1AuditReflexGetResponse, error)
+
 	// ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request
 	ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error)
 
@@ -40960,6 +41125,29 @@ func (r QueryApiV1AuditQueryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r QueryApiV1AuditQueryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReflexEndpointApiV1AuditReflexGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ReflexReport
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReflexEndpointApiV1AuditReflexGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReflexEndpointApiV1AuditReflexGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -48556,6 +48744,15 @@ func (c *ClientWithResponses) QueryApiV1AuditQueryPostWithResponse(ctx context.C
 	return ParseQueryApiV1AuditQueryPostResponse(rsp)
 }
 
+// ReflexEndpointApiV1AuditReflexGetWithResponse request returning *ReflexEndpointApiV1AuditReflexGetResponse
+func (c *ClientWithResponses) ReflexEndpointApiV1AuditReflexGetWithResponse(ctx context.Context, params *ReflexEndpointApiV1AuditReflexGetParams, reqEditors ...RequestEditorFn) (*ReflexEndpointApiV1AuditReflexGetResponse, error) {
+	rsp, err := c.ReflexEndpointApiV1AuditReflexGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReflexEndpointApiV1AuditReflexGetResponse(rsp)
+}
+
 // ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request returning *ReplayApiV1AuditSessionsSessionIdReplayGetResponse
 func (c *ClientWithResponses) ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error) {
 	rsp, err := c.ReplayApiV1AuditSessionsSessionIdReplayGet(ctx, sessionId, params, reqEditors...)
@@ -53686,6 +53883,39 @@ func ParseQueryApiV1AuditQueryPostResponse(rsp *http.Response) (*QueryApiV1Audit
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReflexEndpointApiV1AuditReflexGetResponse parses an HTTP response from a ReflexEndpointApiV1AuditReflexGetWithResponse call
+func ParseReflexEndpointApiV1AuditReflexGetResponse(rsp *http.Response) (*ReflexEndpointApiV1AuditReflexGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReflexEndpointApiV1AuditReflexGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ReflexReport
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

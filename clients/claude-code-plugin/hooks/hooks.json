@@ -1,0 +1,55 @@
+{
+  "description": "MEHO reflex hooks — SessionStart injects a broadcast/memory/knowledge digest so read-before-start is automatic, and advisory reminders nudge announce-before-mutate / report-on-completion. Every hook is fail-open (missing meho CLI, no auth, no VPN, or timeout => silent no-op, exit 0) and warn-only: no hook blocks or denies a tool call. Enforcement with teeth is the server-side gate's job.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/session-start.sh",
+            "args": [],
+            "timeout": 12
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_meho_meho__call_operation",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/pre-call-operation.sh",
+            "args": [],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_meho_meho__broadcast_announce",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/post-announce.sh",
+            "args": [],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/stop-report.sh",
+            "args": [],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

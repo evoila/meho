@@ -35,15 +35,16 @@ teach their Claude session to prefer MEHO features by hand, and the
 result varies per operator. The starter template gives consumer
 repos a consistent, upgradeable surface.
 
-> **Current state (v0.2 staging).** Layer 1 is partially shipped —
-> the database schema, API, CLI verbs, and seed migration land via
-> [G7.1-T1..T3 + T5](https://github.com/evoila/meho/issues/229), but
-> the assembler that fills the MCP `initialize` `instructions` field
-> is [G7.1-T4 #316](https://github.com/evoila/meho/issues/316),
-> still open. Until T4 ships, the `instructions` field is `None`
-> and Layer 1 is not yet reaching agents at session start. Layer 2
-> (this template) is live independently — your local session reads
-> the file the moment it opens the repo, regardless of T4's state.
+> **How the two layers reach a session.** Layer 1 is fully shipped —
+> the database schema, API, CLI verbs, seed migration, and the
+> assembler that fills the MCP `initialize` `instructions` field all
+> land via [G7.1-T1..T5](https://github.com/evoila/meho/issues/229)
+> ([#316](https://github.com/evoila/meho/issues/316) shipped the
+> assembler). A session connecting via MCP receives the tenant-
+> conventions preamble in that field at session start. Layer 2 (this
+> template) reaches the session from the other side — your local
+> session reads the file the moment it opens the repo, whether or not
+> it also connects to MEHO over MCP.
 
 ## Step 1 — Install the template
 
@@ -317,17 +318,40 @@ The operator's MEHO role doesn't satisfy the verb's requirement
 Confirm via `meho status` (renders the operator's tenant + role)
 and request the role change through the realm admin if it's wrong.
 
-### MCP `initialize` returns no preamble
+### MCP `initialize` doesn't carry the tenant conventions you expect
 
-The MCP server's `initialize` response carries `instructions: None`
-until [G7.1-T4 #316](https://github.com/evoila/meho/issues/316)
-lands the session-preamble assembler. This is **expected** in v0.2
-staging — Layer 1 conventions are queryable via `meho conventions
-list / show` once
-[G7.1-T2/T3 #314/#315](https://github.com/evoila/meho/issues/229)
-ship, but the auto-load into the MCP session preamble is gated on
-T4. Layer 2 (this template) is unaffected — the local Claude
-session reads `CLAUDE.md` directly from disk, independent of MCP.
+The `initialize` response's `instructions` field carries the
+assembled Layer-1 preamble (the assembler shipped in
+[G7.1-T4 #316](https://github.com/evoila/meho/issues/316)), so a
+session connecting via MCP should receive the tenant-conventions
+preamble at connect time. If a session isn't seeing the conventions
+you expect, walk these checks:
+
+1. **Does the tenant actually have conventions rows?** Run `meho
+   conventions list`. An empty list means there is nothing to
+   assemble — publish rules with `meho conventions edit <slug>`
+   (requires `tenant_admin`). The assembler still returns a
+   non-empty preamble in this case (it always carries the static
+   broadcast-discipline band), so "no tenant rules in the preamble"
+   and "no preamble at all" are different symptoms.
+2. **Did the client actually re-initialize?** The preamble is a
+   snapshot taken from the `initialize` response; a client that
+   cached that response has no signal to refresh until it re-runs
+   `initialize`, and a transport reconnect on the same session is
+   not enough (same client-side caching class as `tools/list` — see
+   [`docs/codebase/mcp.md` § Known issues](https://github.com/evoila/meho/blob/main/docs/codebase/mcp.md#known-issues)).
+   Restart the MCP client (or open a new session) so it re-runs
+   `initialize`.
+3. **Does the token carry the right tenant claims?** The preamble is
+   assembled for the operator's tenant. Run `meho status` and
+   confirm it renders the tenant you expect; a token bound to the
+   wrong (or no) tenant assembles the preamble from the wrong
+   tenant's rows. Re-authenticate with `meho login "$MEHO_INSTANCE"`
+   if the tenant is wrong.
+
+Layer 2 (this template) is independent of all three — the local
+Claude session reads `CLAUDE.md` directly from disk, regardless of
+the MCP preamble.
 
 ### Broadcast meta-tools missing from `tools/list`
 

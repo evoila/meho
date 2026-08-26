@@ -400,11 +400,21 @@ Design contract:
 - **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
   `30`, `0` = off) gates the whole feature.
 
-A second, independent extras fragment — `checks_alert_advisory`
-(#2718, built in `checks/advisory.py`, deduped per caller via Valkey
-`SET NX EX`, applied to **all** op classes) — merges beside this one at
-the same dispatcher success path; see
-[`docs/codebase/checks-advisory.md`](checks-advisory.md).
+Three independent extras fragments now ride the same dispatcher success
+path, merged as a clobber-free union of distinct keys
+(`extras={**activity, **checks, **reflex}`):
+
+1. `target_activity_advisory` — this fragment (#2550), write-class only.
+2. `checks_alert_advisory` — #2718, built in `checks/advisory.py`,
+   deduped per caller via Valkey `SET NX EX`, applied to **all** op
+   classes; see [`docs/codebase/checks-advisory.md`](checks-advisory.md).
+3. `reflex_advisory` — #3133, built in `broadcast/reflex.py`, a
+   session-scoped coordination nudge (read-before-act /
+   announce-before-mutate) deduped per `(session, heuristic)`; see
+   [`docs/codebase/reflex-advisory.md`](reflex-advisory.md). #3133 also
+   ships the opt-in **announce gate** (`broadcast/announce_gate.py`),
+   which *rejects* — rather than nudges — a caution-or-higher write-class
+   op dispatched without an active claim in a tenant that opted in.
 
 ## Durable announcements (#2547)
 

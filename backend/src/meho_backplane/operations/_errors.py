@@ -462,6 +462,33 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
     )
 
 
+def result_announce_required(op_id: str, remediation: str, duration_ms: float) -> OperationResult:
+    """Opt-in announce gate rejected the call before execution (#3133).
+
+    Returned when a tenant has enabled the announce gate
+    (:mod:`meho_backplane.broadcast.announce_gate`) and a write-class op
+    of ``caution`` safety or higher was dispatched without an active
+    announce claim covering it. This is a policy rejection, **not** a
+    NEEDS_APPROVAL path -- there is no durable approval row and no
+    four-eyes queue; the caller self-remediates by announcing intent and
+    retrying.
+
+    The ``remediation`` string is agent-readable and names
+    ``meho_broadcast_announce`` so an agent can resolve the refusal
+    without human intervention. ``status`` is ``"denied"`` -- the same
+    envelope shape as :func:`result_denied` -- with a distinct
+    ``error_code`` so a caller can tell an announce-gate rejection from a
+    policy-gate denial.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {remediation}",
+        duration_ms=duration_ms,
+        extras={"error_code": "announce_required", "remediation": remediation},
+    )
+
+
 def result_awaiting_approval(
     op_id: str,
     approval_request_id: uuid.UUID,

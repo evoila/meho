@@ -1120,6 +1120,14 @@ class Settings(BaseModel):
     #: state) window. ``0`` disables the feature entirely (no DB read on
     #: any dispatch).
     checks_alert_advisory_window_minutes: int = Field(default=30, ge=0)
+    #: Dedupe window (minutes) for the dispatch-time reflex advisory
+    #: (#3133). A successful MCP-session dispatch that trips a coordination
+    #: heuristic (no prior ``meho_broadcast_recent`` this session, or a
+    #: write-class op with no active announce claim) carries a compact
+    #: ``extras["reflex_advisory"]`` one-liner, once per (session,
+    #: heuristic) window via a Valkey ``SET NX EX``. ``0`` disables the
+    #: feature entirely (no session resolution or I/O on any dispatch).
+    reflex_advisory_window_minutes: int = Field(default=30, ge=0)
     #: Flap-suppression window (minutes) for Dashboard transition email
     #: (#2732). The first crossing into a non-green state mails; repeat
     #: crossings into the *same* state inside the window are suppressed
@@ -1843,6 +1851,9 @@ def get_settings() -> Settings:
         ),
         checks_alert_advisory_window_minutes=int(
             os.environ.get("CHECKS_ALERT_ADVISORY_WINDOW_MINUTES", "30"),
+        ),
+        reflex_advisory_window_minutes=int(
+            os.environ.get("REFLEX_ADVISORY_WINDOW_MINUTES", "30"),
         ),
         checks_notify_suppression_window_minutes=int(
             os.environ.get("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", "30"),

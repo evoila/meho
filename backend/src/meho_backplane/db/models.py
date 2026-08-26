@@ -690,6 +690,22 @@ class Tenant(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # Opt-in per-tenant policy flag for the #3133 dispatch-time announce
+    # gate. Boolean NOT NULL DEFAULT ``false`` -- OFF by default. When
+    # ``True`` the dispatcher rejects a caution-or-higher write-class op
+    # that lacks an active announce claim (read through the cache-aware,
+    # fail-open resolver in
+    # :mod:`meho_backplane.broadcast.announce_gate`). A first-class typed
+    # column -- the structured per-tenant policy store the boolean belongs
+    # in, deliberately not the free-form ``tenant_conventions`` Markdown.
+    # ``server_default=false`` in migration ``0077`` backfills pre-#3133
+    # rows so the ``NOT NULL`` add-column is safe on a populated table.
+    announce_gate_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
 
     __table_args__ = (
         Index(

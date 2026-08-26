@@ -73,6 +73,21 @@ delete env.MEHO_CA_CERT;
 const clientId = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim() || "meho-mcp";
 delete env.MEHO_MCP_CLIENT_ID;
 
+// OAuth scope metadata presented during the handshake. The default is the
+// working surface; the optional `scopes` user_config (delivered as
+// MEHO_MCP_SCOPES) lets an operator deliberately request an elevated
+// surface — append mcp:admin to reach the operator planes. Fall back to the
+// default when the host substitutes an empty/whitespace value for the
+// untouched optional field. Requesting a scope the realm does not grant
+// degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
+// authorization server may ignore an ungranted scope, and Keycloak drops a
+// scope that is not an assigned default/optional client scope, so the token
+// never carries it and the elevated tools simply do not list. Stripped from
+// the child env like the other config seams.
+const scopes =
+  (process.env.MEHO_MCP_SCOPES ?? "").trim() || "mcp:read mcp:execute";
+delete env.MEHO_MCP_SCOPES;
+
 // Run the child as a plain Node process even when process.execPath is
 // Claude Desktop's Electron helper rather than a standalone `node`:
 // ELECTRON_RUN_AS_NODE=1 "starts the process as a normal Node.js process"
@@ -106,7 +121,7 @@ const child = spawn(
     "--static-oauth-client-info",
     JSON.stringify({ client_id: clientId }),
     "--static-oauth-client-metadata",
-    JSON.stringify({ scope: "mcp:read mcp:execute" }),
+    JSON.stringify({ scope: scopes }),
   ],
   { stdio: "inherit", env },
 );

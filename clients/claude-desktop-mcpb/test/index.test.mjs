@@ -63,6 +63,7 @@ writeFileSync(
     "    nodeExtraCaCerts: process.env.NODE_EXTRA_CA_CERTS ?? null,",
     "    mehoCaCert: process.env.MEHO_CA_CERT ?? null,",
     "    mehoClientId: process.env.MEHO_MCP_CLIENT_ID ?? null,",
+    "    mehoScopes: process.env.MEHO_MCP_SCOPES ?? null,",
     "  }) + '\\n',",
     ");",
     "",
@@ -148,6 +149,29 @@ test("guard: an empty client_id falls back to meho-mcp", () => {
   assert.equal(res.status, 0, res.stderr);
   const diag = JSON.parse(res.stdout);
   assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp" });
+});
+
+test("guard: scopes override applied to metadata and MEHO_MCP_SCOPES scrubbed", () => {
+  const elevated = "mcp:read mcp:execute mcp:admin";
+  const res = runLauncher(["https://meho.internal.example/mcp"], {
+    MEHO_MCP_SCOPES: elevated,
+  });
+  assert.equal(res.status, 0, res.stderr);
+  const diag = JSON.parse(res.stdout);
+  assert.deepEqual(JSON.parse(diag.argv[6]), { scope: elevated });
+  assert.equal(diag.mehoScopes, null); // scrubbed from the child env
+});
+
+test("guard: an empty or whitespace-only scopes falls back to the default surface", () => {
+  for (const value of ["", "   "]) {
+    const res = runLauncher(["https://meho.internal.example/mcp"], {
+      MEHO_MCP_SCOPES: value,
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(JSON.parse(JSON.parse(res.stdout).argv[6]), {
+      scope: "mcp:read mcp:execute",
+    });
+  }
 });
 
 test("guard: a non-https endpoint is rejected before spawning", () => {

@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Claude Code plugin — PR behavioral test.
+#
+# The plugin's stdio shim wrapper (clients/claude-code-plugin/bin/meho-mcp-remote)
+# is a bash launcher that `exec`s `npx -y mcp-remote@… <url> --static-oauth-…`.
+# The one contract worth pinning is the argv it hands to npx — in particular
+# the OAuth scope metadata, which the MEHO_MCP_SCOPES elevation seam makes
+# operator-configurable. This workflow runs the stubbed-argv suite (a stub
+# `npx` on a controlled PATH echoes the argv) whenever a PR touches the
+# plugin sources. No network / npm install: the suite stubs npx.
+#
+# Advisory (non-required) and path-scoped, mirroring mcpb-bundle.yml. A
+# required check would need the `changes`-job + job-`if:` shape ci.yml uses
+# to skip cleanly, which this dry-run does not warrant.
+
+name: plugin-test
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'clients/claude-code-plugin/**'
+      - '.github/workflows/plugin-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Plugin shim stubbed-argv suite
+    # Fork-PR guard mirrors ci.yml / mcpb-bundle.yml: `meho-runners-ci` is
+    # internal infra, so fork PRs skip rather than execute plugin sources
+    # on the self-hosted pool.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners-ci
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Behavioral test — shim argv contract
+        run: node --test clients/claude-code-plugin/test/meho-mcp-remote.test.mjs

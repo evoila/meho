@@ -23,6 +23,13 @@
 # extracted from the top-level CHANGELOG.md so the human-curated
 # narrative — not git-log noise — lands in the GitHub Release body.
 #
+# The Claude Desktop MCPB bundle (clients/claude-desktop-mcpb/) is built
+# with the tag version and attached to the same Release as a fifth asset
+# by the "Build + attach Claude Desktop .mcpb bundle" step below. It is
+# not a CLI tarball and is not cosign-signed; distribution is the GitHub
+# Release asset channel only (#3129). The step runs after GoReleaser has
+# created the Release so `gh release upload` has a Release to attach to.
+#
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
 #   * workflow-default = `contents: read` (just enough to checkout).
@@ -112,6 +119,15 @@ jobs:
           # filesystem. Keyed by cli/go.sum (the only Go module in
           # the tree right now).
           cache-dependency-path: cli/go.sum
+
+      - name: Set up Node (Claude Desktop .mcpb bundle)
+        # Node provides `npx` for the pinned `@anthropic-ai/mcpb` CLI that
+        # packs the Claude Desktop bundle (see the build/attach step after
+        # GoReleaser). Same pin as dependency-license-check.yml so one
+        # supply-chain audit covers both Node setups.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
 
       - name: Ensure envsubst (gettext-base) — cosign-installer dep
         # See chart.yml for context.
@@ -258,6 +274,25 @@ jobs:
           # standard sigstore.dev CI guidance.
           COSIGN_YES: "true"
 
+      - name: Build + attach Claude Desktop .mcpb bundle
+        # GoReleaser has created the Release above; attach the Claude
+        # Desktop MCPB bundle to it as a fifth asset. `build.sh` runs the
+        # pinned `mcpb pack` (which validates the manifest) with the tag
+        # version stripped of its leading `v` — matching GoReleaser's
+        # `meho_<version>_...` file-name convention. `--clobber` lets a
+        # re-tag replace the asset instead of failing on a name clash.
+        env:
+          TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          OUT_DIR="${RUNNER_TEMP}/mcpb"
+          clients/claude-desktop-mcpb/build.sh "${VERSION}" "${OUT_DIR}"
+          BUNDLE="${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb"
+          gh release upload "${TAG}" "${BUNDLE}" --clobber --repo "${GITHUB_REPOSITORY}"
+
       - name: Emit release summary
         # Surface the published artefact list in the workflow run
         # summary so a maintainer flipping the draft Release to
@@ -274,7 +309,7 @@ jobs:
             echo "### Artefacts"
             echo ""
             echo '```'
-            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle 2>/dev/null || true
+            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle "${RUNNER_TEMP}"/mcpb/*.mcpb 2>/dev/null || true
             echo '```'
             echo ""
             echo "Each \`.tar.gz\` and the \`SHA256SUMS\` file has a matching"

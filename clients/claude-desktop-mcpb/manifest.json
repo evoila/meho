@@ -1,0 +1,40 @@
+{
+  "manifest_version": "0.3",
+  "name": "meho-claude-desktop",
+  "display_name": "MEHO for Claude Desktop",
+  "version": "0.0.0",
+  "description": "Connect Claude Desktop to an internal MEHO backplane via the mcp-remote shim (VPN required).",
+  "author": {
+    "name": "evoila"
+  },
+  "homepage": "https://github.com/evoila/meho",
+  "documentation": "https://github.com/evoila/meho/blob/main/docs/cross-repo/mcp-client-setup.md",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
+      "env": {
+        "MEHO_CA_CERT": "${user_config.ca_cert}"
+      }
+    }
+  },
+  "user_config": {
+    "backplane_url": {
+      "type": "string",
+      "title": "MEHO MCP endpoint",
+      "description": "Your backplane's MCP URL, e.g. https://meho.internal.example/mcp — must be reachable over your VPN.",
+      "required": true
+    },
+    "ca_cert": {
+      "type": "file",
+      "title": "Internal CA bundle (optional)",
+      "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave empty for public-CA deploys.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32"]
+  }
+}

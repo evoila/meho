@@ -36,6 +36,7 @@ from meho_backplane.main import app
 from meho_backplane.mcp import (
     ResourceTemplateDefinition,
     ToolDefinition,
+    ToolSurface,
     eager_import_mcp_modules,
     register_mcp_resource,
     register_mcp_tool,
@@ -146,6 +147,7 @@ def test_register_mcp_tool_makes_it_callable_via_get_tool() -> None:
 
     defn = ToolDefinition(
         feature=None,
+        surface=ToolSurface.WORKING,
         name="test.tool",
         description="A test tool",
         inputSchema={"type": "object", "properties": {}},
@@ -189,6 +191,7 @@ def test_to_wire_strips_top_level_combinators_but_keeps_them_on_input_schema() -
     }
     defn = ToolDefinition(
         feature=None,
+        surface=ToolSurface.WORKING,
         name="test.combinator",
         description="A tool whose schema carries top-level combinators",
         inputSchema=schema,
@@ -232,6 +235,7 @@ def test_register_mcp_tool_rejects_duplicate() -> None:
 
     defn = ToolDefinition(
         feature=None,
+        surface=ToolSurface.WORKING,
         name="dup.tool",
         description="dup",
         inputSchema={"type": "object"},
@@ -261,6 +265,7 @@ def _register_three_tools_at_varying_roles() -> None:
         register_mcp_tool(
             ToolDefinition(
                 feature=None,
+                surface=ToolSurface.WORKING,
                 name=name,
                 description=f"Tool requiring {role}",
                 inputSchema={"type": "object", "properties": {}},
@@ -342,6 +347,7 @@ def test_tools_call_dispatches_to_registered_handler(
     register_mcp_tool(
         ToolDefinition(
             feature=None,
+            surface=ToolSurface.WORKING,
             name="test.echo",
             description="Echo arguments back",
             inputSchema={
@@ -417,6 +423,7 @@ def test_tools_call_malformed_arguments_returns_invalid_params(
     register_mcp_tool(
         ToolDefinition(
             feature=None,
+            surface=ToolSurface.WORKING,
             name="test.requires_msg",
             description="A tool whose msg arg is required",
             inputSchema={
@@ -466,6 +473,7 @@ def test_tools_call_forbidden_for_under_privileged_operator(
     register_mcp_tool(
         ToolDefinition(
             feature=None,
+            surface=ToolSurface.WORKING,
             name="ops_only.tool",
             description="Operator-only tool",
             inputSchema={"type": "object", "properties": {}},

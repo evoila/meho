@@ -68,7 +68,8 @@ import importlib
 import pkgutil
 import re
 from collections.abc import Awaitable, Callable
-from typing import Any
+from enum import StrEnum
+from typing import Any, Final
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -77,11 +78,13 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.features import FEATURE_MATURITY
 
 __all__ = [
+    "MCP_ADMIN_SCOPE",
     "ConcreteUriProvider",
     "ResourceHandler",
     "ResourceTemplateDefinition",
     "ToolDefinition",
     "ToolHandler",
+    "ToolSurface",
     "all_listed_resources_for",
     "all_resource_templates_for",
     "all_tools_for",
@@ -93,6 +96,7 @@ __all__ = [
     "register_mcp_resource",
     "register_mcp_tool",
     "role_at_least",
+    "surface_visible",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -128,6 +132,54 @@ ConcreteUriProvider = Callable[[Operator], list[str]]
 # ---------------------------------------------------------------------------
 # Definitions
 # ---------------------------------------------------------------------------
+
+
+class ToolSurface(StrEnum):
+    """Which MCP surface a tool belongs to (Initiative #3153, #3154).
+
+    A third gating axis, **orthogonal** to :class:`TenantRole` and the
+    ``required_capability`` set, that carves the registered tools into
+    the two faces of the narrow-waist postulate (CLAUDE.md postulate 5):
+
+    * :attr:`WORKING` — the default agent surface every session sees:
+      do-work + coordinate (status, discovery, execution, knowledge,
+      memory, docs, broadcast trio, target/topology reads, runbook run
+      family). Visible to any session that clears the role + capability
+      gates, with no elevation required.
+    * :attr:`OPERATOR` — the governance / lifecycle planes (connector
+      lifecycle, agents / principals / grants, scheduler, sensors,
+      runbook template authoring, broadcast overrides, topology
+      mutations, target registration, approvals read, audit query).
+      Visible only when the session is explicitly elevated — its
+      :attr:`~meho_backplane.auth.operator.Operator.scopes` set carries
+      :data:`MCP_ADMIN_SCOPE`.
+
+    The field is **required with no default** on :class:`ToolDefinition`
+    (see there): a registration that omits it raises at construction —
+    i.e. at module-import time, pre-traffic — exactly like the
+    duplicate-name and unknown-``feature`` guards. There is no silent
+    default bucket, so every new tool must make an explicit surface
+    decision.
+    """
+
+    WORKING = "working"
+    OPERATOR = "operator"
+
+
+#: The OAuth 2.0 scope value that elevates an MCP session to the operator
+#: surface (Initiative #3153, #3154). A session whose
+#: :attr:`~meho_backplane.auth.operator.Operator.scopes` set contains this
+#: value additionally lists / can call :attr:`ToolSurface.OPERATOR` tools;
+#: without it a session sees only :attr:`ToolSurface.WORKING`. Modelled as
+#: an OAuth scope (not a tenant capability) because elevation is a
+#: per-session, explicit opt-in — the client requests it via
+#: ``MEHO_MCP_SCOPES`` (#3156) and the realm mints it into the token's
+#: ``scope`` claim — whereas ``capabilities`` are tenant-wide provisioned
+#: add-ons and ``platform_admin`` is a standing cross-tenant flag. Kept a
+#: module constant (like ``docs.py``'s ``meho-docs`` capability key) so the
+#: elevation contract is greppable and single-source across the filter, the
+#: call-time re-check, and the docs.
+MCP_ADMIN_SCOPE: Final[str] = "mcp:admin"
 
 
 #: Ordering of :class:`TenantRole` from least-privileged to most-privileged.
@@ -180,6 +232,30 @@ def capability_satisfied(
     return required_capability in operator.capabilities
 
 
+def surface_visible(operator: Operator, surface: ToolSurface) -> bool:
+    """Return True when *operator*'s session may see tools on *surface*.
+
+    The surface gate (Initiative #3153, #3154) is the third axis, AND-ed
+    with the role and capability gates. :attr:`ToolSurface.WORKING` is
+    always admitted — the default narrow-waist surface every session
+    holds. :attr:`ToolSurface.OPERATOR` is admitted only for an
+    **explicitly elevated** session: one whose
+    :attr:`~meho_backplane.auth.operator.Operator.scopes` set carries
+    :data:`MCP_ADMIN_SCOPE`. The scope set is fail-closed (empty when the
+    token carries no ``scope`` claim), so a default session never sees the
+    operator planes.
+
+    Centralised so the gate shape stays single-source for both
+    :func:`all_tools_for` (list-time filter) and the call-time re-check in
+    :mod:`~meho_backplane.mcp.handlers`. Public so the handlers module
+    imports it at module level rather than dipping into a private sibling
+    symbol, exactly like :func:`role_at_least` / :func:`capability_satisfied`.
+    """
+    if surface is ToolSurface.WORKING:
+        return True
+    return MCP_ADMIN_SCOPE in operator.scopes
+
+
 #: JSON-Schema combinator keywords the Anthropic Messages API rejects at
 #: the *top level* of a tool's ``input_schema``. A request carrying one
 #: 400s with ``input_schema does not support oneOf, allOf, or anyOf at
@@ -215,8 +291,8 @@ class ToolDefinition(BaseModel):
 
     The wire shape exposed via ``tools/list`` is derived through
     :meth:`to_wire`, which drops the MEHO-internal fields (``required_role``,
-    ``op_class``, ``required_capability``) — clients don't need them and
-    they'd leak server-side policy detail.
+    ``op_class``, ``required_capability``, ``surface``) — clients don't
+    need them and they'd leak server-side policy detail.
 
     ``inputSchema`` is a JSON Schema 2020-12 object the handler validates
     incoming ``tools/call.arguments`` against. ``outputSchema`` is
@@ -236,6 +312,20 @@ class ToolDefinition(BaseModel):
     the connector enable model rather than a packaging/entitlement
     system. ``None`` (the default) means "no capability gate", so every
     existing tool keeps its role-only behaviour.
+
+    ``surface`` (Initiative #3153, #3154) classifies the tool onto one of
+    the two agent-facing surfaces — :attr:`ToolSurface.WORKING` (the
+    default narrow-waist surface every session lists) or
+    :attr:`ToolSurface.OPERATOR` (the governance planes an
+    :data:`MCP_ADMIN_SCOPE`-elevated session additionally lists). It is
+    **required with no default**: every registration site must classify
+    its tool explicitly, so a new registration that forgets raises a
+    pydantic ``ValidationError`` at construction — which, because the
+    registry is populated at module-import time, fails app boot / test
+    collection loudly rather than defaulting into a silent bucket
+    (mirrors the required-no-default ``feature`` contract). AND-composed
+    with the role + capability gates by :func:`surface_visible`;
+    MEHO-internal — dropped from the wire shape like the RBAC fields.
 
     ``feature`` (#2675) names the tool's owning entry in
     :data:`~meho_backplane.features.FEATURE_MATURITY` so
@@ -260,6 +350,7 @@ class ToolDefinition(BaseModel):
     description: str = Field(min_length=1)
     inputSchema: dict[str, Any]  # noqa: N815 — wire field is camelCase per MCP spec
     feature: str | None
+    surface: ToolSurface
     title: str | None = None
     outputSchema: dict[str, Any] | None = None  # noqa: N815
     required_role: TenantRole = TenantRole.OPERATOR
@@ -290,9 +381,10 @@ class ToolDefinition(BaseModel):
 
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
         optional ``title`` / ``outputSchema``. MEHO fields dropped:
-        ``required_role``, ``op_class``, ``required_capability``. The
-        drop is deliberate — clients don't need server-side RBAC /
-        capability details and shouldn't see them.
+        ``required_role``, ``op_class``, ``required_capability``,
+        ``surface``. The drop is deliberate — clients don't need
+        server-side RBAC / capability / surface details and shouldn't
+        see them.
 
         ``inputSchema`` is additionally passed through
         :func:`_wire_safe_input_schema`, which strips top-level
@@ -544,18 +636,29 @@ def get_resource_for_uri(
 def all_tools_for(operator: Operator) -> list[ToolDefinition]:
     """Return tools the operator may see, in registration order.
 
-    Two orthogonal gates, both AND-ed: the operator's
-    :class:`TenantRole` must meet ``required_role`` *and* — when the tool
-    declares a ``required_capability`` — that key must be in the
-    operator's provisioned :attr:`Operator.capabilities`. A
-    capability-gated tool the tenant hasn't provisioned is *absent* from
-    the listing (true absence, G4.5-T1), not just un-callable.
+    Three orthogonal gates, all AND-ed:
+
+    * **role** — the operator's :class:`TenantRole` must meet
+      ``required_role``.
+    * **capability** — when the tool declares a ``required_capability``,
+      that key must be in the operator's provisioned
+      :attr:`Operator.capabilities`. A capability-gated tool the tenant
+      hasn't provisioned is *absent* (true absence, G4.5-T1).
+    * **surface** — the tool's :attr:`ToolDefinition.surface` must be
+      visible to the session per :func:`surface_visible`. A default
+      session lists only :attr:`ToolSurface.WORKING`; the
+      :attr:`ToolSurface.OPERATOR` planes are absent unless the session
+      is :data:`MCP_ADMIN_SCOPE`-elevated (Initiative #3153, #3154).
+
+    All three are *absence* gates (true absence, not a greyed-out entry),
+    so a tool a session may not use never appears in its ``tools/list``.
     """
     return [
         defn
         for defn, _ in _TOOLS.values()
         if role_at_least(operator.tenant_role, defn.required_role)
         and capability_satisfied(operator, defn.required_capability)
+        and surface_visible(operator, defn.surface)
     ]
 
 

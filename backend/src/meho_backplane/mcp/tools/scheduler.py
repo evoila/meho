@@ -65,7 +65,7 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.scheduler.schemas import (
     ScheduledTriggerCreate,
@@ -159,6 +159,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
         name="meho_scheduler_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List scheduled triggers for the operator's tenant "
             "(Initiative #804). Operator-level read. Returns "
@@ -272,6 +273,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
         name="meho_scheduler_create",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Create one scheduled trigger under the operator's tenant "
             "(Initiative #804). Tenant_admin only. Args: kind "
@@ -416,6 +418,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
         name="meho_scheduler_cancel",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Cancel one scheduled trigger by id (Initiative #804). "
             "Tenant_admin only. Transitions status='cancelled'; the row "

@@ -87,6 +87,7 @@ from pydantic import ValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import (
     ToolDefinition,
+    ToolSurface,
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -590,6 +591,7 @@ register_mcp_tool(
         # writes → ``write_surfaces``. Applies to every tool here.
         feature="write_surfaces",
         name="meho_runbook_start",
+        surface=ToolSurface.WORKING,
         description=_START_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -613,6 +615,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_next",
+        surface=ToolSurface.WORKING,
         description=_NEXT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -642,6 +645,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_abort",
+        surface=ToolSurface.WORKING,
         description=_ABORT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -667,6 +671,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_reassign",
+        surface=ToolSurface.OPERATOR,
         description=_REASSIGN_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -694,6 +699,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_list_runs",
+        surface=ToolSurface.WORKING,
         description=_LIST_DESCRIPTION,
         inputSchema={
             "type": "object",

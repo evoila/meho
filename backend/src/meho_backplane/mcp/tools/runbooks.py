@@ -100,6 +100,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.mcp.registry import (
     ToolDefinition,
+    ToolSurface,
     register_mcp_tool,
 )
 from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
@@ -725,6 +726,7 @@ register_mcp_tool(
         # runbook_runs.py.
         feature="write_surfaces",
         name="meho_runbook_draft_template",
+        surface=ToolSurface.OPERATOR,
         description=_DRAFT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -746,6 +748,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_edit_template",
+        surface=ToolSurface.OPERATOR,
         description=_EDIT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -767,6 +770,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_publish_template",
+        surface=ToolSurface.OPERATOR,
         description=_PUBLISH_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -788,6 +792,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_deprecate_template",
+        surface=ToolSurface.OPERATOR,
         description=_DEPRECATE_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -809,6 +814,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_discard_template",
+        surface=ToolSurface.OPERATOR,
         description=_DISCARD_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -830,6 +836,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_list_templates",
+        surface=ToolSurface.WORKING,
         description=_LIST_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -865,6 +872,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
         name="meho_runbook_show_template",
+        surface=ToolSurface.WORKING,
         description=_SHOW_DESCRIPTION,
         inputSchema={
             "type": "object",

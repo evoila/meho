@@ -61,6 +61,9 @@ def _operator(tenant_id: uuid.UUID = _TENANT_A) -> Operator:
         raw_jwt="dummy",
         tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        # meho_sensor_results is operator-surface (Initiative #3153/#3154);
+        # the session is mcp:admin-elevated so it lists + dispatches.
+        scopes=frozenset({"mcp:admin"}),
     )
 
 

@@ -54,7 +54,7 @@ from __future__ import annotations
 from typing import Any
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.meta_tools import (
     ConnectorNotIngestedError,
@@ -162,6 +162,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="list_operation_groups",
+        surface=ToolSurface.WORKING,
         description=(
             "List enabled operation groups for a connector. Each group "
             "carries a `when_to_use` blurb explaining what the group is "
@@ -299,6 +300,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="search_operations",
+        surface=ToolSurface.WORKING,
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
             "operations. Use this AFTER `list_operation_groups` has "
@@ -397,6 +399,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="call_operation",
+        surface=ToolSurface.WORKING,
         description=(
             "Invoke an operation. Use ONLY after `search_operations` has "
             "returned an op_id and you've confirmed the operation is "
@@ -580,6 +583,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="preview_operation",
+        surface=ToolSurface.WORKING,
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "
             "op + target + params `call_operation` would and returns the "

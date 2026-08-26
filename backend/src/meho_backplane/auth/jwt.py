@@ -755,6 +755,63 @@ def _extract_capabilities(claims: Any, settings: Settings) -> frozenset[str]:
     return frozenset()
 
 
+def _extract_scopes(claims: Any, settings: Settings) -> frozenset[str]:
+    """Extract the session's OAuth 2.0 scope set from *claims*.
+
+    Initiative #3153 / #3154: the ``scope`` claim carries the scopes
+    granted to *this session*. It drives the MCP agent-surface filter —
+    a session whose set contains ``mcp:admin``
+    (:data:`~meho_backplane.mcp.registry.MCP_ADMIN_SCOPE`) additionally
+    lists the operator planes; every session sees the working surface.
+    The claim is **optional** and **fail-closed**: a token that carries
+    no claim — or a malformed one — resolves to the empty set, so the
+    session sees only the default working surface. The fail-closed
+    direction is deliberate: a missing/garbage scope claim must never
+    *grant* an elevation, but (like ``capabilities``) it must not lock the
+    operator out of the working surface either, so it is not a 401.
+
+    Accepted shapes:
+
+    * **absent** → empty set (tokens minted without the scope mapper).
+    * **space-delimited string** → the RFC 9068 §2.2.3 / RFC 6749 §3.3
+      canonical form (``"openid mcp:admin"``). Split on ASCII whitespace;
+      empty tokens are dropped.
+    * **list of strings** → tolerated for realms whose mapper emits the
+      scopes as a JSON array rather than the standard scalar. Non-string
+      entries are dropped and logged.
+
+    Any other JSON type (number, object, bool) is logged under
+    ``malformed_scope_claim`` and resolves to the empty set.
+
+    The claim name is configurable via ``JWT_SCOPES_CLAIM_NAME`` (default
+    ``scope``) so realms that surface the grant under a different attribute
+    are accommodated without a code change.
+    """
+    claim_name = settings.jwt_scopes_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        return frozenset(raw.split())
+    if isinstance(raw, (list, tuple)):
+        values = {item for item in raw if isinstance(item, str)}
+        if len(values) != len(raw):
+            log = structlog.get_logger(__name__)
+            log.warning(
+                "malformed_scope_claim",
+                claim_name=claim_name,
+                reason="non_string_entries_dropped",
+            )
+        return frozenset(values)
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_scope_claim",
+        claim_name=claim_name,
+        reason="not_a_string_or_array",
+    )
+    return frozenset()
+
+
 def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     """Extract the cross-tenant ``platform_admin`` flag from *claims*.
 
@@ -885,6 +942,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
     capabilities = _extract_capabilities(claims, settings)
+    scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
@@ -907,6 +965,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             tenant_role=tenant_role,
             principal_kind=principal_kind,
             capabilities=capabilities,
+            scopes=scopes,
             platform_admin=platform_admin,
             runner_id=runner_id,
         )

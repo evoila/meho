@@ -40,7 +40,7 @@ from uuid import UUID
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.result_handle_store import get_result_handle_store
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
@@ -120,6 +120,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="typed_connector_reads",
         name="result_query",
+        surface=ToolSurface.WORKING,
         description=(
             "Read rows back from a JSONFlux result handle. After "
             "`call_operation` reduces a large list response, you get an "

@@ -293,6 +293,9 @@ def _token(
         sub=sub,
         tenant_role=role.value,
         tenant_id=str(tenant_id),
+        # broadcast-override tools are operator-surface (Initiative
+        # #3153/#3154); elevate the session so they list + dispatch.
+        extra_claims={"scope": "mcp:admin"},
     )
 
 

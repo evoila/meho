@@ -116,7 +116,7 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
@@ -994,6 +994,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
+        surface=ToolSurface.WORKING,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
         outputSchema={
@@ -1377,6 +1378,7 @@ register_mcp_tool(
         # registry entry, not Topology v2's.
         feature="targets",
         name=_LIST_TARGETS_NAME,
+        surface=ToolSurface.WORKING,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
         outputSchema={
@@ -1646,6 +1648,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_ANNOTATE_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_ANNOTATE_DESCRIPTION,
         inputSchema=ANNOTATE_PARAMETER_SCHEMA,
         outputSchema=with_parked_shape(ANNOTATE_RESPONSE_SCHEMA),
@@ -1708,6 +1711,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_UNANNOTATE_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_UNANNOTATE_DESCRIPTION,
         inputSchema=UNANNOTATE_PARAMETER_SCHEMA,
         outputSchema=with_parked_shape(UNANNOTATE_RESPONSE_SCHEMA),

@@ -66,7 +66,7 @@ from meho_backplane.agents.service import (
     AgentIdentityRefInvalidError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 _log = structlog.get_logger(__name__)
@@ -119,6 +119,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List agent definitions for the operator's tenant "
             "(Initiative #802). Operator-level read. Returns "
@@ -161,6 +162,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_show",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Fetch one agent definition by name for the operator's "
             "tenant (Initiative #802). Operator-level read. Returns "
@@ -228,6 +230,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_create",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Create an agent definition for the operator's tenant "
             "(Initiative #802). Tenant-admin only. Args: name (slug), "
@@ -339,6 +342,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_edit",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Apply a partial update to an agent definition by name "
             "(Initiative #802). Tenant-admin only. Supply name plus any "
@@ -410,6 +414,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_delete",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Delete an agent definition by name for the operator's "
             "tenant (Initiative #802). Tenant-admin only. Returns "

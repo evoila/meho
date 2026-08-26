@@ -41,7 +41,7 @@ from meho_backplane.connectors.targets.schemas import (
     TARGETS_REGISTER_PARAMETER_SCHEMA,
     TARGETS_REGISTER_RESPONSE_SCHEMA,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 from meho_backplane.mcp.tools.topology import with_parked_shape
 from meho_backplane.operations.dispatcher import dispatch
@@ -177,6 +177,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="targets",
         name=_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_DESCRIPTION,
         inputSchema=TARGETS_REGISTER_PARAMETER_SCHEMA,
         outputSchema=with_parked_shape(TARGETS_REGISTER_RESPONSE_SCHEMA),

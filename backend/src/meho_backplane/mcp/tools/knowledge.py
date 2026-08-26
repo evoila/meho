@@ -74,7 +74,7 @@ from typing import Any, Final
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.kb.schemas import InvalidKbSlugError
 from meho_backplane.kb.service import KbService
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
@@ -222,6 +222,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_knowledge",
+        surface=ToolSurface.WORKING,
         description=(
             "Search the tenant's knowledge base for distilled operator "
             "knowledge: vendor API patterns, lab conventions, "
@@ -304,6 +305,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="add_to_knowledge",
+        surface=ToolSurface.WORKING,
         description=(
             "Add a new entry to the tenant's knowledge base. Use when "
             "you (or the operator working with you) learn something "

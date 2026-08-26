@@ -82,7 +82,7 @@ from meho_backplane.api.v1.broadcast_overrides import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 _log = structlog.get_logger(__name__)
@@ -149,6 +149,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_overrides_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List broadcast-detail override rules for the operator's "
             "tenant (Initiative #376). Tenant-admin only. Optional "
@@ -222,6 +223,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_overrides_set",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Create a broadcast-detail override rule for the operator's "
             "tenant (Initiative #376). Tenant-admin only. op_id_pattern "
@@ -311,6 +313,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_overrides_remove",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Delete a broadcast-detail override rule by id for the "
             "operator's tenant (Initiative #376). Tenant-admin only. "

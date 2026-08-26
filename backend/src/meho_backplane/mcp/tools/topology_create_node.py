@@ -48,7 +48,7 @@ from meho_backplane.connectors.topology.schemas import (
     CREATE_NODE_PARAMETER_SCHEMA,
     CREATE_NODE_RESPONSE_SCHEMA,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.tools.topology import dispatch_topology_write, with_parked_shape
 
 __all__: list[str] = []
@@ -121,6 +121,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_CREATE_NODE_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_CREATE_NODE_DESCRIPTION,
         inputSchema=CREATE_NODE_PARAMETER_SCHEMA,
         outputSchema=with_parked_shape(CREATE_NODE_RESPONSE_SCHEMA),

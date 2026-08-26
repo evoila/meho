@@ -6143,6 +6143,83 @@
         }
       }
     },
+    "/api/v1/audit/reflex": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Reflex Endpoint",
+        "description": "Return reflex-adoption KPIs for *operator* over the requested window.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a different tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` capability (#1638). *since* / *until* accept\n``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date; malformed \u2192 400.\n*until* defaults to now. An empty window is a structured zero report\n(both surfaces present, ``None`` ratios), not 404.",
+        "operationId": "reflex_endpoint_api_v1_audit_reflex_get",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "7d",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReflexReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/broadcast/overrides": {
       "get": {
         "tags": [
@@ -27283,6 +27360,42 @@
         "title": "ReassignRunResponse",
         "description": "Returned by ``meho_runbook_reassign`` -- the new ownership coordinates."
       },
+      "ReflexReport": {
+        "properties": {
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "surfaces": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceMetrics"
+            },
+            "type": "array",
+            "title": "Surfaces"
+          }
+        },
+        "type": "object",
+        "required": [
+          "since",
+          "until",
+          "tenant_id",
+          "surfaces"
+        ],
+        "title": "ReflexReport",
+        "description": "Top-level shape returned by :func:`compute_reflex_report` + the route.\n\n``surfaces`` is always ordered ``[agent, cli_rest]`` so table\nrenderers and ``--json`` consumers see a stable shape even for an\nempty window (both surfaces present with zero-valued / ``None``\nmetrics). ``tenant_id`` is the scope the report was computed for\n(the operator's own tenant, or a ``platform_admin`` filter)."
+      },
       "RefreshResult": {
         "properties": {
           "target_id": {
@@ -29601,6 +29714,72 @@
         ],
         "title": "SurfaceChecklist",
         "description": "Per-surface checklist: the five criteria + the surface verdict."
+      },
+      "SurfaceMetrics": {
+        "properties": {
+          "surface": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "cli_rest"
+            ],
+            "title": "Surface"
+          },
+          "read_before_act_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Read Before Act Pct"
+          },
+          "read_before_act_sessions": {
+            "type": "integer",
+            "title": "Read Before Act Sessions"
+          },
+          "read_before_act_read_first": {
+            "type": "integer",
+            "title": "Read Before Act Read First"
+          },
+          "announce_coverage_pct": {
+            "type": "number",
+            "nullable": true,
+            "title": "Announce Coverage Pct"
+          },
+          "announce_coverage_write_ops": {
+            "type": "integer",
+            "title": "Announce Coverage Write Ops"
+          },
+          "announce_coverage_announced": {
+            "type": "integer",
+            "title": "Announce Coverage Announced"
+          },
+          "write_back_per_100_call_ops": {
+            "type": "number",
+            "nullable": true,
+            "title": "Write Back Per 100 Call Ops"
+          },
+          "write_back_add_calls": {
+            "type": "integer",
+            "title": "Write Back Add Calls"
+          },
+          "write_back_call_operations": {
+            "type": "integer",
+            "title": "Write Back Call Operations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "surface",
+          "read_before_act_pct",
+          "read_before_act_sessions",
+          "read_before_act_read_first",
+          "announce_coverage_pct",
+          "announce_coverage_write_ops",
+          "announce_coverage_announced",
+          "write_back_per_100_call_ops",
+          "write_back_add_calls",
+          "write_back_call_operations"
+        ],
+        "title": "SurfaceMetrics",
+        "description": "The four reflex metrics for one surface (``agent`` / ``cli_rest``).\n\nEach ratio is reported as a rounded percentage/rate together with\nthe raw numerator and denominator, so a consumer can re-derive the\nratio and a zero-denominator surface reads as ``None`` (N/A) rather\nthan a misleading ``0.0``. Frozen so report instances can be passed\naround without accidental mutation."
       },
       "SurfaceResult": {
         "properties": {

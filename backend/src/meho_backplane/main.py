@@ -70,6 +70,7 @@ from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.approvals import router as api_v1_approvals_router
 from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
+from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
@@ -929,6 +930,15 @@ app.include_router(api_v1_memory_router)
 # row this surface writes carries the canonical `meho.audit.query`
 # identity and broadcasts as aggregate-only per decision #3.
 app.include_router(api_v1_audit_router)
+# #3134 (Initiative #3128) -- reflex-adoption KPIs at
+# `GET /api/v1/audit/reflex`. Read-only `audit_log` + announce-store
+# aggregation reusing the #444 usage-telemetry seam: read-before-act,
+# announce coverage, write-back rate, each split by surface (agent vs
+# CLI/REST). Operator role minimum; the `tenant_filter` cross-tenant
+# param is gated behind platform_admin. Binds the same `audit_op_id`
+# (`meho.audit.reflex`) / `audit_op_class` (`audit_query`) overrides the
+# audit-query surface uses so the row broadcasts aggregate-only.
+app.include_router(api_v1_audit_reflex_router)
 # G6.3-T4 (#381) -- tenant-admin CRUD verbs for BroadcastOverride
 # rules (list / create / delete). Wraps the substrate ORM model T1
 # (#378) ships and the resolver-cache invalidation hook T2 (#379)

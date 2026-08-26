@@ -11,6 +11,23 @@ directory into the root of your consumer repo so that any local agent
 session (Claude Code, an MCP-aware editor, a CI bot) prefers MEHO
 surfaces over per-machine fallbacks.
 
+> **Claude Code users: install the plugin instead.** The MCP wiring and
+> the Layer-2 routing rules below ship as a versioned Claude Code plugin —
+> no copy-merge, no per-release re-pull:
+>
+> ```bash
+> claude plugin marketplace add evoila/meho
+> /plugin install meho@meho
+> ```
+>
+> The plugin lives at
+> [`clients/claude-code-plugin/`](../../../clients/claude-code-plugin/) and
+> carries the same routing discipline as skills (`meho:prefer-meho`,
+> `meho:knowledge`, `meho:memory`, `meho:operations`, `meho:broadcast`)
+> plus the `mcp-remote` MCP config. This directory's template remains the
+> authoritative source for **non-plugin clients** (Cline, Continue, CI
+> bots) that read a `CLAUDE.md`.
+
 ## What's here
 
 | File | Purpose |

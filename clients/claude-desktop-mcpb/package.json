@@ -1,0 +1,10 @@
+{
+  "name": "meho-claude-desktop-mcpb",
+  "version": "0.0.0",
+  "description": "Vendored runtime dependencies for the MEHO for Claude Desktop .mcpb bundle. Not published; build.sh runs `npm ci --omit=dev` to pack node_modules into the bundle.",
+  "private": true,
+  "license": "Apache-2.0",
+  "dependencies": {
+    "mcp-remote": "0.1.38"
+  }
+}

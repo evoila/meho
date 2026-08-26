@@ -33,16 +33,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${2:-${SCRIPT_DIR}/dist}"
 mkdir -p "${OUT_DIR}"
 
-# Stage only the runtime files (manifest + server/) so build.sh, the
-# README, and the .gitignore never end up inside the shipped bundle.
-# The manifest is committed with a placeholder version (0.0.0); the real
-# version is injected into the staged copy so the source tree stays clean.
+# Stage only the runtime files (manifest + server/ + the pinned
+# dependency manifests) so build.sh, the README, the test suite, and the
+# .gitignore never end up inside the shipped bundle. The manifest is
+# committed with a placeholder version (0.0.0); the real version is
+# injected into the staged copy so the source tree stays clean.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
 
 jq --arg v "${VERSION}" '.version = $v' "${SCRIPT_DIR}/manifest.json" \
   > "${STAGE}/manifest.json"
 cp -R "${SCRIPT_DIR}/server" "${STAGE}/server"
+
+# Vendor mcp-remote into the bundle. MCPB Node servers must ship their
+# dependencies in node_modules (MANIFEST spec) — there is no `npx` fetch
+# at runtime. `npm ci` installs the exact, integrity-checked tree pinned
+# in package-lock.json; `--omit=dev` prunes it to the production deps the
+# launcher actually spawns. The launcher resolves the entry from this
+# node_modules at run time via process.execPath.
+cp "${SCRIPT_DIR}/package.json" "${SCRIPT_DIR}/package-lock.json" "${STAGE}/"
+( cd "${STAGE}" && npm ci --omit=dev --no-audit --no-fund )
 
 OUT_FILE="${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb"
 npx --yes "@anthropic-ai/mcpb@${MCPB_VERSION}" pack "${STAGE}" "${OUT_FILE}"

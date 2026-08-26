@@ -3,10 +3,19 @@
 //
 // Claude Desktop runs this file with its bundled Node runtime (the
 // manifest's server.mcp_config.command is "node"). It is a thin stdio
-// pass-through to the proven onramp `npx -y mcp-remote@0.1.38 <url> …`
+// pass-through to the proven onramp `mcp-remote@0.1.38 <url> …`
 // (recipe: docs/cross-repo/mcp-client-setup.md, proven by #2666).
 //
-// It adds two things over invoking npx directly:
+// mcp-remote is vendored into the bundle's node_modules at pack time
+// (build.sh runs `npm ci --omit=dev`) and launched through the same
+// runtime already executing this file — `process.execPath` — so there is
+// no `npx`, no PATH lookup, and no per-platform shell. Under Claude
+// Desktop the entry point runs inside a UtilityProcess whose PATH is the
+// GUI PATH (no /opt/homebrew/bin, no nvm shims), so the old `npx` spawn
+// died with `spawn npx ENOENT` before OAuth (field-test #3143); a direct
+// `process.execPath` spawn cannot hit that failure.
+//
+// It adds two things over invoking mcp-remote directly:
 //
 //  1. A guard on the internal-CA path: the optional `ca_cert` user_config
 //     is delivered as MEHO_CA_CERT, and NODE_EXTRA_CA_CERTS is exported to
@@ -24,6 +33,9 @@
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
 
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 const rawUrl = process.argv[2];
 
@@ -61,28 +73,42 @@ delete env.MEHO_CA_CERT;
 const clientId = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim() || "meho-mcp";
 delete env.MEHO_MCP_CLIENT_ID;
 
-// On Windows `npx` resolves to `npx.cmd`, which Node refuses to spawn
-// without a shell (CVE-2024-27980 mitigation). The URL is validated above,
-// and the OAuth flags are JSON produced by JSON.stringify from a trimmed
-// client id — no interpolated argument can inject a shell token.
-//
-// Pin the smoke-tested `mcp-remote@0.1.38` and present the static
-// `meho-mcp` client via --static-oauth-client-info so the shim skips the
-// DCR the realm blocks; the scope metadata matches what the backplane's
-// token audience mappers expect.
-const isWindows = process.platform === "win32";
+// Run the child as a plain Node process even when process.execPath is
+// Claude Desktop's Electron helper rather than a standalone `node`:
+// ELECTRON_RUN_AS_NODE=1 "starts the process as a normal Node.js process"
+// (Electron docs). Harmless no-op when execPath is already `node`.
+env.ELECTRON_RUN_AS_NODE = "1";
+
+// Resolve the vendored mcp-remote CLI entry from the bundle's node_modules
+// (populated by `npm ci --omit=dev` at pack time). Read the package's own
+// `bin` mapping rather than hardcoding a path, so a future pinned version
+// that relocates its entry script keeps working.
+const require = createRequire(import.meta.url);
+const mcpRemotePkgPath = require.resolve("mcp-remote/package.json");
+const mcpRemotePkg = JSON.parse(readFileSync(mcpRemotePkgPath, "utf8"));
+const mcpRemoteBin =
+  typeof mcpRemotePkg.bin === "string"
+    ? mcpRemotePkg.bin
+    : mcpRemotePkg.bin["mcp-remote"];
+const mcpRemoteEntry = join(dirname(mcpRemotePkgPath), mcpRemoteBin);
+
+// Spawn the pinned mcp-remote through this process's own runtime — a
+// direct binary + args-array spawn on every platform (no external
+// launcher, no PATH resolution, no shell). Present the static `meho-mcp`
+// client via --static-oauth-client-info so the shim skips the DCR the
+// realm blocks; the scope metadata matches what the backplane's token
+// audience mappers expect.
 const child = spawn(
-  isWindows ? "npx.cmd" : "npx",
+  process.execPath,
   [
-    "-y",
-    "mcp-remote@0.1.38",
+    mcpRemoteEntry,
     url.href,
     "--static-oauth-client-info",
     JSON.stringify({ client_id: clientId }),
     "--static-oauth-client-metadata",
     JSON.stringify({ scope: "mcp:read mcp:execute" }),
   ],
-  { stdio: "inherit", env, shell: isWindows },
+  { stdio: "inherit", env },
 );
 
 child.on("error", (err) => {

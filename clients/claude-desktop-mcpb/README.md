@@ -31,8 +31,10 @@ because the shim runs on a machine already on the VPN.
 | Path | Role |
 |---|---|
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
-| `server/index.mjs` | The bundle's entry point. A thin stdio launcher for `npx -y mcp-remote@0.1.38 <url> …` that guards the internal-CA path and presents the pre-registered `meho-mcp` OAuth client. |
-| `build.sh` | Validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
+| `server/index.mjs` | The bundle's entry point. A thin stdio launcher that spawns the vendored `mcp-remote` through the bundle's own runtime, guards the internal-CA path, and presents the pre-registered `meho-mcp` OAuth client. |
+| `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.38` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
+| `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's spawn contract and guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
+| `build.sh` | Vendors dependencies, then validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
 
@@ -41,9 +43,11 @@ because the shim runs on a machine already on the VPN.
 ./build.sh 0.31.0 /tmp/out   # or choose the output directory
 ```
 
-Requires Node.js (for `npx`) and `jq`. The pinned `@anthropic-ai/mcpb`
-CLI validates `manifest.json` against the MANIFEST 0.3 schema before
-zipping, so a malformed manifest fails the build.
+Requires Node.js / `npm` (`build.sh` runs `npm ci --omit=dev` to vendor
+`mcp-remote`, and `npx` for the pinned `@anthropic-ai/mcpb` CLI) and `jq`.
+The `@anthropic-ai/mcpb` CLI validates `manifest.json` against the
+MANIFEST 0.3 schema before zipping, so a malformed manifest fails the
+build.
 
 In CI the same script runs two ways (see
 [`.github/workflows/mcpb-bundle.yml`](../../.github/workflows/mcpb-bundle.yml)
@@ -71,8 +75,8 @@ client id delivered as `MEHO_MCP_CLIENT_ID`. The launcher:
    `meho-mcp` when the host substitutes an empty value for the untouched
    optional `client_id` config — so an operator who never opens the
    advanced field still authenticates.
-4. Spawns the smoke-tested `npx -y mcp-remote@0.1.38 <url>` with inherited
-   stdio, passing `--static-oauth-client-info '{"client_id": "…"}'` and
+4. Spawns the vendored `mcp-remote@0.1.38` with inherited stdio, passing
+   `--static-oauth-client-info '{"client_id": "…"}'` and
    `--static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'`.
    The static client info is load-bearing: MEHO's Keycloak realm blocks
    anonymous RFC 7591 Dynamic Client Registration (default Trusted Hosts
@@ -81,17 +85,28 @@ client id delivered as `MEHO_MCP_CLIENT_ID`. The launcher:
    `meho-mcp` client skips DCR entirely. `mcp-remote` then runs its OAuth
    2.1 + PKCE flow and forwards Streamable-HTTP calls to `/mcp`.
 
+The spawn is a direct `process.execPath` + args-array call — the same
+runtime already executing `index.mjs`, with `ELECTRON_RUN_AS_NODE=1` in
+the child env so it runs as plain Node whether `execPath` is a standalone
+`node` or Claude Desktop's Electron helper. There is **no `npx`, no PATH
+lookup, and no per-platform shell**: `mcp-remote` is vendored in the
+bundle's `node_modules` (MCPB Node servers ship their dependencies), and
+the launcher resolves its entry from there. This is what fixes the
+field-test failure where Claude Desktop's UtilityProcess GUI PATH (no
+Homebrew / nvm entries) made the old `npx` spawn die with
+`spawn npx ENOENT` before OAuth (#3143).
+
 The `meho-mcp` client (or whatever name `client_id` overrides it to) must
 already exist on the realm — see
 [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md).
-The operator's machine needs system Node.js / `npx` on `PATH` (the same
-prerequisite the raw shim recipe has).
+No system Node or `npx` on `PATH` is required at run time — the bundle
+carries its dependencies and Claude Desktop supplies the runtime.
 
 ## Verifying a built bundle
 
 ```bash
 ./build.sh 0.0.0-dev /tmp/out
-unzip -l /tmp/out/meho-claude-desktop-0.0.0-dev.mcpb   # manifest.json + server/index.mjs
+unzip -l /tmp/out/meho-claude-desktop-0.0.0-dev.mcpb | grep -i mcp-remote  # vendored
 ```
 
 Then open the `.mcpb` in Claude Desktop on a VPN-connected machine, enter

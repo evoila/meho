@@ -16,7 +16,8 @@
       "command": "node",
       "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
       "env": {
-        "MEHO_CA_CERT": "${user_config.ca_cert}"
+        "MEHO_CA_CERT": "${user_config.ca_cert}",
+        "MEHO_MCP_CLIENT_ID": "${user_config.client_id}"
       }
     }
   },
@@ -31,6 +32,13 @@
       "type": "file",
       "title": "Internal CA bundle (optional)",
       "description": "PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave empty for public-CA deploys.",
+      "required": false
+    },
+    "client_id": {
+      "type": "string",
+      "title": "OAuth client id (advanced)",
+      "description": "Pre-registered public OAuth client the shim presents to Keycloak. Leave as the default unless your realm registered the client under a different name.",
+      "default": "meho-mcp",
       "required": false
     }
   },

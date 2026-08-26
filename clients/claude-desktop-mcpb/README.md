@@ -31,7 +31,7 @@ because the shim runs on a machine already on the VPN.
 | Path | Role |
 |---|---|
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
-| `server/index.mjs` | The bundle's entry point. A transparent stdio launcher for `npx -y mcp-remote <url>` that guards the internal-CA path. |
+| `server/index.mjs` | The bundle's entry point. A thin stdio launcher for `npx -y mcp-remote@0.1.38 <url> …` that guards the internal-CA path and presents the pre-registered `meho-mcp` OAuth client. |
 | `build.sh` | Validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
@@ -57,8 +57,9 @@ and [`.github/workflows/cli-release.yml`](../../.github/workflows/cli-release.ym
 ## How the launcher works
 
 The manifest's `mcp_config.command` is `node`, running `server/index.mjs`
-with the operator's backplane URL as its argument and the optional CA
-path delivered as the `MEHO_CA_CERT` environment variable. The launcher:
+with the operator's backplane URL as its argument, the optional CA path
+delivered as the `MEHO_CA_CERT` environment variable, and the OAuth
+client id delivered as `MEHO_MCP_CLIENT_ID`. The launcher:
 
 1. Validates that the URL is a well-formed `https` URL.
 2. Exports `NODE_EXTRA_CA_CERTS` to the child **only** when a non-empty
@@ -66,12 +67,25 @@ path delivered as the `MEHO_CA_CERT` environment variable. The launcher:
    child's TLS trust path, and the MCPB host's substitution of an unset
    optional value is undocumented — so the guard lives in code rather
    than depending on that behavior.
-3. Spawns `npx -y mcp-remote <url>` with inherited stdio, so `mcp-remote`
-   runs its OAuth 2.1 + PKCE flow and forwards Streamable-HTTP calls to
-   `/mcp` exactly as it does when spawned directly.
+3. Resolves the OAuth client id from `MEHO_MCP_CLIENT_ID`, falling back to
+   `meho-mcp` when the host substitutes an empty value for the untouched
+   optional `client_id` config — so an operator who never opens the
+   advanced field still authenticates.
+4. Spawns the smoke-tested `npx -y mcp-remote@0.1.38 <url>` with inherited
+   stdio, passing `--static-oauth-client-info '{"client_id": "…"}'` and
+   `--static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'`.
+   The static client info is load-bearing: MEHO's Keycloak realm blocks
+   anonymous RFC 7591 Dynamic Client Registration (default Trusted Hosts
+   policy → `403 "Host not trusted"`), so a bare `mcp-remote` could never
+   complete OAuth on a fresh install. Presenting the pre-registered public
+   `meho-mcp` client skips DCR entirely. `mcp-remote` then runs its OAuth
+   2.1 + PKCE flow and forwards Streamable-HTTP calls to `/mcp`.
 
-The operator's machine therefore needs system Node.js / `npx` on `PATH`
-(the same prerequisite the raw shim recipe has).
+The `meho-mcp` client (or whatever name `client_id` overrides it to) must
+already exist on the realm — see
+[`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md).
+The operator's machine needs system Node.js / `npx` on `PATH` (the same
+prerequisite the raw shim recipe has).
 
 ## Verifying a built bundle
 

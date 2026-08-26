@@ -347,7 +347,13 @@ def test_migration_installs_tenant_table_and_indexes(
             assert "audit_log_tenant_id_idx" in audit_indexes
 
             tenant_columns = {col["name"] for col in inspector.get_columns("tenant")}
-            assert tenant_columns == {"id", "slug", "name", "created_at"}
+            assert tenant_columns == {
+                "id",
+                "slug",
+                "name",
+                "created_at",
+                "announce_gate_enabled",  # #3133 opt-in announce gate flag
+            }
 
             audit_columns = {col["name"] for col in inspector.get_columns("audit_log")}
             assert "tenant_id" in audit_columns

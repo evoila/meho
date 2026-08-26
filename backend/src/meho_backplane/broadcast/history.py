@@ -102,8 +102,10 @@ from meho_backplane.untrusted_text import wrap_untrusted_text
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
+    "WRITE_OP_CLASSES",
     "InvalidSinceError",
     "build_target_activity_advisory",
+    "caller_has_active_announce_claim",
     "default_since_ms",
     "dump_event_wire",
     "event_matches",
@@ -1038,14 +1040,23 @@ async def list_recent_events_fail_soft(
         return {"events": [], "next_cursor": None}
 
 
-#: op_class values that carry the dispatch-time target-activity advisory
-#: (#2550). Only mutating classes qualify -- a write is where crossfire
-#: matters. Read-class dispatches (``read`` / ``credential_read`` /
-#: ``audit_query`` / ``other`` / ``approval``) skip the stream read
-#: entirely, keeping the hot read path free of the lookup.
-_ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+#: The mutating op classes -- ``write`` / ``credential_write`` /
+#: ``credential_mint``. A single source of truth for "is this a
+#: write-class op" shared by the dispatch-time advisories (#2550
+#: target-activity, #3133 reflex) and the #3133 announce gate, so a
+#: change to the mutating-class set lands in one place. Read-class
+#: dispatches (``read`` / ``credential_read`` / ``audit_query`` /
+#: ``other`` / ``approval`` / ``checks``) are not members.
+WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
     {"write", "credential_write", "credential_mint"}
 )
+
+#: op_class values that carry the dispatch-time target-activity advisory
+#: (#2550). Only mutating classes qualify -- a write is where crossfire
+#: matters. Read-class dispatches skip the stream read entirely, keeping
+#: the hot read path free of the lookup. Aliases :data:`WRITE_OP_CLASSES`
+#: so the #2550 gate and the #3133 features stay in lockstep.
+_ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = WRITE_OP_CLASSES
 
 #: Maximum advisory entries surfaced on a single dispatch response. The
 #: advisory is an awareness nudge, not an audit -- the caller who needs
@@ -1212,3 +1223,86 @@ async def build_target_activity_advisory(
         return {}
     newest = peers[:_ADVISORY_MAX_ENTRIES]
     return {ADVISORY_EXTRAS_KEY: [_advisory_entry(event) for event in reversed(newest)]}
+
+
+#: Lookback for the caller's own active-claim scan. Announcement TTLs are
+#: bounded at 1440 minutes (``AgentAnnouncementEvent.ttl_minutes`` upper
+#: bound), which is also the stream's retention ceiling, so a claim older
+#: than this window can no longer be active. Paired with
+#: :data:`_ADVISORY_SCAN_LIMIT` (newest-first ``COUNT`` cap), the scan is
+#: one bounded round-trip; a caller who announced more than
+#: :data:`_ADVISORY_SCAN_LIMIT` events ago in a very busy tenant may fall
+#: off the tail (a bounded false-negative acceptable for an awareness
+#: nudge, and unlikely for the announce-then-write flow the gate targets).
+_CLAIM_SCAN_WINDOW_MINUTES: Final[int] = 1440
+
+
+def _claim_covers_target(event: AgentAnnouncementEvent, target_name: str | None) -> bool:
+    """Whether an announce claim's target attribution covers the op's target.
+
+    A claim that named no target (neither ``target`` nor ``targets``) is
+    target-agnostic and covers any op. A target-less op
+    (``target_name is None``) is covered by any claim. Otherwise the claim
+    must name the op's target (exact match via :func:`_target_matches`).
+    """
+    claim_has_target = event.target is not None or bool(event.targets)
+    if not claim_has_target or target_name is None:
+        return True
+    return _target_matches(event, target_name)
+
+
+async def caller_has_active_announce_claim(
+    operator: Operator,
+    *,
+    op_id: str,
+    target_name: str | None,
+) -> bool:
+    """Return ``True`` iff the caller holds an active claim covering this op.
+
+    Reads the caller's own unexpired :class:`AgentAnnouncementEvent`
+    claims off the per-tenant stream (one bounded newest-first
+    ``XREVRANGE``) and returns ``True`` as soon as one covers the
+    dispatched op. Shared by the #3133 reflex advisory's
+    announce-before-mutate heuristic and the #3133 opt-in announce gate,
+    so the two agree on what "an active claim covering this op" means.
+
+    A claim covers the op when all hold:
+
+    * it was authored by this principal (``principal_sub == operator.sub``
+      -- announcements carry no ``actor_sub``, so a delegated agent's
+      claim rides its human principal's ``sub``);
+    * it has not expired (a claim with no ``ttl_minutes`` never expires);
+    * its declared ``planned_op_class`` matches the op's
+      :func:`classify_op` class, or the claim declared no class (a
+      class-agnostic claim covers any op); and
+    * its target attribution covers the op (see :func:`_claim_covers_target`).
+
+    Propagates :class:`redis.exceptions.RedisError` to the caller's
+    fail-open guard: the reflex advisory swallows it to ``{}`` and the
+    announce gate swallows it to "do not block".
+    """
+    client = get_broadcast_client()
+    key = stream_key(operator.tenant_id)
+    since_ms = max(
+        int((datetime.now(UTC) - timedelta(minutes=_CLAIM_SCAN_WINDOW_MINUTES)).timestamp() * 1000),
+        0,
+    )
+    raw_entries = cast(
+        "list[tuple[str, dict[str, str]]]",
+        await client.xrevrange(key, max=_XRANGE_END, min=str(since_ms), count=_ADVISORY_SCAN_LIMIT),
+    )
+    now = datetime.now(UTC)
+    op_class = classify_op(op_id)
+    for entry_id, fields in raw_entries:
+        event = parse_entry(entry_id, fields, stream_key=key)
+        if not isinstance(event, AgentAnnouncementEvent):
+            continue
+        if event.principal_sub != operator.sub:
+            continue
+        if _is_expired_claim(event, now):
+            continue
+        if event.planned_op_class is not None and event.planned_op_class != op_class:
+            continue
+        if _claim_covers_target(event, target_name):
+            return True
+    return False

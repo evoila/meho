@@ -249,8 +249,10 @@ import httpx
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.history import build_target_activity_advisory
+from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
     OperationResult,
@@ -277,6 +279,7 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     is_probe_refused,
     result_ambiguous_connector,
+    result_announce_required,
     result_awaiting_approval,
     result_connector_auth_failed,
     result_connector_error,
@@ -812,12 +815,21 @@ async def _reduce_and_audit_success(
     # is deduped per (caller, dashboard, state); distinct keys, so a
     # plain merge can never clobber either fragment.
     checks_advisory = await build_checks_alert_advisory(operator)
+    # Third extras fragment (#3133): the reflex advisory nudges an agent
+    # session toward read-before-act / announce-before-mutate discipline,
+    # deduped per (session, heuristic). Distinct key again -- the merge
+    # stays a clobber-free union of the three fragments.
+    reflex_advisory = await build_reflex_advisory(
+        operator,
+        op_id=descriptor.op_id,
+        target_name=getattr(target, "name", None),
+    )
     return wrap_ok_result(
         op_id,
         summary,
         duration_ms,
         handle,
-        extras={**activity_advisory, **checks_advisory},
+        extras={**activity_advisory, **checks_advisory, **reflex_advisory},
     )
 
 
@@ -2253,6 +2265,35 @@ async def dispatch(
                     gate_reason or f"unexpected policy verdict {verdict!r}; denied",
                     duration_ms,
                 )
+
+            # --- Opt-in announce gate (#3133) --------------------------
+            # Verdict is AUTO_EXECUTE. In a tenant that has enabled the
+            # announce gate, a caution-or-higher write-class op is rejected
+            # before execution unless the caller holds an active announce
+            # claim covering it. Off by default and fail-open, so an
+            # ordinary dispatch reaches this line and proceeds unchanged.
+            # Not run on the ``_approved`` resume path -- an operator
+            # already approved that exact call; re-gating it here would
+            # strand an approved op behind an announce it can no longer add.
+            announce_block = await announce_gate_blocks(
+                operator,
+                op_id=op_id,
+                safety_level=descriptor.safety_level,
+                target_name=getattr(target, "name", None),
+            )
+            if announce_block is not None:
+                duration_ms = _elapsed_ms(started)
+                await audit_and_broadcast_safe(
+                    audit_id=uuid.uuid4(),
+                    operator=operator,
+                    descriptor=descriptor,
+                    target=target,
+                    params=params,
+                    params_hash=params_hash,
+                    result_status="denied",
+                    duration_ms=duration_ms,
+                )
+                return result_announce_required(op_id, announce_block, duration_ms)
         else:
             # Approval-queue resume path: the gate is skipped because an
             # operator already approved this exact call. Stamp the row with

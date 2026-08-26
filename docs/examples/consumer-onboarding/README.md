@@ -47,9 +47,10 @@ local Claude session from different angles:
   `instructions` field for any agent connecting *through* MEHO.
   Bound to the **tenant**; binds every session no matter where it
   runs. Shipped by [G7.1-T1..T5](https://github.com/evoila/meho/issues/229)
-  (T4 #316 is the assembler that fills the `instructions` field;
-  until it lands, that field is `None` and Layer 1 is not yet
-  reaching agents).
+  (T4 [#316](https://github.com/evoila/meho/issues/316) shipped the
+  assembler that fills the `instructions` field, so a session
+  connecting via MCP receives the tenant-conventions preamble at
+  session start).
 * **Layer 2 — this template.** The in-repo `CLAUDE.md` the operator's
   local Claude session reads when it opens a cloned consumer repo.
   Bound to the **repo on the operator's machine**; teaches the

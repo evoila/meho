@@ -48,12 +48,14 @@ operational discipline (Vault canonical, naming rules, secret
 handling, CLI-wrapper fallback policy). This file (Layer 2) handles
 only the **"prefer MEHO" routing rules**.
 
-> **Current state (v0.2 staging).** The MCP `initialize` response's
-> `instructions` field is the carrier for the assembled Layer-1
-> preamble. Until [G7.1-T4 #316](https://github.com/evoila/meho/issues/316)
-> lands, that field is `None` and Layer-1 rules are not yet reaching
-> agents — only Layer 2 (this file) is live. Once T4 ships, sessions
-> reconnecting via MCP will receive both layers automatically.
+> **How Layer 1 reaches the session.** The MCP `initialize`
+> response's `instructions` field is the carrier for the assembled
+> Layer-1 preamble, filled by the assembler shipped in
+> [G7.1-T4 #316](https://github.com/evoila/meho/issues/316). A
+> session connecting via MCP receives the tenant-conventions preamble
+> in that field at connect time, so both layers reach the session
+> automatically. The preamble is assembled fresh on each `initialize`,
+> so a reconnect (new MCP session) picks up the current conventions.
 
 ## Preferred MEHO surfaces
 

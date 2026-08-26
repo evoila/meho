@@ -95,6 +95,7 @@ from meho_backplane.broadcast import (
     redact_payload,
 )
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
+from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
@@ -288,6 +289,17 @@ async def handle_tools_call(
 
         audit_payload["params_hash"] = compute_params_hash(arguments)
 
+        # Human-only surface (#3155): approve / reject / grant-elevate
+        # have no MCP path under any claim set — deciding a parked op and
+        # elevating an agent grant are human actions (v0.1-spec §7). The
+        # check runs *before* the registry lookup so an accidental future
+        # re-registration can never make them callable; the remediation
+        # string names the operator console / CLI path instead.
+        remediation = human_only_remediation(name)
+        if remediation is not None:
+            status_code = 404
+            raise McpInvalidParamsError(remediation)
+
         entry = get_tool(name)
         if entry is None:
             status_code = 404
@@ -381,8 +393,8 @@ async def handle_tools_call(
         # Class-wide audit-status correction (#1481). A tool handler can
         # raise ``McpInvalidParamsError`` *after* all the explicit
         # pre-dispatch gates (name/arguments/unknown-tool/RBAC/schema)
-        # — e.g. ``_approve_handler`` rejecting a self-approval,
-        # ``approval_request_not_found``, or ``approval_unauthorized``.
+        # — e.g. ``_get_handler`` raising ``approval_request_not_found``,
+        # or a grant handler mapping a ``GrantValidationError``.
         # Those raises bypass every branch that set ``status_code``, so
         # it is still the init 500 — a server-fault projection of what is
         # actually a JSON-RPC ``-32602`` parameter/policy rejection on

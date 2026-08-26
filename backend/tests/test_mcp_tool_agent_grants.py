@@ -3,8 +3,13 @@
 
 """Negative RBAC tests for ``meho_agents_grant_*`` MCP tools.
 
-G11.2-T6 (#819) registers five agent-grant MCP tools, each declared
-with ``required_role=TenantRole.TENANT_ADMIN`` on the
+G11.2-T6 (#819) registered five agent-grant MCP tools; #3155
+(Initiative #3153) de-registered the dedicated elevation verb
+(``meho_agents_grant_elevate``) — it has no MCP path under any claim
+set and is covered by ``test_mcp_human_only_surface.py``. This file
+covers the four surviving tools (``list`` / ``show`` / ``create`` /
+``revoke``), each declared with
+``required_role=TenantRole.TENANT_ADMIN`` on the
 :class:`~meho_backplane.mcp.registry.ToolDefinition`. Two gates
 enforce that role:
 
@@ -51,17 +56,17 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-#: Every ``meho_agents_grant_*`` tool registered by
+#: The surviving ``meho_agents_grant_*`` tools registered by
 #: :mod:`meho_backplane.mcp.tools.agent_grants`. The list pins the wire
 #: names so a rename surfaces as a test break (test_mcp_tool_agent_grants
 #: misses the tool) rather than as a silent coverage gap. Paired with the
 #: ``required_role=TENANT_ADMIN`` declaration on each
-#: :class:`~meho_backplane.mcp.registry.ToolDefinition`.
+#: :class:`~meho_backplane.mcp.registry.ToolDefinition`. The elevation
+#: verb is deliberately absent — see ``test_mcp_human_only_surface``.
 _GRANT_TOOL_NAMES: tuple[str, ...] = (
     "meho_agents_grant_list",
     "meho_agents_grant_show",
     "meho_agents_grant_create",
-    "meho_agents_grant_elevate",
     "meho_agents_grant_revoke",
 )
 
@@ -134,10 +139,8 @@ def test_operator_tools_call_grant_is_rejected_with_forbidden(
     [TenantRole.TENANT_ADMIN],
     indirect=True,
 )
-@pytest.mark.parametrize("tool_name", ["meho_agents_grant_create", "meho_agents_grant_elevate"])
 def test_admin_grant_for_unregistered_principal_is_rejected(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    tool_name: str,
 ) -> None:
     """A tenant-admin grant for an unregistered principal → -32602 naming the scope (#2489).
 
@@ -146,7 +149,9 @@ def test_admin_grant_for_unregistered_principal_is_rejected(
     tenant. The MCP boundary maps that :exc:`GrantValidationError` to
     JSON-RPC ``-32602`` ``INVALID_PARAMS``; the message names the
     ``principal_kind=agent`` enforcement scope so the caller learns why a
-    grant on a non-agent sub can never fire.
+    grant on a non-agent sub can never fire. The elevation variant that
+    used to share this case is gone (de-registered, #3155); ``create``
+    remains the sole agent-invocable grant-write path.
     """
     client, _op = client_with_operator
     arguments: dict[str, Any] = {
@@ -154,9 +159,7 @@ def test_admin_grant_for_unregistered_principal_is_rejected(
         "op_pattern": "*",
         "verdict": "needs-approval",
     }
-    if tool_name.endswith("elevate"):
-        arguments["expires_at"] = "2099-01-01T00:00:00+00:00"
-    resp = post_mcp(client, _tools_call(tool_name, arguments))
+    resp = post_mcp(client, _tools_call("meho_agents_grant_create", arguments))
     body = resp.json()
     assert "error" in body, body
     assert body["error"]["code"] == INVALID_PARAMS

@@ -192,7 +192,7 @@ def test_broadcast_watch_required_anyof_accepts_either_alias() -> None:
 
 @pytest.mark.parametrize(
     "tool_name",
-    ("meho_approvals_get", "meho_approvals_approve", "meho_approvals_reject"),
+    ("meho_approvals_get",),
 )
 def test_approvals_tools_expose_approval_request_id_canonical_name(
     tool_name: str,
@@ -204,6 +204,9 @@ def test_approvals_tools_expose_approval_request_id_canonical_name(
     `audit_id`). The v0.8.0 wire shape used a bare `id` on the
     approvals tools — the only sibling-drift remaining at that point.
     The bare `id` is retained as a deprecated alias for one cycle.
+    `meho_approvals_get` is the sole surviving approvals tool that
+    names this UUID — the decision verbs (approve / reject) were
+    de-registered from MCP (#3155).
     """
     properties = _properties(tool_name)
     assert "approval_request_id" in properties, (

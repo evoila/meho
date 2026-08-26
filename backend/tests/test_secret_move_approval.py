@@ -680,52 +680,11 @@ async def test_decide_run_bound_no_ops_when_waiter_already_claimed(
     assert fake.secrets.kv.v2.put_calls == []
 
 
-@pytest.mark.asyncio
-async def test_mcp_approve_redispatches_run_bound_move_when_claim_free(
-    monkeypatch: pytest.MonkeyPatch,
-    _registered_secret_broker_op: None,
-    captured_broadcasts: list[BroadcastEvent],
-) -> None:
-    """MCP by-id approve re-dispatches a run-bound approval on a free claim (#2293).
-
-    The MCP ``meho_approvals_approve`` twin of the ``/decide`` waiter-gone
-    fallback: the run_id-is-not-None skip is gone, so the approve wins the
-    free exactly-one-resumer claim and executes the move once, returning the
-    outcome under ``dispatch``.
-    """
-    from meho_backplane.mcp.tools.approvals import _approve_handler
-
-    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
-    request_id = await _park_run_bound_move(requester_sub="agent:requester")
-
-    decider = _make_operator(sub="operator:mcp-decider")
-    result = await _approve_handler(decider, {"approval_request_id": str(request_id)})
-
-    assert result["dispatch"]["status"] == "ok", result
-    assert len(fake.secrets.kv.v2.put_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_mcp_approve_run_bound_no_ops_when_waiter_already_claimed(
-    monkeypatch: pytest.MonkeyPatch,
-    _registered_secret_broker_op: None,
-    captured_broadcasts: list[BroadcastEvent],
-) -> None:
-    """MCP approve no-ops (no second write) when the waiter already claimed (#2293).
-
-    Waiter-alive dedup on the MCP surface: the in-process waiter has already
-    won the claim and executed the move, so the MCP approve loses the claim
-    and reports ``dispatch.status="already_resumed"`` with no second write.
-    """
-    from meho_backplane.mcp.tools.approvals import _approve_handler
-    from meho_backplane.operations.approval_queue import claim_resume
-
-    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
-    request_id = await _park_run_bound_move(requester_sub="agent:requester")
-    assert await claim_resume(request_id) is True
-
-    decider = _make_operator(sub="operator:mcp-decider")
-    result = await _approve_handler(decider, {"approval_request_id": str(request_id)})
-
-    assert result["dispatch"]["status"] == "already_resumed", result
-    assert fake.secrets.kv.v2.put_calls == []
+# NOTE (#3155): the MCP-approve twins of the two ``/decide`` run-bound
+# tests above were removed with the MCP approve tool — approving a parked
+# operation is human-only now (console/CLI), with no ``meho_approvals_approve``
+# handler. The exactly-one-resumer claim behaviour they asserted stays
+# covered by the ``/decide`` REST tests
+# (``test_decide_redispatches_run_bound_move_when_claim_free`` and
+# ``test_decide_run_bound_no_ops_when_waiter_already_claimed``) on the
+# surface that still exists.

@@ -588,12 +588,15 @@ approve / reject with a free-form reason.
 
 ### Operator path — MCP
 
-The MCP tool surface exposes
-`meho_approvals_list`, `meho_approvals_get`,
-`meho_approvals_approve`, `meho_approvals_reject` for
-agent-driven approval workflows (a senior operator's agent
-approving a junior operator's agent's request). Same shape as
-the CLI verbs; the agent runs them under operator identity.
+The MCP tool surface exposes the **read** tools
+`meho_approvals_list` and `meho_approvals_get` so an agent can
+surface and inspect pending requests. The **decision** verbs
+(`meho_approvals_approve` / `meho_approvals_reject`) have no MCP
+path under any claim set (#3155): approving or rejecting a parked
+operation is a human decision (v0.1-spec §7), made on the REST /
+CLI / console surfaces — a model holding the approve button would
+collapse the very gate the approval exists to enforce. An agent
+reads the queue over MCP; a human decides it.
 
 ### Approval bypass for read-only first-day operators
 

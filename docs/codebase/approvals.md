@@ -368,17 +368,18 @@ Two changes close that gap, scoped to the **direct**-op path:
    stored target by id (G11.7-T1 fail-closed semantics preserved) and
    re-dispatches with `dispatch(..., _approved=True)`, falling back to
    the stored `request.params` when the surface supplies none. REST
-   `/approve` (caller params, hash-verified), REST `/decide`, and the
-   MCP `meho_approvals_approve` tool all route through it. `/decide` and
-   the MCP tool return the dispatch outcome (`dispatch_*` fields /
-   `dispatch` block) alongside the decision.
+   `/approve` (caller params, hash-verified) and REST `/decide` both
+   route through it; `/decide` returns the dispatch outcome (`dispatch_*`
+   fields) alongside the decision. (The decision itself is REST / CLI /
+   console only — there is no MCP approve verb; see the MCP section
+   below.)
 
 **The `run_id` gate (no double-execution / agent-run regression
-guard).** `/decide` and the MCP approve tool re-dispatch **only when
+guard).** `/decide` re-dispatches **only when
 `run_id IS NULL`** — i.e. a direct operator op. An **agent-run** request
 (`run_id` set) is still resumed in-process by the agent runtime off the
 `approval.approved` broadcast (the must-not-regress path); re-dispatching
-it from `/decide`/MCP too would execute the op twice. So the agent-run
+it from `/decide` too would execute the op twice. So the agent-run
 resume path is untouched: it keeps its in-memory params, ignores the new
 column, and remains the sole re-dispatcher for `run_id`-bearing requests.
 
@@ -389,7 +390,7 @@ the same row hits the already-decided guard (409 / `not_pending`), so the
 stored params drive exactly one execution.
 
 **Pre-0036 rows.** A row parked before migration 0036 has `params IS
-NULL`. Approving it via `/decide`/MCP (no in-band params) finds nothing
+NULL`. Approving it via `/decide` (no in-band params) finds nothing
 to re-dispatch, so `resume_dispatch_after_approval` **fails closed** with
 a structured `denied` result naming the gap — the operator resumes it via
 REST `/approve` + params, exactly as before 0036.
@@ -639,22 +640,25 @@ the same grant.
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
-Four `meho_approvals_*` tools (all `TenantRole.OPERATOR`-gated):
+Two **read** `meho_approvals_*` tools (both `TenantRole.OPERATOR`-gated):
 
 - `meho_approvals_list` — `status` filter (`pending` default), `limit`/`offset`.
 - `meho_approvals_get` — full detail by id.
-- `meho_approvals_approve` — operator-decision path (status flip + audit +
-  `approval.approved` broadcast; **no `params` required** —
-  `approve_request` skips the hash check when called without params). For
-  an approved **direct** op (`run_id IS NULL`) it then re-dispatches using
-  the stored params (#1503) and returns the outcome under `dispatch`; for
-  an agent-run request the in-process agent runtime resumes the op off the
-  broadcast, so the tool only records the decision.
-- `meho_approvals_reject` — same shape; optional `reason`.
 
-RBAC is enforced at two layers: the MCP registry filter hides write
-tools from non-admins in `tools/list`, and the dispatcher re-checks
-`required_role` at `tools/call`.
+The decision verbs — `approve` and `reject` — have **no MCP path under
+any claim set** (#3155, Initiative #3153). Approving or rejecting a
+parked operation is a *human* decision (v0.1-spec §7); a model session
+that parked an op must not hold the button that clears its own gate (the
+self-approval hole `#3143` F4 surfaced). They stay on the REST / CLI /
+console surfaces above, unchanged. Their wire names are pinned in
+`backend/src/meho_backplane/mcp/human_only.py`, so a `tools/call` on
+`meho_approvals_approve` / `meho_approvals_reject` is denied before the
+registry lookup with a remediation naming `meho approvals approve|reject`
+and the operator console.
+
+RBAC on the surviving read tools is enforced at two layers: the MCP
+registry filter hides them from non-operators in `tools/list`, and the
+dispatcher re-checks `required_role` at `tools/call`.
 
 ### CLI (`cli/internal/cmd/approvals/`)
 

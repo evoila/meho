@@ -1,35 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Negative RBAC tests for ``meho_approvals_*`` MCP tools.
+"""Negative RBAC tests for the ``meho_approvals_*`` read MCP tools.
 
-G11.2-T5 (#818) registers four approval MCP tools, each declared
-with ``required_role=TenantRole.OPERATOR`` on the
-:class:`~meho_backplane.mcp.registry.ToolDefinition`. Two gates
-enforce that role (same as the agent-grants surface):
+G11.2-T5 (#818) registered four approval MCP tools; #3155 (Initiative
+#3153) de-registered the two decision verbs (``approve`` / ``reject``)
+— they have no MCP path under any claim set and are covered by
+``test_mcp_human_only_surface.py``. This file covers the surviving
+**read** tools, ``meho_approvals_list`` / ``meho_approvals_get``, each
+declared with ``required_role=TenantRole.OPERATOR``. Two gates enforce
+that role:
 
 * **List-time filter** in
   :func:`~meho_backplane.mcp.registry.all_tools_for`.
 * **Call-time re-check** in :mod:`~meho_backplane.mcp.handlers`.
 
-The existing service-layer suite (``test_approval_queue.py``)
-exercises
-:func:`~meho_backplane.operations.approval_queue.approve_request` /
-:func:`~meho_backplane.operations.approval_queue.reject_request`
-directly. This file closes the gap by asserting:
+This file asserts:
 
-* A ``read_only`` role does NOT see any ``meho_approvals_*`` tool in
-  the ``tools/list`` response (list-time filter intact).
-* A ``read_only`` direct ``tools/call`` against each tool name
+* A ``read_only`` role does NOT see either read tool in the
+  ``tools/list`` response (list-time filter intact).
+* A ``read_only`` direct ``tools/call`` against each read tool name
   returns the dispatcher's structured rejection — JSON-RPC
   ``-32602`` ``INVALID_PARAMS`` with "forbidden" in the message
   (call-time re-check intact).
 
 Out of scope:
 
-* Happy-path operator coverage — separate task; the re-dispatch +
-  audit + broadcast plumbing is exercised by the service-layer
-  suite.
+* Happy-path operator coverage — separate task.
+* The de-registered decision verbs — ``test_mcp_human_only_surface.py``.
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -48,16 +46,15 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-#: Every ``meho_approvals_*`` tool registered by
+#: The surviving ``meho_approvals_*`` read tools registered by
 #: :mod:`meho_backplane.mcp.tools.approvals`. Pinning the wire names
 #: catches both a rename (test breaks for a missing tool) and a new
 #: addition without RBAC review (the matrix below would not exercise
-#: the new tool until added here).
+#: the new tool until added here). The decision verbs (approve /
+#: reject) are deliberately absent — see ``test_mcp_human_only_surface``.
 _APPROVAL_TOOL_NAMES: tuple[str, ...] = (
     "meho_approvals_list",
     "meho_approvals_get",
-    "meho_approvals_approve",
-    "meho_approvals_reject",
 )
 
 
@@ -113,48 +110,3 @@ def test_read_only_tools_call_approval_is_rejected_with_forbidden(
     assert "error" in body, body
     assert body["error"]["code"] == INVALID_PARAMS
     assert "forbidden" in body["error"]["message"].lower(), body
-
-
-# ---------------------------------------------------------------------------
-# T6 (#1483) — self_approval_forbidden MCP error must carry the
-# APPROVAL_ALLOW_SELF_APPROVAL break-glass hint the exception constructs.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
-def test_self_approval_forbidden_message_carries_break_glass_hint(
-    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``meho_approvals_approve`` self-approval error names ``APPROVAL_ALLOW_SELF_APPROVAL``.
-
-    The role gate passes for ``operator``; the handler then raises
-    :class:`SelfApprovalForbiddenError`, whose message already names the
-    break-glass flag. The MCP ``INVALID_PARAMS`` envelope must keep the
-    ``self_approval_forbidden`` token prefix **and** carry the env-var
-    hint so an agent/operator sees the escape hatch rather than a bare
-    token (#1483).
-    """
-    import uuid
-
-    from meho_backplane.mcp.tools import approvals as approvals_tool
-    from meho_backplane.operations.approval_queue import SelfApprovalForbiddenError
-
-    request_id = uuid.UUID("66666666-6666-6666-6666-666666666666")
-
-    async def _raise_self_approval(*_a: object, **_kw: object) -> None:
-        raise SelfApprovalForbiddenError(request_id, principal_sub="op-test")
-
-    monkeypatch.setattr(approvals_tool, "approve_request", _raise_self_approval)
-
-    client, _op = client_with_operator
-    resp = post_mcp(
-        client,
-        _tools_call("meho_approvals_approve", {"approval_request_id": str(request_id)}),
-    )
-    body = resp.json()
-    assert "error" in body, body
-    assert body["error"]["code"] == INVALID_PARAMS
-    message = body["error"]["message"]
-    assert message.startswith("self_approval_forbidden"), message
-    assert "APPROVAL_ALLOW_SELF_APPROVAL" in message, message

@@ -3,7 +3,7 @@
 
 """MCP tools for the approval surfacing channel (G11.2-T5 / #818).
 
-Four ``meho_approvals_*`` tools that mirror the REST routes
+Two **read** ``meho_approvals_*`` tools that mirror the REST routes
 (:mod:`meho_backplane.api.v1.approvals`) onto the MCP transport:
 
 * ``meho_approvals_list`` — list approval requests, optionally filtered
@@ -11,32 +11,24 @@ Four ``meho_approvals_*`` tools that mirror the REST routes
 * ``meho_approvals_get`` — inspect one approval request by id. Returns
   the ``proposed_effect`` so an operator can decide before approving.
   Role: ``operator``.
-* ``meho_approvals_approve`` — approve a pending request (operator
-  decision: status flip + audit + broadcast; **no** params required —
-  the agent's REST path retains the params-hash check).
-  Role: ``operator``.
-* ``meho_approvals_reject`` — reject a pending request. Role:
-  ``operator``.
 
-All four tools drive
+The decision verbs — approve and reject — have **no MCP path under any
+claim set** (#3155, Initiative #3153). Approving or rejecting a parked
+operation is a *human* decision (v0.1-spec §7); a model session that
+parked an op must not be able to approve it (the self-approval hole
+#3143 F4 surfaced). Both stay reachable on the REST / CLI / console
+surfaces, which are untouched:
+:mod:`meho_backplane.api.v1.approvals`, ``meho approvals
+approve|reject``, and the operator console approvals queue. The wire
+names are pinned in :mod:`meho_backplane.mcp.human_only` so a
+``tools/call`` on them returns a remediation naming those paths.
+
+Both read tools drive
 :mod:`meho_backplane.operations.approval_queue` — the single source of
-truth that T4 (#817) shipped — so a decision made over MCP is
-reflected in the REST/CLI view immediately and writes the same
-synchronous "decision" audit row and ``approval_decided`` broadcast
-event as the REST path. RBAC is enforced at two layers: the registry
-filter hides write tools from non-admins in ``tools/list``, and the
-MCP dispatcher re-checks ``required_role`` at call time.
-
-MCP elicitation URL-mode (forward-looking)
-------------------------------------------
-
-When an in-loop agent hits a ``needs-approval`` verdict, the agent
-runtime can use the row's ``id`` (returned from ``meho_approvals_get``)
-to construct an elicitation URL of the form
-``meho://approvals/{request_id}/decide``. MCP-2025-11-25 hosts that
-support elicitation URL-mode open this URL in the operator's decision
-UI; until that lands the operator approves/rejects via the explicit
-``meho_approvals_{approve,reject}`` tools above.
+truth that T4 (#817) shipped — so the MCP view matches the REST/CLI
+view immediately. RBAC is enforced at two layers: the registry filter
+hides tools from non-operators in ``tools/list``, and the MCP
+dispatcher re-checks ``required_role`` at call time.
 
 Error mapping
 -------------
@@ -44,10 +36,6 @@ Error mapping
 * :class:`~meho_backplane.operations.approval_queue.ApprovalNotFoundError`
   → :class:`~meho_backplane.mcp.server.McpInvalidParamsError` with code
   ``approval_request_not_found``.
-* :class:`~meho_backplane.operations.approval_queue.ApprovalRequestAlreadyDecidedError`
-  → ``approval_request_not_pending``.
-* :class:`~meho_backplane.operations.approval_queue.UnauthorizedApprovalError`
-  → ``approval_unauthorized``.
 """
 
 from __future__ import annotations
@@ -64,25 +52,14 @@ from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
-    ApprovalRequestAlreadyDecidedError,
-    SelfApprovalForbiddenError,
-    UnauthorizedApprovalError,
-    approve_request,
     get_request,
     list_pending,
-    publish_approval_event,
-    reject_request,
-    resume_dispatch_after_approval,
 )
-
-_log = structlog.get_logger(__name__)
 
 #: Canonical op ids — same as the REST routes for transport-independent audit rows.
 _OP_IDS: Final[dict[str, str]] = {
     "list": "approval.list",
     "get": "approval.get",
-    "approve": "approval.approve",
-    "reject": "approval.reject",
 }
 
 #: Allowed ``status`` filter values on ``meho_approvals_list``. Mirrors
@@ -347,214 +324,4 @@ register_mcp_tool(
         required_role=TenantRole.OPERATOR,
     ),
     handler=_get_handler,
-)
-
-
-# ---------------------------------------------------------------------------
-# meho_approvals_approve
-# ---------------------------------------------------------------------------
-
-
-async def _approve_handler(
-    operator: Operator,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    request_id = _require_id(arguments)
-    reason = arguments.get("reason")
-    reason_str = str(reason) if reason is not None else ""
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["approve"],
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-    )
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        try:
-            # Operator-decision path: no params supplied → approve_request
-            # skips the hash check and just flips status + writes the
-            # decision audit row. The params for the re-dispatch are read
-            # back from the row (stored at park time, #1503).
-            row = await approve_request(
-                session,
-                request_id,
-                operator=operator,
-                params=None,
-                reason=reason_str,
-            )
-            await session.commit()
-        except ApprovalNotFoundError as exc:
-            raise McpInvalidParamsError("approval_request_not_found") from exc
-        except ApprovalRequestAlreadyDecidedError as exc:
-            raise McpInvalidParamsError(
-                f"approval_request_not_pending: current status is {exc.status!r}"
-            ) from exc
-        except SelfApprovalForbiddenError as exc:
-            # G11.7-T1 #1401: requester != approver. Surfaced as an
-            # invalid-params error so the operator sees the refusal
-            # reason rather than a generic role failure. Append
-            # ``str(exc)`` so the message also carries the
-            # ``APPROVAL_ALLOW_SELF_APPROVAL=true`` break-glass hint the
-            # exception already constructs (#1483).
-            raise McpInvalidParamsError(f"self_approval_forbidden: {exc}") from exc
-        except UnauthorizedApprovalError as exc:
-            raise McpInvalidParamsError(
-                f"approval_unauthorized: role {exc.role!r} cannot approve"
-            ) from exc
-    # Publish AFTER commit (fail-open).
-    await publish_approval_event(
-        tenant_id=operator.tenant_id,
-        request=row,
-        decision="approved",
-        principal_sub=operator.sub,
-        audit_id=row._audit_id,  # type: ignore[attr-defined]
-    )
-
-    result = _row_to_dict(row)
-
-    # Every approval drives the execute (#1503, #2293): the committed
-    # approval is the authorization; the stored params re-hydrate the
-    # dispatch. The exactly-one-resumer claim inside
-    # resume_dispatch_after_approval arbitrates against the in-process
-    # agent waiter for a run-bound request — this MCP path executes only
-    # when the claim is free (the waiter had died: wait-timeout, pod
-    # restart, run cancelled), else it no-ops with status
-    # "already_resumed". The old run_id-is-not-None skip was the source of
-    # the silent-non-execution seam when the waiter was gone.
-    dispatch_result = await resume_dispatch_after_approval(
-        operator=operator, request=row, params=None
-    )
-    _log.info(
-        "approval_request_redispatched",
-        approval_request_id=str(request_id),
-        op_id=row.op_id,
-        dispatch_status=dispatch_result.status,
-        operator_sub=operator.sub,
-        via="mcp",
-    )
-    result["dispatch"] = {
-        "status": dispatch_result.status,
-        "op_id": dispatch_result.op_id,
-        "result": dispatch_result.result,
-        "error": dispatch_result.error,
-    }
-
-    return result
-
-
-register_mcp_tool(
-    definition=ToolDefinition(
-        feature="approvals",
-        name="meho_approvals_approve",
-        description=(
-            "Approve a pending approval request (G11.2-T5 / #818; #1503; "
-            "#2293). Operator-level. Flips the request to 'approved', writes "
-            "the decision audit row, and announces approval_decided on the "
-            "broadcast feed. It then re-dispatches the op using the params "
-            "stored at park time and returns the outcome under `dispatch`. "
-            "The exactly-one-resumer claim makes this safe for an agent-run "
-            "request: `dispatch.status` is 'ok' when this approve executed "
-            "it (a direct op, or the fallback when the in-process agent "
-            "waiter was gone), or 'already_resumed' when the live waiter "
-            "executed it first — so the approved write lands exactly once. "
-            "Only pending requests may be approved; any other status "
-            "returns approval_request_not_pending. Pass either "
-            "`approval_request_id` (canonical name; G0.18-T5 #1358) or the "
-            "deprecated `id` alias."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
-                "id": _APPROVAL_LEGACY_ID_PROPERTY,
-                "reason": {
-                    "type": "string",
-                    "description": "Optional rationale recorded on the decision audit row.",
-                },
-            },
-            "anyOf": _APPROVAL_ID_ANYOF,
-            "additionalProperties": False,
-        },
-        required_role=TenantRole.OPERATOR,
-    ),
-    handler=_approve_handler,
-)
-
-
-# ---------------------------------------------------------------------------
-# meho_approvals_reject
-# ---------------------------------------------------------------------------
-
-
-async def _reject_handler(
-    operator: Operator,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    request_id = _require_id(arguments)
-    reason = arguments.get("reason")
-    reason_str = str(reason) if reason is not None else ""
-    structlog.contextvars.bind_contextvars(
-        audit_op_id=_OP_IDS["reject"],
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-    )
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session:
-        try:
-            row = await reject_request(
-                session,
-                request_id,
-                operator=operator,
-                reason=reason_str,
-            )
-            await session.commit()
-        except ApprovalNotFoundError as exc:
-            raise McpInvalidParamsError("approval_request_not_found") from exc
-        except ApprovalRequestAlreadyDecidedError as exc:
-            raise McpInvalidParamsError(
-                f"approval_request_not_pending: current status is {exc.status!r}"
-            ) from exc
-        except UnauthorizedApprovalError as exc:
-            raise McpInvalidParamsError(
-                f"approval_unauthorized: role {exc.role!r} cannot reject"
-            ) from exc
-    # Publish AFTER commit (fail-open).
-    await publish_approval_event(
-        tenant_id=operator.tenant_id,
-        request=row,
-        decision="rejected",
-        principal_sub=operator.sub,
-        audit_id=row._audit_id,  # type: ignore[attr-defined]
-    )
-    return _row_to_dict(row)
-
-
-register_mcp_tool(
-    definition=ToolDefinition(
-        feature="approvals",
-        name="meho_approvals_reject",
-        description=(
-            "Reject a pending approval request (G11.2-T5 / #818). "
-            "Operator-level. Flips the request to 'rejected', writes the "
-            "decision audit row, and announces approval_decided on the "
-            "broadcast feed. The original op is not executed. Only "
-            "pending requests may be rejected. Pass either "
-            "`approval_request_id` (canonical name; G0.18-T5 #1358) or "
-            "the deprecated `id` alias."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "approval_request_id": _APPROVAL_REQUEST_ID_PROPERTY,
-                "id": _APPROVAL_LEGACY_ID_PROPERTY,
-                "reason": {
-                    "type": "string",
-                    "description": "Optional rationale recorded on the decision audit row.",
-                },
-            },
-            "anyOf": _APPROVAL_ID_ANYOF,
-            "additionalProperties": False,
-        },
-        required_role=TenantRole.OPERATOR,
-    ),
-    handler=_reject_handler,
 )

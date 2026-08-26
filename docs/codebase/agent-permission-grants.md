@@ -96,7 +96,9 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 
 ## MCP surface
 
-Five tools under `meho_agents_grant_*`: `list`, `show`, `create`, `elevate`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
+Four tools under `meho_agents_grant_*`: `list`, `show`, `create`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
+
+The dedicated elevation verb — `meho_agents_grant_elevate` — has **no MCP path under any claim set** (#3155, Initiative #3153): granting a time-bounded privilege elevation is a human-only operator action, not agent-invocable. It stays on the REST / CLI / console surfaces above (`POST /api/v1/agents/grants/elevate`, `meho agent grant elevate`), unchanged. Its wire name is pinned in `backend/src/meho_backplane/mcp/human_only.py`, so a `tools/call` on it is denied with a remediation naming the CLI/console path. (Note: `meho_agents_grant_create` accepts an `expires_at` and can create a time-bounded grant; it stays on the operator plane per the T1 surface classification — only the dedicated `elevate` verb is removed.)
 
 ## CLI surface
 

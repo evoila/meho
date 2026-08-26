@@ -45,6 +45,7 @@ to point it at a tenant:
 | `MEHO_MCP_URL` | Full MCP endpoint, e.g. `https://meho.internal.example/mcp`. Takes precedence. |
 | `MEHO_INSTANCE` | Backplane base URL, e.g. `https://meho.internal.example`. The wrapper appends `/mcp`. |
 | `MEHO_CA_CERT` | Path to an internal-CA bundle; exported as `NODE_EXTRA_CA_CERTS` for the Node-based shim. Only needed on internal-CA deploys. |
+| `MEHO_MCP_CLIENT_ID` | Pre-registered public OAuth client id the shim presents to Keycloak (default `meho-mcp`). Override only if the realm registers the client under a different name. |
 | `MEHO_PLUGIN_CONFIG` | Override the config-file location (default `${XDG_CONFIG_HOME:-~/.config}/meho/plugin.env`). |
 
 Set the variables in your shell profile, or drop them in the config file:
@@ -61,9 +62,16 @@ Code session — zero edits inside the installed plugin.
 ### Prerequisites
 
 - A machine on the internal network / VPN that can reach the backplane.
-- Node.js with `npx` available (the shim runs `npx -y mcp-remote`).
-- `mcp-remote` performs the OAuth 2.1 + PKCE handshake against the realm; if
-  the backplane URL is not configured, `bin/meho-mcp-remote` exits with a
+- Node.js with `npx` available (the shim runs the smoke-tested
+  `npx -y mcp-remote@0.1.38`).
+- `mcp-remote` performs the OAuth 2.1 + PKCE handshake against the realm. The
+  shim passes `--static-oauth-client-info '{"client_id": "meho-mcp"}'` (overridable
+  via `MEHO_MCP_CLIENT_ID`) so it presents the pre-registered public client
+  rather than attempting RFC 7591 Dynamic Client Registration — which MEHO's
+  Keycloak realm blocks (default Trusted Hosts policy → `403 "Host not
+  trusted"`). The `meho-mcp` client must already exist on the realm; see
+  `docs/cross-repo/mcp-client-setup.md`.
+- If the backplane URL is not configured, `bin/meho-mcp-remote` exits with a
   message naming the variables to set.
 
 ## Layer-2 skills → template sections

@@ -46,4 +46,14 @@ if [ -n "${MEHO_CA_CERT:-}" ]; then
   export NODE_EXTRA_CA_CERTS="$MEHO_CA_CERT"
 fi
 
-exec npx -y mcp-remote "$url"
+# Pin the pre-registered public OAuth client and the smoke-tested
+# mcp-remote build. MEHO's Keycloak realm blocks anonymous RFC 7591
+# Dynamic Client Registration (default Trusted Hosts policy → 403 "Host
+# not trusted"), so mcp-remote must present a static client id rather than
+# self-register. MEHO_MCP_CLIENT_ID lets an operator point at a differently
+# named public client without editing the installed plugin; the scope
+# metadata matches what the backplane's token audience mappers expect.
+client_id="${MEHO_MCP_CLIENT_ID:-meho-mcp}"
+exec npx -y mcp-remote@0.1.38 "$url" \
+  --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
+  --static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'

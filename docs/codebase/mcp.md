@@ -404,8 +404,13 @@ hosted-agent toolset bridge (`agent/toolset.py`, its own
 `_META_TOOL_CATALOG`), the CLI, and the REST routes do **not** consult
 `all_tools_for`, so operators keep the full surface on those fronts —
 only the MCP agent listing narrows. The human-only approval/grant-elevate
-verbs are removed from MCP entirely by sibling #3155; they are classified
-`operator` here and left in place for that task to de-register.
+verbs (`meho_approvals_approve`, `meho_approvals_reject`,
+`meho_agents_grant_elevate`) carry **no MCP registration under any
+surface** — sibling #3155 (landed via #3159) de-registered them, so they
+never reach the surface gate to be classified. What remains is the
+remediation map in `human_only.py` and the pre-registry human-only denial
+branch in `handle_tools_call`, which returns a 404 naming the console / CLI
+path *before* the registry lookup and surface gate ever run.
 
 ## Admin registry writes route through the dispatcher
 

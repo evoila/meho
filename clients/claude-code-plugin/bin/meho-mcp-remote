@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Launch the mcp-remote stdio<->HTTP shim against an operator-configured
+# MEHO backplane. All configuration is read from the environment (or an
+# optional operator config file), so the installed plugin never needs to
+# be edited to point at a tenant's backplane.
+#
+# MEHO is internal-only and never publicly exposed; this shim runs on the
+# operator's own VPN-connected machine and forwards Streamable-HTTP calls
+# to the backplane's /mcp endpoint. mcp-remote itself performs the OAuth
+# 2.1 + PKCE handshake against the realm.
+set -euo pipefail
+
+# Optional operator config file, sourced when present. Lets an operator
+# keep MEHO_MCP_URL / MEHO_INSTANCE / MEHO_CA_CERT out of their shell
+# profile. Override the location with MEHO_PLUGIN_CONFIG.
+config_file="${MEHO_PLUGIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/meho/plugin.env}"
+if [ -f "$config_file" ]; then
+  # shellcheck disable=SC1090
+  . "$config_file"
+fi
+
+# Resolve the backplane MCP endpoint. MEHO_MCP_URL wins; otherwise derive
+# it from MEHO_INSTANCE by appending /mcp.
+url="${MEHO_MCP_URL:-}"
+if [ -z "$url" ] && [ -n "${MEHO_INSTANCE:-}" ]; then
+  url="${MEHO_INSTANCE%/}/mcp"
+fi
+if [ -z "$url" ]; then
+  {
+    echo "meho plugin: no backplane URL configured."
+    echo "  Set MEHO_MCP_URL (e.g. https://meho.internal.example/mcp) or"
+    echo "  MEHO_INSTANCE (e.g. https://meho.internal.example) in your shell"
+    echo "  profile or in $config_file — no edit to the installed plugin is"
+    echo "  needed."
+  } >&2
+  exit 1
+fi
+
+# Internal-CA trust: point Node at the operator's CA bundle when the deploy
+# uses an internal CA. MEHO_CA_CERT is the friendly name; an already-set
+# NODE_EXTRA_CA_CERTS is honored as-is.
+if [ -n "${MEHO_CA_CERT:-}" ]; then
+  export NODE_EXTRA_CA_CERTS="$MEHO_CA_CERT"
+fi
+
+exec npx -y mcp-remote "$url"

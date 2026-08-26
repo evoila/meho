@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "meho": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/meho-mcp-remote"
+    }
+  }
+}

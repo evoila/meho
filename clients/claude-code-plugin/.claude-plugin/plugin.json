@@ -1,0 +1,18 @@
+{
+  "name": "meho",
+  "version": "0.30.0",
+  "description": "MEHO-first operations for Claude Code: MCP wiring to a MEHO backplane via the mcp-remote stdio shim, plus the Layer-2 routing discipline as skills.",
+  "author": {
+    "name": "evoila Group"
+  },
+  "homepage": "https://github.com/evoila/meho",
+  "repository": "https://github.com/evoila/meho",
+  "license": "Apache-2.0",
+  "keywords": [
+    "meho",
+    "mcp",
+    "infrastructure",
+    "governance",
+    "backplane"
+  ]
+}

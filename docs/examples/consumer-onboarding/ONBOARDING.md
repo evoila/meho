@@ -329,8 +329,12 @@ you expect, walk these checks:
 
 1. **Does the tenant actually have conventions rows?** Run `meho
    conventions list`. An empty list means there is nothing to
-   assemble — publish rules with `meho conventions edit <slug>`
-   (requires `tenant_admin`). The assembler still returns a
+   assemble — publish a first rule with `meho conventions create
+   --slug <slug> --kind operational --title "<label>" --body
+   @<file>` (requires `tenant_admin`; `--kind operational` so the
+   rule is packed into the preamble — `edit` only updates an
+   existing rule and 404s against an absent slug). The assembler
+   still returns a
    non-empty preamble in this case (it always carries the static
    broadcast-discipline band), so "no tenant rules in the preamble"
    and "no preamble at all" are different symptoms.

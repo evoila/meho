@@ -54,6 +54,22 @@ fi
 # named public client without editing the installed plugin; the scope
 # metadata matches what the backplane's token audience mappers expect.
 client_id="${MEHO_MCP_CLIENT_ID:-meho-mcp}"
+
+# OAuth scope metadata presented during the handshake. The default is the
+# working surface (mcp:read mcp:execute). MEHO_MCP_SCOPES lets an operator
+# DELIBERATELY request an elevated surface — append mcp:admin to reach the
+# operator planes — never by default. Requesting a scope the realm does not
+# offer degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
+# authorization server may ignore an ungranted scope, and Keycloak drops a
+# scope that is not an assigned default/optional client scope, so the token
+# never carries it and the elevated tools simply do not list (realm
+# prerequisite tracked as evoila-bosnia/claude-rdc-hetzner-dc#2734). An
+# empty or whitespace-only value falls back to the default.
+scopes="${MEHO_MCP_SCOPES:-mcp:read mcp:execute}"
+if [ -z "${scopes//[[:space:]]/}" ]; then
+  scopes="mcp:read mcp:execute"
+fi
+
 exec npx -y mcp-remote@0.1.38 "$url" \
   --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
-  --static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'
+  --static-oauth-client-metadata "{\"scope\": \"$scopes\"}"

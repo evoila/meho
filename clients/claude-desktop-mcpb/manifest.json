@@ -17,7 +17,8 @@
       "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
       "env": {
         "MEHO_CA_CERT": "${user_config.ca_cert}",
-        "MEHO_MCP_CLIENT_ID": "${user_config.client_id}"
+        "MEHO_MCP_CLIENT_ID": "${user_config.client_id}",
+        "MEHO_MCP_SCOPES": "${user_config.scopes}"
       }
     }
   },
@@ -39,6 +40,13 @@
       "title": "OAuth client id (advanced)",
       "description": "Pre-registered public OAuth client the shim presents to Keycloak. Leave as the default unless your realm registered the client under a different name.",
       "default": "meho-mcp",
+      "required": false
+    },
+    "scopes": {
+      "type": "string",
+      "title": "OAuth scopes (advanced)",
+      "description": "Space-separated OAuth scopes the shim requests during login. Leave as the default working surface; add an elevated scope (e.g. \"mcp:read mcp:execute mcp:admin\") only to deliberately opt into operator mode. Requesting a scope your realm does not grant degrades to the default surface.",
+      "default": "mcp:read mcp:execute",
       "required": false
     }
   },

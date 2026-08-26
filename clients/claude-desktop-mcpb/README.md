@@ -62,8 +62,9 @@ and [`.github/workflows/cli-release.yml`](../../.github/workflows/cli-release.ym
 
 The manifest's `mcp_config.command` is `node`, running `server/index.mjs`
 with the operator's backplane URL as its argument, the optional CA path
-delivered as the `MEHO_CA_CERT` environment variable, and the OAuth
-client id delivered as `MEHO_MCP_CLIENT_ID`. The launcher:
+delivered as the `MEHO_CA_CERT` environment variable, the OAuth client id
+delivered as `MEHO_MCP_CLIENT_ID`, and the requested OAuth scopes delivered
+as `MEHO_MCP_SCOPES`. The launcher:
 
 1. Validates that the URL is a well-formed `https` URL.
 2. Exports `NODE_EXTRA_CA_CERTS` to the child **only** when a non-empty
@@ -75,9 +76,15 @@ client id delivered as `MEHO_MCP_CLIENT_ID`. The launcher:
    `meho-mcp` when the host substitutes an empty value for the untouched
    optional `client_id` config — so an operator who never opens the
    advanced field still authenticates.
-4. Spawns the vendored `mcp-remote@0.1.38` with inherited stdio, passing
+4. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
+   to the default working surface `mcp:read mcp:execute` when the host
+   substitutes an empty/whitespace value for the untouched optional
+   `scopes` config. Setting it to an elevated value (e.g.
+   `mcp:read mcp:execute mcp:admin`) is the deliberate opt-in to
+   [operator mode](#elevated-operator-mode-opt-in).
+5. Spawns the vendored `mcp-remote@0.1.38` with inherited stdio, passing
    `--static-oauth-client-info '{"client_id": "…"}'` and
-   `--static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'`.
+   `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'`.
    The static client info is load-bearing: MEHO's Keycloak realm blocks
    anonymous RFC 7591 Dynamic Client Registration (default Trusted Hosts
    policy → `403 "Host not trusted"`), so a bare `mcp-remote` could never
@@ -101,6 +108,46 @@ already exist on the realm — see
 [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md).
 No system Node or `npx` on `PATH` is required at run time — the bundle
 carries its dependencies and Claude Desktop supplies the runtime.
+
+## Elevated operator mode (opt-in)
+
+By default a session lists only the **working surface** — status,
+connector/operation discovery, `call_operation` / `preview_operation` /
+`result_query`, knowledge, memory, the broadcast trio, target/topology
+reads, and the runbook run family. That is everything an operator needs to
+get work done, and it is what every session gets with the `scopes` field
+left at its default `mcp:read mcp:execute`.
+
+The advanced `scopes` user_config is the deliberate opt-in to **operator
+mode**. Set it to add the elevated scope:
+
+```
+mcp:read mcp:execute mcp:admin
+```
+
+An elevated session additionally lists the **operator planes**: the agents
+/ principals registry and grants, connector lifecycle, broadcast overrides,
+the scheduler, sensors, runbook template authoring, and the approvals
+**read** views (`meho_approvals_list` / `meho_approvals_get`).
+
+Elevation **never** exposes the human-only verbs. `meho_approvals_approve`,
+`meho_approvals_reject`, and `meho_agents_grant_elevate` have no MCP path
+under any scope — approving a parked operation and granting elevation are
+human decisions made through the console or CLI only (#3155). A model
+holding the approve button would collapse the four-eyes gate, so it is
+never on the wire.
+
+**Realm prerequisite (and the fallback if it is missing).** `mcp:admin`
+must be offered as an **optional** (requestable, non-default) client scope
+on the realm's `meho-mcp` client before elevation takes effect — tracked as
+[`evoila-bosnia/claude-rdc-hetzner-dc#2734`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2734).
+Until it lands, requesting `mcp:admin` **degrades to the default working
+surface**: per OAuth 2.1 (RFC 6749 §3.3) the authorization server may ignore
+a scope it does not grant, and Keycloak drops any requested scope that is
+not an assigned default/optional client scope — so the token comes back
+without `mcp:admin`, no error is raised, and the operator planes simply do
+not appear. Setting the `scopes` field on a realm that does not yet offer
+the scope is therefore safe: the session behaves exactly as the default.
 
 ## Verifying a built bundle
 

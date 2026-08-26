@@ -1,0 +1,3 @@
+# Built bundles (produced by build.sh / CI, attached to GitHub Releases).
+/dist/
+*.mcpb

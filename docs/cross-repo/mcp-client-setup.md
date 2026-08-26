@@ -90,7 +90,20 @@ MEHO speaks Streamable HTTP at `/mcp`, not stdio. This matters because Claude De
 
 ### Claude Desktop — via the `mcp-remote` stdio shim (recommended for Desktop)
 
-Claude Desktop's remote "Custom Connector" is brokered through Anthropic's cloud and requires a **publicly reachable** backplane — which MEHO, being internal-only, never is (see the callout at the top of this doc). Desktop instead reaches an internal MEHO through a **local stdio→HTTP shim** that runs on the operator's own VPN-connected machine. Configure it as a local MCP server in `claude_desktop_config.json`:
+Claude Desktop's remote "Custom Connector" is brokered through Anthropic's cloud and requires a **publicly reachable** backplane — which MEHO, being internal-only, never is (see the callout at the top of this doc). Desktop instead reaches an internal MEHO through a **local stdio→HTTP shim** (`mcp-remote`) that runs on the operator's own VPN-connected machine. There are two ways to wire it up: the packaged bundle (primary) or the raw config (fallback).
+
+#### Primary: the `.mcpb` bundle (one-click install)
+
+Every MEHO release attaches a **`meho-claude-desktop-<version>.mcpb`** file to its [GitHub Release](https://github.com/evoila/meho/releases), built from [`clients/claude-desktop-mcpb/`](../../clients/claude-desktop-mcpb/). Download it and open it in Claude Desktop: the install dialog appears and prompts for two values — no `claude_desktop_config.json` editing.
+
+1. **MEHO MCP endpoint** (required) — your backplane's `/mcp` URL, e.g. `https://meho.internal.example/mcp`, reachable over your VPN.
+2. **Internal CA bundle** (optional) — a PEM bundle for the internal CA that signs the backplane's TLS certificate. Leave it empty for public-CA deploys.
+
+The bundle wraps exactly the `npx -y mcp-remote <url>` invocation shown in the fallback below, and needs system Node.js / `npx` on `PATH` (the same prerequisite the raw config has). Distribution is the GitHub Release asset channel only — there is no public marketplace or registry, and the internal-only posture is unchanged because the shim still runs on your own VPN-connected machine.
+
+#### Fallback: raw `claude_desktop_config.json`
+
+If you would rather not use the bundle (or need to tweak the invocation), configure the shim as a local MCP server directly:
 
 ```json
 {
@@ -104,7 +117,7 @@ Claude Desktop's remote "Custom Connector" is brokered through Anthropic's cloud
 }
 ```
 
-`mcp-remote` runs the OAuth 2.1 + PKCE flow against the internal Keycloak (or presents a Bearer token supplied out-of-band via `meho login --print-token`) and forwards Streamable-HTTP calls to `/mcp`. `NODE_EXTRA_CA_CERTS` is only needed when the deploy uses an internal CA (see [`deploy/values-examples/README.md` § Internal-CA trust bundle](../../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv)). Because the shim runs on a machine already on the VPN, nothing about the backplane is publicly exposed.
+`mcp-remote` runs the OAuth 2.1 + PKCE flow against the internal Keycloak (or presents a Bearer token supplied out-of-band via `meho login --print-token`) and forwards Streamable-HTTP calls to `/mcp`. `NODE_EXTRA_CA_CERTS` is only needed when the deploy uses an internal CA (see [`deploy/values-examples/README.md` § Internal-CA trust bundle](../../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv)); omit the `env` block entirely for public-CA deploys. Because the shim runs on a machine already on the VPN, nothing about the backplane is publicly exposed.
 
 ### Claude.ai / Claude Desktop remote Custom Connector — not applicable
 

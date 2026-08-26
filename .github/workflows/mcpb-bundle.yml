@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Claude Desktop .mcpb bundle — PR dry-run.
+#
+# The "MEHO for Claude Desktop" MCPB bundle (clients/claude-desktop-mcpb/)
+# is built and attached to the GitHub Release on `v*` tag push by
+# cli-release.yml, next to the CLI tarballs. This workflow is the PR-side
+# counterpart: whenever a PR touches the bundle sources, it packs the
+# bundle (which validates manifest.json against the MANIFEST 0.3 schema),
+# enforces the internal-only wording guard, and uploads the result as a
+# CI artifact so a reviewer can download and install it.
+#
+# Not a release step — it never touches a GitHub Release. Path-scoped via
+# `on.pull_request.paths` because it is an advisory (non-required) check;
+# a required check would need the `changes`-job + job-`if:` shape ci.yml
+# uses to skip cleanly, which this dry-run does not warrant.
+
+name: mcpb-bundle
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'clients/claude-desktop-mcpb/**'
+      - '.github/workflows/mcpb-bundle.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcpb-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pack:
+    name: Pack .mcpb bundle (dry-run)
+    # Fork-PR guard mirrors ci.yml / image.yml: `meho-runners-ci` is
+    # internal infra, so fork PRs skip rather than execute bundle
+    # sources on the self-hosted pool.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners-ci
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Wording guard — no "custom connector" path
+        # Regression guard for #2792: MEHO is internal-only, so the
+        # invalid remote Custom-Connector onramp must never creep back
+        # into the bundle sources. `grep -ri` returns 0 on a match, so a
+        # match fails the step.
+        run: |
+          if grep -ri "custom connector" clients/claude-desktop-mcpb/; then
+            echo "::error::'custom connector' found in bundle sources — the internal-only remote-connector path must stay scrubbed (#2792)."
+            exit 1
+          fi
+
+      - name: Pack bundle (dry-run)
+        # The PR number gives a valid pre-release semver so each dry-run
+        # bundle is identifiable; the real version is the git tag on the
+        # release path (cli-release.yml).
+        run: clients/claude-desktop-mcpb/build.sh "0.0.0-pr${{ github.event.number }}" dist
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: meho-claude-desktop-mcpb
+          path: dist/*.mcpb
+          if-no-files-found: error

@@ -12,7 +12,7 @@ The `/release` skill walks these same steps interactively.
 ## What a release is
 
 A release is **a `v*` git tag**. The tag is the single source of truth
-for the version — four artefacts derive from it, all published
+for the version — five artefacts derive from it, all published
 automatically on the tag push:
 
 | Artefact | Where | Workflow | Version source |
@@ -20,9 +20,12 @@ automatically on the tag push:
 | Backplane image | `ghcr.io/evoila/meho:vX.Y.Z` | [`image.yml`](../.github/workflows/image.yml) | git tag |
 | Helm chart | `oci://ghcr.io/evoila/meho-chart` | [`chart.yml`](../.github/workflows/chart.yml) | chart workflow sets `version` + `appVersion` |
 | CLI tarballs + GitHub Release | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | GoReleaser bakes `{{.Tag}}` into `version.Version` |
+| Claude Desktop `.mcpb` bundle | [releases](https://github.com/evoila/meho/releases) | [`cli-release.yml`](../.github/workflows/cli-release.yml) | `clients/claude-desktop-mcpb/build.sh` stamps the tag version |
 | Docs site version | <https://evoila.github.io/meho/> | [`docs-site.yml`](../.github/workflows/docs-site.yml) | mike publishes the tag's `MAJOR.MINOR` + moves `latest` |
 
-All four trigger on `tags: ['v*']` (image/chart have **no** path filter
+The Desktop `.mcpb` bundle rides `cli-release.yml`, attached to the same
+GitHub Release as the CLI tarballs (four workflows, five artefacts). All
+four workflows fire on `tags: ['v*']` (image/chart have **no** path filter
 on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
 patch tag republishes its minor's docs in place.
@@ -189,6 +192,8 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - [ ] Image `ghcr.io/evoila/meho:vX.Y.Z` published (`image.yml` green).
 - [ ] Chart published to `oci://ghcr.io/evoila/meho-chart` (`chart.yml` green).
 - [ ] CLI tarballs attached to the Release; `meho version` prints `vX.Y.Z`.
+- [ ] Claude Desktop bundle `meho-claude-desktop-X.Y.Z.mcpb` attached to
+  the Release (fifth asset, uploaded by `cli-release.yml` after GoReleaser).
 
 #### Maintainer one-time setup — GHCR package visibility
 

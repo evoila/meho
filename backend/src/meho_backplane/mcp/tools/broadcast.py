@@ -110,7 +110,7 @@ from meho_backplane.broadcast.history import (
     parse_entry,
     stream_key,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
 __all__: list[str] = []
@@ -243,6 +243,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_recent",
+        surface=ToolSurface.WORKING,
         description=(
             "Read the operator's tenant's recent broadcast events from "
             "meho:feed:{tenant_id} (Initiative #1090, Task #1091). "
@@ -659,6 +660,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_announce",
+        surface=ToolSurface.WORKING,
         description=(
             "Publish an agent-authored announcement to the operator's "
             "tenant broadcast stream (Initiative #1090, Task #1092). "
@@ -1173,6 +1175,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
         name="meho_broadcast_watch",
+        surface=ToolSurface.WORKING,
         description=(
             "Long-poll the operator's tenant broadcast stream for new "
             "events past 'cursor' (Initiative #1090, Task #1093). "

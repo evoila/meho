@@ -111,7 +111,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
@@ -435,6 +435,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="search_memory",
+        surface=ToolSurface.WORKING,
         description=(
             "Search the operator's accessible memories (own user-scoped "
             "entries + tenant-shared + target-shared entries visible to "
@@ -505,6 +506,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name="add_to_memory",
+        surface=ToolSurface.WORKING,
         description=(
             "Add a new memory entry. Use when you (or the operator "
             "working with you) learn something worth retaining beyond "

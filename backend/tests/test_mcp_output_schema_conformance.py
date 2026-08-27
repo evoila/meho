@@ -200,6 +200,12 @@ def _custom_operator(
     role: TenantRole,
     capabilities: frozenset[str] = frozenset(),
     principal_kind: PrincipalKind = PrincipalKind.USER,
+    # Conformance dispatches operator-surface tools (doc-collection
+    # lifecycle, topology writes, targets register) whose parked/output
+    # shapes it pins; the session is mcp:admin-elevated (Initiative
+    # #3153/#3154) so those tools list + dispatch. Harmless for the
+    # working-surface tools it also covers.
+    scopes: frozenset[str] = frozenset({"mcp:admin"}),
 ) -> Operator:
     return Operator(
         sub="op-conformance",
@@ -210,6 +216,7 @@ def _custom_operator(
         tenant_role=role,
         capabilities=capabilities,
         principal_kind=principal_kind,
+        scopes=scopes,
     )
 
 

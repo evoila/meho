@@ -61,7 +61,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
@@ -112,6 +112,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agent_principals_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List agent principals registered for the operator's tenant "
             "(G11.2-T1 #815). Returns {principals: [...]} sorted by name. "
@@ -194,6 +195,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agent_principals_register",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Register a new agent principal for the operator's tenant "
             "(G11.2-T1 #815). Creates a Keycloak client tagged kind=agent "
@@ -279,6 +281,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agent_principals_revoke",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Revoke an agent principal — kill switch (G11.2-T1 #815). "
             "Disables the Keycloak client immediately (no new token grants) "

@@ -60,6 +60,9 @@ def _admin(tenant_id: uuid.UUID = _TENANT_A) -> Operator:
         raw_jwt="dummy",
         tenant_id=tenant_id,
         tenant_role=TenantRole.TENANT_ADMIN,
+        # Sensor tools are operator-surface (Initiative #3153/#3154); the
+        # session is mcp:admin-elevated so they list + dispatch.
+        scopes=frozenset({"mcp:admin"}),
     )
 
 
@@ -71,6 +74,7 @@ def _platform_admin(tenant_id: uuid.UUID = _TENANT_A) -> Operator:
         tenant_id=tenant_id,
         tenant_role=TenantRole.TENANT_ADMIN,
         platform_admin=True,
+        scopes=frozenset({"mcp:admin"}),
     )
 
 

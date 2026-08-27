@@ -66,7 +66,7 @@ from meho_backplane.agents.grant_schemas import (
 )
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 _log = structlog.get_logger(__name__)
@@ -141,6 +141,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_grant_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List agent permission grants for the operator's tenant "
             "(G11.2-T6). Returns {grants: [...]}; each row carries "
@@ -196,6 +197,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_grant_show",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Fetch one agent permission grant by id (G11.2-T6). "
             "Returns the grant row (carrying both `grant_id` and the "
@@ -249,6 +251,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_grant_create",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Grant a permission to an agent principal (G11.2-T6). "
             "verdict: auto-execute | needs-approval | deny. "
@@ -323,6 +326,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_grant_revoke",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Revoke (delete) a permission grant by id (G11.2-T6). "
             "Returns {revoked: <grant_id>} on success."

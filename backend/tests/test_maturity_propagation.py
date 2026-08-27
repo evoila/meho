@@ -47,7 +47,7 @@ from meho_backplane.mcp.maturity import (
     MATURITY_BLOCK_START,
     _build_band,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 
 _NON_GA_PREFIXES = ("[beta] ", "[experimental] ")
 
@@ -130,6 +130,7 @@ def test_prefix_is_applied_at_registration_and_stays_off_the_wire_fields() -> No
             register_mcp_tool(
                 ToolDefinition(
                     feature=feature,
+                    surface=ToolSurface.WORKING,
                     name=tool_name,
                     description="Does a thing.",
                     inputSchema={"type": "object"},
@@ -155,6 +156,7 @@ def test_unknown_feature_key_is_rejected_at_construction() -> None:
     with pytest.raises(ValidationError, match="unknown feature key"):
         ToolDefinition(
             feature="not-a-feature",
+            surface=ToolSurface.WORKING,
             name="maturity.test.bogus",
             description="Does a thing.",
             inputSchema={"type": "object"},

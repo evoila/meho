@@ -53,6 +53,21 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   this field yet; it is the substrate a later cross-tenant authorization
   gate will check, so that a ``tenant_admin`` cannot be mistaken for a
   platform operator on the strength of role rank alone.
+* ``scopes`` — the OAuth 2.0 scopes granted to *this session*, lifted
+  from the standard ``scope`` claim (RFC 9068 §2.2.3; space-delimited,
+  configurable via ``JWT_SCOPES_CLAIM_NAME``). Drives the MCP
+  agent-surface filter (Initiative #3153, #3154): the default working
+  surface is always listed, and the operator planes are additionally
+  listed only when the set carries ``mcp:admin``
+  (:data:`~meho_backplane.mcp.registry.MCP_ADMIN_SCOPE`). Modelled as a
+  ``frozenset`` so the frozen :class:`Operator` stays immutable and the
+  membership test is O(1). Distinct from ``capabilities`` (tenant-wide
+  provisioned add-ons, shared by every session of the tenant) and
+  ``platform_admin`` (a standing cross-tenant flag): a scope is a
+  **per-session, explicit opt-in** the client requests at token time
+  (``MEHO_MCP_SCOPES``, #3156). Defaults to the empty set so a token that
+  carries no ``scope`` claim sees only the working surface (fail-closed —
+  a missing/garbage claim never elevates).
 * ``runner_id`` — the satellite runner principal's row UUID, lifted from
   a configurable JWT claim (default ``runner_id``) when
   ``principal_kind`` is :attr:`PrincipalKind.RUNNER`. Optional and
@@ -183,6 +198,7 @@ class Operator(BaseModel):
     tenant_role: TenantRole
     principal_kind: PrincipalKind = PrincipalKind.USER
     capabilities: frozenset[str] = frozenset()
+    scopes: frozenset[str] = frozenset()
     platform_admin: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False

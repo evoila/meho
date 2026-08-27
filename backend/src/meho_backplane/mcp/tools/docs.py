@@ -121,7 +121,7 @@ from meho_backplane.docs_search import (
     synthesize_docs_answer,
 )
 from meho_backplane.docs_search.answer_errors import LEG_EXPAND, classify_answer_error
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 
 __all__: list[str] = []
@@ -361,6 +361,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="search_docs",
+        surface=ToolSurface.WORKING,
         description=(
             "Search a vendor-document collection (product manuals, KB "
             "articles, design / reference guides) for an authoritative "
@@ -665,6 +666,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name="ask_docs",
+        surface=ToolSurface.WORKING,
         description=(
             "Answer a vendor-reference question with a SYNTHESIZED, CITED "
             "answer composed over a vendor-document collection (product "

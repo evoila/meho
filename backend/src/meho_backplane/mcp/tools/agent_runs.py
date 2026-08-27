@@ -48,7 +48,7 @@ from meho_backplane.agent.invocation import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import AgentRunStatus
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations._audit import work_ref_var
 
@@ -197,6 +197,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_run",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Run a named agent for the operator's tenant (Initiative #802). "
             "Operator-level. Sync (default) blocks up to the server-side "
@@ -283,6 +284,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_run_status",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Poll an agent run's durable status by run_id (Initiative "
             "#802). Operator-level. Returns {run_id, status, turns, "
@@ -389,6 +391,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
         name="meho_agents_list_runs",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List the operator's tenant's agent runs, newest first "
             "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "

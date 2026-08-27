@@ -206,6 +206,9 @@ def _mint_operator(
         tenant_id=tenant_id,
         tenant_role=role.value,
         audience=audience,
+        # meho_audit_replay is an operator-surface tool (Initiative
+        # #3153/#3154); elevate the session so it lists + dispatches.
+        scopes=["mcp:admin"],
     )
 
 

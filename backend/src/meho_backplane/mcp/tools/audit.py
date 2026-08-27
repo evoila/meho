@@ -75,7 +75,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
@@ -597,6 +597,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="audit",
         name=_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_TOOL_DESCRIPTION,
         inputSchema=_INPUT_SCHEMA,
         # Tagged union (#2774): the flat filter path returns
@@ -751,6 +752,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="audit",
         name=_REPLAY_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_REPLAY_TOOL_DESCRIPTION,
         inputSchema=_REPLAY_INPUT_SCHEMA,
         outputSchema=_REPLAY_OUTPUT_SCHEMA,

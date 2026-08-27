@@ -37,7 +37,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
@@ -225,6 +225,7 @@ async def test_tools_call_post_gate_invalid_params_audits_as_denied_not_500(
     register_mcp_tool(
         ToolDefinition(
             feature=None,
+            surface=ToolSurface.WORKING,
             name="test.post_gate_reject",
             description="Raises McpInvalidParamsError after the gates (test only).",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},

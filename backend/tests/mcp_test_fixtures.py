@@ -53,7 +53,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import DocCollection, Tenant
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.registry import clear_registries
+from meho_backplane.mcp.registry import MCP_ADMIN_SCOPE, clear_registries
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -110,12 +110,24 @@ def build_operator(
     role: TenantRole = TenantRole.READ_ONLY,
     *,
     platform_admin: bool = False,
+    scopes: frozenset[str] = frozenset({MCP_ADMIN_SCOPE}),
 ) -> Operator:
     """Build a fixture :class:`Operator` pinned to :data:`OPERATOR_TENANT_ID`.
 
     ``platform_admin`` sets the cross-tenant capability primitive (#1638)
     so tests can exercise the platform-admin-gated cross-tenant paths
     (e.g. ``list_targets`` with a foreign ``tenant`` arg, #1641).
+
+    ``scopes`` defaults to an ``mcp:admin``-**elevated** session
+    (Initiative #3153, #3154): most MCP suites here exercise the *behaviour*
+    of operator-plane tools (agents, sensors, scheduler, topology writes,
+    audit query, …) and must reach them, so the shared fixture operator is
+    elevated by default. The surface-filter itself is pinned by
+    :mod:`tests.test_mcp_surface_filter`, which builds its own
+    **non-elevated** operators (``scopes=frozenset()``) to prove the default
+    working surface and the operator-plane hiding. Pass
+    ``scopes=frozenset()`` here to opt a specific suite back to the default
+    working surface.
     """
     return Operator(
         sub="op-test",
@@ -124,6 +136,7 @@ def build_operator(
         raw_jwt="fixture-jwt-not-real",
         tenant_id=OPERATOR_TENANT_ID,
         tenant_role=role,
+        scopes=scopes,
         platform_admin=platform_admin,
     )
 
@@ -209,6 +222,8 @@ def isolated_registry() -> Iterator[None]:
         result_query,
         runbook_runs,
         runbooks,
+        scheduler,
+        sensors,
         targets_register,
         topology,
         topology_bulk_import,
@@ -319,6 +334,15 @@ def isolated_registry() -> Iterator[None]:
     # here -- pytest collects them via the side-effect
     # ``register_mcp_tool`` calls in the module body, not by name.
     importlib.reload(runbook_runs)
+    # #3154: the scheduler + sensors MCP tool modules join the reload list
+    # so the fixture re-registers the *complete* production tool surface
+    # (they were previously omitted — harmless while nothing pinned the full
+    # inventory, but the surface-filter pin in
+    # ``tests.test_mcp_surface_filter`` asserts the exact 78-tool set). No
+    # other test reloads these modules, so the single reload here can't
+    # double-register.
+    importlib.reload(scheduler)
+    importlib.reload(sensors)
     importlib.reload(memory_tools)
     importlib.reload(memory_promote_tool)
     # G11.1-T2 (#809): the agent-definition MCP tools join the reload

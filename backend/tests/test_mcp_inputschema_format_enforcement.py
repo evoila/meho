@@ -45,7 +45,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -95,6 +95,7 @@ def _register_format_probe_tool() -> dict[str, list[dict[str, Any]]]:
     register_mcp_tool(
         ToolDefinition(
             feature=None,
+            surface=ToolSurface.WORKING,
             name="test.format_probe",
             description="Synthetic tool asserting format enforcement",
             inputSchema={

@@ -56,6 +56,10 @@ def _operator(
     *,
     role: TenantRole = TenantRole.TENANT_ADMIN,
     capabilities: frozenset[str] = frozenset(),
+    # create_doc_collections is operator-surface (Initiative #3153/#3154);
+    # the fixture session is mcp:admin-elevated by default so it lists +
+    # dispatches. The capability gate (meho-docs) still ANDs independently.
+    scopes: frozenset[str] = frozenset({"mcp:admin"}),
 ) -> Operator:
     return Operator(
         sub="admin-test",
@@ -65,6 +69,7 @@ def _operator(
         tenant_id=OPERATOR_TENANT_ID,
         tenant_role=role,
         capabilities=capabilities,
+        scopes=scopes,
     )
 
 

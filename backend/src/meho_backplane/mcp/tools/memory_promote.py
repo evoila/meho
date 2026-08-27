@@ -74,7 +74,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.memory.rbac import (
     InvalidPromotionStepError,
@@ -175,6 +175,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="memory_knowledge",
         name=_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=(
             "Promote one memory to a strictly broader scope along the "
             "ladder: user -> user-tenant -> tenant, OR user -> "

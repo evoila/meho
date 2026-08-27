@@ -53,7 +53,7 @@ from meho_backplane.checks.service import (
     SensorRequiresSafeOperationError,
     SensorResultsCursorError,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 #: Canonical operation identifiers bound into ``audit_op_id`` per tool.
@@ -120,6 +120,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
         name="meho_sensor_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List sensors for the operator's tenant (Initiative #2416). "
             "Operator-level read. Returns {sensors: [sensor, ...]} sorted "
@@ -229,6 +230,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
         name="meho_sensor_create",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Create one sensor under the operator's tenant (Initiative "
             "#2416). Tenant_admin only. A sensor pins an (op + args + "
@@ -394,6 +396,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
         name="meho_sensor_delete",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Hard-delete one sensor by id (Initiative #2416). Tenant_admin "
             "only. Removes the row (no tombstone). Cross-tenant / absent id "
@@ -459,6 +462,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
         name="meho_sensor_results",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Per-tick evidence trend query for one sensor (Initiative #2780, "
             "#2756). Operator-level read -- the forensic 'when did this start "

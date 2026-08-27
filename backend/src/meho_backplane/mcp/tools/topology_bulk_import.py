@@ -62,7 +62,7 @@ from meho_backplane.connectors.topology.schemas import (
     BULK_IMPORT_TOOL_INPUT_SCHEMA,
 )
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools.topology import dispatch_topology_write, with_parked_shape
 from meho_backplane.topology.bulk_import import (
@@ -173,6 +173,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="topology",
         name=_BULK_IMPORT_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_BULK_IMPORT_DESCRIPTION,
         inputSchema=BULK_IMPORT_TOOL_INPUT_SCHEMA,
         outputSchema=with_parked_shape(BULK_IMPORT_RESPONSE_SCHEMA),

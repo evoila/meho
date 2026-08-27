@@ -102,7 +102,7 @@ from typing import Any
 import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.tools._connector_shared import (
     _CONNECTOR_ID_DESCRIPTION,
     _OP_CLASS_READ,
@@ -418,6 +418,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_list",
+        surface=ToolSurface.WORKING,
         feature="typed_connector_reads",
         description=(
             "List ingested connectors visible to the operator's tenant "
@@ -464,6 +465,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_review",
+        surface=ToolSurface.OPERATOR,
         feature="connector_ingest",
         description=(
             "Get the full review payload for one connector (groups + "
@@ -506,6 +508,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_edit_group",
+        surface=ToolSurface.OPERATOR,
         feature="connector_ingest",
         description=(
             "Edit one operation group's when_to_use prose or display "
@@ -544,6 +547,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_edit_op",
+        surface=ToolSurface.OPERATOR,
         feature="connector_ingest",
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
@@ -597,6 +601,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_enable",
+        surface=ToolSurface.OPERATOR,
         feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to review_status='enabled' "
@@ -633,6 +638,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_enable_reads",
+        surface=ToolSurface.OPERATOR,
         feature="typed_connector_reads",
         description=(
             "Bulk-enable every read-class operation of a connector in "
@@ -686,6 +692,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_disable",
+        surface=ToolSurface.OPERATOR,
         feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to "
@@ -724,6 +731,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho_connector_delete",
+        surface=ToolSurface.OPERATOR,
         feature="typed_connector_reads",
         description=(
             "Delete one connector (tenant_admin only): remove its "

@@ -74,6 +74,7 @@ def mint_token(
     tenant_role: str = DEFAULT_TENANT_ROLE,
     audience: str | None = None,
     capabilities: list[str] | None = None,
+    scopes: list[str] | None = None,
     platform_admin: bool | None = None,
     principal_kind: str | None = None,
     runner_id: str | None = None,
@@ -94,6 +95,13 @@ def mint_token(
     ``_extract_capabilities`` reads onto ``Operator.capabilities`` (G4.5-T1
     add-on / G4.6-T3 per-collection entitlement). ``None`` omits the claim
     entirely so pre-capability call sites are unchanged.
+
+    ``scopes`` populates the standard OAuth 2.0 ``scope`` claim (RFC 9068
+    §2.2.3) the backend's ``_extract_scopes`` reads onto
+    ``Operator.scopes`` (Initiative #3153/#3154), emitted as a
+    space-delimited string. Pass ``["mcp:admin"]`` to mint an
+    MCP-operator-surface-elevated session; ``None`` omits the claim so the
+    session sees only the default working surface.
 
     ``principal_kind`` / ``runner_id`` populate the ``principal_kind`` and
     ``runner_id`` claims the backend's ``_extract_principal_kind`` /
@@ -122,6 +130,8 @@ def mint_token(
             payload["email"] = email
         if capabilities is not None:
             payload["capabilities"] = capabilities
+        if scopes is not None:
+            payload["scope"] = " ".join(scopes)
         if platform_admin is not None:
             payload["platform_admin"] = platform_admin
         if principal_kind is not None:

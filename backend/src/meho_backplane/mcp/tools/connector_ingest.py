@@ -109,7 +109,7 @@ import structlog
 from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._connector_shared import (
     _OP_CLASS_READ,
@@ -579,6 +579,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="connector_ingest",
         name="meho_connector_ingest",
+        surface=ToolSurface.OPERATOR,
         description=_INGEST_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -674,6 +675,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="connector_ingest",
         name="meho_connector_ingest_status",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Poll the durable status of an async connector-ingest job "
             "by handle (operator-level). Use after a "

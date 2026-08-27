@@ -116,6 +116,10 @@ def _agent_admin_client() -> Iterator[tuple[TestClient, Operator]]:
         tenant_id=OPERATOR_TENANT_ID,
         tenant_role=TenantRole.TENANT_ADMIN,
         principal_kind=PrincipalKind.AGENT,
+        # meho_targets_register is operator-surface (Initiative #3153/#3154);
+        # elevate so the call reaches the policy gate's agent-parking branch
+        # rather than being filtered by the surface gate first.
+        scopes=frozenset({"mcp:admin"}),
     )
 
     async def _fake_verify() -> Operator:

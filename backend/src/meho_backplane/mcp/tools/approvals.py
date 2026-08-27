@@ -48,7 +48,7 @@ import structlog
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
@@ -219,6 +219,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
         name="meho_approvals_list",
+        surface=ToolSurface.OPERATOR,
         description=(
             "List approval requests for your tenant (G11.2-T5 / #818). "
             "Operator-level. Use status='pending' (default) for the "
@@ -303,6 +304,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
         name="meho_approvals_get",
+        surface=ToolSurface.OPERATOR,
         description=(
             "Inspect a single approval request by id (G11.2-T5 / #818). "
             "Operator-level. Returns the full detail including "

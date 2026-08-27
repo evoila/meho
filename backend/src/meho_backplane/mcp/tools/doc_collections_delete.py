@@ -44,7 +44,7 @@ from meho_backplane.docs_collections import (
     delete_doc_collection,
     resolve_doc_collection,
 )
-from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 
 __all__: list[str] = []
@@ -152,6 +152,7 @@ register_mcp_tool(
     definition=ToolDefinition(
         feature="doc_collections",
         name=_DELETE_TOOL_NAME,
+        surface=ToolSurface.OPERATOR,
         description=_DELETE_DOC_COLLECTIONS_DESCRIPTION,
         inputSchema=_DELETE_DOC_COLLECTIONS_INPUT_SCHEMA,
         outputSchema=_DELETE_DOC_COLLECTIONS_OUTPUT_SCHEMA,

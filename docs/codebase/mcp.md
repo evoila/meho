@@ -317,6 +317,101 @@ A tool that cannot honestly declare its output shape should drop the
 declaration (spec-legal — proven by the ~60 non-declaring tools)
 rather than publish a schema its payloads violate.
 
+## Agent-surface scoping (working vs. operator, #3154)
+
+`tools/list` is filtered by **three orthogonal gates**, all AND-composed
+in `all_tools_for` (`mcp/registry.py`) and re-checked at `tools/call` in
+`handle_tools_call` (`mcp/handlers.py`):
+
+1. **role** — the session's `TenantRole` must meet the tool's
+   `required_role` (`role_at_least`).
+2. **capability** — a tool declaring `required_capability` (only the
+   `meho-docs` docs tools today) is absent unless the tenant provisioned
+   that key (`capability_satisfied`).
+3. **surface** — every tool carries an explicit
+   `ToolSurface` (`working` | `operator`); `surface_visible` admits the
+   working surface to everyone and the operator surface only to an
+   **elevated** session (Initiative #3153).
+
+All three are *true-absence* gates: a tool a session may not use never
+appears in its `tools/list`, and naming it directly at `tools/call` is
+rejected 403-class (INVALID_PARAMS, handler never runs) — the listing
+filter is enforced, not cosmetic.
+
+### The two surfaces
+
+`ToolSurface` is a **required, no-default** field on `ToolDefinition`
+(like `feature`): a registration that omits it raises a pydantic
+`ValidationError` at construction — i.e. at module-import time, so an
+unclassified tool fails app boot / test collection loudly rather than
+defaulting into a silent bucket. Every registered tool is classified
+explicitly.
+
+* **`working`** (the default narrow-waist surface every session lists,
+  honouring CLAUDE.md postulate 5): `meho_status`; discovery
+  (`meho_connector_list`, `list_operation_groups`, `search_operations`);
+  execution (`call_operation`, `preview_operation`, `result_query`);
+  knowledge + memory (`search_knowledge`/`add_to_knowledge`,
+  `search_memory`/`add_to_memory`); the capability-gated docs tools
+  (`search_docs`, `ask_docs`, `list_doc_collections`); the broadcast trio
+  (`meho_broadcast_recent`/`_announce`/`_watch`); target/topology **reads**
+  (`list_targets`, `query_topology`); and the runbook **run** family
+  (`meho_runbook_start`/`_next`/`_abort`/`_list_runs`/`_list_templates`/
+  `_show_template`).
+* **`operator`** (the governance / lifecycle planes, listed only after
+  elevation): connector lifecycle + ingest, agents / principals / grants,
+  scheduler, sensors, runbook **template authoring** + `_reassign`,
+  broadcast overrides, topology **mutations**, target registration,
+  doc-collection create/delete, `meho_memory_promote`, approvals read
+  (`meho_approvals_list`/`_get`), and audit query (`query_audit`,
+  `meho_audit_replay`).
+
+The exact membership of both surfaces is pinned as a sorted set in
+`tests/test_mcp_surface_filter.py`, so any new tool that forgets to
+classify — or a reclassification — fails that test loudly.
+
+### Elevation: the `mcp:admin` scope
+
+Elevation is a **per-session, explicit opt-in**, modelled as an OAuth 2.0
+scope rather than a tenant capability. `Operator.scopes` (a `frozenset`)
+is lifted from the standard `scope` claim (RFC 9068 §2.2.3, space-
+delimited; configurable via `JWT_SCOPES_CLAIM_NAME`, default `scope`) by
+`_extract_scopes` in `auth/jwt.py`, fail-closed to the empty set. A
+session whose set carries `MCP_ADMIN_SCOPE` (`"mcp:admin"`, a
+`mcp/registry.py` constant) additionally lists the operator planes; every
+other session sees only the working surface.
+
+The scope shape is deliberate: `capabilities` are tenant-wide provisioned
+add-ons (shared by every session of the tenant) and `platform_admin` is a
+standing cross-tenant flag, but elevation must be requested per session —
+the client asks for it via `MEHO_MCP_SCOPES` (#3156) and the realm mints
+it into the token's `scope` claim. Modelling elevation as a standing role
+or capability would re-open the self-approval hole the initiative closes:
+a session must *choose* to hold the operator planes, not carry them by
+default on the strength of its role.
+
+The surface gate **AND-composes** with the capability gate: an elevated
+session that has *not* provisioned `meho-docs` still does not see the docs
+tools (working or operator: the three working docs tools plus the two
+operator-surface doc-collection lifecycle tools all stay hidden). The
+gates are independent axes.
+
+### Blast radius
+
+The surface filter lives entirely in `all_tools_for` (the only
+`tools/list` feeder) and the `handle_tools_call` re-check. The
+hosted-agent toolset bridge (`agent/toolset.py`, its own
+`_META_TOOL_CATALOG`), the CLI, and the REST routes do **not** consult
+`all_tools_for`, so operators keep the full surface on those fronts —
+only the MCP agent listing narrows. The human-only approval/grant-elevate
+verbs (`meho_approvals_approve`, `meho_approvals_reject`,
+`meho_agents_grant_elevate`) carry **no MCP registration under any
+surface** — sibling #3155 (landed via #3159) de-registered them, so they
+never reach the surface gate to be classified. What remains is the
+remediation map in `human_only.py` and the pre-registry human-only denial
+branch in `handle_tools_call`, which returns a 404 naming the console / CLI
+path *before* the registry lookup and surface gate ever run.
+
 ## Admin registry writes route through the dispatcher
 
 The `meho_*` admin namespace holds the `tenant_admin` write tools

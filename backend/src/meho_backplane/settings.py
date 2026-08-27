@@ -254,6 +254,17 @@ class Settings(BaseModel):
         set, so capability-gated tools are simply absent for that
         operator (fail-closed). Override only when the realm exposes the
         capability list under a different attribute.
+    jwt_scopes_claim_name:
+        Name of the JWT claim that carries the session's OAuth 2.0 scope
+        grant (Initiative #3153, #3154). Default ``scope`` matches the
+        RFC 9068 §2.2.3 / RFC 6749 §3.3 access-token convention (a
+        space-delimited string; a JSON array is also tolerated). Drives
+        the MCP agent-surface filter — a session whose set carries
+        ``mcp:admin`` additionally lists the operator planes. The claim is
+        **optional** and **fail-closed** — tokens that carry no claim (or
+        a malformed value) resolve to the empty set, so the session sees
+        only the default working surface. Override only when the realm
+        surfaces the grant under a different attribute.
     jwt_platform_admin_claim_name:
         Name of the JWT claim that carries the cross-tenant
         ``platform_admin`` flag (a JSON boolean). Default
@@ -967,6 +978,7 @@ class Settings(BaseModel):
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
+    jwt_scopes_claim_name: str = Field(default="scope", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
@@ -1748,6 +1760,10 @@ def get_settings() -> Settings:
         jwt_capabilities_claim_name=os.environ.get(
             "JWT_CAPABILITIES_CLAIM_NAME",
             "capabilities",
+        ),
+        jwt_scopes_claim_name=os.environ.get(
+            "JWT_SCOPES_CLAIM_NAME",
+            "scope",
         ),
         jwt_platform_admin_claim_name=os.environ.get(
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",

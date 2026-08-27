@@ -107,6 +107,7 @@ from meho_backplane.mcp.registry import (
     get_tool,
     redacted_audit_uri,
     role_at_least,
+    surface_visible,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
 from meho_backplane.operations._audit import resolve_broadcast_lineage
@@ -337,6 +338,26 @@ async def handle_tools_call(
             status_code = 403
             raise McpInvalidParamsError(
                 f"forbidden: {name!r} requires an unprovisioned capability",
+            )
+
+        # Surface gate (Initiative #3153, #3154): the tool's surface gates
+        # invocation too, not just listing. all_tools_for already hides an
+        # operator-plane tool from a non-elevated session, but a client
+        # that learned the name out-of-band could still try to call it.
+        # Re-check here — after the role + capability gates so a
+        # role-forbidden call still reports the role reason — so the
+        # listing filter is enforced, not cosmetic: knowing the name of an
+        # operator-plane tool can't bypass the mcp:admin elevation gate.
+        if not surface_visible(operator, defn.surface):
+            _log.warning(
+                "mcp_tool_call_surface_forbidden",
+                tool=name,
+                surface=defn.surface,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} is on the operator surface and requires "
+                "an elevated (mcp:admin) MCP session",
             )
 
         # Validate arguments against the tool's inputSchema. ``cls`` is

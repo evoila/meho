@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from jsonschema import Draft202012Validator
@@ -37,6 +37,12 @@ from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.permissions import _more_restrictive, resolve_verdict
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+
+# Read-class HTTP verbs — the same set the ingest layer pins as
+# ``READ_HTTP_METHODS`` (``operations/ingest/_internals.py``). Duplicated as
+# a two-element literal here so the gate carries no import into the ingest
+# package (which would risk an import cycle on the hot dispatch path).
+_READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 
 _log = structlog.get_logger(__name__)
 
@@ -137,24 +143,81 @@ def validate_params(
     return out
 
 
-def _non_agent_verdict(
+def _is_mutating(descriptor: EndpointDescriptor) -> bool:
+    """Whether *descriptor* names a mutating (non-read) operation.
+
+    Grounded in the fields the repo already carries — no invented column:
+
+    * an ingested op declares an HTTP ``method``; it is read-class iff the
+      verb is in :data:`_READ_METHODS` (``GET`` / ``HEAD``), mutating
+      otherwise (``POST`` / ``PUT`` / ``PATCH`` / ``DELETE``);
+    * a typed / composite op carries no ``method``, so its curated
+      ``safety_level`` stands in — a ``safe`` typed op is a read, a
+      ``caution`` / ``dangerous`` one is a write by convention.
+    """
+    method = descriptor.method
+    if method:
+        return method.upper() not in _READ_METHODS
+    return descriptor.safety_level != "safe"
+
+
+def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
+    """Extra gating a **service** principal gets from ``safety_level`` (#3152).
+
+    Resolution of #3152 as its option 1: the non-agent gate now consults
+    ``safety_level`` for a service principal on a ``requires_approval=False``
+    op. A ``dangerous`` op parks always; a mutating ``caution`` op parks;
+    ``safe`` (and any non-mutating) op is unchanged (auto-executes). A
+    standing grant is the sanctioned path to run either unattended.
+
+    Returns the park reason, or ``None`` when the op stays auto-execute.
+    """
+    if descriptor.safety_level == "dangerous":
+        return (
+            "safety_level=dangerous; service-principal mutations park "
+            "(routed to the approval queue) unless a standing grant covers them (#3152)"
+        )
+    if descriptor.safety_level == "caution" and _is_mutating(descriptor):
+        return (
+            "safety_level=caution mutating op; service-principal mutations park "
+            "unless a standing grant covers them (#3152)"
+        )
+    return None
+
+
+async def _non_agent_verdict(
     *,
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
+    connector_id: str | None,
 ) -> tuple[PermissionVerdict, str | None]:
     """Resolve the verdict for a human / service (non-agent) principal.
 
-    Preserves the v0.2 default-allow contract for ordinary ops, but
-    routes a ``requires_approval`` op to ``needs-approval`` (the approval
-    queue) rather than hard-denying it (G11.7-T1 #1401). Self-approval is
-    blocked at decide time by ``approve_request``'s requester != approver
-    guard — the gate's job here is only to park the call.
+    Preserves the v0.2 default-allow contract for a human ``USER`` operator
+    — an ordinary op auto-executes and a ``requires_approval`` op routes to
+    the approval queue (G11.7-T1 #1401); they are their own approver.
+
+    For a **service** principal (client-credentials, ``principal_kind =
+    service``) the gate additionally consults ``safety_level`` (#3152) so a
+    mutating ``caution`` / ``dangerous`` op parks even without
+    ``requires_approval``, and — for any parked service-principal op — a
+    live matching **standing grant** (#3151) auto-approves it: the grant
+    use is recorded on the approvals audit ledger and the gate clears to
+    ``AUTO_EXECUTE``. Absent a grant the op parks for a human decision.
     """
     target_id_str = str(getattr(target, "id", None)) if target is not None else None
+    is_service = operator.principal_kind is PrincipalKind.SERVICE
+
+    gate_reason: str | None = None
     if descriptor.requires_approval:
+        gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
+    elif is_service:
+        gate_reason = _service_safety_gate_reason(descriptor)
+
+    if gate_reason is None:
         _log.info(
-            "policy_gate_needs_approval",
+            "policy_gate_default_allow",
             operator_sub=operator.sub,
             principal_kind=operator.principal_kind.value,
             tenant_id=str(operator.tenant_id),
@@ -162,12 +225,34 @@ def _non_agent_verdict(
             safety_level=descriptor.safety_level,
             target_id=target_id_str,
         )
-        return (
-            PermissionVerdict.NEEDS_APPROVAL,
-            "requires_approval is True; routed to the approval queue (G11.7-T1)",
+        return PermissionVerdict.AUTO_EXECUTE, None
+
+    # The op would park. A service principal can clear the gate with a live
+    # standing grant (recorded as an auto-approval on the audit ledger).
+    if is_service and connector_id is not None:
+        from meho_backplane.operations.service_grants import consult_and_record_grant
+
+        grant_id = await consult_and_record_grant(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
         )
+        if grant_id is not None:
+            _log.info(
+                "policy_gate_standing_grant_auto_approved",
+                operator_sub=operator.sub,
+                principal_kind=operator.principal_kind.value,
+                tenant_id=str(operator.tenant_id),
+                op_id=descriptor.op_id,
+                safety_level=descriptor.safety_level,
+                target_id=target_id_str,
+                grant_id=str(grant_id),
+            )
+            return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
     _log.info(
-        "policy_gate_default_allow",
+        "policy_gate_needs_approval",
         operator_sub=operator.sub,
         principal_kind=operator.principal_kind.value,
         tenant_id=str(operator.tenant_id),
@@ -175,7 +260,7 @@ def _non_agent_verdict(
         safety_level=descriptor.safety_level,
         target_id=target_id_str,
     )
-    return PermissionVerdict.AUTO_EXECUTE, None
+    return PermissionVerdict.NEEDS_APPROVAL, gate_reason
 
 
 async def policy_gate(
@@ -183,6 +268,7 @@ async def policy_gate(
     operator: Operator,
     descriptor: EndpointDescriptor,
     target: Any,
+    connector_id: str | None = None,
 ) -> tuple[PermissionVerdict, str | None]:
     """G11.2-T3 per-(principal, op, target) policy gate.
 
@@ -216,23 +302,21 @@ async def policy_gate(
     The per-(principal, op, target) agent-permission model gates **agent
     principals** (``principal_kind == agent``) through
     :func:`~meho_backplane.auth.permissions.resolve_verdict`. Human
-    operators and service accounts keep the v0.2 default-allow contract
-    for ordinary ops, but a ``requires_approval`` op now routes them to
-    the **approval queue** (``needs-approval``) rather than hard-denying.
+    operators keep the v0.2 default-allow contract for ordinary ops, but a
+    ``requires_approval`` op now routes them to the **approval queue**
+    (``needs-approval``) rather than hard-denying.
 
-    G11.7-T1 (#1401) closes the Phase-C gap: ops-team operators
-    authenticate as ``USER`` principals
-    (:func:`meho_backplane.auth.operator`), so the old hard-deny meant
-    every governed connector write returned ``denied`` to the very
-    people meant to run it. Routing them to ``needs-approval`` reuses
-    the already-built queue/approve/resume substrate
-    (:func:`~meho_backplane.operations.approval_queue.create_pending_request`
-    accepts any operator; the REST/MCP/CLI approve surfaces and the
-    ``_approved=True`` resume path are unchanged) — it is a one-branch
-    policy change, not new infrastructure. A non-``requires_approval``
-    op a human has always been able to run still auto-executes, so no
-    existing human-runnable op regresses.
+    **Service principals** (client-credentials, ``principal_kind ==
+    service``) additionally consult ``safety_level`` (#3152): a mutating
+    ``caution`` / ``dangerous`` op parks even without ``requires_approval``.
+    Any parked service-principal op is auto-approved when a live matching
+    **standing grant** exists (#3151), which requires *connector_id* to be
+    supplied so the grant's connector scope can be matched; the grant use
+    is recorded on the approvals audit ledger. See :func:`_non_agent_verdict`.
 
+    G11.7-T1 (#1401) routes ``USER`` operators to ``needs-approval`` on a
+    ``requires_approval`` op (reusing the queue/approve/resume substrate)
+    rather than hard-denying — so no existing human-runnable op regresses.
     The agent path additionally folds ``requires_approval`` into the
     verdict as a ``needs-approval`` floor, so an op the connector author
     marked as requiring approval is never auto-executed by an agent
@@ -241,12 +325,17 @@ async def policy_gate(
     The function is **async** — it opens its own DB session to load the
     caller's :class:`~meho_backplane.db.models.AgentPermission` rows,
     mirroring the same pattern :func:`audit_and_broadcast_safe` uses.
-    The dispatcher's call site changes only in adding ``await``; the
-    signature (operator / descriptor / target) stays identical to v0.2.
     """
     # --- Human / service principals: default-allow, queue on approval --
+    # (a service principal additionally consults safety_level + standing
+    # grants — see :func:`_non_agent_verdict`).
     if operator.principal_kind is not PrincipalKind.AGENT:
-        return _non_agent_verdict(operator=operator, descriptor=descriptor, target=target)
+        return await _non_agent_verdict(
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            connector_id=connector_id,
+        )
 
     # --- Agent principals: per-(principal, op, target) verdict ----------
     target_id = getattr(target, "id", target) if target is not None else None

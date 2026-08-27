@@ -4301,6 +4301,150 @@ class AgentPermission(Base):
     )
 
 
+class ServicePrincipalGrant(Base):
+    """Standing scoped auto-approval grant for a service principal (#3151 / #3152).
+
+    A paired consumer add-on drives long multi-step workflows through the
+    backplane as a **service principal** (OAuth2 client-credentials,
+    ``principal_kind = service``). Its own workflow model has a single
+    deliberate human-approval gate near the end, but the run never reaches
+    it unattended: the non-agent policy gate
+    (:func:`meho_backplane.operations._validate._non_agent_verdict`) parks
+    every ``requires_approval`` op — and, since #3152, every mutating
+    ``caution`` / ``dangerous`` op — so a ~10-step build parks a dozen
+    times before the modeled gate.
+
+    One row authorises exactly one
+    ``(principal_sub, op_id, connector_id, target_id)`` tuple in a tenant
+    to run **unattended**. Creating the grant IS the operator's upfront
+    review (deny-by-default absent a match), so every scope is explicit —
+    **no wildcards** on ``principal_sub`` or ``op_id`` (contrast
+    :class:`AgentPermission`, whose ``op_pattern`` is an fnmatch glob for
+    the *agent* verdict model). The grant list is the **floor** of what
+    runs unattended, never a bypass of a modeled gate: delete-shaped ops
+    are refused at creation
+    (:func:`meho_backplane.operations.service_grants.ServicePrincipalGrantService.create`).
+
+    Design decisions
+    ----------------
+
+    **Principal is ``sub``, not an FK.** Same soft-reference discipline as
+    :attr:`AgentPermission.principal_sub`. Unlike agent grants there is no
+    server-side service-principal registry to validate against (a service
+    principal is any Keycloak client-credentials client carrying
+    ``principal_kind=service``), so an unenforceable-principal check is not
+    possible; a grant whose ``principal_sub`` never authenticates simply
+    sits inert.
+
+    **Enforcement is SERVICE-only.** The gate consults these rows solely
+    for ``principal_kind == service`` tokens. A human ``USER`` operator
+    keeps the v0.2 default-allow + queue-on-``requires_approval`` contract
+    (they are their own approver); agents use :class:`AgentPermission`.
+
+    **Revocation is a soft-delete.** ``revoked_at`` (+ ``revoked_by_sub``)
+    is stamped rather than the row deleted, so a revoked grant stays
+    visible in the grant history — same forensic visibility as a human
+    approval decision. Expiry (``expires_at``) and revocation are both
+    honoured **at dispatch time** by the lookup filter; no sweeper is
+    needed (an expired / revoked row simply stops matching).
+
+    Indexes / constraints
+    ---------------------
+
+    * ``service_principal_grant_lookup_idx`` — b-tree on
+      ``(tenant_id, principal_sub, op_id)`` — the dispatch-time query.
+    * ``uq_service_principal_grant_targeted`` / ``…_targetless`` — two
+      **partial** unique indexes (``target_id IS [NOT] NULL AND revoked_at
+      IS NULL``) enforcing "at most one active grant per fully-scoped
+      key". Split because the nullable ``target_id`` would otherwise defeat
+      a single unique index on the targetless case (``NULL != NULL``), and
+      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+    """
+
+    __tablename__ = "service_principal_grant"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the service principal the grant authorises. Soft
+    # reference (no FK) -- same discipline as AgentPermission.principal_sub.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exactly one operation id (no glob). Raw HTTP ops are ``"POST:/path"``;
+    # typed / composite ops are dotted (``"vmware.composite.vm.create"``).
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The ``"<impl_id>-<version>"`` connector string the dispatcher resolves
+    # (same shape as ApprovalRequest.connector_id).
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
+    # target. Matched exactly at dispatch (no any-target wildcard).
+    target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Operator's upfront justification (the review flow requires it).
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # NULL = a standing (permanent) grant; a future UTC timestamp bounds it.
+    # The dispatch lookup ignores rows past their ``expires_at``.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Soft-delete marker: NULL = live, non-NULL = revoked at that time.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    revoked_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "service_principal_grant_lookup_idx",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "uq_service_principal_grant_targeted",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            "target_id",
+            unique=True,
+            postgresql_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+            sqlite_where=sa.text("target_id IS NOT NULL AND revoked_at IS NULL"),
+        ),
+        Index(
+            "uq_service_principal_grant_targetless",
+            "tenant_id",
+            "principal_sub",
+            "op_id",
+            "connector_id",
+            unique=True,
+            postgresql_where=sa.text("target_id IS NULL AND revoked_at IS NULL"),
+            sqlite_where=sa.text("target_id IS NULL AND revoked_at IS NULL"),
+        ),
+        Index(
+            "service_principal_grant_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
 class ScheduledTriggerKind(StrEnum):
     """Closed enum of trigger shapes the G11.3 scheduler dispatches.
 

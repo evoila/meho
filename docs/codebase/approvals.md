@@ -836,9 +836,34 @@ for the agent-run substrate's full shape, including the wait timeout
 (`Settings.agent_approval_wait_timeout_seconds`, default 30 min) and the
 fail-open semantics on broadcast outage.
 
+## Service-principal standing grants + safety_level gate (#3151 / #3152)
+
+The non-agent gate (`_non_agent_verdict`, `operations/_validate.py`) gained
+two paired behaviours for **service** principals (`principal_kind =
+service`), leaving the human `USER` path unchanged:
+
+- **`safety_level` is now consulted** (#3152, resolved as option 1): a
+  mutating `caution` op — and any `dangerous` op — parks even without
+  `requires_approval`. Previously only `requires_approval` parked a
+  non-agent op, so a `caution` mutation (`POST:/vcenter/vm/{vm}/hardware/disk`)
+  executed ungated for a service principal. A human `USER` operator is
+  **not** subject to this (they are their own approver).
+- **Standing scoped auto-approval grants** (#3151): an operator issues a
+  `(principal_sub, op_id, connector_id, target_id)` grant — the persistent
+  form of an approve decision — so a service principal's repeated parks
+  during an unattended run auto-approve instead. Each use writes an
+  `approval.decision` / `auto-approved` audit row (this section's shape),
+  carrying `grant_id` — same ledger visibility as a human decision.
+
+Grants are operator-role REST at `/api/v1/service-principals/grants`;
+delete-shaped ops are refused at creation (the grant list is the *floor*
+of what runs unattended, never a bypass of a modeled destructive gate).
+Full design: [`service-principal-grants.md`](service-principal-grants.md).
+
 ## References
 
 - `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + broadcast (T5) + park-time `expires_at` stamping and `expire_stale_requests` coalesce (#2322).
+- `backend/src/meho_backplane/operations/service_grants.py` — service-principal standing grants + the grant-use `approval.decision` audit row (#3151 / #3152); see [`service-principal-grants.md`](service-principal-grants.md).
 - `backend/src/meho_backplane/operations/approval_expiry.py` — periodic per-tenant approval-TTL sweeper (#2322).
 - `backend/src/meho_backplane/api/v1/approvals.py` — REST routes.
 - `backend/src/meho_backplane/mcp/tools/approvals.py` — MCP tools.

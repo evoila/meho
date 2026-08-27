@@ -2211,7 +2211,10 @@ async def dispatch(
             # / deny). The call site signature is unchanged; the function now
             # awaits a DB read to load the principal's AgentPermission rows.
             verdict, gate_reason = await policy_gate(
-                operator=operator, descriptor=descriptor, target=target
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                connector_id=connector_id,
             )
             policy_decision_var.set(verdict.value)
             if verdict == PermissionVerdict.DENY:

@@ -107,6 +107,7 @@ from meho_backplane.api.v1.runner_principals import (
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
+from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -1047,6 +1048,9 @@ app.include_router(api_v1_checks_dashboards_router)
 # (T5) so a ``broadcast_watch`` operator session learns of pending
 # requests without polling. Operator-level; tenant-scoped via the JWT.
 app.include_router(api_v1_approvals_router)
+# #3151 -- operator-managed standing scoped auto-approval grants for
+# service principals (the persistent form of an approve decision).
+app.include_router(api_v1_service_grants_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;
 # writes gated to tenant_admin. Tenant-scoped via the JWT's

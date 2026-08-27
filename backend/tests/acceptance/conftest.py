@@ -290,6 +290,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # irrelevant in a single non-cascading TRUNCATE).
     "check_dashboard_sensors",
     "check_dashboards",
+    # ``service_principal_grant.tenant_id`` is a real ``REFERENCES tenant(id)``
+    # FK from migration ``0078`` (#3151/#3152 standing grants). PG rejects
+    # truncating ``tenant`` unless every referencing table is listed in the
+    # same statement, so this must appear here or every PG-backed acceptance
+    # test errors at setup with ``cannot truncate a table referenced in a
+    # foreign key constraint``.
+    "service_principal_grant",
     "targets",
     "tenant",
 )

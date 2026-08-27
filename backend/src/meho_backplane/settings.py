@@ -91,6 +91,30 @@ def parse_bool_env(value: str | None) -> bool:
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+#: Default delete-shaped op-id patterns a service-principal standing grant
+#: may never cover (#3151). Case-sensitive ``fnmatchcase`` globs over the
+#: exact op id: raw HTTP DELETE ops (``DELETE:*``) plus the dotted typed
+#: delete/destroy/remove/purge families. Overridable via
+#: ``SERVICE_GRANT_DELETE_SHAPED_PATTERNS`` (comma-separated).
+_DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS: tuple[str, ...] = (
+    "DELETE:*",
+    "*.delete",
+    "*.destroy",
+    "*.remove",
+    "*.purge",
+)
+
+
+def _parse_service_grant_delete_shaped_patterns(raw: str) -> tuple[str, ...]:
+    """Parse the comma-separated override, falling back to the default set.
+
+    An empty / whitespace-only value keeps the built-in default patterns so
+    the delete-shaped guardrail never silently disappears on a blank env var.
+    """
+    parts = tuple(chunk.strip() for chunk in raw.split(",") if chunk.strip())
+    return parts or _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+
+
 class Settings(BaseModel):
     """Process-wide configuration knobs.
 
@@ -1209,6 +1233,12 @@ class Settings(BaseModel):
     approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
     approval_expiry_enabled: bool = True
     approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    # #3151 — op-id patterns a service-principal standing grant may never
+    # cover (delete-shaped ops are the floor of what runs unattended, never
+    # grantable). See ``operations.service_grants``.
+    service_grant_delete_shaped_patterns: tuple[str, ...] = (
+        _DEFAULT_SERVICE_GRANT_DELETE_SHAPED_PATTERNS
+    )
     # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
     # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
     # running an external lease-reclaim mechanism (DBOS Transact, a
@@ -1936,6 +1966,11 @@ def get_settings() -> Settings:
         ),
         approval_expiry_tick_interval_seconds=int(
             os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        # #3151 — delete-shaped op-id patterns never grantable to a service
+        # principal. Comma-separated override; empty keeps the default set.
+        service_grant_delete_shaped_patterns=_parse_service_grant_delete_shaped_patterns(
+            os.environ.get("SERVICE_GRANT_DELETE_SHAPED_PATTERNS", ""),
         ),
         agent_run_reaper_enabled=parse_bool_env(
             os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),

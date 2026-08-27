@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- Operator-managed **standing scoped auto-approval grants for service
+  principals** (#3151). A service principal (OAuth2 client-credentials)
+  driving a long unattended run no longer parks a dozen times before its
+  modeled approval gate: an operator issues a
+  `(principal_sub, op_id, connector_id, target_id)` grant — the persistent
+  form of an approve decision — via the operator-role REST surface
+  `/api/v1/service-principals/grants` (create / list / revoke). Every scope
+  is explicit (no wildcards on principal or op), creating the grant IS the
+  upfront review (`reason` required), delete-shaped ops are never grantable,
+  revocation is a soft-delete (history retained), and each use writes an
+  `approval.decision` / `auto-approved` audit row carrying the `grant_id` —
+  same ledger visibility as a human decision. Expiry and revocation are
+  honoured at dispatch time.
+
+### Changed
+
+- The non-agent policy gate now **consults `safety_level` for service
+  principals** (#3152, resolved as option 1). A mutating `caution` op — and
+  any `dangerous` op — carried by a service principal now parks (routed to
+  the approval queue) even without `requires_approval`, where before only
+  `requires_approval` gated a non-agent op. Standing grants (#3151) are the
+  sanctioned path to run such mutations unattended. Human `USER` operators
+  are unaffected (they remain their own approver); the agent verdict path is
+  untouched.
+
 ### Fixed — document the first-connect MCP startup-timeout race for both Claude clients (#3148)
 
 - A fresh machine's **first** connect through either client onramp raced Claude

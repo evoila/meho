@@ -90,34 +90,562 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added
+## [0.31.0] - 2026-08-27
 
-- Operator-managed **standing scoped auto-approval grants for service
-  principals** (#3151). A service principal (OAuth2 client-credentials)
-  driving a long unattended run no longer parks a dozen times before its
-  modeled approval gate: an operator issues a
-  `(principal_sub, op_id, connector_id, target_id)` grant — the persistent
-  form of an approve decision — via the operator-role REST surface
-  `/api/v1/service-principals/grants` (create / list / revoke). Every scope
-  is explicit (no wildcards on principal or op), creating the grant IS the
-  upfront review (`reason` required), delete-shaped ops are never grantable,
-  revocation is a soft-delete (history retained), and each use writes an
-  `approval.decision` / `auto-approved` audit row carrying the `grant_id` —
-  same ledger visibility as a human decision. Expiry and revocation are
-  honoured at dispatch time.
+### Breaking changes — MCP agent surface is claim-gated: default drops to the 25-tool working surface (#3154 / #3160)
 
-### Changed
+- A default MCP session used to list and dispatch the entire 78-tool
+  registration, so any agent token reached the operator planes — connector
+  lifecycle, agents/principals/grants, scheduler, sensors, broadcast
+  overrides, runbook template authoring, topology mutations, audit admin —
+  with no elevation, the self-approval hole #3153 set out to close.
+  `tools/list` now returns only the 25-tool **working surface** by default
+  (health, connectors, operation discovery, execution, result handles,
+  knowledge/memory, broadcast, target/topology reads, the runbook run
+  family); the 53 operator-plane tools list **and** dispatch only for a
+  session that explicitly requested the OAuth `mcp:admin` scope, lifted from
+  the standard `scope` claim (RFC 9068 §2.2.3) via `_extract_scopes` and
+  fail-closed empty. Every registered tool now carries a required
+  `ToolSurface` classification with no default — an unclassified
+  registration raises a pydantic `ValidationError` at import, so no tool
+  lands in a silent bucket. The gate is enforced twice: `all_tools_for`
+  AND-composes it with the existing role and `meho-docs` capability gates for
+  the listing, and `tools/call` re-checks it, so a non-listed tool 403s with
+  a remediation before its handler runs. CLI, REST, and hosted-agent
+  surfaces are untouched — `all_tools_for` feeds only `tools/list`.
+  **BREAKING** for any MCP client that relied on an operator-plane tool in a
+  default session. **Migration:** request the optional `mcp:admin` scope —
+  via the plugin's `MEHO_MCP_SCOPES` env seam or the `.mcpb` `scopes`
+  user_config (shipped in #3158); the realm grants it request-only.
 
-- The non-agent policy gate now **consults `safety_level` for service
-  principals** (#3152, resolved as option 1). A mutating `caution` op — and
-  any `dangerous` op — carried by a service principal now parks (routed to
-  the approval queue) even without `requires_approval`, where before only
-  `requires_approval` gated a non-agent op. Standing grants (#3151) are the
-  sanctioned path to run such mutations unattended. Human `USER` operators
-  are unaffected (they remain their own approver); the agent verdict path is
-  untouched.
+### Breaking changes — approval + grant-elevate decision verbs have no MCP path under any claim set (#3155 / #3159)
 
-### Fixed — document the first-connect MCP startup-timeout race for both Claude clients (#3148)
+- The three human-decision verbs `meho_approvals_approve`,
+  `meho_approvals_reject`, and `meho_agents_grant_elevate` are
+  de-registered from the MCP tool surface: they are absent from
+  `tools/list` and refused at `tools/call` under **every** claim shape,
+  including an elevated `tenant_admin` token. This closes the
+  self-approval hole (#3143 F4, which observed all three offered to a
+  tenant_admin session): a model session that parked an operation could
+  hold the same button that clears its own gate — approval is a human
+  decision (v0.1-spec §7), and grant-elevate is model-invocable privilege
+  escalation. A new `mcp/human_only.py` is the single source of truth,
+  consulted by `handle_tools_call` **before** the registry lookup, so an
+  accidental future re-registration still can't make them callable; a
+  `tools/call` on any of the three raises `McpInvalidParamsError`
+  (`-32602`, status 404) whose message names both the operator console
+  approvals queue and the concrete CLI verb — `meho approvals approve
+  <request-id>`, `meho approvals reject <request-id> --reason <text>`,
+  and `meho agent grant elevate --principal <sub> --op <pattern>
+  --verdict <v> --expires <iso8601>`. BREAKING for any MCP caller of
+  those three: the decision now moves to the operator console or the
+  `meho` CLI, exactly as the denial message directs. The read halves
+  (`meho_approvals_list` / `_get`) and the operator-plane grant verbs
+  (`list` / `show` / `create` / `revoke`) remain, and the REST / CLI /
+  console approval and grant paths are untouched. A static guard test
+  (`tests/test_mcp_human_only_surface.py`) fails CI if any tool module
+  both registers a tool and wires an approval-decision (`approve_request`
+  / `reject_request` / `resume_dispatch_after_approval`) or
+  grant-elevation (`AgentElevationCreate`) endpoint, so a re-add is
+  caught regardless of the wire name it picks.
+
+### Added — Claude Code plugin + in-repo marketplace: one-command MEHO onramp (#3130 / #3136)
+
+- A Claude Code team's MEHO onramp was manual and drift-prone: wire MCP by
+  hand per `docs/cross-repo/mcp-client-setup.md`, then copy-merge the ~245-line
+  Layer-2 `CLAUDE.md` template from `docs/examples/consumer-onboarding/` and
+  re-pull it on every MEHO minor release. This ships `evoila/meho` as both a
+  plugin marketplace and the plugin it hosts: a root
+  `.claude-plugin/marketplace.json` advertises an inline `meho` plugin at
+  `./clients/claude-code-plugin`, so the whole onramp is `claude plugin
+  marketplace add evoila/meho` then `/plugin install meho@meho`. The plugin
+  carries a stdio `.mcp.json` that launches the `mcp-remote` shim through
+  `${CLAUDE_PLUGIN_ROOT}/bin/meho-mcp-remote`; the wrapper reads the backplane
+  URL (`MEHO_MCP_URL`, or `MEHO_INSTANCE` + `/mcp`) and an optional internal-CA
+  path (`MEHO_CA_CERT` → `NODE_EXTRA_CA_CERTS`) from operator env or
+  `~/.config/meho/plugin.env`, so a target connects with zero edits inside the
+  installed plugin. It pins `mcp-remote@0.1.38` and presents the
+  pre-registered public OAuth client — `--static-oauth-client-info
+  '{"client_id": "meho-mcp"}'` (overridable via `MEHO_MCP_CLIENT_ID`) plus
+  `--static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'` —
+  because MEHO's Keycloak realm blocks DCR and Claude Code's `.mcp.json`
+  exposes no `client_id` field for native HTTP MCP. The Layer-2 routing
+  discipline moves out of the copy-me template into five model-invoked skills
+  namespaced `meho:<skill>` — `meho:prefer-meho` (connect / stays-local /
+  versioning), `meho:knowledge`, `meho:memory`, `meho:operations` (targets +
+  connectors + audit), and `meho:broadcast` (live awareness + untrusted-content
+  trust rule) — so their versions ride MEHO releases instead of a per-release
+  template re-pull. `docs/examples/consumer-onboarding/README.md` now names the
+  plugin as the primary Claude Code path; the template stays authoritative for
+  non-plugin clients (Cline, Continue, CI bots). Native-HTTP/CIMD MCP
+  migration of the `.mcp.json` and the SessionStart/announce reflex hooks are
+  deliberately deferred (follow-up #3131).
+
+### Added — Claude Desktop onramp packaged as a one-click `.mcpb` bundle (#3129 / #3138)
+
+- Installing the Claude Desktop onramp against an internal MEHO meant
+  hand-editing `claude_desktop_config.json` with the `npx mcp-remote`
+  shim invocation and, on internal-CA deploys, a `NODE_EXTRA_CA_CERTS`
+  env var — the repo had no npm toolchain and no packaging for it. New
+  `clients/claude-desktop-mcpb/` ships an MCPB (`manifest_version` 0.3)
+  bundle so a fresh user installs by **opening a `.mcpb` file**: the
+  Desktop install dialog prompts for the `/mcp` URL and an optional
+  internal-CA bundle instead of any JSON editing. The bundle's entry
+  point is a small stdio launcher (`server/index.mjs`) that makes the
+  CA path deterministic — it exports `NODE_EXTRA_CA_CERTS` to
+  `mcp-remote` **only** when a non-empty CA path is supplied, scrubs it
+  from the child env otherwise, then forwards stdio to the pinned
+  `npx -y mcp-remote@0.1.38 <url> …` (the proven #2666 shim). To clear
+  a fresh install's OAuth against MEHO's DCR-blocking Keycloak realm
+  (anonymous RFC 7591 registration → `403 Host not trusted`), the
+  launcher presents the pre-registered public `meho-mcp` client via
+  `--static-oauth-client-info` plus `--static-oauth-client-metadata`
+  (scope `mcp:read mcp:execute`); the client id is overridable without
+  editing the installed bundle via an optional `client_id` MCPB
+  `user_config` (default `meho-mcp`, delivered as `MEHO_MCP_CLIENT_ID`).
+  `build.sh <version>` runs `mcpb pack` (CLI pinned `2.1.2`) to produce
+  `meho-claude-desktop-<version>.mcpb`. Release wiring attaches it as a
+  step in `cli-release.yml` **after** GoReleaser (so `gh release upload`
+  has a Release to attach to), and a new `mcpb-bundle.yml` runs a
+  dry-run pack plus the #2792 "custom connector" wording guard on PRs
+  touching the bundle. Distribution stays the GitHub Release asset
+  channel only, so the internal-only posture is unchanged;
+  `RELEASING.md` gains the fifth artefact row and a post-tag
+  verification line, and `mcp-client-setup.md` Step 3 now leads with the
+  bundle and keeps the raw shim JSON as the fallback.
+
+### Added — plugin reflex hooks: session digest injection, announce/report reminders (#3131 / #3142)
+
+- The `meho` plugin's broadcast discipline (read-before-start, announce-
+  before-mutate, report-on-completion) was advisory text the model had to
+  remember to follow. Three **fail-open, warn-only** Claude Code reflex
+  hooks now make it deterministic harness-run behavior
+  (`clients/claude-code-plugin/hooks/hooks.json` + scripts under `bin/`).
+  `SessionStart` (`bin/session-start.sh`) prints a compact three-section
+  digest — recent tenant activity, scoped memory, recent knowledge — to
+  stdout, which Claude Code injects as session context, so read-before-
+  start happens before the first prompt. The live feed (`meho status
+  --watch`) is an SSE stream unusable from a hook that must return
+  promptly, so the digest reads the same broadcast window via the bounded,
+  non-streaming `meho audit recent`. `PreToolUse` on `call_operation`
+  emits a one-time reminder naming `broadcast_announce`; `PostToolUse` on
+  `broadcast_announce` records the announce (suppressing that reminder);
+  `Stop` reminds to report when `call_operation` ran but nothing was
+  announced or reported. No hook ever denies or blocks — enforcement with
+  teeth is the server-side announce gate's job (sibling #3133) — and every
+  failure path (missing CLI, expired login, no VPN, timeout) exits 0
+  silently. Scoped-matcher gotcha, now documented in the plugin README: a
+  plugin-bundled MCP server's tools are named
+  `mcp__plugin_<plugin>_<server>__<tool>`, so the matchers target
+  `mcp__plugin_meho_meho__call_operation` /
+  `mcp__plugin_meho_meho__broadcast_announce` — a bare `mcp__meho__...`
+  never fires. Per-`session_id` marker files under
+  `${TMPDIR:-/tmp}/meho-plugin-hooks` dedupe each nudge to at most once.
+  `PreToolUse`/`Stop` return the nudge as
+  `hookSpecificOutput.additionalContext` and never exit 2; because
+  `additionalContext` on a `Stop` hook *continues* the turn once (so
+  report-on-completion gets a chance to fire), the `Stop` hook no-ops when
+  `stop_hook_active` is true and writes a once-per-session
+  `.stop_reminded` marker to bound itself to a single nudge. Every hook
+  entry carries an explicit `timeout` (12/5/5/5 s).
+
+### Added — dispatch-time reflex advisory + opt-in per-tenant announce gate (#3133 / #3141)
+
+- Nothing at dispatch time reacted to missing coordination discipline: an
+  agent session could run its first `call_operation` without ever reading
+  `meho_broadcast_recent`, and execute write-class ops without an announce
+  claim, while the backplane knew both facts and said nothing. Two pieces
+  close the gap, both copying the established fail-open, bounded, deduped
+  advisory mould. First, a **third `OperationResult.extras` advisory
+  fragment** joins the #2550 `target_activity_advisory` and #2718
+  `checks_alert_advisory` at the `wrap_ok_result` seam in
+  `operations/dispatcher.py`: `broadcast/reflex.py`'s `build_reflex_advisory`
+  nudges an MCP session toward **read-before-act** (no prior
+  `meho_broadcast_recent` for its `agent_session_id` in `audit_log`) and
+  **announce-before-mutate** (a write-class op with no active claim covering
+  it), returning `{"reflex_advisory": "<one line>"}` or `{}`. Nudges are
+  session-scoped and deduped per `(session, heuristic)` via a Valkey
+  `SET NX EX`, fire only on the ok path after the synchronous audit commit,
+  and fail open — a builder exception logs a structlog event and leaves the
+  result byte-identical; a session-less CLI/REST dispatch gets no nudge.
+  Second, a **default-OFF, opt-in per-tenant announce gate**
+  (`broadcast/announce_gate.py`) runs at the dispatch pre-execution phase:
+  an enabled tenant rejects a `caution`-or-higher write-class op that holds
+  no active announce claim *before* execution, with a structured
+  `announce_required` denial naming `meho_broadcast_announce` (a policy
+  rejection, not a NEEDS_APPROVAL path). Enablement is the structured
+  `tenant.announce_gate_enabled` flag added by migration
+  `0077_add_tenant_announce_gate_enabled`, read through a cache-aware
+  fail-open resolver that mirrors the `broadcast_override` precedent —
+  deliberately not free-form `tenant_conventions`. A shared
+  `caller_has_active_announce_claim` scanner and a public `WRITE_OP_CLASSES`
+  constant, factored into `broadcast/history.py`, keep the advisory
+  heuristic and the gate agreeing on coverage. No MCP schema change (`extras`
+  is already an `object`) and `audit_log` gains no `broadcast_event_id`
+  column — the linkage stays `BroadcastEvent.audit_id`. New
+  `docs/codebase/reflex-advisory.md` documents both pieces; the
+  `broadcast.md` inventory now lists three advisory fragments.
+
+### Added — reflex-adoption KPIs from `audit_log` (#3134 / #3140)
+
+- The reflex work (op descriptions, plugin hooks, dispatch advisory) is a
+  behavioural bet, but nothing measured whether it moved the needle:
+  usage telemetry (#444) tracks retrieval conversion and says nothing
+  about read-before-act, announce coverage, or knowledge/memory
+  write-back. A new read-only report computes those in-session-discipline
+  KPIs directly off the synchronous, append-only, session-tagged
+  `audit_log` (plus the #2544 announce store) — reusing the #444 seam (a
+  `compute_*` service behind a REST route + CLI verb), not a parallel
+  metrics pipeline. `meho_backplane.reflex.compute_reflex_report` and
+  `GET /api/v1/audit/reflex` (new CLI `meho audit reflex` with
+  `--since`/`--until`/`--tenant`/`--json`) return four v1 metrics over a
+  window, per tenant: read-before-act (a session's first `call_operation`
+  preceded by a `broadcast_recent`), announce coverage (write-class ops —
+  `classify_op`-classified — with an earlier same-session announce
+  claim), write-back rate (`add_to_knowledge` + `add_to_memory` per 100
+  `call_operation`), and the surface split itself — each metric broken
+  into `agent` (rows with `agent_session_id`) vs `cli_rest` (rows
+  without). That split is the point: the MCP-meta-tool metrics are
+  structurally N/A on CLI/REST (no agent session), which is exactly the
+  server-side-levers-only baseline the reflex work needs to compare
+  against. RBAC follows the audit-query surface — operator-min to read,
+  `tenant_filter` gated behind `platform_admin` — and the query binds
+  `audit_op_class=audit_query` so its own audit row broadcasts
+  aggregate-only (decision #3). Metric definitions are pinned in
+  `docs/codebase/reflex-adoption.md`, precise enough that a second
+  implementation reproduces the numbers, and delineated from the
+  meho-internal#200 taint roll-up (adoption vs in-session discipline —
+  related, not merged).
+
+### Added — client scope-elevation seam on both stdio onramps (`MEHO_MCP_SCOPES` + `.mcpb` `scopes`) (#3156 / #3158)
+
+- The two stdio-shim onramps that let Claude Code and Claude Desktop reach
+  the backplane both **hardcoded** the OAuth scope they request —
+  `--static-oauth-client-metadata '{"scope": "mcp:read mcp:execute"}'` —
+  leaving an operator no way to request the `mcp:admin` elevation the T1
+  surface filter (#3153) gates the operator planes behind. This T3 client
+  seam of #3153 adds a deliberate opt-in without touching the default. The
+  plugin wrapper `clients/claude-code-plugin/bin/meho-mcp-remote` reads a new
+  `MEHO_MCP_SCOPES` env (documented in the README env table) and feeds it
+  verbatim to the scope metadata; the `.mcpb` bundle gains an optional
+  `scopes` user_config that flows `manifest.json` → `MEHO_MCP_SCOPES` → the
+  `server/index.mjs` launcher argv, scrubbed from the child env like the
+  `client_id` / `ca_cert` seams before it (mirroring #3138). Both default to
+  `mcp:read mcp:execute` and both fall back to that default on an empty or
+  whitespace-only value, so a session that never sets the field is
+  byte-identical to before. Appending `mcp:admin` (e.g.
+  `mcp:read mcp:execute mcp:admin`) is what lists the operator planes —
+  agents / principals registry + grants, connector lifecycle, broadcast
+  overrides, scheduler, sensors, runbook template authoring, and the
+  approvals **read** views — and it never exposes the human-only verbs
+  `meho_approvals_approve` / `meho_approvals_reject` /
+  `meho_agents_grant_elevate`, which have no MCP path under any scope
+  (#3155). Requesting a scope the realm does not yet offer is a safe no-op:
+  per OAuth 2.1 (RFC 6749 §3.3) the authorization server may ignore an
+  unassigned scope and Keycloak drops it, so the token returns without
+  `mcp:admin`, no error is raised, and the planes simply do not list — the
+  realm change that makes `mcp:admin` a requestable optional scope on the
+  `meho-mcp` client landed via `claude-rdc-hetzner-dc#2734` (2026-08-26). A new advisory, path-scoped `.github/workflows/plugin-test.yml`
+  gives the plugin its first CI runner (it had none), running the
+  stubbed-argv suite — a stub `npx` echoes its argv, no network — over the
+  default / override / empty / whitespace cases on PRs that touch the plugin,
+  mirroring `mcpb-bundle.yml`.
+
+### Added — dual-surface conformance pins + authoritative 78-tool inventory (#3157 / #3161)
+
+- The final task of Initiative #3153 (MCP agent-surface scoping) closes
+  the loop on the surface split shipped by #3154 (claim-driven filter)
+  and #3155 (human-only de-registration): prove the cutover loses
+  nothing agents used, pin both listings so drift is caught in CI, and
+  give "what is exposed" one authoritative home. New
+  `backend/tests/test_mcp_surface_conformance.py` pins the exact
+  **sorted** working (25) and `mcp:admin`-elevated (53 operator)
+  `tools/list` listings **per claim shape** — default working,
+  elevated, and elevated-without-`meho-docs` (the five capability-gated
+  docs tools: `search_docs` / `ask_docs` / `list_doc_collections` plus
+  the operator `create_doc_collections` / `delete_doc_collections`) —
+  driven through `handle_tools_list` and the real `POST /mcp` route,
+  the wire path a client actually observes. This complements #3154's
+  `test_mcp_surface_filter.py` registry-state frozenset partition test
+  rather than duplicating it: a regression in `handle_tools_list` or
+  `ToolDefinition.to_wire` would pass #3154 and fail here. The
+  snapshots are tied to the live registry by a partition guard
+  (`test_pinned_surfaces_partition_the_live_registry`), so a
+  reclassification breaks the per-claim-shape pins and an un-pinned
+  addition breaks the guard — either fails CI visibly. Alongside it,
+  `docs/codebase/mcp.md` now carries the full authoritative inventory —
+  name + one-liner + surface + gating claim for all **78** registered
+  tools (25 working / 53 operator) plus the 3 de-registered human-only
+  verbs (`HUMAN_ONLY_MCP_TOOLS`) — replacing the scattered partial
+  listings and cross-referencing #3150's consumer-doc name-conformance
+  grep as reciprocal sources of truth (names live here; the grep
+  enforces them in consumer docs). A pre-cutover audit-verification
+  recipe recorded on #3157 (runnable SQL + `meho audit query` over the
+  live `audit_log`, on the #3134 reflex-KPI conventions) confirms the
+  set of MCP-session-invoked tools is a subset of the 25 working-surface
+  names. Suite lands 10 tests green, two end-to-end through `POST /mcp`.
+
+### Added — consumer-doc tool-name conformance guard (#3150 / #3167)
+
+- Field-test finding F4 (#3143) caught the plugin's Layer-2 skills and the
+  consumer onboarding docs naming MCP tools that do not exist on the
+  deployed server: bare `broadcast_announce` / `broadcast_recent` for the
+  registered `meho_broadcast_*` forms, never-registered `search_connectors`
+  / `list_connectors` / `result_aggregate` / `_export` / `_describe`, and
+  `operation_id` where `call_operation`'s real argument is `op_id` (`target`
+  resolves by name, not the UUID `list_targets` returns). A skill that tells
+  Claude to call a nonexistent tool erodes exactly the first-reflex
+  behaviour the plugin exists to build. This names-only sweep aligns every
+  such reference in the plugin's `broadcast` skill, its `README.md`
+  (reminder + matcher rows and the scoped-name example), and the onboarding
+  `ONBOARDING.md` — whose stale "meta-tools missing from `tools/list` / not
+  yet wired" note now states the deployed reality (registered under `meho_`
+  names, #1092) and points at the authoritative inventory. New pure-stdlib
+  guard `scripts/ci/check_consumer_tool_names.py` derives the legal name set
+  from the `register_mcp_tool(...)` call sites the deploy itself reads —
+  unioned with the three human-only verbs from `human_only.py` (#3155) and a
+  package-name allow-list — then fails any scanned doc line that names a
+  forbidden/never-registered tool or `operation_id`, uses a bare
+  `broadcast_*` without the `meho_` prefix, or — the wide net — carries an
+  unregistered `meho_<name>` or `mcp__plugin_meho_meho__<tool>` matcher,
+  each with a fix hint. It runs advisory + path-scoped as the new
+  `consumer-tool-name-check` workflow, is pinned by
+  `backend/tests/test_consumer_doc_tool_names.py`, and is the doc-side
+  sibling of the #3147 hook-matcher guard and the #3157 `tools/list`
+  surface-conformance test — all three anchoring the one authoritative
+  78-tool inventory in `docs/codebase/mcp.md`, referenced not duplicated.
+
+### Added — pfSense write ops: named gateway + static-route add (#3090 / #3162)
+
+- The `pfsense-ssh-2.7` typed SSH connector carried nine read-only ops
+  and zero writes, so provisioning the reach path for a routed nested
+  lab forced the consumer back to a local SSH wrapper replaying a
+  guarded `pfSsh.php playback` fragment — exactly the config-mutation
+  idiom the connector should own. Two typed writes close the gap in a
+  new `routing` op group (surface 9→11): `pfsense.gateway.add` appends
+  a named `gateway_item` (interface, gateway IP, `ipprotocol` derived
+  from the IP family, optional `monitor_disable` for a pre-staged
+  gateway whose upstream device does not exist yet) then
+  `write_config()`; `pfsense.route.static.add` appends a
+  `staticroutes/route` (CIDR → gateway name) then `write_config()` +
+  `system_routing_configure()`, and requires its gateway to already
+  exist. pfSense CE 2.7 has no REST, so each write rides the same
+  `pfSsh.php playback` transport the reads use — but because playback
+  resolves its arg through `basename()` against `/etc/phpshellsessions/`
+  (and piped stdin never drives the interactive exec loop), the op
+  stages a raw-PHP fragment there via a quoted-delimiter heredoc, plays
+  it back, cleans up, then reads `config.xml` back to confirm the entry
+  landed. Guarded + idempotent: both read `config.xml` first, an
+  existing gateway name / route network returns
+  `{existed_before: true, applied: false, existing: <row>}` with no
+  duplicate appended, and a non-zero playback exit or a silent
+  `write_config` failure raises rather than reporting success.
+  Injection-safe (names/interfaces character-class allowlisted, IPs and
+  CIDRs parsed and re-serialised via `ipaddress`, values emitted through
+  a PHP single-quote escaper — never raw interpolation) and surgical
+  (only `gateways/gateway_item` and `staticroutes/route` are touched,
+  never interface config, so a perimeter firewall carrying the
+  operator's own VPN path is not stunned). Classified
+  `safety_level=caution` / `requires_approval=False`, mirroring
+  `bind9.record.add` / `windns.record.add` for an additive, recoverable,
+  idempotent config write. Ship state: State 2 — the connector's SSH
+  `shared_service_account` loader is already live inline (the same model
+  as `bind9-ssh-9.x`), and these writes are unit-tested against a mocked
+  SSH transport; E2E fake-shell dispatch coverage and remove/update ops
+  are deferred follow-ups.
+
+### Added — standing scoped auto-approval grants for service principals (#3151 / #3168)
+
+- A service principal (OAuth2 client-credentials) driving a long unattended
+  run no longer parks a dozen times before its modeled approval gate: an
+  operator issues a `(principal_sub, op_id, connector_id, target_id)`
+  grant — the persistent form of an approve decision — via the
+  operator-role REST surface `/api/v1/service-principals/grants` (create /
+  list / revoke). Every scope is explicit (no wildcards on principal or
+  op), creating the grant IS the upfront review (`reason` required),
+  delete-shaped ops are never grantable, revocation is a soft-delete
+  (history retained), and each use writes an `approval.decision` /
+  `auto-approved` audit row carrying the `grant_id` — same ledger
+  visibility as a human decision. Expiry and revocation are honoured at
+  dispatch time.
+
+### Changed — proactive-trigger wording on the six coordination-lever tool descriptions (#3132 / #3137)
+
+- The three coordination levers — knowledge (`search_knowledge` /
+  `add_to_knowledge`), memory (`search_memory` / `add_to_memory`), and
+  broadcast (`meho_broadcast_recent` / `meho_broadcast_announce`) — are
+  *optional* capabilities an agent completes an operation without ever
+  touching, and current Claude models under-reach for optional
+  capabilities unless the description names a prescriptive "call this
+  when …" trigger. The read-before-start / announce-before-mutate /
+  write-back-after-learning discipline previously lived only in the
+  tenant preamble and Layer-2 skills (advisory context the model does
+  not re-read at call time), so the levers fired only when an operator
+  pushed. This wording-only pass strengthens the when-to-call part of
+  all six descriptions to name the *unprompted* case: search knowledge
+  and memory **as a first reflex before answering** any tenant
+  infrastructure/convention/incident question; capture a learning the
+  moment an op teaches it (especially the fix for an error just
+  resolved) **before the context is lost**; read the broadcast window
+  **before the first `call_operation`** to avoid colliding with
+  in-flight work; and announce intent **before any mutating op** (gated
+  on the hit's `safety_level` / `requires_approval`) and again on
+  completion. No tool is added, removed, or renamed and no schema
+  changes — only the `description` strings in `broadcast.py`,
+  `knowledge.py`, and `memory.py`. The #2675 maturity prefix and the
+  #2486 kb REST/CLI cross-references are preserved untouched, and
+  `docs/codebase/mcp.md` now records the proactive-trigger convention
+  (with the `tests/test_mcp_tools_knowledge.py` /
+  `test_mcp_tools_memory.py` substring guards pinning the load-bearing
+  pieces) so a future edit cannot silently revert it.
+
+### Changed — non-agent policy gate consults `safety_level` for service principals (#3152 / #3168)
+
+- A mutating `caution` op — and any `dangerous` op — carried by a service
+  principal now parks (routed to the approval queue) even without
+  `requires_approval`, where before only `requires_approval` gated a
+  non-agent op (#3152, resolved as option 1). Standing grants (#3151) are
+  the sanctioned path to run such mutations unattended. Human `USER`
+  operators are unaffected (they remain their own approver); the agent
+  verdict path is untouched.
+
+### Fixed — `.mcpb` launcher vendors `mcp-remote`, spawns via the bundle runtime (#3144 / #3146)
+
+- The Claude Desktop `.mcpb` launcher
+  (`clients/claude-desktop-mcpb/server/index.mjs`) spawned bare `npx` from
+  PATH. Under Claude Desktop's UtilityProcess — which carries the GUI PATH,
+  with no `/opt/homebrew/bin` and no nvm shims — that died with `spawn npx
+  ENOENT` **before OAuth ever started**, parking Part B of the field test
+  (finding F1, #3143) for every Homebrew/nvm macOS machine (i.e. most of
+  them). The fix vendors `mcp-remote@0.1.38` **inside the bundle** at pack
+  time (`npm ci --omit=dev` from a committed, integrity-pinned
+  `package-lock.json`) and spawns it through the bundle's **own runtime** —
+  `process.execPath` plus the resolved entry script, with
+  `ELECTRON_RUN_AS_NODE=1` in the child env so it runs as plain Node whether
+  `execPath` is a standalone `node` or Desktop's Electron helper. That
+  removes `npx`, the PATH lookup, **and** the Windows `shell:true` branch
+  entirely — a direct binary + args-array spawn on every platform — killing
+  the ENOENT, the first-launch network fetch of `mcp-remote`, and the win32
+  JSON-argv quoting risk flagged in PR #3138 iter-2 in one move. The
+  static-OAuth invocation contract (pinned version,
+  `--static-oauth-client-info` with the `MEHO_MCP_CLIENT_ID`/`client_id`
+  seam, `--static-oauth-client-metadata`, https-URL and `NODE_EXTRA_CA_CERTS`
+  guards, child-env scrubbing) is preserved byte-for-byte, proven by a
+  `node:test` behavioral suite wired into the `mcpb-bundle.yml` PR lane and
+  run under a minimal `PATH=/usr/bin:/bin`. The resulting bundle is `1.4 MB`
+  compressed (4.5 MB / 726 files uncompressed) with a production-pruned
+  `node_modules`; the README's "system Node / `npx` on PATH" run-time
+  prerequisite is dropped.
+
+### Fixed — plugin PostToolUse matcher names the real `meho_broadcast_announce` tool (#3147 / #3164)
+
+- The plugin's announce-silencing reflex was dead in production: the
+  `PostToolUse` hook in `clients/claude-code-plugin/hooks/hooks.json`
+  matched `mcp__plugin_meho_meho__broadcast_announce`, but the tool is
+  registered as `meho_broadcast_announce`
+  (`backend/src/meho_backplane/mcp/tools/broadcast.py`), so the correct
+  plugin-scoped name is `mcp__plugin_meho_meho__meho_broadcast_announce`.
+  The bare name matched nothing, `post-announce.sh` never wrote the
+  session `.announced` marker, and the announce/report reminders never
+  fell silent after an announce (field-test finding F3, #3143). The
+  `PreToolUse` `call_operation` matcher was correct only by accident —
+  `call_operation` registers *without* the `meho_` prefix, and that
+  prefix asymmetry (some tools `meho_`-prefixed, some not) is exactly
+  what hid the bug. This fixes the matcher plus the two reminder texts
+  (`bin/pre-call-operation.sh`, `bin/stop-report.sh`, which had
+  instructed Claude to call the nonexistent `broadcast_announce`) and
+  the surrounding comments across all three `bin/` hooks. It also adds a
+  static conformance guard (`test/hooks-matcher-conformance.test.mjs`):
+  every `mcp__plugin_meho_meho__<tool>` matcher in `hooks.json` must name
+  a tool registered under `backend/src/meho_backplane/mcp/tools/`, with
+  the registered set derived in-repo from the `register_mcp_tool` call
+  sites (both string-literal and `Final[str]`-constant names) — no live
+  server. Wired into the existing `plugin-test` CI lane so the next
+  rename can't silently disarm a hook.
+
+### Fixed — SessionStart digest drops `__sensor__` heartbeat rows from the activity window (#3145 / #3165)
+
+- The Claude Code plugin's SessionStart reflex hook injects a compact
+  digest so a fresh session reads-before-start — and its recent-activity
+  window (`meho audit recent`) exists to surface what other operators and
+  agents did in this tenant. On any checks-enabled tenant (i.e. every real
+  one) that window was almost entirely `__sensor__` principal rows: the
+  checks plane runs sensor pins continuously, so machine heartbeats
+  dominate the newest audit rows and evict the operator/agent activity the
+  window is for, defeating the reflex (field report #3143, credit
+  ilhan-karic). `clients/claude-code-plugin/bin/session-start.sh` now
+  fetches a wide page and filters before truncating — the old
+  `meho audit recent --limit 10 | head -n 12` becomes
+  `meho audit recent --limit 100 | grep -vF '__sensor__' | head -n 12` —
+  so the display budget fills with real activity instead of collapsing to
+  heartbeats (filter-after-truncate would leave an all-sensor or empty
+  window). `__sensor__` is a reserved sentinel the backplane forbids any
+  operator from adopting, so the fixed-string drop cannot suppress a real
+  principal's rows. Client-side by necessity and design: the audit
+  `--principal` CLI filter is include-only (no invert) and server-side
+  exclusion is out of scope, so there is no CLI/backend/OpenAPI change and
+  nothing to regen. The other digest sections (memory, knowledge) are
+  untouched. Ships a stubbed-`meho` digest suite
+  (`test/session-start.test.mjs`) that proves filter-then-truncate on a
+  20-sensor-then-15-real fixture and preserves the hook's fail-open
+  guarantees, and broadens `.github/workflows/plugin-test.yml` to run
+  every `test/*.test.mjs` suite.
+
+### Fixed — consumer-onboarding docs no longer claim the #316 preamble assembler is unshipped (#3135 / #3139)
+
+- The `docs/examples/consumer-onboarding/` starter template (README, the
+  template `CLAUDE.md`, and `ONBOARDING.md`) told every new consumer that
+  the MCP session-preamble assembler (G7.1-T4 #316) had **not** landed and
+  that `initialize`'s `instructions` field was `None` — a "v0.2 staging"
+  caveat that outlived its truth. #316 closed 2026-05-25; the assembler
+  (`_session_instructions`, `backend/src/meho_backplane/mcp/server.py`) is
+  live and wired into the `initialize` response, so the stale claims
+  suppressed exactly the Layer-1 reflex channel the backplane already
+  ships. All three "not landed" notes now state the live behavior: a
+  session connecting via MCP receives the tenant-conventions preamble in
+  the `instructions` field at connect time, assembled fresh on each
+  `initialize` (so a reconnect picks up the current conventions). The
+  `ONBOARDING.md` troubleshooting subsection — once "an empty preamble is
+  **expected**" — is rewritten into a real three-step diagnostic for a
+  *missing* preamble: confirm the tenant has convention rows (`meho
+  conventions list`, and publish the first with `meho conventions create
+  --slug <slug> --kind operational ...`, which needs `tenant_admin` —
+  `conventions edit` is update-only and 404s an absent slug), force the
+  client to re-`initialize` (the preamble is a snapshot cached client-side
+  like `tools/list`, per `docs/codebase/mcp.md` § Known issues, so a
+  transport reconnect alone is not enough), and check the token's tenant
+  claims via `meho status`. Docs-only, scoped to that directory.
+
+### Fixed — reflex advisory documented as post-`v0.30.0`; direct-MCP read-nudge regression test (#3149 / #3166)
+
+- Field finding F5 (#3143) reported the read-before-act reflex nudge
+  returning `extras: {}` on a live lab session and read it as a code
+  defect. It is deployment lag, not a bug: the lab backplane runs
+  `v0.30.0` (GIT_SHA `d33419f8`), which predates PR #3141 (`6367f717`,
+  merged *after* the `v0.30.0` tag) that introduced the advisory, so the
+  running image carries no `meho_backplane.broadcast.reflex` module and no
+  `reflex_advisory_window_minutes` setting — the dispatcher merge seam
+  calls a builder that isn't there and `extras` stays empty (confirmed
+  live by `kubectl exec` against the pod). The heuristic itself is
+  correct: the read probe keys on the real audit path
+  `/mcp/tools/call/meho_broadcast_recent` (the broadcast tool does carry
+  the `meho_` prefix), so the F3-style prefix asymmetry does not apply.
+  `docs/codebase/reflex-advisory.md` now spells out the full qualifying
+  shape — the five conditions under which the fragment fires, led by the
+  minimum-deployed-version caveat (it first fires on the release *after*
+  `v0.30.0`; confirm with `python -c "import
+  meho_backplane.broadcast.reflex"` against the running image before
+  calling an absent fragment a bug). The one real gap was coverage: the
+  suite only bound the agent-run contextvar (`agent_session_id_var`), but
+  the live field shape resolves the session through
+  `resolve_agent_session_id`'s `Mcp-Session-Id` header fallback — a direct
+  MCP client with no in-process agent loop. New regression
+  `test_read_nudge_fires_for_direct_mcp_session_via_header_fallback` in
+  `backend/tests/test_reflex_advisory.py` reproduces exactly that shape
+  and asserts the nudge fires with the default 30-minute window. Docs +
+  tests only.
+
+### Fixed — document the first-connect MCP startup-timeout race for both Claude clients (#3148 / #3163)
 
 - A fresh machine's **first** connect through either client onramp raced Claude
   Code's default 30 s MCP startup timeout: `mcp-remote` opens the Keycloak login

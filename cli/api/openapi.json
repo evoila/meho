@@ -9228,6 +9228,244 @@
         }
       }
     },
+    "/api/v1/service-principals/grants": {
+      "get": {
+        "tags": [
+          "service-principal-grants"
+        ],
+        "summary": "List Grants",
+        "description": "List standing grants for the operator's tenant.\n\n``principal_sub`` filters to one service principal's grants;\n``include_revoked`` surfaces the revoked history. Tenant-scoped to the\noperator's JWT \u2014 no cross-tenant access.",
+        "operationId": "list_grants_api_v1_service_principals_grants_get",
+        "parameters": [
+          {
+            "name": "principal_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Principal Sub"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGrantListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "service-principal-grants"
+        ],
+        "summary": "Create Grant",
+        "description": "Create a standing grant (the operator's upfront review).\n\nReturns 422 when the op is delete-shaped, a scope field carries a\nwildcard, ``expires_at`` is in the past, or an active grant for the\nsame fully-scoped key already exists. Audited via the audit middleware.",
+        "operationId": "create_grant_api_v1_service_principals_grants_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceGrantCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/service-principals/grants/{grant_id}": {
+      "get": {
+        "tags": [
+          "service-principal-grants"
+        ],
+        "summary": "Show Grant",
+        "description": "Return one grant by id. Cross-tenant probes return 404 (never 403).",
+        "operationId": "show_grant_api_v1_service_principals_grants__grant_id__get",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceGrantRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "service-principal-grants"
+        ],
+        "summary": "Revoke Grant",
+        "description": "Revoke (soft-delete) a standing grant.\n\nReturns 204 on success; 404 when the grant is absent, already revoked,\nor belongs to another tenant. Audited via the audit middleware.",
+        "operationId": "revoke_grant_api_v1_service_principals_grants__grant_id__delete",
+        "parameters": [
+          {
+            "name": "grant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Grant Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -29396,6 +29634,158 @@
         ],
         "title": "SensorStatus",
         "description": "Closed lifecycle status of a :class:`Sensor`.\n\n``ScheduledTriggerStatus`` minus the trigger-only terminal states:\na sensor is either eligible for evaluation (:attr:`ACTIVE`) or held\n(:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is\nnot accepted at create; #2505 parks a row to ``paused`` (plus a\n``status_reason``) when it hits an unparseable persisted cadence, and\n#2506's rollup derives ``skip`` for paused rows."
+      },
+      "ServiceGrantCreate": {
+        "properties": {
+          "principal_sub": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Principal Sub",
+            "description": "JWT sub of the service principal the grant authorises (no wildcard)."
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Id",
+            "description": "Exact operation id, no glob (e.g. 'POST:/vcenter/vm')."
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Connector Id",
+            "description": "Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'."
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id",
+            "description": "Target UUID the grant is scoped to, or null for a targetless op."
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Reason",
+            "description": "Operator's upfront justification (creating the grant is the review)."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At",
+            "description": "Optional UTC expiry; null = standing (permanent) grant; must be future."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "principal_sub",
+          "op_id",
+          "connector_id",
+          "reason"
+        ],
+        "title": "ServiceGrantCreate",
+        "description": "Body for creating a standing scoped auto-approval grant.\n\n``extra=\"forbid\"`` rejects unknown fields with 422. There are\ndeliberately **no wildcards**: ``op_id`` and ``connector_id`` name one\nexact operation on one exact connector, and ``target_id`` is either a\nconcrete target UUID or ``None`` for a targetless op. The service layer\nrefuses delete-shaped ops (a grant is the floor of what runs\nunattended, not a bypass of a modeled destructive gate)."
+      },
+      "ServiceGrantListResponse": {
+        "properties": {
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceGrantRead"
+            },
+            "type": "array",
+            "title": "Grants"
+          }
+        },
+        "type": "object",
+        "required": [
+          "grants"
+        ],
+        "title": "ServiceGrantListResponse",
+        "description": "Response envelope for ``GET /api/v1/service-principals/grants``."
+      },
+      "ServiceGrantRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "revoked_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Revoked At"
+          },
+          "revoked_by_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Revoked By Sub"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "principal_sub",
+          "op_id",
+          "connector_id",
+          "target_id",
+          "reason",
+          "created_by_sub",
+          "created_at",
+          "expires_at",
+          "revoked_at",
+          "revoked_by_sub"
+        ],
+        "title": "ServiceGrantRead",
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM row.\nExposes ``revoked_at`` / ``revoked_by_sub`` so callers can tell a live\ngrant from a revoked one in the history."
       },
       "ShowTemplateResponse": {
         "properties": {

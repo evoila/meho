@@ -4,7 +4,7 @@
 #
 # PreToolUse reflex hook for the plugin's `call_operation` tool. If this
 # session has not announced intent yet, it emits a one-time, advisory
-# reminder naming `broadcast_announce`. It never denies or blocks the
+# reminder naming `meho_broadcast_announce`. It never denies or blocks the
 # call — enforcement with teeth is the server-side announce gate's job;
 # this is a warn-only nudge.
 #
@@ -47,7 +47,7 @@ reminded_marker="${state_dir}/${sid}.reminded"
 # reminder already fired once.
 if [ ! -e "$announced_marker" ] && [ ! -e "$reminded_marker" ]; then
   : > "$reminded_marker" 2>/dev/null || true
-  msg="MEHO reflex: this session is calling call_operation without having announced intent. Call broadcast_announce (phase=start) so other operators watching the tenant feed see your work, and report with phase=completion when you finish. Advisory only — this appears once per session and does not block the call."
+  msg="MEHO reflex: this session is calling call_operation without having announced intent. Call meho_broadcast_announce (phase=start) so other operators watching the tenant feed see your work, and report with phase=completion when you finish. Advisory only — this appears once per session and does not block the call."
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$msg"
 fi
 

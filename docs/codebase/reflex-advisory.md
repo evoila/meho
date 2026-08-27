@@ -167,7 +167,47 @@ administration, and a management verb is a clean follow-up.
   `resolve_agent_session_id()`, which prefers the agent-run id and falls
   back to the MCP header session. A direct MCP agent session (the primary
   target) correlates cleanly; a nested agent-run-over-MCP may correlate
-  imperfectly.
+  imperfectly. The header fallback is the shape a standalone MCP client
+  exercises — it has no in-process agent loop, so `agent_session_id_var`
+  is unset and the whole nudge hinges on the `Mcp-Session-Id` header
+  being present (see "When the advisory does *not* fire" below).
+
+## When the advisory does *not* fire (qualifying shape)
+
+The fragment is present on a response only when **all** of these hold.
+Any one absent is a silent, correct `{}` — never a defect:
+
+1. **The feature is deployed.** `build_reflex_advisory` and the
+   `reflex_advisory_window_minutes` setting ship in **PR #3141**
+   (merge `6367f7`), which landed **after** the `v0.30.0` tag
+   (`d33419f`). A backplane running `v0.30.0` or earlier has no
+   `meho_backplane.broadcast.reflex` module and no
+   `reflex_advisory_window_minutes` setting, so **`extras` never carries
+   `reflex_advisory`** — the merge seam calls a builder that isn't there.
+   This is the root cause of the F5 field observation (#3149): the lab
+   ran `v0.30.0`, one release behind the feature. The advisory first
+   fires on the release *after* `v0.30.0`. Confirm the deployment is on
+   that release before treating an absent fragment as a bug — a live
+   read of the running image settles it:
+   `python -c "import meho_backplane.broadcast.reflex"` succeeds only
+   where the feature is deployed.
+2. **The window is non-zero.** `REFLEX_ADVISORY_WINDOW_MINUTES=0`
+   short-circuits to `{}` before any session resolution or I/O.
+3. **The dispatch has an agent session.** `resolve_agent_session_id()`
+   is non-`None` — an agent-run id (`agent_session_id_var`) *or* a
+   direct MCP session's `Mcp-Session-Id` header. An operator CLI / REST
+   call, a system sweep, **and a header-less MCP client that POSTed
+   `tools/call` without completing `initialize`** all resolve to `None`
+   and get no nudge (`audit_log.agent_session_id` lands NULL for that
+   same header-less call — see `mcp_session_id_capture_mode`).
+4. **The dispatch succeeded.** The fragment rides an already-ok
+   response, built after the audit commit — never a denied / error /
+   awaiting-approval envelope.
+5. **A heuristic both qualifies and wins its dedupe claim.** Read: no
+   prior `meho_broadcast_recent` row for the session. Announce:
+   write-class op with no covering active claim. And the
+   `(session, heuristic)` key must be unclaimed this window — a second
+   `call_operation` in the same session+window is silent by design.
 
 ## Operator reach (JSON only today)
 

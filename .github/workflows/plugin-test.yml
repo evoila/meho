@@ -3,16 +3,21 @@
 
 # Claude Code plugin — PR behavioral + conformance tests.
 #
-# The plugin's stdio shim wrapper (clients/claude-code-plugin/bin/meho-mcp-remote)
-# is a bash launcher that `exec`s `npx -y mcp-remote@… <url> --static-oauth-…`.
-# One contract worth pinning is the argv it hands to npx — in particular
-# the OAuth scope metadata, which the MEHO_MCP_SCOPES elevation seam makes
-# operator-configurable — verified by a stubbed-argv suite (a stub `npx` on a
-# controlled PATH echoes the argv). A second suite is a static guard that
-# every plugin-scoped hooks.json matcher names a tool actually registered
-# under backend/src/meho_backplane/mcp/tools/ (the meho_ prefix asymmetry
-# silently disarmed the announce hook once — F3, #3143). This workflow runs
-# both whenever a PR touches the plugin sources. No network / npm install.
+# Three suites pin the plugin's behavioural contracts, each stubbing the
+# binary it drives (`npx` / `meho`) on a controlled PATH:
+#   1. The stdio shim wrapper (bin/meho-mcp-remote) `exec`s
+#      `npx -y mcp-remote@… <url> --static-oauth-…` — its argv is the
+#      contract, in particular the OAuth scope metadata the MEHO_MCP_SCOPES
+#      elevation seam makes operator-configurable (stubbed-argv suite).
+#   2. A static guard that every plugin-scoped hooks.json matcher names a
+#      tool actually registered under backend/src/meho_backplane/mcp/tools/
+#      (the meho_ prefix asymmetry silently disarmed the announce hook
+#      once — F3, #3143).
+#   3. The SessionStart reflex hook (bin/session-start.sh) shells out to
+#      the `meho` CLI and injects a digest whose recent-activity window
+#      must exclude `__sensor__` heartbeat rows.
+# This workflow runs every `test/*.test.mjs` suite whenever a PR touches
+# the plugin sources. No network / npm install.
 #
 # Advisory (non-required) and path-scoped, mirroring mcpb-bundle.yml. A
 # required check would need the `changes`-job + job-`if:` shape ci.yml uses
@@ -52,5 +57,5 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Plugin tests — shim argv contract + hooks matcher conformance
+      - name: Plugin tests — shim argv, hooks matcher conformance, session-start digest
         run: node --test clients/claude-code-plugin/test/*.test.mjs

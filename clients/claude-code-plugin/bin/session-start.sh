@@ -55,7 +55,21 @@ status_out="$(meho_read 2 status)"
 # `meho audit recent` is the bounded, non-streaming read of "what the
 # tenant has been doing". (`meho status --watch` is the live SSE feed —
 # unusable from a hook that must return promptly.)
-activity="$(meho_read 3 audit recent --limit 10 | head -n 12)"
+#
+# The checks plane runs sensor pins continuously under the `__sensor__`
+# principal, so on any checks-enabled tenant those machine heartbeats
+# dominate the newest audit rows and evict the operator/agent activity
+# this window exists to surface. Fetch a wide page, drop the
+# sensor-principal rows, THEN cut to the window budget — filtering
+# before the truncation keeps the window full of real activity instead
+# of collapsing to heartbeats (filter-after-truncate would show an all-
+# sensor or empty window on a sensor-heavy tenant). `__sensor__` is a
+# reserved sentinel the backplane forbids any operator from adopting,
+# so a fixed-string drop of the token cannot suppress a real principal's
+# rows. No CLI/backend change: the audit `--principal` filter is
+# include-only (no invert) and server-side exclusion is out of scope,
+# so the cheapest correct mechanism is a client-side drop here.
+activity="$(meho_read 3 audit recent --limit 100 | grep -vF '__sensor__' | head -n 12)"
 
 # Scoped memory recall — the operator's own notes/preferences in scope.
 memory="$(meho_read 3 list --limit 8 | head -n 10)"

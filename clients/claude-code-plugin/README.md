@@ -188,6 +188,11 @@ present. The live broadcast feed (`meho status --watch`) is an SSE stream and
 unsuitable for a hook that must return promptly, so the digest uses the
 audit log — every MEHO op writes an audit row and emits a broadcast event, so
 `meho audit recent` is the bounded, non-streaming read of the same window.
+The recent-activity window fetches a wide page and drops rows written under
+the reserved `__sensor__` principal (the checks plane's continuous sensor
+executions) *before* truncating to the display budget, so on a checks-enabled
+tenant those machine heartbeats can't evict the operator/agent activity the
+window exists to surface.
 These hooks **enforce** the broadcast discipline the server-assembled tenant
 preamble already states; they don't restate it.
 

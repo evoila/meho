@@ -90,6 +90,10 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "runner-principals": "satellite_gateway",
     "scheduler": "scheduler",
     "sensors": "sensors",
+    # Standing scoped auto-approval grants for service principals (#3151 /
+    # #3152) are the persistent form of an operator approve decision --
+    # same substrate, same maturity tier as the approval queue.
+    "service-principal-grants": "approvals",
     "targets": "targets",
     "topology": "topology",
 }

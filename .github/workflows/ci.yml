@@ -908,7 +908,18 @@ jobs:
         # keeps the step from erroring with "No data to combine" when pytest
         # crashed before any worker wrote a data file (genuine no-coverage case
         # → the upload step's hashFiles guard then skips cleanly).
+        #
+        # timeout-minutes (#3172): combine takes seconds when healthy, but the
+        # v0.31.0 cut proved a hang that outlives the pytest step's SIGALRM
+        # guard leaves debris this step then hangs on — and an UNBOUNDED step
+        # rides into the job's 60-min cap, whose timeout is a CANCELLATION
+        # that whole-job continue-on-error does NOT absorb (it absorbs
+        # failures), flipping the run conclusion to `cancelled` and blocking
+        # the RELEASING.md tag gate. A step cap converts that hang into an
+        # absorbed step FAILURE — run stays `success`, coverage degrades to
+        # "none for this push", which is this job's documented lossy contract.
         if: always()
+        timeout-minutes: 5
         run: |
           if ! ls .coverage.* >/dev/null 2>&1; then
             echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
@@ -930,6 +941,9 @@ jobs:
         # continue-on-error.
         if: always() && hashFiles('backend/coverage.xml') != ''
         continue-on-error: true
+        # timeout-minutes (#3172): same job-cap-cancel hole as the combine
+        # step — a hung upload must degrade to an absorbed step failure.
+        timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: python-coverage
@@ -945,6 +959,9 @@ jobs:
         # belt-and-suspenders on top of the whole-job continue-on-error.
         if: always() && hashFiles('backend/pytest-coverage.log') != ''
         continue-on-error: true
+        # timeout-minutes (#3172): same job-cap-cancel hole as the combine
+        # step — a hung upload must degrade to an absorbed step failure.
+        timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-pytest-log

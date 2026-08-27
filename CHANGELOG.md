@@ -149,6 +149,21 @@ connector-related release-notes line.
   grant-elevation (`AgentElevationCreate`) endpoint, so a re-add is
   caught regardless of the wire name it picks.
 
+### Security — base image openssl family patched for CVE-2026-14456 (PR #3170)
+
+- The runtime image's pinned `python:3.14-slim` base ships
+  `openssl 3.5.6-1~deb13u2`, which trivy flags as a fixable **HIGH**
+  (`CVE-2026-14456`) across `openssl`, `libssl3t64`, and
+  `openssl-provider-legacy` — the advisory landed between the PR-lane
+  builds and the release-roll merge, turning the `main` image run red at
+  the scan gate. The upstream base manifest has not been rebuilt against
+  the Debian fix yet, so the usual base-digest bump cannot clear it; the
+  three packages join the existing targeted `apt-get --only-upgrade`
+  security layer (the CVE-2026-53615 pattern from PR #3053), pulling
+  `3.5.7-1~deb13u2` from `trixie-security` with apt indexes dropped
+  in-layer. No new package enters the image. Removable once a rebuilt
+  base already carries openssl >= `3.5.7-1~deb13u2`.
+
 ### Added — Claude Code plugin + in-repo marketplace: one-command MEHO onramp (#3130 / #3136)
 
 - A Claude Code team's MEHO onramp was manual and drift-prone: wire MCP by

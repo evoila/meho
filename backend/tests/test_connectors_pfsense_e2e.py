@@ -296,6 +296,12 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "pfsense.dhcp.leases",
 )
 
+#: The mutating ops (#3090). Held separate from ``EXPECTED_OP_IDS`` because
+#: the empty-params dispatch/audit sweep below only exercises the read
+#: surface -- the write ops require real params + a mocked config.xml guard
+#: (covered by ``test_connectors_pfsense_write_ops.py``).
+_WRITE_OP_IDS: frozenset[str] = frozenset({"pfsense.gateway.add", "pfsense.route.static.add"})
+
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
 # ---------------------------------------------------------------------------
@@ -406,34 +412,36 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 9 pfSense ops are registered in PFSENSE_OPS."""
+    """All 11 pfSense ops are registered in PFSENSE_OPS (9 read/identity + 2 write)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
-    missing = set(EXPECTED_OP_IDS) - op_ids
+    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 9, f"Expected 9 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 11, f"Expected 11 ops, got {len(PFSENSE_OPS)}"
 
 
-def test_pfsense_ops_all_safe_and_no_approval_required() -> None:
-    """All read ops carry safety_level='safe' and requires_approval=False."""
+def test_pfsense_ops_safety_levels_and_no_approval_required() -> None:
+    """Read ops are 'safe', the write ops (#3090) are 'caution'; none require approval."""
     for op in PFSENSE_OPS:
-        assert op.safety_level == "safe", f"{op.op_id} should be safe"
+        expected = "caution" if op.op_id in _WRITE_OP_IDS else "safe"
+        assert op.safety_level == expected, f"{op.op_id} should be safety_level={expected!r}"
         assert not op.requires_approval, f"{op.op_id} should not require approval"
 
 
-def test_pfsense_ops_parameter_schemas_are_empty() -> None:
-    """All read ops accept no parameters (empty schema, additionalProperties=False)."""
+def test_pfsense_read_ops_parameter_schemas_are_empty() -> None:
+    """Read ops accept no parameters; every op keeps additionalProperties=False."""
     for op in PFSENSE_OPS:
         schema = op.parameter_schema
         assert schema.get("additionalProperties") is False, (
             f"{op.op_id}: parameter_schema must have additionalProperties=False"
         )
-        assert schema.get("properties") == {}, (
-            f"{op.op_id}: parameter_schema must have empty properties"
-        )
+        if op.op_id not in _WRITE_OP_IDS:
+            assert schema.get("properties") == {}, (
+                f"{op.op_id}: read-op parameter_schema must have empty properties"
+            )
 
 
 def test_pfsense_ops_all_have_llm_instructions() -> None:
-    """All 9 ops carry non-empty llm_instructions for agent discoverability."""
+    """All ops carry non-empty llm_instructions for agent discoverability."""
     for op in PFSENSE_OPS:
         assert op.llm_instructions, f"{op.op_id}: llm_instructions must not be empty"
         instr = op.llm_instructions

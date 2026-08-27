@@ -10,11 +10,14 @@ and is the second typed-SSH tier child of the `SshConnector` adapter (G0.2-T4
 release series (FreeBSD 14.1 base, as of 2.7.2).
 
 The connector replaces the operator's `scripts/pfsense.sh` wrapper in the
-`claude-rdc-hetzner-dc` consumer repository. The G3.7-T1 (#844) skeleton ships
+consumer repository. The G3.7-T1 (#844) skeleton ships
 only the `pfsense.about` canary op, the key-only auth enforcement, the
 fingerprint, and the probe. G3.7-T2 (#847) adds the 7 read ops
 (`pfctl`/config.xml parsed); G3.7-T3 (#850) ships the CLI verbs + E2E
-acceptance suite + onboarding doc.
+acceptance suite + onboarding doc. #2849 adds `pfsense.dhcp.leases`. #3090
+adds the first two write ops (`pfsense.gateway.add`,
+`pfsense.route.static.add`) via the `pfSsh.php playback` config-mutation
+idiom.
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -24,8 +27,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   attributes: `product="pfsense"`, `version="2.7"`, `impl_id="pfsense-ssh"`.
   Inherits the per-target asyncssh connection pool and `aclose()` from the
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
-  `probe`, `execute`, `about`, and the read-op bound-method shims (the 7 T2 ops
-  plus `dhcp_leases`, #2849).
+  `probe`, `execute`, `about`, the read-op bound-method shims (the 7 T2 ops
+  plus `dhcp_leases`, #2849), and the write-op bound-method shims (`gateway_add`,
+  `route_static_add`, #3090).
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
   `ssh_private_key` in the target's **Vault secret** (`target.secret_ref` is a
@@ -38,9 +42,18 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (9 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (11 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
-  appends `pfsense.dhcp.leases`.
+  appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
+  `ops_write` module.
+
+- **Write op handlers** (`ops_write.py`, #3090) — input validators
+  (`_validate_gateway_name` / `_validate_interface` / `_validate_gateway_ip` /
+  `_validate_network_cidr`), the `parse_static_routes_xml` config parser, the
+  `pfSsh.php playback` fragment builders (`_build_gateway_playback` /
+  `_build_route_playback`), the stage/playback/cleanup helper (`_apply_playback`),
+  and the handler functions `pfsense_gateway_add` / `pfsense_route_static_add`
+  plus the `WRITE_OPS` tuple.
 
 - **Read op parsers** (`ops_read.py`) — pure parsers for pfctl, config.xml, and
   the ISC dhcpd lease DB, plus the handler functions and the `READ_OPS` tuple:
@@ -157,21 +170,26 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (9 ops)
+## Op surface (11 ops)
 
-| Op ID | Command | Group |
-|---|---|---|
-| `pfsense.about` | `cat /etc/version` | `identity` |
-| `pfsense.version` | `cat /etc/version` | `config` |
-| `pfsense.firewall.rules` | `pfctl -sr` | `firewall` |
-| `pfsense.firewall.state` | `pfctl -ss` | `firewall` |
-| `pfsense.nat.rules` | `pfctl -sn` | `nat` |
-| `pfsense.interface.list` | `ifconfig -a` | `network` |
-| `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` |
-| `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` |
-| `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` |
+| Op ID | Command | Group | Safety |
+|---|---|---|---|
+| `pfsense.about` | `cat /etc/version` | `identity` | `safe` |
+| `pfsense.version` | `cat /etc/version` | `config` | `safe` |
+| `pfsense.firewall.rules` | `pfctl -sr` | `firewall` | `safe` |
+| `pfsense.firewall.state` | `pfctl -ss` | `firewall` | `safe` |
+| `pfsense.nat.rules` | `pfctl -sn` | `nat` | `safe` |
+| `pfsense.interface.list` | `ifconfig -a` | `network` | `safe` |
+| `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` | `safe` |
+| `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` | `safe` |
+| `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
+| `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
+| `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
 
-All 9 ops are `safety_level="safe"`, `requires_approval=False`.
+The 9 read / identity ops are `safety_level="safe"`; the 2 write ops (#3090)
+are `safety_level="caution"`. All 11 are `requires_approval=False` — the same
+posture `bind9.record.add` / `windns.record.add` carry for an additive,
+recoverable, idempotent config write.
 
 `pfsense.firewall.state` and `pfsense.dhcp.leases` both return `{rows, total}`
 and are the JSONFlux reduction candidates: connection-state tables and busy
@@ -199,6 +217,53 @@ interface `dpinger` is not monitoring) keeps its row with all five health
 fields `null`; a failure of the status command degrades the whole set to
 `null` health rather than failing the op.
 
+## Write ops (#3090)
+
+`pfsense.gateway.add` and `pfsense.route.static.add` are the connector's first
+mutating ops. pfSense CE 2.7 has no REST surface, so the mutation runs through
+the **`pfSsh.php playback` idiom** — the same mechanism the `pfsense.gateway.list`
+read op already uses (`pfSsh.php playback gatewaystatus`). Because
+`pfSsh.php playback <name>` resolves its argument through `basename()` against
+`/etc/phpshellsessions/` (and piped stdin does not drive the interactive `exec`
+loop reliably), each write:
+
+1. reads `/cf/conf/config.xml` and parses the relevant block (the guard);
+2. if the entry is absent, stages a raw-PHP fragment into
+   `/etc/phpshellsessions/<script>` via a **quoted-delimiter heredoc** (no shell
+   expansion), plays it back with `pfSsh.php playback <script>`, and removes the
+   file in a `finally`;
+3. reads `config.xml` back and confirms the entry landed.
+
+The fragment carries no `<?php` tag and no trailing `exec`, and opens with
+`global $config;` — `playback_text` prepends `require_once` of the pfSense
+config libraries and `eval`s the text inside a function scope, so the config
+libraries populate the `$config` global and the fragment must pull it into
+scope (mirroring the shipped `gatewaystatus` script's `global $argv;`).
+
+**Guarded + idempotent.** A gateway whose `name` already exists, or a route
+whose canonical `network` already exists, is reported as
+`{existed_before: true, applied: false, existing: <row>}` and stages **no**
+playback — never a duplicate. `pfsense.route.static.add` additionally requires
+the referenced gateway to already exist (pre-stage it with
+`pfsense.gateway.add`, whose `monitor_disable` flag suits a gateway whose
+upstream device is not up yet). A non-zero playback exit, or a silent
+`write_config` failure that leaves the entry absent on read-back, raises rather
+than reporting success.
+
+**Injection safety.** Every operator value is validated and re-serialised before
+it reaches the fragment: names / interfaces against a strict character-class
+allowlist (`^[A-Za-z0-9_-]{1,64}$` / `^[A-Za-z0-9_]{1,32}$`), IPs parsed and
+re-emitted through `ipaddress`, CIDRs canonicalised. Anything outside the
+allowlist is rejected before a single SSH round-trip; `_php_squote` escapes
+defensively on top.
+
+**Surgical contract.** The handlers touch only `gateways/gateway_item` and
+`staticroutes/route` — never interface config. The perimeter pfSense frequently
+carries the operator's own access path, so an interface re-enumeration would
+sever the very session issuing the change. `pfsense.route.static.add` calls
+`system_routing_configure()` (route-table apply only); `pfsense.gateway.add`
+applies nothing — a pre-staged gateway is inert config until referenced.
+
 ## Known issues
 
 - `known_hosts=None` in the SSH adapter disables host-key verification for
@@ -215,6 +280,10 @@ fields `null`; a failure of the status command degrades the whole set to
   chroot path confirmed against pfSense's `status_dhcp_leases.php`.
 - Task #2850: project live `dpinger` status (up/RTT/loss) onto
   `pfsense.gateway.list` via `pfSsh.php playback gatewaystatus`.
+- Task #3090: `pfsense.gateway.add` + `pfsense.route.static.add` — the first
+  write ops, via the `pfSsh.php playback` config-mutation idiom. Classification
+  mirrors `bind9.record.add` (`caution` / no-approval). pfSense PHP shell:
+  https://docs.netgate.com/pfsense/en/latest/development/php-shell.html.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

@@ -31,14 +31,20 @@ Coverage matrix (per Task #847 acceptance criteria):
   nullable; log-structured de-dup to the last block per IP.
 * Malformed command output → structured result (no crash); error field
   set on non-zero exit with empty stdout.
-* ``PFSENSE_OPS`` registration shape -- all 9 ops carry
-  ``safety_level='safe'``, ``additionalProperties=False`` on the
-  parameter schema, non-empty ``llm_instructions``, and pfsense-
-  namespace op_ids; ``firewall``, ``nat``, ``network``, ``config``,
-  ``dhcp`` groups are present.
-* Idempotency contract -- the ``PFSENSE_OPS`` tuple length matches 9
-  (T2 read ops + ``pfsense.dhcp.leases``, #2849); the ``pfsense.about``
-  canary remains at index 0.
+* ``PFSENSE_OPS`` registration shape -- every op carries
+  ``additionalProperties=False`` on the parameter schema, non-empty
+  ``llm_instructions``, and a pfsense-namespace op_id; the read /
+  identity ops are ``safety_level='safe'`` and the two write ops
+  (#3090) are ``safety_level='caution'``; ``firewall``, ``nat``,
+  ``network``, ``config``, ``dhcp``, ``routing`` groups are present.
+* Registration count -- the ``PFSENSE_OPS`` tuple length matches 11
+  (T2 read ops + ``pfsense.dhcp.leases`` #2849 + the two write ops
+  #3090); the ``pfsense.about`` canary remains at index 0.
+
+The ``pfsense.gateway.add`` / ``pfsense.route.static.add`` write-op
+behaviour (validation, idempotency guards, config-write failure
+propagation, playback-fragment construction) is covered in
+``test_connectors_pfsense_write_ops.py``.
 """
 
 from __future__ import annotations
@@ -1031,9 +1037,9 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_nine_entries() -> None:
-    """T1 canary + 7 T2 read ops + pfsense.dhcp.leases (#2849) = 9 total."""
-    assert len(PFSENSE_OPS) == 9
+def test_pfsense_ops_has_eleven_entries() -> None:
+    """T1 canary + 7 T2 read ops + pfsense.dhcp.leases (#2849) + 2 write ops (#3090) = 11."""
+    assert len(PFSENSE_OPS) == 11
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1045,9 +1051,19 @@ def test_pfsense_ops_all_have_pfsense_namespace() -> None:
         assert op.op_id.startswith("pfsense."), f"{op.op_id!r} lacks pfsense. prefix"
 
 
-def test_pfsense_ops_all_safe() -> None:
+#: The mutating ops (#3090) -- classified ``caution`` (additive config
+#: write), unlike the read/identity surface which is ``safe``.
+_WRITE_OP_IDS = {"pfsense.gateway.add", "pfsense.route.static.add"}
+
+
+def test_pfsense_read_ops_safe_write_ops_caution() -> None:
     for op in PFSENSE_OPS:
-        assert op.safety_level == "safe", f"{op.op_id!r} has safety_level != 'safe'"
+        if op.op_id in _WRITE_OP_IDS:
+            assert op.safety_level == "caution", (
+                f"{op.op_id!r} write op should be safety_level='caution'"
+            )
+        else:
+            assert op.safety_level == "safe", f"{op.op_id!r} has safety_level != 'safe'"
 
 
 def test_pfsense_ops_all_parameter_schemas_have_additional_properties_false() -> None:
@@ -1077,6 +1093,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.gateway.list",
         "pfsense.config.show",
         "pfsense.dhcp.leases",
+        "pfsense.gateway.add",
+        "pfsense.route.static.add",
     }
     assert op_ids == expected
 
@@ -1089,6 +1107,7 @@ def test_pfsense_ops_group_keys_include_new_groups() -> None:
     assert "network" in group_keys
     assert "config" in group_keys
     assert "dhcp" in group_keys
+    assert "routing" in group_keys
 
 
 def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:

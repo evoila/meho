@@ -750,13 +750,17 @@ jobs:
     #      #2865): the legit -n 1 serial wall is 35:32, so a 35-min step cap
     #      would kill honest runs.
     #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
-    #      step (checkout / uv sync / model warm — never observed). It must stay
-    #      comfortably above step cap + pre-pytest setup (35–75 s observed) +
-    #      combine/upload (~15 s) so layer 2 always fires first for anything
-    #      under pytest — a job-level expiry CANCELS the job, and `cancelled`
-    #      leaks past continue-on-error into the run conclusion (the exact
-    #      #2800/#2865 failure). 55 also sits below the ~60-min external pod
-    #      reap seen on the heavy pool, so GitHub's job timeout wins that race.
+    #      step (checkout / uv sync / model warm — never observed). Every
+    #      post-pytest step is now step-capped too (#3172: combine 4, uploads
+    #      2+2 — the v0.31.0 cut proved a hang CAN escape into combine via the
+    #      pytest step's debris), so the bounded-step worst case is 45 + 4 + 2
+    #      + 2 = 53 min + pre-pytest setup (35–75 s observed) ≈ 54 — the step
+    #      caps always fire before this job cap for any hang under a bounded
+    #      step, and a job-level expiry (which CANCELS the job; `cancelled`
+    #      leaks past continue-on-error into the run conclusion — the exact
+    #      #2800/#2865/#3172 failure) is reserved for the never-observed wedged
+    #      setup step. 55 also sits below the ~60-min external pod reap seen
+    #      on the heavy pool, so GitHub's job timeout wins that race.
     # Neither runner cap is a perf budget: the job is push-only and non-blocking,
     # so a long wall never gates a PR.
     timeout-minutes: 55
@@ -912,14 +916,17 @@ jobs:
         # timeout-minutes (#3172): combine takes seconds when healthy, but the
         # v0.31.0 cut proved a hang that outlives the pytest step's SIGALRM
         # guard leaves debris this step then hangs on — and an UNBOUNDED step
-        # rides into the job's 60-min cap, whose timeout is a CANCELLATION
-        # that whole-job continue-on-error does NOT absorb (it absorbs
-        # failures), flipping the run conclusion to `cancelled` and blocking
-        # the RELEASING.md tag gate. A step cap converts that hang into an
-        # absorbed step FAILURE — run stays `success`, coverage degrades to
-        # "none for this push", which is this job's documented lossy contract.
+        # rides into the job's 55-min cap (layer 3 above), whose timeout is a
+        # CANCELLATION that whole-job continue-on-error does NOT absorb (it
+        # absorbs failures), flipping the run conclusion to `cancelled` and
+        # blocking the RELEASING.md tag gate. A step cap converts that hang
+        # into an absorbed step FAILURE — run stays `success`, coverage
+        # degrades to "none for this push", the job's documented lossy
+        # contract. Budget: 45 (pytest) + 4 + 2 + 2 (this step + uploads)
+        # = 53, leaving ~2 min for the pre-pytest setup (35–75 s observed)
+        # under the 55-min job cap, so layer 2 keeps firing first.
         if: always()
-        timeout-minutes: 5
+        timeout-minutes: 4
         run: |
           if ! ls .coverage.* >/dev/null 2>&1; then
             echo "::warning::no per-worker coverage data files — pytest produced no coverage (crash before first test?); skipping combine"
@@ -943,7 +950,7 @@ jobs:
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
-        timeout-minutes: 3
+        timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: python-coverage
@@ -961,7 +968,7 @@ jobs:
         continue-on-error: true
         # timeout-minutes (#3172): same job-cap-cancel hole as the combine
         # step — a hung upload must degrade to an absorbed step failure.
-        timeout-minutes: 3
+        timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-pytest-log

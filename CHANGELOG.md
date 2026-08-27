@@ -112,11 +112,12 @@ connector-related release-notes line.
   not absorb (it absorbs failures), flipping the run conclusion to
   `cancelled` and blocking the RELEASING.md "cancelled ≠ green" tag
   gate until the operator waived the job. The combine and both upload
-  steps now carry `timeout-minutes` (5/3/3, worst case 56 min inside
-  the 60-min job cap), so the same hang degrades to absorbed step
-  failures with run conclusion `success` and lossy coverage — the
-  job's documented contract (#2800). The underlying serial-lane hang
-  investigation stays open on #3172.
+  steps now carry `timeout-minutes` (4/2/2 — bounded-step worst case
+  45 + 4 + 2 + 2 = 53 min plus ~1 min observed setup, under the job's
+  55-minute cap so the step caps always fire first), and the same hang
+  now degrades to absorbed step failures with run conclusion `success`
+  and lossy coverage — the job's documented contract (#2800). The
+  underlying serial-lane hang investigation stays open on #3172.
 
 ## [0.31.0] - 2026-08-27
 

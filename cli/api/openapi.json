@@ -31864,6 +31864,10 @@
       "x-maturity": "beta"
     },
     {
+      "name": "service-principal-grants",
+      "x-maturity": "ga"
+    },
+    {
       "name": "targets",
       "x-maturity": "ga"
     },

@@ -357,28 +357,36 @@ Layer 2 (this template) is independent of all three — the local
 Claude session reads `CLAUDE.md` directly from disk, regardless of
 the MCP preamble.
 
-### Broadcast meta-tools missing from `tools/list`
+### Broadcast meta-tools — the registered names carry a `meho_` prefix
 
-`broadcast_recent` / `broadcast_announce` / `broadcast_watch` are
-referenced in the template's broadcast-discipline section as the
-preferred surface for cross-operator awareness. In the current v0.2
-staging build their MCP registration is not yet wired — the
-underlying SSE feed and CLI subscriber ship via
-[G6.1 #228](https://github.com/evoila/meho/issues/228), but the
-named meta-tools are a follow-up. Until they land, the four-step
-discipline maps onto:
+The cross-operator awareness meta-tools are registered as
+`meho_broadcast_recent` / `meho_broadcast_announce` /
+`meho_broadcast_watch` and appear on `tools/list` for an
+operator-scoped session (shipped in
+[#1092](https://github.com/evoila/meho/issues/1092); the underlying
+SSE feed + CLI subscriber shipped earlier via
+[G6.1 #228](https://github.com/evoila/meho/issues/228)). The `meho_`
+prefix is load-bearing: dropping it names a tool that is not
+registered, so the call fails. The template's broadcast-discipline
+section already uses the prefixed forms — call those exactly.
+
+The authoritative name for every exposed MCP tool (working surface +
+`mcp:admin` operator surface, with the exact count) lives in
+[`docs/codebase/mcp.md`](https://github.com/evoila/meho/blob/main/docs/codebase/mcp.md)
+under "Dual-surface tool inventory". A CI guard
+(`scripts/ci/check_consumer_tool_names.py`) fails the build if this
+template — or any consumer-facing doc/skill — names a tool that is
+not registered under that inventory.
+
+Human operators still have the read-side CLI equivalents when they are
+not driving through MCP:
 
 * Step 1 (check before starting) — `meho audit who-touched <name>
   --since 30m` for "who's been here recently".
-* Step 2 (announce intent) — explicit Slack/chat post.
 * Step 3 (check in mid-flight) — `meho status --watch --target
   <name>` running in a background terminal.
-* Step 4 (report on completion) — explicit Slack/chat post + the
-  audit row id from your operation's CLI output.
-
-When the meta-tools register, switch the discipline section in your
-consumer-side `CLAUDE.md` to call them directly; the upstream
-template will lead the change.
+* Step 4 (report on completion) — the audit row id from your
+  operation's CLI output.
 
 ## References
 

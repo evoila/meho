@@ -107,7 +107,7 @@ connector-related release-notes line.
   v0.31.0 cut (three different runner pods — systematic, not a wedged
   node): a unit-sweep hang that outlived the pytest step's in-process
   SIGALRM guard left per-worker coverage debris, the **unbounded**
-  combine step hung on it, and the job's 60-minute cap fired — a
+  combine step hung on it, and the job's 55-minute cap fired — a
   job-timeout *cancellation*, which whole-job `continue-on-error` does
   not absorb (it absorbs failures), flipping the run conclusion to
   `cancelled` and blocking the RELEASING.md "cancelled ≠ green" tag

@@ -109,6 +109,33 @@ already exist on the realm — see
 No system Node or `npx` on `PATH` is required at run time — the bundle
 carries its dependencies and Claude Desktop supplies the runtime.
 
+## First connect — the OAuth login race
+
+The **first** time a fresh machine enables this bundle, the vendored
+`mcp-remote` runs the full Keycloak OAuth 2.1 + PKCE login before the server
+reports ready. It opens a browser tab for that login **behind the Claude
+Desktop window**, and Claude Desktop enforces its **own MCP startup timeout** on
+the `.mcpb` server — if the browser login has not finished before that elapses,
+Desktop marks the extension disconnected and tears the shim (and its OAuth
+callback server) down mid-handshake.
+
+Unlike the Claude Code CLI, Desktop's startup timeout is **not** operator-
+settable — the CLI's `MCP_TIMEOUT` env var
+([Claude Code MCP docs](https://code.claude.com/docs/en/mcp.md)) does not apply
+to Desktop — so the recipe is *finish the login promptly, then retry if it
+lapsed*:
+
+1. Right after enabling the extension, switch to the browser tab that opened
+   **behind** the Claude Desktop window and complete the Keycloak login without
+   delay.
+2. If the first attempt timed out (the extension shows disconnected), toggle it
+   off and back on — or fully quit and relaunch Claude Desktop — to restart the
+   handshake, then complete the login.
+
+`mcp-remote` caches the tokens under `~/.mcp-auth`, so once the first login
+succeeds **every later launch connects instantly** — the race only bites the
+very first connect on a fresh machine (or again after you clear `~/.mcp-auth`).
+
 ## Elevated operator mode (opt-in)
 
 By default a session lists only the **working surface** — status,

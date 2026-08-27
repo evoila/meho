@@ -347,28 +347,165 @@ unclassified tool fails app boot / test collection loudly rather than
 defaulting into a silent bucket. Every registered tool is classified
 explicitly.
 
-* **`working`** (the default narrow-waist surface every session lists,
-  honouring CLAUDE.md postulate 5): `meho_status`; discovery
-  (`meho_connector_list`, `list_operation_groups`, `search_operations`);
-  execution (`call_operation`, `preview_operation`, `result_query`);
-  knowledge + memory (`search_knowledge`/`add_to_knowledge`,
-  `search_memory`/`add_to_memory`); the capability-gated docs tools
-  (`search_docs`, `ask_docs`, `list_doc_collections`); the broadcast trio
-  (`meho_broadcast_recent`/`_announce`/`_watch`); target/topology **reads**
-  (`list_targets`, `query_topology`); and the runbook **run** family
-  (`meho_runbook_start`/`_next`/`_abort`/`_list_runs`/`_list_templates`/
-  `_show_template`).
-* **`operator`** (the governance / lifecycle planes, listed only after
-  elevation): connector lifecycle + ingest, agents / principals / grants,
-  scheduler, sensors, runbook **template authoring** + `_reassign`,
-  broadcast overrides, topology **mutations**, target registration,
-  doc-collection create/delete, `meho_memory_promote`, approvals read
-  (`meho_approvals_list`/`_get`), and audit query (`query_audit`,
-  `meho_audit_replay`).
+* **`working`** — the default narrow-waist surface every session lists,
+  honouring CLAUDE.md postulate 5: status, discovery, execution,
+  knowledge, memory, docs (capability-gated), the broadcast trio,
+  target/topology **reads**, and the runbook **run** family.
+* **`operator`** — the governance / lifecycle planes, listed only after
+  `mcp:admin` elevation: connector lifecycle + ingest, agents /
+  principals / grants, scheduler, sensors, runbook **template
+  authoring**, broadcast overrides, topology **mutations**, target
+  registration, doc-collection create/delete, memory promotion,
+  approvals **read**, and audit query.
 
-The exact membership of both surfaces is pinned as a sorted set in
-`tests/test_mcp_surface_filter.py`, so any new tool that forgets to
-classify — or a reclassification — fails that test loudly.
+## Dual-surface tool inventory
+
+This is the **authoritative enumeration** of the MCP agent surface —
+every registered tool, its surface, its gating claim, and a one-line
+summary. It is the single home for "what does an MCP session actually
+expose", replacing the per-Task partial listings that were scattered
+across this doc. The membership is machine-pinned two ways, so this
+table can never silently drift from the code:
+
+* `tests/test_mcp_surface_filter.py` (#3154) pins the working / operator
+  partition as frozensets off `all_tools_for` (registry state) and
+  proves it is exhaustive + disjoint.
+* `tests/test_mcp_surface_conformance.py` (#3157) pins the exact
+  **sorted** `tools/list` wire listing per claim shape — driven through
+  `handle_tools_list` and the real `POST /mcp` route — so a
+  reclassification or an un-pinned addition fails CI at the listing path
+  a client actually observes.
+
+Counts: **25 working + 53 operator = 78 registered tools**, plus the
+**3 human-only verbs** (below) that carry no MCP registration under any
+claim set.
+
+**Name authority ↔ consumer docs (#3150).** The tool *names* in this
+inventory are the authority the consumer-facing docs/skills
+name-conformance work (#3150) validates against: its grep guard fails CI
+when a consumer doc, onboarding template, or plugin skill references an
+MCP tool by a name outside this working surface (e.g. a bare
+`broadcast_announce` instead of `meho_broadcast_announce`). The two are
+reciprocal, not divergent — names are defined here; the grep enforces
+them there. This inventory owns *what is exposed*; #3150 owns *how
+consumer docs spell it*.
+
+Gating recap — a tool appears in a session's `tools/list` iff **role**
+`≥` its minimum **AND** the tenant holds any required **capability**
+**AND** the session clears the **surface** gate (working = always;
+operator = `mcp:admin`-elevated). The "Role" and "Extra gate" columns
+below are the per-tool half; the surface's scope requirement is stated
+in each table heading.
+
+### Working surface (default — every session, no elevation)
+
+| Tool | Role | Extra gate | What it does |
+|---|---|---|---|
+| `add_to_knowledge` | operator | — | Write a distilled entry to the tenant knowledge base. |
+| `add_to_memory` | operator | — | Save a scoped memory entry (user / tenant / target). |
+| `ask_docs` | operator | `meho-docs` | Synthesized, cited answer over a vendor-document collection. |
+| `call_operation` | operator | — | Invoke a resolved connector operation against a target. |
+| `list_doc_collections` | operator | `meho-docs` | List the documentation collections this session may search. |
+| `list_operation_groups` | operator | — | List a connector's enabled operation groups. |
+| `list_targets` | operator | — | List the tenant's accessible infrastructure targets. |
+| `meho_broadcast_announce` | operator | — | Publish an agent-authored announcement to the tenant stream. |
+| `meho_broadcast_recent` | operator | — | Read the tenant's recent broadcast events. |
+| `meho_broadcast_watch` | operator | — | Long-poll the tenant broadcast stream for new events. |
+| `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
+| `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
+| `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
+| `meho_runbook_list_templates` | operator | — | List runbook templates in the tenant. |
+| `meho_runbook_next` | operator | — | Advance one step of an in-progress run (opacity contract). |
+| `meho_runbook_show_template` | operator | — | Read a runbook template's full body. |
+| `meho_runbook_start` | operator | — | Start a new runbook run (self-assigned). |
+| `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
+| `preview_operation` | operator | — | Preview an operation without running it. |
+| `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
+| `result_query` | operator | — | Read rows back from a JSONFlux result handle. |
+| `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
+| `search_knowledge` | operator | — | Search the tenant knowledge base. |
+| `search_memory` | operator | — | Search the operator's accessible memories. |
+| `search_operations` | operator | — | Hybrid BM25 + cosine search over a connector's operations. |
+
+### Operator surface (`mcp:admin` elevation required)
+
+Every tool below is listed / callable **only** on an `mcp:admin`-elevated
+session (on top of the Role + Extra-gate columns).
+
+| Tool | Role | Extra gate | What it does |
+|---|---|---|---|
+| `create_doc_collections` | tenant_admin | `meho-docs` | Register a new documentation collection for search routing. |
+| `delete_doc_collections` | tenant_admin | `meho-docs` | Deregister a disabled, tenant-owned documentation collection. |
+| `meho_agent_principals_list` | operator | — | List agent principals registered for the tenant. |
+| `meho_agent_principals_register` | tenant_admin | — | Register a new agent principal. |
+| `meho_agent_principals_revoke` | tenant_admin | — | Revoke an agent principal (kill switch). |
+| `meho_agents_create` | tenant_admin | — | Create an agent definition. |
+| `meho_agents_delete` | tenant_admin | — | Delete an agent definition by name. |
+| `meho_agents_edit` | tenant_admin | — | Apply a partial update to an agent definition. |
+| `meho_agents_grant_create` | tenant_admin | — | Grant a permission to an agent principal. |
+| `meho_agents_grant_list` | tenant_admin | — | List agent permission grants. |
+| `meho_agents_grant_revoke` | tenant_admin | — | Revoke a permission grant by id. |
+| `meho_agents_grant_show` | tenant_admin | — | Fetch one agent permission grant by id. |
+| `meho_agents_list` | operator | — | List agent definitions. |
+| `meho_agents_list_runs` | operator | — | List the tenant's agent runs, newest first. |
+| `meho_agents_run` | operator | — | Run a named agent (sync or async). |
+| `meho_agents_run_status` | operator | — | Poll an agent run's durable status by `run_id`. |
+| `meho_agents_show` | operator | — | Fetch one agent definition by name. |
+| `meho_approvals_get` | operator | — | Inspect a single approval request (read-only). |
+| `meho_approvals_list` | operator | — | List approval requests for the tenant (read-only). |
+| `meho_audit_replay` | tenant_admin | — | Reconstruct another session's full operation trace (forensic). |
+| `meho_broadcast_overrides_list` | tenant_admin | — | List broadcast-detail override rules. |
+| `meho_broadcast_overrides_remove` | tenant_admin | — | Delete a broadcast-detail override rule by id. |
+| `meho_broadcast_overrides_set` | tenant_admin | — | Create a broadcast-detail override rule. |
+| `meho_connector_delete` | tenant_admin | — | Delete a connector's ingested rows / auto-registered shim. |
+| `meho_connector_disable` | tenant_admin | — | Disable every group of a connector (regression roll-back). |
+| `meho_connector_edit_group` | tenant_admin | — | Edit an operation group's `when_to_use` prose or name. |
+| `meho_connector_edit_op` | tenant_admin | — | Edit one operation's per-op overrides. |
+| `meho_connector_enable` | tenant_admin | — | Enable every group of a connector. |
+| `meho_connector_enable_reads` | tenant_admin | — | Bulk-enable a connector's read-class operations. |
+| `meho_connector_ingest` | tenant_admin | — | Ingest one or more OpenAPI specs into a connector. |
+| `meho_connector_ingest_status` | operator | — | Poll an async connector-ingest job's status. |
+| `meho_connector_review` | operator | — | Get a connector's full review payload (groups + per-op flags). |
+| `meho_memory_promote` | tenant_admin | — | Promote a memory to a strictly broader scope. |
+| `meho_runbook_deprecate_template` | tenant_admin | — | Mark a published runbook version deprecated. |
+| `meho_runbook_discard_template` | tenant_admin | — | Delete an unpublished draft template. |
+| `meho_runbook_draft_template` | tenant_admin | — | Create the first draft of a new template. |
+| `meho_runbook_edit_template` | tenant_admin | — | Edit a template (in-place for drafts, fork-on-published). |
+| `meho_runbook_publish_template` | tenant_admin | — | Publish a draft template. |
+| `meho_runbook_reassign` | tenant_admin | — | Reassign an in-progress run to another operator. |
+| `meho_scheduler_cancel` | tenant_admin | — | Cancel a scheduled trigger by id. |
+| `meho_scheduler_create` | tenant_admin | — | Create a scheduled trigger (cron / one-off / event). |
+| `meho_scheduler_list` | operator | — | List scheduled triggers. |
+| `meho_sensor_create` | tenant_admin | — | Create a sensor (op + assertion + cadence + severity). |
+| `meho_sensor_delete` | tenant_admin | — | Hard-delete a sensor by id. |
+| `meho_sensor_list` | operator | — | List sensors with their latest-result projection. |
+| `meho_sensor_results` | operator | — | Per-tick evidence trend history for one sensor. |
+| `meho_targets_register` | tenant_admin | — | Register a new target in the tenant. |
+| `meho_topology_annotate` | tenant_admin | — | Assert a curated graph edge auto-discovery can't infer. |
+| `meho_topology_bulk_import` | tenant_admin | — | Batch-assert curated graph edges in one atomic pass. |
+| `meho_topology_create_node` | tenant_admin | — | Manually seed a graph node. |
+| `meho_topology_delete_node` | tenant_admin | — | Hard-delete a manually-seeded graph node. |
+| `meho_topology_unannotate` | tenant_admin | — | Delete a curated graph edge (re-promotes any superseded auto edge). |
+| `query_audit` | operator | — | Query the audit log for forensic reconstruction. |
+
+### Human-only (no MCP path under any claim set)
+
+Three decision verbs are **de-registered** from the MCP surface entirely
+(#3155) — absent from `tools/list` for every role / capability /
+elevation, and a direct `tools/call` is denied *before* the registry
+lookup with a remediation naming the console / CLI path. They are not
+"operator-surface tools you can elevate into"; they have no MCP
+registration at all.
+
+| Verb | Human path |
+|---|---|
+| `meho_approvals_approve` | operator console approvals queue, or `meho approvals approve <request-id>` |
+| `meho_approvals_reject` | operator console approvals queue, or `meho approvals reject <request-id> --reason <text>` |
+| `meho_agents_grant_elevate` | operator console, or `meho agent grant elevate …` |
+
+The map + remediation strings live in `mcp/human_only.py`; the
+registry-absence + wire-behaviour + static re-add guards are in
+`tests/test_mcp_human_only_surface.py`.
 
 ### Elevation: the `mcp:admin` scope
 
@@ -411,6 +548,74 @@ never reach the surface gate to be classified. What remains is the
 remediation map in `human_only.py` and the pre-registry human-only denial
 branch in `handle_tools_call`, which returns a 404 naming the console / CLI
 path *before* the registry lookup and surface gate ever run.
+
+### Verifying the split against real usage (pre-cutover audit)
+
+The cutover's safety claim is: **narrowing the default listing to the
+working surface loses nothing agents actually used.** That is falsifiable
+directly from `audit_log`, because every `tools/call` writes one
+synchronous, session-tagged row (`method='MCP'`,
+`path='/mcp/tools/call/<tool_name>'`, `agent_session_id` set when the
+client negotiated an `Mcp-Session-Id`). The check is: over a trailing
+window, is the **set of MCP-session-invoked tool names** a subset of the
+25-name working surface? Any name outside it is an operator-plane tool a
+real session reached — an exception to record and disposition before
+cutover.
+
+The query reuses the #3134 reflex-KPI seam conventions — the
+`MCP_TOOL_PATH_PREFIX = '/mcp/tools/call/'` filter, the
+`agent_session_id IS NOT NULL` "agent surface" split, and successful
+rows only (`status_code = 200`). The working-surface allowlist it checks
+against is the same 25 names the conformance suite pins, so the SQL and
+the CI pin cannot drift.
+
+Authoritative SQL (Postgres, per tenant, trailing 30 days):
+
+```sql
+WITH mcp_calls AS (
+  SELECT DISTINCT split_part(path, '/mcp/tools/call/', 2) AS tool_name
+  FROM audit_log
+  WHERE method = 'MCP'
+    AND path LIKE '/mcp/tools/call/%'
+    AND agent_session_id IS NOT NULL          -- negotiated MCP sessions only
+    AND status_code = 200                     -- acted, not a rejected attempt
+    AND occurred_at >= now() - interval '30 days'
+    -- AND tenant_id = '<tenant-uuid>'         -- scope to one tenant if desired
+)
+SELECT tool_name
+FROM mcp_calls
+WHERE tool_name NOT IN (
+  'add_to_knowledge','add_to_memory','ask_docs','call_operation',
+  'list_doc_collections','list_operation_groups','list_targets',
+  'meho_broadcast_announce','meho_broadcast_recent','meho_broadcast_watch',
+  'meho_connector_list','meho_runbook_abort','meho_runbook_list_runs',
+  'meho_runbook_list_templates','meho_runbook_next','meho_runbook_show_template',
+  'meho_runbook_start','meho_status','preview_operation','query_topology',
+  'result_query','search_docs','search_knowledge','search_memory','search_operations'
+)
+ORDER BY tool_name;
+```
+
+**Zero rows returned ⇒ the invoked-tool set ⊆ working surface** — the
+cutover loses nothing. Any returned row is an operator-plane tool a real
+agent session invoked pre-cutover; record it and its disposition (it now
+requires `mcp:admin`).
+
+Operator alternative via the CLI (no direct DB access needed) — list the
+window's MCP tool-call rows and reduce to the distinct tool names, then
+eyeball against the working table above:
+
+```bash
+meho audit query --since 30d --json \
+  | jq -r '.rows[] | select(.method == "MCP" and (.path | startswith("/mcp/tools/call/")))
+           | .path | sub("^/mcp/tools/call/"; "")' \
+  | sort -u
+```
+
+The recorded pre-cutover run for this deployment is on
+[issue #3157](https://github.com/evoila/meho/issues/3157) (Initiative
+#3153): what ran locally vs. what is operator-run against the live
+`audit_log`, and the disposition of any exception.
 
 ## Admin registry writes route through the dispatcher
 

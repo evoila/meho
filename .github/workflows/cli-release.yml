@@ -7,7 +7,8 @@
 #   On every `v*` tag push, build four single-static tarballs
 #   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64), produce a
 #   combined SHA256SUMS file, and publish them as assets on a new
-#   draft GitHub Release at https://github.com/evoila/meho/releases.
+#   GitHub Release (auto-published, `draft: false` since #1127) at
+#   https://github.com/evoila/meho/releases.
 #
 # Tag-driven only — main branch pushes never publish a release. The
 # release tag is the authoritative version stamp: GoReleaser strips
@@ -248,8 +249,8 @@ jobs:
           # step above). When the file is empty (no matching section)
           # GoReleaser logs a warning and uses the empty body; the
           # warning step above surfaces this loudly in the workflow
-          # log so a maintainer can spot the missing CHANGELOG
-          # update before flipping the draft Release to public. The
+          # log so a maintainer can spot a missing CHANGELOG update
+          # on the (auto-published, #1127) Release right away. The
           # fallback `changelog:` block in cli/.goreleaser.yaml still
           # serves snapshot builds (`make release-dry-run`) where no
           # CHANGELOG section exists.
@@ -373,8 +374,8 @@ jobs:
             echo "\`sha256sum -c SHA256SUMS\` against the tarballs you"
             echo "actually downloaded (two-step trust chain)."
             echo ""
-            echo "The release is created in **draft** mode — a maintainer"
-            echo "must flip it to public via the GitHub Releases UI after"
-            echo "verifying the four tarballs + bundles are present and"
+            echo "The release is **live** the moment this workflow ends"
+            echo "(auto-published, #1127) — verify the four tarballs +"
+            echo "bundles and the .mcpb asset are present and that"
             echo "\`meho version\` reports the expected tag."
           } >> "${GITHUB_STEP_SUMMARY}"

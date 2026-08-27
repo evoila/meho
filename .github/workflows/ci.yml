@@ -705,14 +705,26 @@ jobs:
     # across 8306 tests — and barely shrinks with xdist worker count, so the
     # session-end combine is NOT the peak (offline combine alone did not
     # avoid the OOM at -n 3). The lever that actually fits the pod is dropping
-    # base suite memory via low parallelism: -n 1 peaks at 12.48 GiB, ~1.2 GiB
-    # under the <13.67 GiB pod limit that #1982's --cov run (13.67 GiB) tripped.
+    # base suite memory via low parallelism: -n 1 peaks at 12.48 GiB.
+    # CORRECTION (#3172, 2026-08-27): the "<13.67 GiB pod limit" this job was
+    # originally sized against NEVER existed — 13.67 GiB was #1982's measured
+    # local peak, mistaken for the runner's cap. The live heavy-pool runner
+    # container limit (rdc-gitops apps/rke2-ci/meho-runners-heavy) was 8Gi,
+    # so the 12.48-GiB serial sweep never fit: every main-push run since
+    # ~2026-06-20 died as an OOM runner-loss (absorbed job failure, null step
+    # telemetry) or a memory-thrash wedge (pytest crawls to the 45-min step
+    # cap, combine hangs on the debris — the v0.31.0 tag-gate blocker).
+    # rdc-gitops#115 resizes the pool to 14Gi (request == limit,
+    # node-exclusive by memory), giving the sweep ~1.5 GiB of real headroom
+    # on this same runs-on label.
     # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
     # AFTER pytest exits, pytest invoked with `-p no:cov` so pytest-cov's
     # in-process combine never runs) keeps the combine memory-cheap regardless.
-    # If the suite grows enough to push -n 1 over the limit, the durable fix is
-    # a larger-memory runner pool (infra, out of band) — this job is
-    # non-blocking so an OOM merely skips one coverage upload until then.
+    # If the suite grows enough to push -n 1 over ~13 GiB, the durable fix is
+    # sharding this sweep into sequential pytest invocations (each with its
+    # own parallel data files; combine already merges across them) — 14Gi is
+    # the ceiling the current 15.62-GiB-allocatable nodes support — and this
+    # job stays non-blocking so an OOM merely skips one coverage upload.
     # Runs on push to main, OR on a PR explicitly opted in via the
     # `ci-coverage-validate` label (the on-runner validation escape hatch
     # described above). The fork-PR guard still applies on the PR path so

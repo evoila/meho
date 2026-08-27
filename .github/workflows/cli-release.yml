@@ -291,37 +291,41 @@ jobs:
           echo "MCPB_BUNDLE=${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb" >> "${GITHUB_ENV}"
 
       - name: Attach Claude Desktop .mcpb bundle to the Release
-        # GoReleaser created the draft Release above; attach the bundle as a
-        # fifth asset through the GitHub API. The self-hosted
+        # GoReleaser created the Release above — PUBLISHED, not draft:
+        # cli/.goreleaser.yaml has `draft: false` (auto-publish since #1127;
+        # the v0.31.0 Release was live the moment GoReleaser finished, which
+        # is what the release-asset distribution channel depends on). Attach
+        # the bundle as a fifth asset through the GitHub API: the self-hosted
         # `meho-runners-ci` image ships without the `gh` CLI, so the previous
         # `gh release upload` line died with `gh: command not found` (exit
         # 127) on the first tag run to include this step, v0.31.0 (#3171).
         # This action calls the API directly and needs no CLI on the runner.
-        # `draft: true` keeps the Release a draft — the action publishes a
-        # reused draft on upload unless told to keep it, and the Release must
-        # stay draft for a maintainer to flip it (see "Emit release
-        # summary"); omitting `body`/`name` preserves the GoReleaser-set
-        # release notes. `overwrite_files` (default true) lets a re-tag
-        # replace the asset, matching the previous `--clobber`;
-        # `fail_on_unmatched_files` keeps the step fail-closed if the bundle
-        # glob matches nothing.
+        # No `draft:` input: on the update path this pinned version ignores
+        # it anyway (v3.0.2 `github.ts` preserves `existingRelease.draft`),
+        # and the #3174 comment claiming the Release "must stay draft for a
+        # maintainer to flip it" described a flow that has not existed since
+        # #1127 — the input was dead config wrapped in a false narrative
+        # (#3171 record correction). Omitting `body`/`name` preserves the
+        # GoReleaser-set release notes. `overwrite_files` (default true)
+        # lets a re-tag replace the asset, matching the previous
+        # `--clobber`; `fail_on_unmatched_files` keeps the step fail-closed
+        # if the bundle glob matches nothing.
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           tag_name: ${{ github.ref_name }}
           files: ${{ env.MCPB_BUNDLE }}
-          draft: true
           fail_on_unmatched_files: true
 
       - name: Emit release summary
         # Surface the published artefact list in the workflow run
-        # summary so a maintainer flipping the draft Release to
-        # public can spot a missing target at a glance.
+        # summary so a maintainer verifying the (auto-published,
+        # #1127) Release can spot a missing target at a glance.
         if: success()
         env:
           TAG: ${{ github.ref_name }}
         run: |
           {
-            echo "## CLI release published (draft)"
+            echo "## CLI release published"
             echo ""
             echo "Tag: \`${TAG}\`"
             echo ""

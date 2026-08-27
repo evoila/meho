@@ -735,14 +735,16 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
-    # TODO(ops): the durable fix for the recurring ~47-min OOM / runner-loss on
-    # this pool (which silently killed coverage on every main push from
-    # 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24%; see the memory
-    # table above and docs/codebase/sonarcloud.md) is a larger-memory runner pool
-    # — a gha-runner-scale-set on the rke2-ci cluster (ops-owned, out of band).
-    # Move this `runs-on:` to the new pool once provisioned. Until then an OOM
-    # skips one coverage upload; quality-gate.yml now makes that skip
-    # fail-visible via an error annotation (#2513).
+    # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
+    # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
+    # runner-loss on this pool — which silently killed coverage on every main
+    # push from 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24% (see
+    # the memory table above and docs/codebase/sonarcloud.md) — was the pool's
+    # 8Gi runner limit vs this job's 12.48-GiB serial sweep. Fixed IN PLACE by
+    # rdc-gitops#115 (heavy pool resized to 14Gi request==limit); this
+    # `runs-on:` label is correct and stays. An OOM would still only skip one
+    # coverage upload (job stays non-blocking); quality-gate.yml makes that
+    # skip fail-visible via an error annotation (#2513).
     # THREE-LAYER hang defense (#2800 → #2806 → #2865). Ordered inner→outer;
     # each layer catches what the one inside it structurally cannot:
     #   1. IN-PROCESS, per test — pytest-timeout `--timeout=300` (signal) on

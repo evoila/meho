@@ -90,18 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — `.mcpb` release attach no longer assumes a `gh` CLI on the runner (#3171 / PR #3175)
+### Fixed — `.mcpb` attach step sheds the false draft-Release narrative (#3171 / PR #3175)
 
-- The v0.31.0 tag run — the first ever to reach the `cli-release.yml`
-  "Build + attach Claude Desktop `.mcpb` bundle" step (it shipped inside
-  v0.31.0 via #3138) — died with `gh: command not found`: the job runs on
-  the self-hosted `meho-runners-ci` pool, whose image is upstream
-  `actions-runner` plus `python3-yaml`/`gettext-base` and carries no `gh`.
-  The bundle had to be attached by hand. The step now drives the GitHub
-  Releases REST API directly with python3 stdlib (guaranteed by the
-  image): resolve the release by tag, delete a same-name asset first (the
-  old `--clobber` re-tag semantics), then upload — no CLI assumed on any
-  runner the job may land on.
+- The #3174 attach step carried `draft: true` plus a comment claiming the
+  Release "must stay draft for a maintainer to flip it" — a flow that has
+  not existed since #1127: `cli/.goreleaser.yaml` sets `draft: false`, so
+  every release (v0.31.0 included) is live-published the moment GoReleaser
+  finishes, which is what the `.mcpb` release-asset distribution channel
+  depends on. Functionally benign — the pinned `action-gh-release` v3.0.2
+  ignores the `draft` input on its update path (`github.ts` preserves
+  `existingRelease.draft`, verified at the pinned SHA) — but dead config
+  wrapped in a false narrative invites a future "fix" that would actually
+  un-publish releases. The input is removed and the step + release-summary
+  comments now state the published-release reality.
 
 ### Fixed — coverage job sized against a pod limit that never existed; real limit fixed on the pool (#3172 / PR #3175)
 
@@ -150,7 +151,7 @@ connector-related release-notes line.
   and lossy coverage — the job's documented contract (#2800). The
   underlying serial-lane hang investigation stays open on #3172.
 
-### Fixed — `cli-release.yml` attaches the `.mcpb` bundle without the `gh` CLI (#3171)
+### Fixed — `cli-release.yml` attaches the `.mcpb` bundle without the `gh` CLI (#3171 / #3174)
 
 - The v0.31.0 tag run of `cli-release.yml` built the Claude Desktop
   `.mcpb` bundle but failed to attach it: the `gh release upload` line

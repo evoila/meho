@@ -118,6 +118,38 @@ the scope is therefore safe: the session behaves exactly as the default.
 - If the backplane URL is not configured, `bin/meho-mcp-remote` exits with a
   message naming the variables to set.
 
+## First connect — raise the MCP startup timeout
+
+The **first** time a fresh machine connects, `mcp-remote` has to complete the
+full Keycloak OAuth 2.1 + PKCE login before the `meho` server reports ready. It
+opens a browser tab for that login — **behind the terminal window** — and
+Claude Code's default **30-second MCP startup timeout** kills the shim (and its
+short-lived OAuth callback server) if the browser login has not finished in
+time. On a vanilla `claude` first run the login reliably loses that race.
+
+Start the **first** session with a longer startup budget:
+
+```bash
+MCP_TIMEOUT=120000 claude
+```
+
+Then switch to the browser tab that opened **behind** your terminal and
+complete the Keycloak login. `mcp-remote` caches the tokens under
+`~/.mcp-auth`, so **every later session connects instantly** — the raised
+timeout is only needed for that one first connect (once per fresh machine, or
+again after you clear `~/.mcp-auth`).
+
+**Why the plugin can't set this for you.** `MCP_TIMEOUT` is the MCP *startup*
+timeout, and Claude Code reads it from **its own process environment** at
+launch — before it spawns any server. The plugin's `.mcp.json` can only set the
+*server child's* environment, which the CLI never consults for the startup
+deadline, so no `.mcp.json` key raises it. (The per-server `timeout` field that
+`.mcp.json` *does* accept is a **tool-execution** timeout — a per-call
+wall-clock limit that overrides `MCP_TOOL_TIMEOUT` — not the startup timeout, so
+it does not help here.) The variable has to live in the shell that launches
+`claude`. See the
+[Claude Code MCP docs](https://code.claude.com/docs/en/mcp.md).
+
 ## Layer-2 skills → template sections
 
 The skills migrate the routing rules from the

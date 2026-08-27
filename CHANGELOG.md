@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — document the first-connect MCP startup-timeout race for both Claude clients (#3148)
+
+- A fresh machine's **first** connect through either client onramp raced Claude
+  Code's default 30 s MCP startup timeout: `mcp-remote` opens the Keycloak login
+  tab behind the terminal (or the Claude Desktop window), and the shim — with its
+  short-lived OAuth callback server — was torn down before a human could finish
+  the browser login (field-test finding F2, #3143). The plugin cannot raise the
+  budget mechanically: `MCP_TIMEOUT` is the *startup* timeout Claude Code reads
+  from its **own** process environment, not a `.mcp.json` key (the `.mcp.json`
+  `timeout` field is a per-call tool-execution limit, not startup). Both client
+  READMEs now carry a prominent "First connect" section — `MCP_TIMEOUT=120000
+  claude` for the plugin, complete-promptly-then-retry for Desktop — plus the
+  browser-tab-behind-the-window note and the `~/.mcp-auth` token-cache reason it
+  only bites the very first connect.
+
 ## [0.30.0] - 2026-08-25
 
 ### Added — air-gapped depot lifecycle ops on the installer connector (#3121 / #3125)

@@ -90,6 +90,37 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `.mcpb` release attach no longer assumes a `gh` CLI on the runner (#3171 / PR #3175)
+
+- The v0.31.0 tag run — the first ever to reach the `cli-release.yml`
+  "Build + attach Claude Desktop `.mcpb` bundle" step (it shipped inside
+  v0.31.0 via #3138) — died with `gh: command not found`: the job runs on
+  the self-hosted `meho-runners-ci` pool, whose image is upstream
+  `actions-runner` plus `python3-yaml`/`gettext-base` and carries no `gh`.
+  The bundle had to be attached by hand. The step now drives the GitHub
+  Releases REST API directly with python3 stdlib (guaranteed by the
+  image): resolve the release by tag, delete a same-name asset first (the
+  old `--clobber` re-tag semantics), then upload — no CLI assumed on any
+  runner the job may land on.
+
+### Fixed — coverage job sized against a pod limit that never existed; real limit fixed on the pool (#3172 / PR #3175)
+
+- The `python-coverage` job's memory table claimed its serial sweep
+  (measured 12.48 GiB at 8306 tests) ran "~1.2 GiB under the <13.67 GiB
+  pod limit" — but 13.67 GiB was #1982's measured local peak, never the
+  runner's cap. The live heavy-pool runner limit was **8Gi**
+  (rdc-gitops `apps/rke2-ci/meho-runners-heavy`), so the sweep never
+  fit: every main-push coverage run since ~2026-06-20 died as an OOM
+  runner-loss (absorbed job failure, null step telemetry, purged logs)
+  or a memory-thrash wedge — the latter being the v0.31.0 tag-gate
+  `cancelled` blocker that #3173 hardened against. The ci.yml comment
+  now records the real history; the durable fix is rdc-gitops#115
+  (heavy pool resized to 14Gi request==limit, node-exclusive by
+  memory, ~1.5 GiB real headroom), with sweep-sharding named as the
+  next lever if the suite outgrows ~13 GiB — 14Gi is the ceiling of
+  the current 15.62-GiB-allocatable nodes. #3172 stays open for the
+  post-resize verification (coverage job green + SonarCloud recovery).
+
 ### Fixed — deploying.md v0.31.0 upgrade row names both shipped migrations (PR #3173)
 
 - The version-specific upgrade-notes row added by the v0.31.0

@@ -25,10 +25,12 @@
 #
 # The Claude Desktop MCPB bundle (clients/claude-desktop-mcpb/) is built
 # with the tag version and attached to the same Release as a fifth asset
-# by the "Build + attach Claude Desktop .mcpb bundle" step below. It is
-# not a CLI tarball and is not cosign-signed; distribution is the GitHub
-# Release asset channel only (#3129). The step runs after GoReleaser has
-# created the Release so `gh release upload` has a Release to attach to.
+# by the build + attach steps below. It is not a CLI tarball and is not
+# cosign-signed; distribution is the GitHub Release asset channel only
+# (#3129). The steps run after GoReleaser has created the Release; the
+# attach step uses softprops/action-gh-release (GitHub API, no `gh` CLI)
+# so it works on the self-hosted runner image, which ships without `gh`
+# (#3171).
 #
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
@@ -274,24 +276,41 @@ jobs:
           # standard sigstore.dev CI guidance.
           COSIGN_YES: "true"
 
-      - name: Build + attach Claude Desktop .mcpb bundle
-        # GoReleaser has created the Release above; attach the Claude
-        # Desktop MCPB bundle to it as a fifth asset. `build.sh` runs the
-        # pinned `mcpb pack` (which validates the manifest) with the tag
-        # version stripped of its leading `v` — matching GoReleaser's
-        # `meho_<version>_...` file-name convention. `--clobber` lets a
-        # re-tag replace the asset instead of failing on a name clash.
+      - name: Build Claude Desktop .mcpb bundle
+        # `build.sh` runs the pinned `mcpb pack` (which validates the
+        # manifest) with the tag version stripped of its leading `v` —
+        # matching GoReleaser's `meho_<version>_...` file-name convention.
+        # The built bundle path is exported for the attach step that follows.
         env:
           TAG: ${{ github.ref_name }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
           OUT_DIR="${RUNNER_TEMP}/mcpb"
           clients/claude-desktop-mcpb/build.sh "${VERSION}" "${OUT_DIR}"
-          BUNDLE="${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb"
-          gh release upload "${TAG}" "${BUNDLE}" --clobber --repo "${GITHUB_REPOSITORY}"
+          echo "MCPB_BUNDLE=${OUT_DIR}/meho-claude-desktop-${VERSION}.mcpb" >> "${GITHUB_ENV}"
+
+      - name: Attach Claude Desktop .mcpb bundle to the Release
+        # GoReleaser created the draft Release above; attach the bundle as a
+        # fifth asset through the GitHub API. The self-hosted
+        # `meho-runners-ci` image ships without the `gh` CLI, so the previous
+        # `gh release upload` line died with `gh: command not found` (exit
+        # 127) on the first tag run to include this step, v0.31.0 (#3171).
+        # This action calls the API directly and needs no CLI on the runner.
+        # `draft: true` keeps the Release a draft — the action publishes a
+        # reused draft on upload unless told to keep it, and the Release must
+        # stay draft for a maintainer to flip it (see "Emit release
+        # summary"); omitting `body`/`name` preserves the GoReleaser-set
+        # release notes. `overwrite_files` (default true) lets a re-tag
+        # replace the asset, matching the previous `--clobber`;
+        # `fail_on_unmatched_files` keeps the step fail-closed if the bundle
+        # glob matches nothing.
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ env.MCPB_BUNDLE }}
+          draft: true
+          fail_on_unmatched_files: true
 
       - name: Emit release summary
         # Surface the published artefact list in the workflow run

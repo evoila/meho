@@ -119,6 +119,21 @@ connector-related release-notes line.
   and lossy coverage — the job's documented contract (#2800). The
   underlying serial-lane hang investigation stays open on #3172.
 
+### Fixed — `cli-release.yml` attaches the `.mcpb` bundle without the `gh` CLI (#3171)
+
+- The v0.31.0 tag run of `cli-release.yml` built the Claude Desktop
+  `.mcpb` bundle but failed to attach it: the `gh release upload` line
+  died with `gh: command not found` (exit 127). v0.31.0 was the **first**
+  tag run to include the attach step (it landed in #3138, after v0.30.0
+  tagged), and the self-hosted `meho-runners-ci` image ships without the
+  `gh` CLI — the step had assumed `gh` was present, as it is on
+  GitHub-hosted `ubuntu-latest`. The attach now
+  goes through `softprops/action-gh-release` (SHA-pinned, GitHub API, no
+  CLI on the runner). `draft: true` keeps the GoReleaser-created Release a
+  draft for a maintainer to flip, omitting `body`/`name` preserves its
+  release notes, and `fail_on_unmatched_files` keeps the step fail-closed.
+  Next tag run publishes all five assets without manual intervention.
+
 ## [0.31.0] - 2026-08-27
 
 ### Breaking changes — MCP agent surface is claim-gated: default drops to the 25-tool working surface (#3154 / #3160)

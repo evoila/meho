@@ -3,7 +3,7 @@
 # Copyright (c) 2026 evoila Group
 #
 # Stop reflex hook. If this session invoked call_operation but never
-# announced or reported via broadcast_announce, it emits a one-line
+# announced or reported via meho_broadcast_announce, it emits a one-line
 # report-on-completion reminder as `hookSpecificOutput.additionalContext`.
 #
 # Semantics (do not misread): additionalContext on a Stop hook does NOT
@@ -21,7 +21,7 @@
 # bounded continuation above is the only nudge it makes.
 #
 # State is the same session-scoped marker set the call_operation and
-# broadcast_announce hooks maintain: remind only when `.used` exists and
+# meho_broadcast_announce hooks maintain: remind only when `.used` exists and
 # `.announced` does not.
 
 state_dir="${TMPDIR:-/tmp}/meho-plugin-hooks"
@@ -45,7 +45,7 @@ reminded_marker="${state_dir}/${sid}.stop_reminded"
 
 if [ -e "$used_marker" ] && [ ! -e "$announced_marker" ] && [ ! -e "$reminded_marker" ]; then
   : > "$reminded_marker" 2>/dev/null || true
-  msg="MEHO reflex: this session invoked call_operation but never announced or reported via broadcast_announce. Before ending, consider a broadcast_announce with phase=completion and a short result summary so the tenant feed reflects what changed. Advisory only."
+  msg="MEHO reflex: this session invoked call_operation but never announced or reported via meho_broadcast_announce. Before ending, consider a meho_broadcast_announce with phase=completion and a short result summary so the tenant feed reflects what changed. Advisory only."
   printf '{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"%s"}}\n' "$msg"
 fi
 

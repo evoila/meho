@@ -28,7 +28,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__plugin_meho_meho__broadcast_announce",
+        "matcher": "mcp__plugin_meho_meho__meho_broadcast_announce",
         "hooks": [
           {
             "type": "command",

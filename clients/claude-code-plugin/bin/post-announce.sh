@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 #
-# PostToolUse reflex hook for the plugin's `broadcast_announce` tool.
+# PostToolUse reflex hook for the plugin's `meho_broadcast_announce` tool.
 # Records that this session has announced (or reported) intent by writing
 # a session-scoped marker. pre-call-operation.sh reads the marker to
 # suppress its announce reminder, and stop-report.sh reads it to suppress
-# its report reminder. `broadcast_announce` serves both the start and
+# its report reminder. `meho_broadcast_announce` serves both the start and
 # completion phases, so a single marker covers "announced/reported".
 #
-# Matcher (hooks.json): `mcp__plugin_meho_meho__broadcast_announce` —
+# Matcher (hooks.json): `mcp__plugin_meho_meho__meho_broadcast_announce` —
 # the plugin-scoped tool-name form (see pre-call-operation.sh). Pure
 # side effect; the hook emits no decision and cannot block (PostToolUse
 # runs after the tool has already executed).

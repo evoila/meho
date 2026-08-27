@@ -18,7 +18,9 @@ Coverage mirrors the acceptance criteria on the issue, by name:
 * the fragment is session-scoped -- a dispatch with no agent session
   (CLI / non-MCP) gets no nudge;
 * read-before-act fires when the session has no prior
-  ``meho_broadcast_recent`` audit row and stays silent once it does;
+  ``meho_broadcast_recent`` audit row and stays silent once it does, and
+  fires for a direct MCP session resolved via the ``Mcp-Session-Id``
+  header fallback -- the live field shape (#3149);
 * announce-before-mutate fires for a write-class op with no covering
   claim and stays silent when a claim covers it; read-class ops never
   trip it;
@@ -43,6 +45,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
+import structlog
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -115,6 +118,22 @@ def _bound_session(session_id: UUID | None) -> Iterator[None]:
         yield
     finally:
         agent_session_id_var.reset(token)
+
+
+@contextmanager
+def _bound_mcp_session(session_id: UUID) -> Iterator[None]:
+    """Bind only the ``mcp_session_id`` header contextvar for the block.
+
+    Reproduces a *direct* MCP client's request context: no in-process
+    agent loop bound :data:`agent_session_id_var`, so the session is
+    carried solely by the ``mcp_session_id`` structlog contextvar the
+    transport binds from the ``Mcp-Session-Id`` header
+    (:func:`meho_backplane.mcp.server._bind_mcp_session_id`). This is the
+    live field shape :func:`resolve_agent_session_id` resolves via its
+    header fallback (#3149).
+    """
+    with structlog.contextvars.bound_contextvars(mcp_session_id=str(session_id)):
+        yield
 
 
 async def _seed_tenant(tenant_id: UUID = _TENANT) -> None:
@@ -295,6 +314,27 @@ async def test_read_nudge_is_per_session() -> None:
     with _patch_set(store), _bound_session(other):
         advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
     assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
+
+
+async def test_read_nudge_fires_for_direct_mcp_session_via_header_fallback() -> None:
+    """Live field shape (#3149): a direct MCP session -- no agent-run
+    contextvar, session carried only by the ``Mcp-Session-Id`` header --
+    still fires the read nudge.
+
+    :func:`resolve_agent_session_id` resolves this session through its
+    ``mcp_session_id`` fallback rather than :data:`agent_session_id_var`;
+    the sibling read tests only exercise the agent-run path. The F5 field
+    test (#3143) saw ``extras: {}`` for exactly this shape *not* because
+    the resolution fails but because the lab ran ``v0.30.0``, which
+    predates the feature (PR #3141 landed after the tag). This locks in
+    that a header-resolved session emits, so the next deploy past
+    ``v0.30.0`` is the only thing the field re-verification waits on.
+    """
+    store = _FakeSetStore()
+    with _patch_set(store), _bound_session(None), _bound_mcp_session(_SESSION):
+        advisory = await build_reflex_advisory(_operator(), op_id="vault.kv.list", target_name=None)
+    assert advisory == {REFLEX_ADVISORY_EXTRAS_KEY: _READ_NUDGE}
+    assert store.ex_values[0] == 30 * 60
 
 
 # ---------------------------------------------------------------------------

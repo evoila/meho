@@ -192,6 +192,20 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "more hosts on a segment. Rows carry the client IP, MAC, hostname, "
         "lease start/end, and effective binding state."
     ),
+    "routing": (
+        "Use for pfSense routing-plane provisioning writes: appending a "
+        "named gateway (``pfsense.gateway.add``) or a static route "
+        "(``pfsense.route.static.add``) to ``config.xml``. Call "
+        "``pfsense.gateway.add`` to define a next-hop -- including a "
+        "pre-staged one (``monitor_disable``) whose upstream device does "
+        "not exist yet -- then ``pfsense.route.static.add`` to point a "
+        "CIDR at it. Both are idempotent (re-adding an existing gateway "
+        "name or route network is a reported no-op) and surgical (they "
+        "touch only the gateway / static-route config, never interfaces), "
+        "so they are safe against a perimeter firewall carrying the "
+        "operator's own access path. Read the current state first with "
+        "``pfsense.gateway.list`` / ``pfsense.config.show``."
+    ),
 }
 
 
@@ -609,6 +623,42 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
+
+    async def gateway_add(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.gateway.add`` (#3090).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_write.pfsense_gateway_add`.
+        Guarded + idempotent additive config write (``safety_level=caution``).
+        """
+        from meho_backplane.connectors.pfsense.ops_write import (
+            pfsense_gateway_add as _pfsense_gateway_add,
+        )
+
+        return await _pfsense_gateway_add(self, target, params, operator)
+
+    async def route_static_add(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.route.static.add`` (#3090).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_write.pfsense_route_static_add`.
+        Guarded + idempotent additive config write (``safety_level=caution``).
+        """
+        from meho_backplane.connectors.pfsense.ops_write import (
+            pfsense_route_static_add as _pfsense_route_static_add,
+        )
+
+        return await _pfsense_route_static_add(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

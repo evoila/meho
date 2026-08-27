@@ -304,7 +304,7 @@ def _build_gateway_playback(
         f"$gw['name'] = {_php_squote(name)};",
         "$gw['weight'] = '1';",
         f"$gw['ipprotocol'] = {_php_squote(ipprotocol)};",
-        f"$gw['descr'] = {_php_squote('meho: pre-staged gateway ' + name)};",
+        f"$gw['descr'] = {_php_squote('meho: gateway ' + name)};",
     ]
     if monitor_disable:
         lines.append("$gw['monitor_disable'] = '';")

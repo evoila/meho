@@ -90,6 +90,34 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — deploying.md v0.31.0 upgrade row names both shipped migrations (PR #3173)
+
+- The version-specific upgrade-notes row added by the v0.31.0
+  release-cutting PR (#3169) named only migration `0077` (tenant
+  announce-gate flag), omitting `0078` (the `service_principal_grant`
+  table from #3151 / #3168, which merged into the release window after
+  the row was drafted). An operator diffing `/ready`'s `db.revision`
+  against the notes would read `current=0078` as unexplained drift. The
+  row now names both migrations and keeps the additive-only / no-action
+  claim, which holds for both.
+
+### Fixed — coverage job's post-pytest steps bounded so a hang can't cancel the run (#3172 / PR #3173)
+
+- Three consecutive `main` CI runs concluded `cancelled` during the
+  v0.31.0 cut (three different runner pods — systematic, not a wedged
+  node): a unit-sweep hang that outlived the pytest step's in-process
+  SIGALRM guard left per-worker coverage debris, the **unbounded**
+  combine step hung on it, and the job's 60-minute cap fired — a
+  job-timeout *cancellation*, which whole-job `continue-on-error` does
+  not absorb (it absorbs failures), flipping the run conclusion to
+  `cancelled` and blocking the RELEASING.md "cancelled ≠ green" tag
+  gate until the operator waived the job. The combine and both upload
+  steps now carry `timeout-minutes` (5/3/3, worst case 56 min inside
+  the 60-min job cap), so the same hang degrades to absorbed step
+  failures with run conclusion `success` and lossy coverage — the
+  job's documented contract (#2800). The underlying serial-lane hang
+  investigation stays open on #3172.
+
 ## [0.31.0] - 2026-08-27
 
 ### Breaking changes — MCP agent surface is claim-gated: default drops to the 25-tool working surface (#3154 / #3160)

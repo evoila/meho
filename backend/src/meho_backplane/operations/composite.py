@@ -363,6 +363,9 @@ def get_dispatch_child(
     return _dispatch_child
 
 
+# code-quality-allow: pre-existing 118-line function (predates #3151); this
+# change adds only the `connector_id=connector_id` pass-through to the
+# policy_gate call so a service-principal standing grant can be matched.
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -445,7 +448,9 @@ async def enforce_subop_policy(
         parameter_schema={},
     )
 
-    verdict, reason = await policy_gate(operator=operator, descriptor=descriptor, target=target)
+    verdict, reason = await policy_gate(
+        operator=operator, descriptor=descriptor, target=target, connector_id=connector_id
+    )
     if verdict is PermissionVerdict.AUTO_EXECUTE:
         return None
 

@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Consumer-facing MCP tool-name conformance guard.
+#
+# Field-test finding F4 (#3143): consumer-facing docs and the Claude Code
+# plugin's skills named MCP tools that do not exist under those names on
+# the deployed server (bare `broadcast_announce` vs the registered
+# `meho_broadcast_announce`; never-registered `search_connectors` /
+# `result_aggregate`). A skill or template that tells Claude to call a
+# nonexistent tool erodes the first-reflex behaviour the plugin exists to
+# build, and there was no guard to stop it recurring.
+#
+# `scripts/ci/check_consumer_tool_names.py` derives the legal tool-name
+# set from the registration source (the same `register_mcp_tool(...)` call
+# sites the deploy sees) and fails when a consumer-facing doc/skill names a
+# tool that is not registered. It is the doc-side sibling of the plugin's
+# hooks-matcher guard (#3147) and the `tools/list` surface-conformance test
+# (#3157); the human-readable inventory all three anchor is
+# `docs/codebase/mcp.md`.
+#
+# Advisory (non-required) and path-scoped, mirroring plugin-test.yml /
+# mcpb-bundle.yml: a required check would need the `changes`-job + job-`if:`
+# skip shape ci.yml uses, which this pure-stdlib grep does not warrant. No
+# `continue-on-error` — when it runs, it is strict.
+
+name: consumer-tool-name-check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/examples/consumer-onboarding/**'
+      - 'clients/claude-code-plugin/skills/**'
+      - 'clients/claude-code-plugin/README.md'
+      - 'docs/cross-repo/mcp-client-setup.md'
+      - 'docs-site/clients/**'
+      - 'backend/src/meho_backplane/mcp/tools/**'
+      - 'backend/src/meho_backplane/mcp/human_only.py'
+      - 'scripts/ci/check_consumer_tool_names.py'
+      - '.github/workflows/consumer-tool-name-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consumer-tool-name-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Consumer tool-name conformance guard
+    # Fork-PR guard mirrors plugin-test.yml / mcpb-bundle.yml:
+    # `meho-runners-ci` is internal infra, so fork PRs skip rather than
+    # execute repo scripts on the self-hosted pool. The guard is advisory,
+    # so skipping on forks is acceptable.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners-ci
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Run consumer tool-name conformance check
+        run: python scripts/ci/check_consumer_tool_names.py

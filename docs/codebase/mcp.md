@@ -382,13 +382,16 @@ claim set.
 
 **Name authority ↔ consumer docs (#3150).** The tool *names* in this
 inventory are the authority the consumer-facing docs/skills
-name-conformance work (#3150) validates against: its grep guard fails CI
-when a consumer doc, onboarding template, or plugin skill references an
-MCP tool by a name outside this working surface (e.g. a bare
-`broadcast_announce` instead of `meho_broadcast_announce`). The two are
-reciprocal, not divergent — names are defined here; the grep enforces
-them there. This inventory owns *what is exposed*; #3150 owns *how
-consumer docs spell it*.
+name-conformance work (#3150) validates against: its guard
+(`scripts/ci/check_consumer_tool_names.py`, run by the
+`consumer-tool-name-check` workflow) derives the same registered set
+from the tool source and fails CI when a consumer doc, onboarding
+template, or plugin skill references an MCP tool by a name that is not
+registered (e.g. a bare `broadcast_announce` instead of
+`meho_broadcast_announce`, or a nonexistent `search_connectors` /
+`result_aggregate`). The two are reciprocal, not divergent — names are
+defined here; the guard enforces them there. This inventory owns *what
+is exposed*; #3150 owns *how consumer docs spell it*.
 
 Gating recap — a tool appears in a session's `tools/list` iff **role**
 `≥` its minimum **AND** the tenant holds any required **capability**

@@ -178,8 +178,8 @@ job):
 | Event | Script | Behaviour |
 |---|---|---|
 | `SessionStart` | `bin/session-start.sh` | Fetches a compact digest — recent tenant activity (the durable form of the broadcast window), scoped memory, and recent knowledge — via the `meho` CLI and prints it to stdout. Claude Code injects a SessionStart hook's stdout as session context, so read-before-start is automatic instead of a discipline the model must remember. |
-| `PreToolUse` on `call_operation` | `bin/pre-call-operation.sh` | If the session hasn't announced intent yet, emits a one-time advisory reminder naming `broadcast_announce`, returned as `hookSpecificOutput.additionalContext` (no `permissionDecision`, so the normal permission flow proceeds). |
-| `PostToolUse` on `broadcast_announce` | `bin/post-announce.sh` | Records that the session announced/reported, so the `PreToolUse` and `Stop` reminders fall silent. |
+| `PreToolUse` on `call_operation` | `bin/pre-call-operation.sh` | If the session hasn't announced intent yet, emits a one-time advisory reminder naming `meho_broadcast_announce`, returned as `hookSpecificOutput.additionalContext` (no `permissionDecision`, so the normal permission flow proceeds). |
+| `PostToolUse` on `meho_broadcast_announce` | `bin/post-announce.sh` | Records that the session announced/reported, so the `PreToolUse` and `Stop` reminders fall silent. |
 | `Stop` | `bin/stop-report.sh` | If the session invoked `call_operation` but never announced/reported, emits a one-line report-on-completion reminder as `additionalContext`. This *continues* the turn once so Claude can act on it (Stop `additionalContext` does not let the turn end — it runs under the same loop protections as `decision: block`). It is bounded to a single nudge: the hook no-ops when `stop_hook_active` is `true` and writes a once-per-session marker, then lets the session stop. It never exits 2 (which would hard-block the stop). |
 
 The digest reads `meho status` (gate), `meho audit recent`, `meho list`
@@ -202,7 +202,9 @@ mcp__plugin_<plugin-name>_<server-name>__<tool>
 
 Both the plugin and its bundled MCP server are named `meho`, so
 `call_operation` is `mcp__plugin_meho_meho__call_operation` and
-`broadcast_announce` is `mcp__plugin_meho_meho__broadcast_announce`. A bare
+`meho_broadcast_announce` is `mcp__plugin_meho_meho__meho_broadcast_announce`
+(mind the `meho_` tool-prefix — the scoped name embeds the exact registered
+tool name, so the broadcast tools carry `meho_` twice). A bare
 `mcp__meho__call_operation` matcher **never fires** for a plugin-bundled
 server. Add a `.*` suffix (`mcp__plugin_meho_meho__.*`) when a server-wide
 match is wanted; the matchers here target the two exact tool names.

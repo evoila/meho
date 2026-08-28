@@ -658,24 +658,68 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
         raise _http_401("unknown_tenant_role") from exc
 
 
+def _is_service_account_token(claims: Any, settings: Settings) -> bool:
+    """Positively identify an IdP service-account (client-credentials) token.
+
+    Fix for #3178. An OAuth2 ``client_credentials`` grant carries no
+    interactive user, so an IdP mints the client its own *service account*
+    identity. Keycloak names that identity deterministically —
+    ``service-account-<clientId>`` — and stamps it on the username claim
+    (default ``preferred_username``). That naming is a documented Keycloak
+    invariant (the prefix is reserved for service-account users), so a
+    username claim bearing the configured prefix is an **explicit positive
+    marker** of a service-account token, not a fuzzy heuristic.
+
+    Fail-closed by construction (this is the policy path): the function
+    returns ``True`` **only** on a positive prefix match, so a token whose
+    shape we cannot positively identify falls through to the ``user``
+    default in :func:`_extract_principal_kind`. A false negative is safe —
+    the #3152 grants gate is fail-open into the human approval flow — but a
+    false positive would silently upgrade an ordinary user into the
+    unattended-dispatch surface, so the marker must be a positive signal
+    only. An empty configured prefix disables the marker (every token stays
+    ``user`` unless it carries an explicit ``principal_kind`` claim).
+
+    Both the claim name (``JWT_SERVICE_ACCOUNT_USERNAME_CLAIM``) and the
+    prefix (``JWT_SERVICE_ACCOUNT_USERNAME_PREFIX``) are configurable so a
+    realm that surfaces the marker differently is accommodated without a
+    code change — mirroring the configurable-claim convention every other
+    extractor here follows.
+    """
+    prefix = settings.jwt_service_account_username_prefix
+    if not prefix:
+        return False
+    username = claims.get(settings.jwt_service_account_username_claim)
+    return isinstance(username, str) and username.startswith(prefix)
+
+
 def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
-    """Extract ``principal_kind`` from *claims*, absent claim → ``user``.
+    """Extract ``principal_kind`` from *claims*.
 
-    G11.2-T1 (#815): the ``principal_kind`` claim is **optional** — a
-    JWT that carries no ``principal_kind`` claim is treated as a human
-    user (the pre-G11.2 default). This keeps all existing human-operator
-    tokens working without a Keycloak mapper update.
+    G11.2-T1 (#815): the ``principal_kind`` claim is **optional**. An
+    **explicit** claim always wins — including an explicit ``user`` — and
+    only the three enum values ``user`` / ``service`` / ``agent`` (plus the
+    ``runner`` kind) are accepted; a claim that is **present but
+    unrecognised** is logged and rejected with a 401
+    (``unknown_principal_kind``), mirroring :func:`_extract_tenant_role`'s
+    unknown-role handling at this layer. ``principal_kind`` is the
+    discriminator agent-vs-human authorization branches on (per-kind
+    permission model, approval gate, agent dispatch), so silently coercing
+    an issuer-signed value the enum doesn't model to the human-user default
+    would be a fail-open authorization decision. A realm that emits a
+    custom kind needs the enum widened first — exactly like an out-of-enum
+    ``tenant_role``.
 
-    Only three values are accepted: ``user``, ``service``, ``agent``.
-    A claim that is **present but unrecognised** is logged and rejected
-    with a 401 (``unknown_principal_kind``), mirroring
-    :func:`_extract_tenant_role`'s unknown-role handling at this layer.
-    ``principal_kind`` is the discriminator agent-vs-human authorization
-    branches on (per-kind permission model, approval gate, agent
-    dispatch), so silently coercing an issuer-signed value the enum
-    doesn't model to the human-user default would be a fail-open
-    authorization decision. A realm that emits a custom kind needs the
-    enum widened first — exactly like an out-of-enum ``tenant_role``.
+    When the claim is **absent**, the classification is inferred (#3178):
+    an IdP service-account (client-credentials) token — positively
+    identified by :func:`_is_service_account_token` — resolves to
+    ``service`` so the #3152 standing-grants gate evaluates it, and any
+    other token falls back to the pre-G11.2 human-``user`` default (which
+    keeps every existing human-operator token working without a Keycloak
+    mapper update). The inference runs **only** for the absent-claim case
+    and only *upgrades* on a positive marker, so it never overrides an
+    explicit claim and never downgrades — the fail-closed direction for the
+    policy path.
 
     The claim name is configurable via ``JWT_PRINCIPAL_KIND_CLAIM_NAME``
     (default ``principal_kind``) in :class:`~meho_backplane.settings.Settings`
@@ -685,7 +729,12 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
     claim_name = settings.jwt_principal_kind_claim_name
     raw = claims.get(claim_name)
     if raw is None:
-        # Claim absent → legacy human-operator token. Graceful fallback.
+        # Claim absent. An explicit Keycloak ``principal_kind`` mapper is
+        # the canonical way to set this, but a client-credentials client
+        # often lacks it — so positively test for a service-account token
+        # before defaulting to the legacy human-``user`` fallback (#3178).
+        if _is_service_account_token(claims, settings):
+            return PrincipalKind.SERVICE
         return PrincipalKind.USER
     try:
         return PrincipalKind(raw)

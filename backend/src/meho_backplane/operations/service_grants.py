@@ -50,7 +50,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 import structlog
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +63,7 @@ __all__ = [
     "GrantValidationError",
     "ServicePrincipalGrantService",
     "consult_and_record_grant",
+    "count_live_grants_for_principal",
     "find_live_grant",
 ]
 
@@ -429,6 +430,42 @@ async def find_live_grant(
         stmt = stmt.where(ServicePrincipalGrant.target_id == target_id)
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def count_live_grants_for_principal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    now: datetime | None = None,
+) -> int:
+    """Count this principal's live standing grants across **all** scopes.
+
+    Liveness matches :func:`find_live_grant` (``revoked_at IS NULL`` and
+    (``expires_at IS NULL`` or ``expires_at > now``)) but ignores the
+    op/connector/target scope — it answers only "does this ``sub`` hold any
+    grant that *should* be evaluated". Used solely by the misclassification
+    WARN in :func:`~meho_backplane.operations._validate._non_agent_verdict`
+    (#3178): a non-service principal holding a live grant is almost
+    certainly a service account whose token missed the service-account
+    marker. Never on the auto-execute hot path.
+    """
+    cutoff = now or datetime.now(UTC)
+    stmt = (
+        select(func.count())
+        .select_from(ServicePrincipalGrant)
+        .where(
+            ServicePrincipalGrant.tenant_id == tenant_id,
+            ServicePrincipalGrant.principal_sub == principal_sub,
+            ServicePrincipalGrant.revoked_at.is_(None),
+            or_(
+                ServicePrincipalGrant.expires_at.is_(None),
+                ServicePrincipalGrant.expires_at > cutoff,
+            ),
+        )
+    )
+    result = await session.execute(stmt)
+    return int(result.scalar_one())
 
 
 async def consult_and_record_grant(

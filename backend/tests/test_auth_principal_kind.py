@@ -80,6 +80,7 @@ def _mint(
     *,
     principal_kind: str | None = None,
     claim_name: str = "principal_kind",
+    extra_claims: dict[str, Any] | None = None,
 ) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -97,6 +98,8 @@ def _mint(
         }
         if principal_kind is not None:
             payload[claim_name] = principal_kind
+        if extra_claims is not None:
+            payload.update(extra_claims)
         header = {"alg": "RS256", "kid": key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, key)
         return token.decode("ascii") if isinstance(token, bytes) else token
@@ -216,6 +219,108 @@ def test_absent_claim_defaults_to_user() -> None:
             resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["principal_kind"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# Service-account (client-credentials) classification (#3178)
+# ---------------------------------------------------------------------------
+#
+# An OAuth2 client-credentials token carries no interactive user and often
+# no ``principal_kind`` claim; it must classify as ``service`` (not the
+# ``user`` default) so the #3152 standing-grants gate evaluates it. The
+# positive marker is Keycloak's reserved ``service-account-<clientId>``
+# username on ``preferred_username``. Fail-closed: only a positive marker
+# upgrades; an explicit claim always wins; every other shape stays ``user``.
+
+
+def _classify(token: str, key: Any, *, monkeypatch: pytest.MonkeyPatch | None = None) -> str:
+    """Drive a token through ``verify_jwt`` and return the resolved kind."""
+    if monkeypatch is not None:
+        get_settings.cache_clear()
+        clear_jwks_cache()
+    app = _make_app()
+    with respx.mock as r:
+        r.get(_DISCOVERY_URL).mock(
+            return_value=httpx.Response(200, json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL})
+        )
+        r.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=_public_jwks(key)))
+        with TestClient(app) as client:
+            resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["principal_kind"]
+
+
+def test_client_credentials_marker_classifies_service() -> None:
+    """No ``principal_kind`` claim + ``service-account-*`` username → ``service``."""
+    key = _make_key("kid-svc-marker")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "service-account-deploy-bot"},
+    )
+    assert _classify(token, key) == "service"
+
+
+def test_ordinary_username_without_marker_stays_user() -> None:
+    """No claim + a non-service-account username → ``user`` (fail-closed default)."""
+    key = _make_key("kid-user-marker")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "alice"},
+    )
+    assert _classify(token, key) == "user"
+
+
+def test_explicit_user_claim_overrides_service_marker() -> None:
+    """An explicit ``principal_kind=user`` wins even when the marker is present.
+
+    The marker inference runs **only** for the absent-claim case, so an
+    issuer that deliberately stamps ``user`` is never silently upgraded.
+    """
+    key = _make_key("kid-explicit-user")
+    token = _mint(
+        key,
+        principal_kind="user",
+        extra_claims={"preferred_username": "service-account-deploy-bot"},
+    )
+    assert _classify(token, key) == "user"
+
+
+def test_custom_service_account_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`` retargets the marker prefix."""
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "svc:")
+    key = _make_key("kid-custom-prefix")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "svc:deploy-bot"},
+    )
+    assert _classify(token, key, monkeypatch=monkeypatch) == "service"
+
+
+def test_custom_service_account_username_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``JWT_SERVICE_ACCOUNT_USERNAME_CLAIM`` retargets which claim carries the marker."""
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_CLAIM", "client_id")
+    key = _make_key("kid-custom-claim")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"client_id": "service-account-deploy-bot"},
+    )
+    assert _classify(token, key, monkeypatch=monkeypatch) == "service"
+
+
+def test_empty_prefix_disables_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty configured prefix disables the marker — a service account stays ``user``."""
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    key = _make_key("kid-empty-prefix")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "service-account-deploy-bot"},
+    )
+    assert _classify(token, key, monkeypatch=monkeypatch) == "user"
 
 
 # ---------------------------------------------------------------------------

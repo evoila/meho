@@ -266,8 +266,27 @@ class Settings(BaseModel):
         G11.2-T1 (#815). Default ``principal_kind`` matches the agent-
         client protocol-mapper recipe in
         ``docs/cross-repo/keycloak-agent-client.md``. The claim is
-        **optional** — tokens that carry no claim resolve to ``user``
-        (graceful fallback for all pre-G11.2 human-operator tokens).
+        **optional** — tokens that carry no claim resolve to ``user``,
+        unless the token is positively identified as an IdP service
+        account (see :attr:`jwt_service_account_username_prefix`), in
+        which case it resolves to ``service`` (#3178).
+    jwt_service_account_username_claim:
+        Name of the JWT claim carrying the principal's username, read
+        only to classify a client-credentials token whose
+        ``principal_kind`` claim is absent (#3178). Default
+        ``preferred_username`` matches Keycloak's built-in username
+        mapper. Override when the realm surfaces the username elsewhere.
+    jwt_service_account_username_prefix:
+        Prefix that positively marks an IdP service-account
+        (OAuth2 client-credentials) token on the
+        :attr:`jwt_service_account_username_claim` value (#3178). Default
+        ``service-account-`` is Keycloak's reserved naming for the
+        service-account user it mints per client (``service-account-
+        <clientId>``). A token whose username bears this prefix and that
+        carries **no** explicit ``principal_kind`` claim classifies as
+        ``service`` so the #3152 standing-grants gate evaluates it;
+        every other token stays ``user`` (fail-closed — only a positive
+        marker upgrades). An empty string disables the marker entirely.
     jwt_capabilities_claim_name:
         Name of the JWT claim that carries the tenant-provisioned
         capability keys (a JSON array of strings) added by G4.5-T1
@@ -1001,6 +1020,8 @@ class Settings(BaseModel):
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
+    jwt_service_account_username_claim: str = Field(default="preferred_username", min_length=1)
+    jwt_service_account_username_prefix: str = Field(default="service-account-")
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_scopes_claim_name: str = Field(default="scope", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
@@ -1786,6 +1807,14 @@ def get_settings() -> Settings:
         jwt_principal_kind_claim_name=os.environ.get(
             "JWT_PRINCIPAL_KIND_CLAIM_NAME",
             "principal_kind",
+        ),
+        jwt_service_account_username_claim=os.environ.get(
+            "JWT_SERVICE_ACCOUNT_USERNAME_CLAIM",
+            "preferred_username",
+        ),
+        jwt_service_account_username_prefix=os.environ.get(
+            "JWT_SERVICE_ACCOUNT_USERNAME_PREFIX",
+            "service-account-",
         ),
         jwt_capabilities_claim_name=os.environ.get(
             "JWT_CAPABILITIES_CLAIM_NAME",

@@ -185,6 +185,53 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
     return None
 
 
+async def _warn_if_grant_holding_non_service(operator: Operator) -> None:
+    """Emit a WARN when a **non-service** principal that is about to park
+    holds a live standing grant (#3178).
+
+    That combination is almost certainly the #3178 misclassification bug: a
+    service account whose client-credentials token missed the
+    service-account marker classified as ``user`` (or, rarely, a genuine
+    human who was mistakenly issued a grant). Either way the grant is
+    silently inert and the op is parking — exactly the pattern #3151/#3152
+    exists to eliminate — so it warrants an operator-visible signal.
+
+    Scoped to the **park** path only (already the slow path): the extra
+    count query never touches the auto-execute hot path. Fail-open — a
+    diagnostic must never block a dispatch, so any lookup error is
+    swallowed after logging.
+    """
+    from meho_backplane.operations.service_grants import count_live_grants_for_principal
+
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            live_grants = await count_live_grants_for_principal(
+                session,
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+            )
+        if live_grants > 0:
+            _log.warning(
+                "policy_gate_grant_holder_classified_non_service",
+                operator_sub=operator.sub,
+                principal_kind=operator.principal_kind.value,
+                tenant_id=str(operator.tenant_id),
+                live_grant_count=live_grants,
+                hint=(
+                    "principal holds >=1 active standing grant but is not "
+                    "classified 'service'; the grants gate cannot evaluate it "
+                    "(likely a client-credentials token missing the "
+                    "service-account marker -- see #3178)"
+                ),
+            )
+    except Exception:
+        _log.exception(
+            "policy_gate_grant_holder_check_failed",
+            operator_sub=operator.sub,
+        )
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -250,6 +297,11 @@ async def _non_agent_verdict(
                 grant_id=str(grant_id),
             )
             return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    if not is_service:
+        # The op is parking for a non-service principal. If that principal
+        # holds a live standing grant, surface the #3178 misclassification.
+        await _warn_if_grant_holding_non_service(operator)
 
     _log.info(
         "policy_gate_needs_approval",

@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — coverage sweep sharded into a 3-way matrix + fan-in combine (#3172 / PR #3177)
+
+- With the heavy-pool OOM class closed by the 14Gi resize
+  (rdc-gitops#115), the first healthy coverage run exposed the residual
+  limit: 13,311 collected tests put the serial `-n 1` sweep at ~57
+  minutes — past the 45-minute step cap, the 55-minute job cap, and
+  brushing the ~60-minute external pod reap, so the monolithic job was
+  killed at 93% with zero test failures (run 33149016521). The sweep
+  now runs as three deterministic stride shards of the sorted
+  test-file list (~238 files / ~19 min each, per-shard step cap 30,
+  `fail-fast: false`), each uploading its raw parallel coverage data;
+  a new `python-coverage-combine` fan-in job merges every shard and
+  uploads the single `python-coverage` artifact, so quality-gate.yml's
+  contract is unchanged and SonarCloud receives full-suite coverage
+  for the first time since the 2026-06-20 collapse. Growth path: bump
+  the matrix and the stride `TOTAL` in lockstep.
+
 ### Fixed — `.mcpb` attach step sheds the false draft-Release narrative (#3171 / PR #3175)
 
 - The #3174 attach step carried `draft: true` plus a comment claiming the

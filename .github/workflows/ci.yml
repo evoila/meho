@@ -772,26 +772,27 @@ jobs:
     #      runner itself is wedged — step 9 still `in_progress` at the ~60-min
     #      job kill on the v0.28.0 cut (run 31199593016, cancelled 2×) — so a
     #      runner-enforced timeout is not a reliable backstop for a pytest hang.
-    #   2. STEP `timeout-minutes: 45` (~36-min serial wall + creep headroom) —
-    #      runner-enforced backstop for a hang the per-test SIGALRM cannot reach
-    #      (a stall during COLLECTION before any test item starts, or a
-    #      GIL-locked C call that never returns to the main thread). A step
-    #      timeout is a step FAILURE, absorbed by whole-job continue-on-error →
-    #      run conclusion stays `success`. Kept at 45 (NOT the 35 floated in
-    #      #2865): the legit -n 1 serial wall is 35:32, so a 35-min step cap
-    #      would kill honest runs.
+    #   2. STEP `timeout-minutes: 30` (~19-min per-shard wall + growth
+    #      headroom, #3172) — runner-enforced backstop for a hang the per-test
+    #      SIGALRM cannot reach (a stall during COLLECTION before any test
+    #      item starts, or a GIL-locked C call that never returns to the main
+    #      thread). A step timeout is a step FAILURE, absorbed by whole-job
+    #      continue-on-error → run conclusion stays `success`.
     #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
     #      step (checkout / uv sync / model warm — never observed). Every
-    #      post-pytest step is now step-capped too (#3172: combine 4, uploads
-    #      2+2 — the v0.31.0 cut proved a hang CAN escape into combine via the
-    #      pytest step's debris), so the bounded-step worst case is 45 + 4 + 2
-    #      + 2 = 53 min + pre-pytest setup (35–75 s observed) ≈ 54 — the step
-    #      caps always fire before this job cap for any hang under a bounded
-    #      step, and a job-level expiry (which CANCELS the job; `cancelled`
-    #      leaks past continue-on-error into the run conclusion — the exact
-    #      #2800/#2865/#3172 failure) is reserved for the never-observed wedged
-    #      setup step. 55 also sits below the ~60-min external pod reap seen
-    #      on the heavy pool, so GitHub's job timeout wins that race.
+    #      post-pytest step in this shard job is step-capped too (#3172:
+    #      shard-data upload 2, log upload 2 — the v0.31.0 cut proved a hang
+    #      CAN escape into a post-pytest step via the pytest step's debris),
+    #      so the bounded-step worst case is 30 + 2 + 2 = 34 min + pre-pytest
+    #      setup (35–75 s observed) ≈ 35 — the step caps always fire before
+    #      this job cap for any hang under a bounded step, and a job-level
+    #      expiry (which CANCELS the job; `cancelled` leaks past
+    #      continue-on-error into the run conclusion — the exact
+    #      #2800/#2865/#3172 failure) is reserved for the never-observed
+    #      wedged setup step. 55 also sits below the ~60-min external pod
+    #      reap seen on the heavy pool, so GitHub's job timeout wins that
+    #      race. (The combine + coverage.xml upload moved to the
+    #      python-coverage-combine fan-in job below, with its own budget.)
     # Neither runner cap is a perf budget: the job is push-only and non-blocking,
     # so a long wall never gates a PR.
     timeout-minutes: 55
@@ -1007,7 +1008,11 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
     runs-on: meho-runners-ci
-    timeout-minutes: 10
+    # 15 > the 12 min of bounded step caps below + ~1-2 min of honest
+    # checkout/uv/sync — the step caps always fire before this job cap, so
+    # a stall degrades to an absorbed step failure, never a run-level
+    # cancellation (the #2800/#3172 leak).
+    timeout-minutes: 15
     continue-on-error: true
     defaults:
       run:
@@ -1073,15 +1078,15 @@ jobs:
         # timeout-minutes (#3172): combine takes seconds when healthy, but the
         # v0.31.0 cut proved a hang that outlives the pytest step's SIGALRM
         # guard leaves debris this step then hangs on — and an UNBOUNDED step
-        # rides into the job's 55-min cap (layer 3 above), whose timeout is a
-        # CANCELLATION that whole-job continue-on-error does NOT absorb (it
-        # absorbs failures), flipping the run conclusion to `cancelled` and
-        # blocking the RELEASING.md tag gate. A step cap converts that hang
-        # into an absorbed step FAILURE — run stays `success`, coverage
-        # degrades to "none for this push", the job's documented lossy
-        # contract. Budget: 45 (pytest) + 4 + 2 + 2 (this step + uploads)
-        # = 53, leaving ~2 min for the pre-pytest setup (35–75 s observed)
-        # under the 55-min job cap, so layer 2 keeps firing first.
+        # rides into this job's cap, whose timeout is a CANCELLATION that
+        # whole-job continue-on-error does NOT absorb (it absorbs failures),
+        # flipping the run conclusion to `cancelled` and blocking the
+        # RELEASING.md tag gate. A step cap converts that hang into an
+        # absorbed step FAILURE — run stays `success`, coverage degrades to
+        # "none for this push", the documented lossy contract. This fan-in
+        # job's budget: downloads 2+2+2 + this step 4 + upload 2 = 12 min of
+        # bounded steps + checkout/uv/sync (~1-2 min honest) under the
+        # 15-min job cap, so step caps always fire first.
         if: always()
         timeout-minutes: 4
         run: |

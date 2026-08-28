@@ -90,7 +90,7 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179)
+### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any
   set-shaped response over the 50-row / 4 KB thresholds, but until now only

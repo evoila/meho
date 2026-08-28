@@ -658,7 +658,7 @@ jobs:
         # artifact is now produced by the dedicated `python-coverage` job below.
 
   python-coverage:
-    name: Python coverage (SonarCloud)
+    name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/3)
     # Restores the SonarCloud Clean-as-You-Code coverage artifact that #1982
     # had to drop from the required unit lane to stop the OOM kill. This job
     # is deliberately:
@@ -720,11 +720,21 @@ jobs:
     # The "offline" shape (per-worker parallel data + `coverage combine`/`xml`
     # AFTER pytest exits, pytest invoked with `-p no:cov` so pytest-cov's
     # in-process combine never runs) keeps the combine memory-cheap regardless.
-    # If the suite grows enough to push -n 1 over ~13 GiB, the durable fix is
-    # sharding this sweep into sequential pytest invocations (each with its
-    # own parallel data files; combine already merges across them) — 14Gi is
-    # the ceiling the current 15.62-GiB-allocatable nodes support — and this
-    # job stays non-blocking so an OOM merely skips one coverage upload.
+    # SHARDED (#3172, 2026-08-28): 13,311 collected tests put the -n 1
+    # serial wall at ~57 min — past the 45-min step cap, the 55-min job cap,
+    # and brushing the ~60-min external pod reap, so a monolithic sweep was
+    # structurally out of road (proven by run 33149016521: healthy 14Gi pod,
+    # steady progress, killed at 93%). The sweep now runs as 3 stride shards
+    # of the sorted test-file list (~240 files / ~19 min each), fanned into
+    # the python-coverage-combine job below which merges all shards' parallel
+    # data and uploads the single `python-coverage` artifact — the
+    # quality-gate.yml contract is unchanged. Per-shard memory sits well
+    # under the 14Gi pod (session-state accumulation scales with
+    # tests-per-process; 14Gi is the ceiling the 15.62-GiB-allocatable nodes
+    # support). If a shard's wall approaches its 30-min step cap, raise the
+    # shard count — bump BOTH the matrix and TOTAL in the pytest step, in
+    # lockstep. This job stays non-blocking; a shard OOM merely thins one
+    # shard's coverage.
     # Runs on push to main, OR on a PR explicitly opted in via the
     # `ci-coverage-validate` label (the on-runner validation escape hatch
     # described above). The fork-PR guard still applies on the PR path so
@@ -735,6 +745,13 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
+    strategy:
+      # 3 stride shards (#3172) — see the SHARDED paragraph in the header
+      # comment. fail-fast off: one shard's red tests must not cancel the
+      # other shards' coverage data (partial coverage beats none).
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     # RESOLVED 2026-08-27 (#3172; formerly a TODO(ops) asking for a new
     # larger-memory pool + a runs-on move): the recurring ~47-min OOM /
     # runner-loss on this pool — which silently killed coverage on every main
@@ -755,26 +772,27 @@ jobs:
     #      runner itself is wedged — step 9 still `in_progress` at the ~60-min
     #      job kill on the v0.28.0 cut (run 31199593016, cancelled 2×) — so a
     #      runner-enforced timeout is not a reliable backstop for a pytest hang.
-    #   2. STEP `timeout-minutes: 45` (~36-min serial wall + creep headroom) —
-    #      runner-enforced backstop for a hang the per-test SIGALRM cannot reach
-    #      (a stall during COLLECTION before any test item starts, or a
-    #      GIL-locked C call that never returns to the main thread). A step
-    #      timeout is a step FAILURE, absorbed by whole-job continue-on-error →
-    #      run conclusion stays `success`. Kept at 45 (NOT the 35 floated in
-    #      #2865): the legit -n 1 serial wall is 35:32, so a 35-min step cap
-    #      would kill honest runs.
+    #   2. STEP `timeout-minutes: 30` (~19-min per-shard wall + growth
+    #      headroom, #3172) — runner-enforced backstop for a hang the per-test
+    #      SIGALRM cannot reach (a stall during COLLECTION before any test
+    #      item starts, or a GIL-locked C call that never returns to the main
+    #      thread). A step timeout is a step FAILURE, absorbed by whole-job
+    #      continue-on-error → run conclusion stays `success`.
     #   3. JOB `timeout-minutes: 55` — outer backstop for a wedged NON-pytest
     #      step (checkout / uv sync / model warm — never observed). Every
-    #      post-pytest step is now step-capped too (#3172: combine 4, uploads
-    #      2+2 — the v0.31.0 cut proved a hang CAN escape into combine via the
-    #      pytest step's debris), so the bounded-step worst case is 45 + 4 + 2
-    #      + 2 = 53 min + pre-pytest setup (35–75 s observed) ≈ 54 — the step
-    #      caps always fire before this job cap for any hang under a bounded
-    #      step, and a job-level expiry (which CANCELS the job; `cancelled`
-    #      leaks past continue-on-error into the run conclusion — the exact
-    #      #2800/#2865/#3172 failure) is reserved for the never-observed wedged
-    #      setup step. 55 also sits below the ~60-min external pod reap seen
-    #      on the heavy pool, so GitHub's job timeout wins that race.
+    #      post-pytest step in this shard job is step-capped too (#3172:
+    #      shard-data upload 2, log upload 2 — the v0.31.0 cut proved a hang
+    #      CAN escape into a post-pytest step via the pytest step's debris),
+    #      so the bounded-step worst case is 30 + 2 + 2 = 34 min + pre-pytest
+    #      setup (35–75 s observed) ≈ 35 — the step caps always fire before
+    #      this job cap for any hang under a bounded step, and a job-level
+    #      expiry (which CANCELS the job; `cancelled` leaks past
+    #      continue-on-error into the run conclusion — the exact
+    #      #2800/#2865/#3172 failure) is reserved for the never-observed
+    #      wedged setup step. 55 also sits below the ~60-min external pod
+    #      reap seen on the heavy pool, so GitHub's job timeout wins that
+    #      race. (The combine + coverage.xml upload moved to the
+    #      python-coverage-combine fan-in job below, with its own budget.)
     # Neither runner cap is a perf budget: the job is push-only and non-blocking,
     # so a long wall never gates a PR.
     timeout-minutes: 55
@@ -848,7 +866,11 @@ jobs:
         # never a cancellation. But #2865 proved a pytest hang can outlive it
         # when the runner is wedged, so the PRIMARY guard is the in-process
         # `--timeout` on the run below, not this cap.
-        timeout-minutes: 45
+        # 30 per shard (#3172): the honest per-shard wall is ~19 min (57-min
+        # serial total / 3 shards at 13,311 tests), so 30 gives ~50% suite-
+        # growth headroom while keeping shard+combine far inside the 55-min
+        # job cap.
+        timeout-minutes: 30
         # Force bash so the run below gets pipefail + PIPESTATUS: the
         # self-hosted pool's default shell does NOT enable `pipefail`, which
         # let `pytest | tee` mask a hang's non-zero exit as step SUCCESS
@@ -859,7 +881,7 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Same lane-placement opt-out as the required unit lane's
           # Pytest step (#2980) — this job re-runs that sweep, serially
-          # and under a 45-min step cap, so the canary's full-ingest
+          # and under a 30-min per-shard step cap, so the canary's full-ingest
           # tests are opted out here for the same budget reason. Today
           # this is belt-and-suspenders (this job has no spec-shelf
           # checkout, so those tests skip on shelf absence anyway);
@@ -898,47 +920,173 @@ jobs:
         # no re-run. --max-worker-restart=0 then caps ANY other worker death
         # (segfault / OOM-kill) at zero retries, so a single failure can never
         # multiply into a job-cap overrun. 300 s sits well above the slowest
-        # honest test yet far below the 45-min step cap. tee preserves the full
+        # honest test yet far below the 30-min step cap. tee preserves the full
         # log for the hang-diagnostic artifact below; `exit ${PIPESTATUS[0]}`
         # propagates pytest's OWN exit (not tee's) so a hang reads as a step
         # FAILURE the job's continue-on-error absorbs — `shell: bash` above
         # guarantees PIPESTATUS + pipefail on this self-hosted pool.
         run: |
+          # Deterministic stride shard (#3172): the sorted test-file list,
+          # every 3rd file to this shard. File-level split keeps conftest
+          # semantics identical to a full run; stride (vs contiguous
+          # blocks) spreads the heavyweight suites across shards. The
+          # three shards partition the full set exactly (NR mod 3 hits
+          # each residue once); integration stays excluded by the find,
+          # matching the old --ignore.
+          TOTAL=3
+          SHARD="${{ matrix.shard }}"
+          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
+          echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
+          if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
+            echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
+            exit 1
+          fi
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --timeout=300 --timeout-method=signal --max-worker-restart=0 \
-            --ignore=tests/integration tests/ 2>&1 | tee pytest-coverage.log
+            "${SHARD_FILES[@]}" 2>&1 | tee pytest-coverage.log
           exit "${PIPESTATUS[0]}"
 
-      - name: Combine coverage + write XML (offline, workers exited)
-        # Runs AFTER the pytest step above fully returned — every xdist worker
-        # process is gone, so `coverage combine` merges the per-worker parallel
-        # data files standalone (cheap), not co-resident with live workers.
-        # Uses .coveragerc.ci (relative_files=true) so paths are repo-relative
-        # for SonarCloud cross-job mapping (#1987 AC6).
+      - name: Upload shard coverage data (parallel files)
+        # Raw per-worker parallel data files (`.coverage.<host>.<pid>.<rand>`)
+        # for THIS shard — the python-coverage-combine job below merges every
+        # shard's set and writes the single coverage.xml quality-gate.yml
+        # consumes (#3172). `.coveragerc.ci` sets relative_files=true, so
+        # data from three different runners combines cleanly.
+        # include-hidden-files: upload-artifact v4+ excludes dotfiles by
+        # default, and every coverage data file is a dotfile.
+        # timeout-minutes (#3172): same job-cap-cancel hole as every
+        # post-pytest step — a hung upload must degrade to an absorbed step
+        # failure.
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-coverage-data-shard-${{ matrix.shard }}
+          path: backend/.coverage.*
+          include-hidden-files: true
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Upload coverage-job pytest log (hang diagnostic)
+        # #2865: a coverage-job hang now dies as a pytest-timeout FAILURE with
+        # the offending test's traceback in this log (see the Pytest step's
+        # --timeout). Uploaded whenever the log exists so the NEXT hang says
+        # WHERE it hung, not just that the job ran long. continue-on-error is
+        # belt-and-suspenders on top of the whole-job continue-on-error.
+        if: always() && hashFiles('backend/pytest-coverage.log') != ''
+        continue-on-error: true
+        # timeout-minutes (#3172): same job-cap-cancel hole as the combine
+        # step — a hung upload must degrade to an absorbed step failure.
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage-pytest-log-shard-${{ matrix.shard }}
+          path: backend/pytest-coverage.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  python-coverage-combine:
+    name: Python coverage combine (SonarCloud artifact)
+    # Fan-in for the sharded python-coverage matrix above (#3172): downloads
+    # every shard's raw parallel coverage data, merges it, and uploads the
+    # single `python-coverage` artifact (backend/coverage.xml) — the
+    # quality-gate.yml contract is byte-identical to the old monolithic
+    # producer; only the producer topology changed. Same trigger + absorption
+    # posture as the shard job: push-to-main (or the `ci-coverage-validate`
+    # PR label), non-required, whole-job continue-on-error. `always()` keeps
+    # the fan-in merging partial data when a shard failed its tests or died —
+    # per-download continue-on-error tolerates a shard that never produced an
+    # artifact, and the combine step's ls guard exits cleanly when none did.
+    # Runs on the main (non-heavy) pool: combine is seconds of CPU and a few
+    # hundred MB — it needs no 14Gi node.
+    needs: python-coverage
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate')))
+    runs-on: meho-runners-ci
+    # 15 > the 12 min of bounded step caps below + ~1-2 min of honest
+    # checkout/uv/sync — the step caps always fire before this job cap, so
+    # a stall degrades to an absorbed step failure, never a run-level
+    # cancellation (the #2800/#3172 leak).
+    timeout-minutes: 15
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        # The combine/xml pass needs only the coverage binary from the locked
+        # env; a warm uv cache makes this seconds.
+        run: uv sync --locked --all-groups
+
+      - name: Download shard 1 coverage data
+        # Same pinned download-artifact as quality-gate.yml. Three explicit
+        # name-addressed downloads (not a pattern match) keep the step free
+        # of newer-action feature dependencies; continue-on-error tolerates
+        # a shard that produced no artifact (see the job header).
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: python-coverage-data-shard-1
+          path: backend
+
+      - name: Download shard 2 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: python-coverage-data-shard-2
+          path: backend
+
+      - name: Download shard 3 coverage data
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: python-coverage-data-shard-3
+          path: backend
+
+      - name: Combine coverage + write XML (offline, all shards)
+        # Runs in this fan-in job with every shard's pytest long gone, so
+        # `coverage combine` merges the downloaded per-worker parallel data
+        # files standalone (cheap). Uses .coveragerc.ci (relative_files=true)
+        # so paths are repo-relative across the three shard runners and for
+        # SonarCloud cross-job mapping (#1987 AC6).
         #
-        # `if: always()` so a non-zero pytest exit (a single flaky test in a
-        # 8.3k-test sweep) still combines + uploads whatever coverage the run
-        # DID produce, rather than GitHub skipping this step and silently
-        # dropping all coverage for the push. Partial coverage beats none here
-        # — this whole job is non-blocking, and SonarCloud merging slightly
-        # incomplete new-code coverage is far better than a "no data" gap on
-        # every push that happens to hit a flake. The `[ -f .coverage* ]` guard
-        # keeps the step from erroring with "No data to combine" when pytest
-        # crashed before any worker wrote a data file (genuine no-coverage case
-        # → the upload step's hashFiles guard then skips cleanly).
+        # `if: always()` + the ls guard: combine whatever shards delivered —
+        # a missing shard artifact (OOM before any data file) thins coverage
+        # rather than zeroing it. Partial coverage beats none; this whole job
+        # is non-blocking, and SonarCloud merging slightly incomplete
+        # new-code coverage is far better than a "no data" gap. The guard
+        # keeps the step from erroring with "No data to combine" when NO
+        # shard produced data (→ the upload step's hashFiles guard then
+        # skips cleanly).
         #
         # timeout-minutes (#3172): combine takes seconds when healthy, but the
         # v0.31.0 cut proved a hang that outlives the pytest step's SIGALRM
         # guard leaves debris this step then hangs on — and an UNBOUNDED step
-        # rides into the job's 55-min cap (layer 3 above), whose timeout is a
-        # CANCELLATION that whole-job continue-on-error does NOT absorb (it
-        # absorbs failures), flipping the run conclusion to `cancelled` and
-        # blocking the RELEASING.md tag gate. A step cap converts that hang
-        # into an absorbed step FAILURE — run stays `success`, coverage
-        # degrades to "none for this push", the job's documented lossy
-        # contract. Budget: 45 (pytest) + 4 + 2 + 2 (this step + uploads)
-        # = 53, leaving ~2 min for the pre-pytest setup (35–75 s observed)
-        # under the 55-min job cap, so layer 2 keeps firing first.
+        # rides into this job's cap, whose timeout is a CANCELLATION that
+        # whole-job continue-on-error does NOT absorb (it absorbs failures),
+        # flipping the run conclusion to `cancelled` and blocking the
+        # RELEASING.md tag gate. A step cap converts that hang into an
+        # absorbed step FAILURE — run stays `success`, coverage degrades to
+        # "none for this push", the documented lossy contract. This fan-in
+        # job's budget: downloads 2+2+2 + this step 4 + upload 2 = 12 min of
+        # bounded steps + checkout/uv/sync (~1-2 min honest) under the
+        # 15-min job cap, so step caps always fire first.
         if: always()
         timeout-minutes: 4
         run: |
@@ -972,23 +1120,6 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Upload coverage-job pytest log (hang diagnostic)
-        # #2865: a coverage-job hang now dies as a pytest-timeout FAILURE with
-        # the offending test's traceback in this log (see the Pytest step's
-        # --timeout). Uploaded whenever the log exists so the NEXT hang says
-        # WHERE it hung, not just that the job ran long. continue-on-error is
-        # belt-and-suspenders on top of the whole-job continue-on-error.
-        if: always() && hashFiles('backend/pytest-coverage.log') != ''
-        continue-on-error: true
-        # timeout-minutes (#3172): same job-cap-cancel hole as the combine
-        # step — a hung upload must degrade to an absorbed step failure.
-        timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: coverage-pytest-log
-          path: backend/pytest-coverage.log
-          retention-days: 7
-          if-no-files-found: warn
 
   python-integration:
     name: Python (integration testcontainers)

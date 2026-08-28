@@ -12,6 +12,10 @@
 //     GET /api/v1/operations/search.
 //   - `meho operation call <connector_id> <op_id> --target <slug> [--params ...]`
 //     — invoke the dispatcher via POST /api/v1/operations/call.
+//   - `meho operation result-query <handle_id> [--offset N] [--limit N]`
+//     — page rows back from a JSONFlux result handle via
+//     POST /api/v1/operations/result-query (#3179), the REST twin of the
+//     MCP `result_query` tool.
 //
 // Each verb wraps one backplane route and renders the response in
 // either a human-readable table or `--json` mode. Authentication
@@ -54,6 +58,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newGroupsCmd())
 	cmd.AddCommand(newSearchCmd())
 	cmd.AddCommand(newCallCmd())
+	cmd.AddCommand(newResultQueryCmd())
 	return cmd
 }
 
@@ -81,6 +86,12 @@ type operationsAPI interface {
 		params *api.GetSearchApiV1OperationsSearchGetParams,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.GetSearchApiV1OperationsSearchGetResponse, error)
+	PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+		ctx context.Context,
+		params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
+		body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error)
 	Refresh(ctx context.Context) error
 }
 

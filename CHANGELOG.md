@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179)
+
+- `POST /api/v1/operations/call` can *mint* a reduced result handle for any
+  set-shaped response over the 50-row / 4 KB thresholds, but until now only
+  the MCP `result_query` tool could read one back — a REST consumer that
+  received a handle was at a dead end (a real automation add-on had to fail
+  closed on a 181-row inventory and hand the drill-in to a human over MCP).
+  New route **`POST /api/v1/operations/result-query`** (body: `handle_id`,
+  `offset`, `limit`) pages the full spilled set back over REST, wrapping the
+  exact same windowed-read core as the MCP tool — identical tenant/principal
+  scoping and the same recoverable not-found miss (`404` /
+  `reason=handle_not_found`, the REST twin of the tool's `-32602`).
+- New CLI verb **`meho operation result-query <handle_id> [--offset N]
+  [--limit N]`** on the new route — making the `meho operation result-query`
+  hint the `vcf-logs` result-handle render already printed finally truthful
+  (the narrow-waist postulate says every meta-tool has a CLI verb;
+  `result_query` was the lone exception).
+- The reduced envelope's `fetch_more.drill_in.rationale` now names the REST
+  route alongside the MCP tool, so a consumer that got the handle over REST
+  (never touching MCP) learns how to page it without a discovery dance.
+
 ### Fixed — service-principal grants inert: client-credentials tokens now classify as `service` (#3178)
 
 - An OAuth2 client-credentials (service-account) token carries no

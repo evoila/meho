@@ -3428,6 +3428,62 @@
         }
       }
     },
+    "/api/v1/operations/result-query": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Post Result Query",
+        "description": "Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.\n\nDelegates to :func:`read_result_window` \u2014 the same transport-neutral\ncore the MCP ``result_query`` tool wraps \u2014 so REST and MCP share the\ntenant/principal scoping and not-found semantics exactly. The tenant +\nprincipal come from the JWT-validated :class:`Operator`; the body carries\nno tenant, by design.\n\nCloses the REST dead-end #3179 named: ``POST /api/v1/operations/call``\ncan *mint* a reduced ``handle`` for any set-shaped result over the\n50-row / 4 KB thresholds, but before this route a REST consumer had no\nway to read it back and had to fail closed or hand the drill-in to a\nhuman over MCP.\n\nA handle that is unknown, expired (TTL elapsed), or belongs to a\ndifferent operator is a ``404`` with a structured ``detail`` carrying\n``reason=\"handle_not_found\"`` \u2014 the recoverable-miss twin of the MCP\ntool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs\nthe operation for a fresh handle). Cross-operator access is deliberately\nindistinguishable from \"not found\" so the store leaks no existence\nsignal across the operator boundary. A malformed ``handle_id`` (not a\nUUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the\nPydantic layer before the handler runs.",
+        "operationId": "post_result_query_api_v1_operations_result_query_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResultQueryBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Post Result Query Api V1 Operations Result Query Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/operations/preview": {
       "post": {
         "tags": [
@@ -28048,6 +28104,38 @@
         ],
         "title": "ResultIngestResponse",
         "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``accepted + duplicates`` equals the batch length."
+      },
+      "ResultQueryBody": {
+        "properties": {
+          "handle_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Handle Id",
+            "description": "The result handle's UUID, taken from a reduced `/call` response's `result.handle.handle_id` or `fetch_more.drill_in.example_call.args.handle_id`."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Offset",
+            "description": "Zero-based index of the first row to return. Page by advancing this by the previous `limit`.",
+            "default": 0
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 500.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "description": "Page size. Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
+            "default": 50
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "handle_id"
+        ],
+        "title": "ResultQueryBody",
+        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\nFiltering / projection is out of scope (issue #3179 non-goal): parity is\nthe same offset/limit window the MCP tool serves, not more."
       },
       "RetireChecklistReport": {
         "properties": {

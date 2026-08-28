@@ -1079,6 +1079,10 @@ async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
     assert drill_in.example_call["args"]["handle_id"] == str(handle.handle_id)
     assert drill_in.expires_at is not None
     assert "result_query" in drill_in.rationale
+    # #3179: the available-branch rationale names the REST read-back route
+    # too, so a consumer that got the handle over REST (never touching MCP)
+    # learns how to page it without a discovery dance.
+    assert "POST /api/v1/operations/result-query" in drill_in.rationale
 
 
 async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:

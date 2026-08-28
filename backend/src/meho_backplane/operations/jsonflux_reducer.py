@@ -94,6 +94,14 @@ _log = structlog.get_logger(__name__)
 #: prose every time) and so the tests can assert against a stable anchor.
 _RESULT_QUERY_TOOL = "result_query"
 
+#: REST route that reads the same spilled handle back — the sibling of the
+#: ``result_query`` MCP tool (#3179). Named in the drill-in rationale
+#: alongside the MCP tool so a REST consumer that received the handle over
+#: ``POST /api/v1/operations/call`` (never touching MCP) still learns how to
+#: page it. Must match the route mounted in
+#: :mod:`meho_backplane.api.v1.operations`.
+_RESULT_QUERY_REST_ROUTE = "POST /api/v1/operations/result-query"
+
 #: Shared workaround tail for every no-spill rationale: whatever the
 #: cause, the recovery the agent can act on is the same.
 _DRILL_IN_WORKAROUND = (
@@ -134,7 +142,8 @@ def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows:
     )
     return (
         f"The full result set ({total_rows} rows) is retrievable over MCP "
-        f"via the ``{_RESULT_QUERY_TOOL}`` tool. Call it with "
+        f"via the ``{_RESULT_QUERY_TOOL}`` tool or over REST via "
+        f"``{_RESULT_QUERY_REST_ROUTE}``. Call either with "
         f"``handle_id={handle_id}`` plus ``offset`` / ``limit`` to page "
         f"beyond the inline sample.{tail_note}"
     )

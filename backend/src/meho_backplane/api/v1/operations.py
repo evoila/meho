@@ -19,6 +19,12 @@ the agent transport.
   (``query`` is the deprecated alias, #1854). Operator role.
 * ``POST /api/v1/operations/call`` (body: ``CallOperationBody``) --
   invoke the dispatcher. Operator role.
+* ``POST /api/v1/operations/result-query`` (body: ``ResultQueryBody``) --
+  read a window of rows back from a JSONFlux result handle (#3179). The
+  REST twin of the MCP ``result_query`` tool: both wrap the same
+  transport-neutral core (:func:`read_result_window`), so a REST consumer
+  that receives a reduced ``handle`` from ``/call`` is no longer at a dead
+  end. Operator role.
 * ``GET /api/v1/operations/{descriptor_id}`` -- inspect a single
   descriptor row including ``llm_instructions``. Tenant-admin role
   because ``llm_instructions`` is the per-op agent prompt (leaking it
@@ -37,6 +43,7 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.openapi.models import Example
+from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.api.v1._freetext_filter import (
     FREE_TEXT_Q_DESCRIPTION,
@@ -55,6 +62,11 @@ from meho_backplane.operations.meta_tools import (
     list_operation_groups,
     preview_operation,
     search_operations,
+)
+from meho_backplane.operations.result_query import (
+    MAX_LIMIT,
+    ResultHandleNotFoundError,
+    read_result_window,
 )
 
 #: Shared OpenAPI metadata for the ``connector_id`` query param on the
@@ -278,6 +290,91 @@ async def post_call(
     consumer's error handling is a single switch on ``extras.error_code``.
     """
     return await call_operation(operator, body.model_dump())
+
+
+class ResultQueryBody(BaseModel):
+    """POST body for ``/api/v1/operations/result-query`` (#3179).
+
+    The REST twin of the MCP ``result_query`` tool's ``inputSchema``:
+    ``handle_id`` is the UUID minted onto a reduced ``/call`` response's
+    ``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and
+    ``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP
+    schema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces
+    validate identically. ``extra="forbid"`` rejects unknown body fields with
+    a 422, matching the sibling ``CallOperationBody`` posture.
+
+    Filtering / projection is out of scope (issue #3179 non-goal): parity is
+    the same offset/limit window the MCP tool serves, not more.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    handle_id: uuid.UUID = Field(
+        description=(
+            "The result handle's UUID, taken from a reduced `/call` "
+            "response's `result.handle.handle_id` or "
+            "`fetch_more.drill_in.example_call.args.handle_id`."
+        ),
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Zero-based index of the first row to return. Page by advancing "
+            "this by the previous `limit`."
+        ),
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=MAX_LIMIT,
+        description=(
+            f"Page size. Default 50; max {MAX_LIMIT}. Matches the "
+            "`result_query` MCP tool's upper bound."
+        ),
+    )
+
+
+@router.post("/result-query")
+async def post_result_query(
+    body: ResultQueryBody,
+    operator: Operator = _require_operator,
+) -> dict[str, Any]:
+    """Read a ``[offset : offset+limit]`` window of a JSONFlux result handle.
+
+    Delegates to :func:`read_result_window` — the same transport-neutral
+    core the MCP ``result_query`` tool wraps — so REST and MCP share the
+    tenant/principal scoping and not-found semantics exactly. The tenant +
+    principal come from the JWT-validated :class:`Operator`; the body carries
+    no tenant, by design.
+
+    Closes the REST dead-end #3179 named: ``POST /api/v1/operations/call``
+    can *mint* a reduced ``handle`` for any set-shaped result over the
+    50-row / 4 KB thresholds, but before this route a REST consumer had no
+    way to read it back and had to fail closed or hand the drill-in to a
+    human over MCP.
+
+    A handle that is unknown, expired (TTL elapsed), or belongs to a
+    different operator is a ``404`` with a structured ``detail`` carrying
+    ``reason="handle_not_found"`` — the recoverable-miss twin of the MCP
+    tool's ``-32602`` / ``data.reason=handle_not_found`` (the caller re-runs
+    the operation for a fresh handle). Cross-operator access is deliberately
+    indistinguishable from "not found" so the store leaks no existence
+    signal across the operator boundary. A malformed ``handle_id`` (not a
+    UUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the
+    Pydantic layer before the handler runs.
+    """
+    try:
+        return await read_result_window(operator, body.handle_id, body.offset, body.limit)
+    except ResultHandleNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": str(exc),
+                "reason": "handle_not_found",
+                "handle_id": str(body.handle_id),
+            },
+        ) from exc
 
 
 @router.post("/preview")

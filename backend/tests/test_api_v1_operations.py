@@ -38,16 +38,19 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.api.v1.operations import router as operations_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.result_handle_store import SpilledWindow
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations.result_query import MAX_LIMIT
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -823,3 +826,305 @@ def test_get_descriptor_unknown_id_returns_404(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/operations/result-query  (#3179 — REST parity for result_query)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResultStore:
+    """In-memory result-handle store the route reads windows out of.
+
+    Keyed by ``(tenant_id, operator_sub, handle_id)`` so the tests can assert
+    the route threads the operator identity from the JWT — never the body —
+    exactly as the MCP ``result_query`` tool's fake does. The two surfaces
+    share the transport-neutral core, so mirroring the fake keeps their
+    scoping + not-found behaviour provably identical.
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+
+    def seed(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        handle_id: uuid.UUID,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        self._rows[(str(tenant_id), operator_sub, str(handle_id))] = rows
+
+    async def fetch_window(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        handle_id: uuid.UUID,
+        offset: int,
+        limit: int,
+    ) -> SpilledWindow | None:
+        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
+        if rows is None:
+            return None
+        window = rows[offset : offset + limit] if limit > 0 else []
+        return SpilledWindow(
+            rows=window,
+            total_rows=len(rows),
+            stored_rows=len(rows),
+            truncated=False,
+        )
+
+
+@pytest.fixture
+def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> _FakeResultStore:
+    """Replace the production store getter (on the shared core) with a fake."""
+    store = _FakeResultStore()
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
+    return store
+
+
+def test_post_result_query_requires_authentication(client: TestClient) -> None:
+    """No Bearer header -> 401 (before any handle lookup)."""
+    response = client.post(
+        "/api/v1/operations/result-query",
+        json={"handle_id": str(uuid.uuid4())},
+    )
+    assert response.status_code == 401
+
+
+def test_post_result_query_returns_window_beyond_inline_sample(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A >50-row spilled set is fully retrievable over REST by paging.
+
+    The REST twin of ``test_result_query_returns_window_beyond_inline_sample``
+    in the MCP tool suite: rows past the inline sample and the tail are both
+    reachable, and the envelope carries the same metadata keys.
+    """
+    handle = uuid.uuid4()
+    rows = [{"i": i, "name": f"row-{i}"} for i in range(60)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 5, "limit": 50},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["handle_id"] == str(handle)
+        assert body["total_rows"] == 60
+        assert body["returned_rows"] == 50
+        assert body["truncated"] is False
+        assert [r["i"] for r in body["rows"]] == list(range(5, 55))
+
+        # The tail (rows 55..59) is reachable too — the full set, not a sample.
+        tail = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 55, "limit": 50},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert tail.status_code == 200
+    assert [r["i"] for r in tail.json()["rows"]] == list(range(55, 60))
+
+
+def test_post_result_query_defaults_offset_and_limit(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """Omitting offset/limit windows [0:50] — the documented defaults."""
+    handle = uuid.uuid4()
+    rows = [{"i": i} for i in range(120)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["offset"] == 0
+    assert body["limit"] == 50
+    assert body["returned_rows"] == 50
+    assert [r["i"] for r in body["rows"]] == list(range(50))
+
+
+def test_post_result_query_unknown_handle_returns_typed_404(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """An unknown/expired handle -> 404 with reason=handle_not_found.
+
+    The REST twin of the MCP tool's recoverable ``-32602`` /
+    ``data.reason=handle_not_found`` miss.
+    """
+    handle = uuid.uuid4()
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["reason"] == "handle_not_found"
+    assert detail["handle_id"] == str(handle)
+
+
+def test_post_result_query_cross_operator_is_a_miss(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A handle spilled by a different operator in the same tenant -> 404.
+
+    Principal scoping: the store keys on the spilling operator's ``sub``, so a
+    stranger in the same tenant gets the same not-found miss (no existence
+    signal leaks across the operator boundary).
+    """
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="some-other-operator",
+        handle_id=handle,
+        rows=[{"i": i} for i in range(60)],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "handle_not_found"
+
+
+def test_post_result_query_cross_tenant_is_a_miss(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A handle spilled under a different tenant -> 404 (tenant scoping).
+
+    The tenant comes from the JWT, never the body, so an operator in tenant B
+    cannot read tenant A's handle even with the right handle_id + sub.
+    """
+    handle = uuid.uuid4()
+    other_tenant = uuid.UUID("00000000-0000-0000-0000-0000000000b0")
+    fake_result_store.seed(
+        tenant_id=other_tenant,
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"i": i} for i in range(60)],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle)},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "handle_not_found"
+
+
+def test_post_result_query_invalid_uuid_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A malformed handle_id is a 422 at the Pydantic layer (before the handler)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": "not-a-uuid"},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+
+
+def test_post_result_query_negative_offset_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """offset < 0 is rejected at the Pydantic bound (ge=0)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(uuid.uuid4()), "offset": -1},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+
+
+def test_post_result_query_zero_limit_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """limit < 1 is rejected at the Pydantic bound (ge=1)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(uuid.uuid4()), "limit": 0},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+
+
+def test_post_result_query_over_max_limit_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """limit above the shared MAX_LIMIT ceiling is rejected (le=MAX_LIMIT)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(uuid.uuid4()), "limit": MAX_LIMIT + 1},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+
+
+def test_post_result_query_rejects_extra_body_field(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """extra='forbid' rejects an unknown body field with a 422 (typo-loud)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(uuid.uuid4()), "bogus": 1},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422

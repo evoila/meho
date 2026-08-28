@@ -21,9 +21,11 @@ threshold (>50 rows or >4 KB by default), the caller gets back:
   `fetch_more` envelope.
 
 The **full** normalized row list is spilled to the Valkey-backed
-`ResultHandleStore` keyed by `(tenant_id, handle_id)`; the
-`result_query` MCP meta-tool pages it back. Whether that spill happened
-is reported on `handle.fetch_more.drill_in`:
+`ResultHandleStore` keyed by `(tenant_id, handle_id)`; the `result_query`
+read surface pages it back over **both** transports — the MCP meta-tool
+and the REST route `POST /api/v1/operations/result-query`, which share the
+`read_result_window` core (#3179). Whether that spill happened is reported
+on `handle.fetch_more.drill_in`:
 
 | State | `available` | `reason` | What the agent can do |
 |---|---|---|---|
@@ -42,7 +44,9 @@ branch to `available=false`.
 | `JsonFluxReducer._spill` / `_SpillOutcome` | `backend/src/meho_backplane/operations/jsonflux_reducer.py` | Persists the materialized rows; reports `stored_rows` **or** a machine-readable `skip_reason` |
 | `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The two-valued no-spill cause on the wire (#1629) |
 | `ResultHandleStore.spill` / `fetch_window` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back |
-| `result_query` | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` |
+| `read_result_window` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core both surfaces wrap (#3179); misses raise the recoverable not-found error |
+| `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
+| `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
 
 ## Control flow (dispatch path)

@@ -413,7 +413,7 @@ Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@mod
 
 `fetch_more` is the G0.15-T8 (#1219) self-documenting drill-in / pagination envelope. Every handle the production reducer mints carries it (the two branches `drill_in` and `native_pagination` are always populated) so an agent reading the response can answer *"how do I get more rows"* from the envelope itself — no MCP-tool / resource-URI / REST-route discovery dance. The shape, the drill-in branch (`available=True` naming the `result_query` tool when the full set was spilled to the `ResultHandleStore`, `available=False` with the narrower-params workaround when it was skipped or the store was unreachable — G0.20-T7 #1507), and the `llm_instructions.pagination_hint` registration slot the reducer reads to build `native_pagination` are documented in [`jsonflux.md` § fetch_more envelope](jsonflux.md#fetch_more-envelope-g015-t8-1219). `None` only on legacy code paths that build a `ResultHandle` directly without going through the reducer (test fixtures); production reduce paths always populate it.
 
-`JsonFluxReducer` populates `handle` for large set-shaped responses (G0.6.1, #750) and spills the full row set to the Valkey-backed `ResultHandleStore`; the `result_query` MCP meta-tool reads windows back from it (G0.20-T7 #1507). See [`jsonflux.md` § Read-back](jsonflux.md#read-back-the-resulthandlestore-g020-t7-1507).
+`JsonFluxReducer` populates `handle` for large set-shaped responses (G0.6.1, #750) and spills the full row set to the Valkey-backed `ResultHandleStore`; the `result_query` MCP meta-tool **and** the REST route `POST /api/v1/operations/result-query` read windows back from it through the shared `read_result_window` core (G0.20-T7 #1507; REST parity #3179). See [`jsonflux.md` § Read-back](jsonflux.md#read-back-the-resulthandlestore-g020-t7-1507).
 
 ## The three operation meta-tools
 
@@ -448,6 +448,7 @@ Per [CLAUDE.md](../../CLAUDE.md) postulate 5, the agent never sees per-op MCP to
 - `GET /api/v1/operations/groups?connector_id=...` — `list_operation_groups`
 - `GET /api/v1/operations/search?connector_id=...&query=...&group=...&limit=...` — `search_operations`
 - `POST /api/v1/operations/call` (body: `CallOperationBody`) — `call_operation`
+- `POST /api/v1/operations/result-query` (body: `ResultQueryBody`) — the REST twin of the MCP `result_query` tool; both wrap the shared `read_result_window` core so a REST consumer that received a reduced handle off `/call` can page it back (#3179)
 - `GET /api/v1/operations/{descriptor_id}` — inspect a single descriptor (gated on `tenant_admin` because `llm_instructions` is the per-op agent prompt and reading it amounts to a prompt leak)
 
 The CLI `meho operation ...` verbs mirror the same surface. Wire identity across MCP + REST + CLI is the contract every CLI verb relies on.

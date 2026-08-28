@@ -9,9 +9,11 @@ bounded inline `sample` plus a self-documenting `fetch_more` envelope. The
 **full** materialized set is spilled to a Valkey-backed
 `ResultHandleStore` (keyed by `(tenant_id, handle_id)`, server-enforced
 TTL, row count capped by `RESULT_HANDLE_MAX_SPILL_ROWS`), and the
-`result_query` MCP meta-tool pages it back beyond the inline sample. When
+`result_query` read surface — the MCP meta-tool and the REST route `POST
+/api/v1/operations/result-query`, both wrapping one shared core (#3179) —
+pages it back beyond the inline sample. When
 the spill succeeds the handle's `fetch_more.drill_in` is `available=true`
-and names that tool; when it is skipped or the store is unreachable the
+and names that surface; when it is skipped or the store is unreachable the
 envelope still tells the agent how to act on more than the sample (re-call
 with narrower params / native pagination) and the reduce path is
 unaffected (fail-open).
@@ -338,7 +340,11 @@ triage runbook). The spill
 + read-back are described under *"Read-back: the `ResultHandleStore`"*
 below; the `mcp_resource_uri` field stays `None` in the current
 tool-only surface. `rationale` always carries the operator/agent-facing
-prose explaining the current state.
+prose explaining the current state — on the `available=True` branch it
+names both the `result_query` MCP tool and the `POST /api/v1/operations/
+result-query` REST route (#3179), so a consumer that received the handle
+over either transport learns how to page it; the structured `mcp_tool`
+field stays MCP-only (the REST route lives in the prose, not a new field).
 
 **`native_pagination: FetchMoreNativePagination`** — *"what params
 let the underlying op return the next slice?"* When the op
@@ -423,16 +429,24 @@ is unreachable. Both skip shapes surface in the response as
 `jsonflux_spill_skipped` warning; the store-level failure additionally
 logs `result_handle_spill_failed` with the underlying error.
 
-The `result_query` MCP meta-tool
+The read surface is dual — MCP and REST share one windowed-read core
+([`operations/result_query.py`](../../backend/src/meho_backplane/operations/result_query.py),
+`read_result_window`), so the two transports cannot drift on scoping or
+not-found semantics (#3179). The `result_query` MCP meta-tool
 ([`mcp/tools/result_query.py`](../../backend/src/meho_backplane/mcp/tools/result_query.py))
-is the read surface: `result_query(handle_id, offset, limit)` returns the
+and the REST route `POST /api/v1/operations/result-query`
+([`api/v1/operations.py`](../../backend/src/meho_backplane/api/v1/operations.py))
+both wrap it: `result_query(handle_id, offset, limit)` returns the
 requested window plus `total_rows` / `stored_rows` / `truncated`. The
 tenant comes from the operator's JWT (never the arguments) and the
 spilling operator's `sub` is checked, so a cross-tenant or cross-operator
-read is an indistinguishable `handle_not_found` miss — the same
-recoverable `-32602` taxonomy an expired handle surfaces. This is the
-design first drafted as the `HandleStore` in G3.1-T4 (#304,
-closed-superseded), revived and narrowed to the reduce-time spill case.
+read is an indistinguishable `handle_not_found` miss — surfaced as the
+recoverable `-32602` taxonomy over MCP and as a `404` with
+`reason=handle_not_found` over REST. Before #3179 the read-back was
+MCP-only: a REST consumer that received a handle off `POST /api/v1/
+operations/call` was at a dead end. This is the design first drafted as
+the `HandleStore` in G3.1-T4 (#304, closed-superseded), revived and
+narrowed to the reduce-time spill case.
 
 ### Sample ordering — head vs tail (G0.19-T1, #1479)
 

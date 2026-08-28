@@ -104,14 +104,20 @@ dedicated job was the sole coverage producer and nothing else caught the gap.
 3. The artifact list on the CI run — a present `python-coverage` artifact rules
    out this failure mode.
 
-**The durable fix is ops-owned.** The coverage tax is intrinsic (~12.5 GiB peak
-at `-n 1`, only ~1.2 GiB under the pod limit) and barely moves with parallelism,
-so the job is one suite-growth increment away from OOM again. The durable fix —
-named in both the job's own header comment and its `# TODO(ops)` at `runs-on:` —
-is a **larger-memory runner pool** (a gha-runner-scale-set on the rke2-ci
-cluster, provisioned out of band); once it exists, move the job's `runs-on:` to
-it. Until then the job stays non-blocking and the fail-visible annotation above
-surfaces every skipped upload instead of letting it rot silently.
+**The durable fix landed 2026-08-27 (#3172 / rdc-gitops#115).** The coverage
+tax is intrinsic (~12.5 GiB peak at `-n 1`) and barely moves with parallelism —
+and the "~1.2 GiB under the pod limit" this section used to claim was fiction:
+the live heavy-pool runner limit was **8Gi** (13.67 GiB was #1982's measured
+local peak, mistaken for the cap), so the sweep never fit and every main-push
+coverage run since ~2026-06-20 died as an OOM runner-loss or a memory-thrash
+wedge. rdc-gitops#115 resized the pool in place to **14Gi** (request==limit,
+node-exclusive by memory on the 15.62-GiB-allocatable workers) — the job's
+`runs-on:` stays. Real headroom is now ~1.5 GiB; if the suite outgrows
+~13 GiB serial, the next lever is sharding the sweep into sequential pytest
+invocations (`coverage combine` already merges across parallel data files),
+not a bigger limit — 14Gi is this node size's ceiling. The job stays
+non-blocking and the fail-visible annotation above surfaces every skipped
+upload instead of letting it rot silently.
 
 ## New-code period + scan trigger — how they're configured
 

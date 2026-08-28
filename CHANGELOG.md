@@ -90,6 +90,38 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `.mcpb` attach step sheds the false draft-Release narrative (#3171 / PR #3175)
+
+- The #3174 attach step carried `draft: true` plus a comment claiming the
+  Release "must stay draft for a maintainer to flip it" — a flow that has
+  not existed since #1127: `cli/.goreleaser.yaml` sets `draft: false`, so
+  every release (v0.31.0 included) is live-published the moment GoReleaser
+  finishes, which is what the `.mcpb` release-asset distribution channel
+  depends on. Functionally benign — the pinned `action-gh-release` v3.0.2
+  ignores the `draft` input on its update path (`github.ts` preserves
+  `existingRelease.draft`, verified at the pinned SHA) — but dead config
+  wrapped in a false narrative invites a future "fix" that would actually
+  un-publish releases. The input is removed and the step + release-summary
+  comments now state the published-release reality.
+
+### Fixed — coverage job sized against a pod limit that never existed; real limit fixed on the pool (#3172 / PR #3175)
+
+- The `python-coverage` job's memory table claimed its serial sweep
+  (measured 12.48 GiB at 8306 tests) ran "~1.2 GiB under the <13.67 GiB
+  pod limit" — but 13.67 GiB was #1982's measured local peak, never the
+  runner's cap. The live heavy-pool runner limit was **8Gi**
+  (rdc-gitops `apps/rke2-ci/meho-runners-heavy`), so the sweep never
+  fit: every main-push coverage run since ~2026-06-20 died as an OOM
+  runner-loss (absorbed job failure, null step telemetry, purged logs)
+  or a memory-thrash wedge — the latter being the v0.31.0 tag-gate
+  `cancelled` blocker that #3173 hardened against. The ci.yml comment
+  now records the real history; the durable fix is rdc-gitops#115
+  (heavy pool resized to 14Gi request==limit, node-exclusive by
+  memory, ~1.5 GiB real headroom), with sweep-sharding named as the
+  next lever if the suite outgrows ~13 GiB — 14Gi is the ceiling of
+  the current 15.62-GiB-allocatable nodes. #3172 stays open for the
+  post-resize verification (coverage job green + SonarCloud recovery).
+
 ### Fixed — deploying.md v0.31.0 upgrade row names both shipped migrations (PR #3173)
 
 - The version-specific upgrade-notes row added by the v0.31.0
@@ -119,7 +151,7 @@ connector-related release-notes line.
   and lossy coverage — the job's documented contract (#2800). The
   underlying serial-lane hang investigation stays open on #3172.
 
-### Fixed — `cli-release.yml` attaches the `.mcpb` bundle without the `gh` CLI (#3171)
+### Fixed — `cli-release.yml` attaches the `.mcpb` bundle without the `gh` CLI (#3171 / #3174)
 
 - The v0.31.0 tag run of `cli-release.yml` built the Claude Desktop
   `.mcpb` bundle but failed to attach it: the `gh release upload` line

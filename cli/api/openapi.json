@@ -9522,6 +9522,252 @@
         }
       }
     },
+    "/api/v1/addons/pairings": {
+      "post": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Pair Addon",
+        "description": "Pair an add-on (the one-time handshake).\n\nReturns 201 with the one-time credentials on success; 409 on a\ncontract-version skew (``detail`` names the direction) or a duplicate\npairing; 422 on a malformed name; 503/502 when Keycloak admin is\nunconfigured / failing. Audited via the audit middleware.",
+        "operationId": "pair_addon_api_v1_addons_pairings_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairAddonRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairAddonResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "List Pairings",
+        "description": "List active pairings for the operator's tenant (tenant-scoped).",
+        "operationId": "list_pairings_api_v1_addons_pairings_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairedAddonListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/addons/pairings/{name}": {
+      "get": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Show Pairing",
+        "description": "Return one pairing by name. Cross-tenant probes return 404.",
+        "operationId": "show_pairing_api_v1_addons_pairings__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairedAddonRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Unpair Addon",
+        "description": "Unpair an add-on (reversible). 204 on success; 404 when not paired.",
+        "operationId": "unpair_addon_api_v1_addons_pairings__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/addons/pairings/{name}/heartbeat": {
+      "post": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Heartbeat Pairing",
+        "description": "Record an add-on liveness heartbeat (paired service principal only).\n\nThe paired add-on authenticates as its own service principal and stamps\n``last_seen_at``. A non-service principal is 403; an unpaired add-on is\n404. Audited via the audit middleware.",
+        "operationId": "heartbeat_pairing_api_v1_addons_pairings__name__heartbeat_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairedAddonRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -19075,6 +19321,28 @@
         }
       }
     },
+    "/ui/pairing": {
+      "get": {
+        "tags": [
+          "ui-pairing"
+        ],
+        "summary": "Ui Pairing List",
+        "description": "Serve ``GET /ui/pairing``. See module docstring.",
+        "operationId": "ui_pairing_list_ui_pairing_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/audit/results": {
       "get": {
         "tags": [
@@ -26315,6 +26583,14 @@
           "sensor_runner": {
             "$ref": "#/components/schemas/SensorRunnerStatus",
             "nullable": true
+          },
+          "pairings": {
+            "items": {
+              "$ref": "#/components/schemas/PairingHealth"
+            },
+            "type": "array",
+            "title": "Pairings",
+            "default": []
           }
         },
         "type": "object",
@@ -26325,7 +26601,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET.\n\n``pairings`` (#3025) carries the tenant's active add-on pairings \u2014\neach add-on's negotiated contract version, whether it is still\ncontract-compatible with this backplane build, and its last liveness\nheartbeat. The list is empty when nothing is paired; the empty-default\nkeeps response decoders generated against the pre-#3025 shape working."
       },
       "InCompare": {
         "properties": {
@@ -27399,6 +27675,200 @@
         ],
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
+      },
+      "PairAddonRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          },
+          "addon_contract_version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Addon Contract Version"
+          },
+          "addon_min_backplane_version": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Addon Min Backplane Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "addon_contract_version",
+          "addon_min_backplane_version"
+        ],
+        "title": "PairAddonRequest",
+        "description": "Intake for :meth:`AddonPairingService.pair` \u2014 the handshake body.\n\n``addon_contract_version`` is the contract version the add-on speaks;\n``addon_min_backplane_version`` is the oldest backplane contract the\nadd-on will accept. Both drive the bidirectional negotiation in\n:mod:`meho_backplane.operations.addon_pairing_contract`."
+      },
+      "PairAddonResult": {
+        "properties": {
+          "pairing": {
+            "$ref": "#/components/schemas/PairedAddonRead"
+          },
+          "client_id": {
+            "type": "string",
+            "title": "Client Id"
+          },
+          "client_secret": {
+            "type": "string",
+            "title": "Client Secret"
+          },
+          "backplane_contract_version": {
+            "type": "integer",
+            "title": "Backplane Contract Version"
+          },
+          "negotiated_contract_version": {
+            "type": "integer",
+            "title": "Negotiated Contract Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pairing",
+          "client_id",
+          "client_secret",
+          "backplane_contract_version",
+          "negotiated_contract_version"
+        ],
+        "title": "PairAddonResult",
+        "description": "One-time pairing response carrying the add-on's fresh credentials.\n\n``client_secret`` is repr-hidden so it never lands in a log line or an\nexception render; it is serialised in the HTTP body once (the handshake\nresponse) and is unrecoverable afterwards."
+      },
+      "PairedAddonListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PairedAddonRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "PairedAddonListResponse",
+        "description": "Unified list envelope (api-shape-conventions \u00a72) for paired add-ons."
+      },
+      "PairedAddonRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "contract_version": {
+            "type": "integer",
+            "title": "Contract Version"
+          },
+          "addon_contract_version": {
+            "type": "integer",
+            "title": "Addon Contract Version"
+          },
+          "addon_min_backplane_version": {
+            "type": "integer",
+            "title": "Addon Min Backplane Version"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "paired_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Paired At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "owner_sub",
+          "contract_version",
+          "addon_contract_version",
+          "addon_min_backplane_version",
+          "created_by_sub",
+          "paired_at",
+          "last_seen_at",
+          "updated_at"
+        ],
+        "title": "PairedAddonRead",
+        "description": "Row representation returned by list / get / heartbeat accessors."
+      },
+      "PairingHealth": {
+        "properties": {
+          "addon": {
+            "type": "string",
+            "title": "Addon"
+          },
+          "contract_version": {
+            "type": "integer",
+            "title": "Contract Version"
+          },
+          "contract_compatible": {
+            "type": "boolean",
+            "title": "Contract Compatible"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen"
+          }
+        },
+        "type": "object",
+        "required": [
+          "addon",
+          "contract_version",
+          "contract_compatible",
+          "last_seen"
+        ],
+        "title": "PairingHealth",
+        "description": "Health of one active add-on pairing (#3025).\n\n``contract_compatible`` re-evaluates the persisted pairing's negotiated\nversion pair against the *current* backplane contract, in both pinning\ndirections \u2014 so an add-on left behind by a backplane upgrade (or a\nbackplane rolled back below an add-on's required minimum) reads as\n``False`` here without a re-handshake. ``last_seen`` is the add-on's last\nliveness heartbeat, ``None`` until it first checks in."
       },
       "PermissionVerdict": {
         "type": "string",
@@ -31851,6 +32321,10 @@
     }
   },
   "tags": [
+    {
+      "name": "addon-pairing",
+      "x-maturity": "experimental"
+    },
     {
       "name": "agent-grants",
       "x-maturity": "experimental"

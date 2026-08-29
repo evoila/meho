@@ -318,6 +318,15 @@ const (
 	MemoryScopeUserTenant MemoryScope = "user-tenant"
 )
 
+// Defines values for OperationRunStatus.
+const (
+	OperationRunStatusCancelled OperationRunStatus = "cancelled"
+	OperationRunStatusFailed    OperationRunStatus = "failed"
+	OperationRunStatusPending   OperationRunStatus = "pending"
+	OperationRunStatusRunning   OperationRunStatus = "running"
+	OperationRunStatusSucceeded OperationRunStatus = "succeeded"
+)
+
 // Defines values for PermissionVerdict.
 const (
 	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
@@ -1220,6 +1229,9 @@ type ApprovalRequestView struct {
 
 // ApproveRequestBody POST body for “…/approve“.
 type ApproveRequestBody struct {
+	// Async Async governed dispatch (#3079). When true, the decision is still recorded synchronously, but the resumed op is dispatched on a background task and the route returns HTTP 202 + a durable run handle immediately instead of blocking for the resumed op's full duration. Poll / cancel via ``/api/v1/operations/runs/{handle}``. Default false — the response is byte-identical to the pre-#3079 inline resume.
+	Async *bool `json:"async,omitempty"`
+
 	// Params The original dispatch params, unchanged. The hash must match the stored params_hash on the approval request.
 	Params *map[string]interface{} `json:"params,omitempty"`
 
@@ -2759,6 +2771,8 @@ type BudgetStatus struct {
 // untouched. The field stores an opaque string -- no validation, no
 // tracker API call (Goal #1651 ships the field only).
 type CallOperationBody struct {
+	// Async Async governed dispatch (#3079). When true, ``/call`` returns a durable run handle (HTTP 202) immediately instead of holding the connection for the op's full duration; execution proceeds server-side and the caller polls / cancels via ``/api/v1/operations/runs/{handle}``. The completed ``OperationResult`` envelope is persisted on the run, so a dropped response never loses the outcome. Default false — sync mode is byte-identical to the pre-#3079 behaviour.
+	Async       *bool                     `json:"async,omitempty"`
 	ConnectorId string                    `json:"connector_id"`
 	OpId        string                    `json:"op_id"`
 	Params      *map[string]interface{}   `json:"params,omitempty"`
@@ -5330,6 +5344,160 @@ type OperationDescriptor struct {
 	Tags              []string                `json:"tags"`
 	TenantId          *openapi_types.UUID     `json:"tenant_id"`
 	Version           string                  `json:"version"`
+}
+
+// OperationRunStatus Closed lifecycle status of an :class:`OperationRun`.
+//
+// Async governed dispatch (#3079). A “POST /api/v1/operations/call“
+// (or “/approvals/{id}/approve“) submitted in async mode creates one
+// durable “operation_run“ row whose “status“ walks an explicit,
+// enforced state machine. The legal transitions live in
+// :data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;
+// the service rejects any edge not on that map so an illegal jump cannot
+// land in the DB.
+//
+// Members:
+//
+//   - :attr:`PENDING` -- the row was created but the background task has
+//     not started executing the dispatch yet (initial state on insert).
+//   - :attr:`RUNNING` -- the background task is executing the governed
+//     dispatch (target resolve + policy + connector call + audit).
+//   - :attr:`SUCCEEDED` -- the dispatch **completed** and its full
+//     :class:`~meho_backplane.connectors.schemas.OperationResult` envelope
+//     is persisted on “result“ (terminal). Note this is the *run*
+//     completing, not the op succeeding: a dispatch that returned
+//     “status='error'“ / “'denied'“ / “'needs-approval'“ is a
+//     “succeeded“ **run** whose persisted envelope carries that
+//     dispatch status. The dropped-response class the feature eliminates
+//     is exactly this: the envelope is durable regardless of the caller's
+//     connection.
+//   - :attr:`FAILED` -- the background task itself did not complete: the
+//     worker died mid-flight (lease lapsed, reaped by the operation-run
+//     reaper) or the dispatch raised unexpectedly (terminal). Distinct
+//     from a persisted error envelope on a “succeeded“ run.
+//   - :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
+//     run (terminal).
+//
+// There is deliberately no “awaiting_approval“ state (unlike
+// :class:`AgentRunStatus`): a governed dispatch runs to a terminal
+// envelope in one shot. A “needs-approval“ dispatch parks its own
+// :class:`ApprovalRequest` and is recorded as a “succeeded“ run whose
+// envelope names the parked request.
+type OperationRunStatus string
+
+// OperationRunStatusResponse Poll response for “GET /operations/runs/{handle}“.
+//
+// “result“ carries the full persisted “OperationResult“ envelope once
+// the run reaches “succeeded“ (the dropped-response-class fix); “error“
+// carries the run-crash / reaper reason on a “failed“ run. Both are
+// “None“ while the run is still “pending“ / “running“.
+type OperationRunStatusResponse struct {
+	ApprovalRequestId *openapi_types.UUID     `json:"approval_request_id"`
+	ConnectorId       string                  `json:"connector_id"`
+	CreatedAt         time.Time               `json:"created_at"`
+	EndedAt           *time.Time              `json:"ended_at"`
+	Error             *string                 `json:"error"`
+	OpId              string                  `json:"op_id"`
+	Origin            string                  `json:"origin"`
+	Result            *map[string]interface{} `json:"result"`
+	RunId             openapi_types.UUID      `json:"run_id"`
+	StartedAt         *time.Time              `json:"started_at"`
+
+	// Status Closed lifecycle status of an :class:`OperationRun`.
+	//
+	// Async governed dispatch (#3079). A ``POST /api/v1/operations/call``
+	// (or ``/approvals/{id}/approve``) submitted in async mode creates one
+	// durable ``operation_run`` row whose ``status`` walks an explicit,
+	// enforced state machine. The legal transitions live in
+	// :data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;
+	// the service rejects any edge not on that map so an illegal jump cannot
+	// land in the DB.
+	//
+	// Members:
+	//
+	// * :attr:`PENDING` -- the row was created but the background task has
+	//   not started executing the dispatch yet (initial state on insert).
+	// * :attr:`RUNNING` -- the background task is executing the governed
+	//   dispatch (target resolve + policy + connector call + audit).
+	// * :attr:`SUCCEEDED` -- the dispatch **completed** and its full
+	//   :class:`~meho_backplane.connectors.schemas.OperationResult` envelope
+	//   is persisted on ``result`` (terminal). Note this is the *run*
+	//   completing, not the op succeeding: a dispatch that returned
+	//   ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a
+	//   ``succeeded`` **run** whose persisted envelope carries that
+	//   dispatch status. The dropped-response class the feature eliminates
+	//   is exactly this: the envelope is durable regardless of the caller's
+	//   connection.
+	// * :attr:`FAILED` -- the background task itself did not complete: the
+	//   worker died mid-flight (lease lapsed, reaped by the operation-run
+	//   reaper) or the dispatch raised unexpectedly (terminal). Distinct
+	//   from a persisted error envelope on a ``succeeded`` run.
+	// * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
+	//   run (terminal).
+	//
+	// There is deliberately no ``awaiting_approval`` state (unlike
+	// :class:`AgentRunStatus`): a governed dispatch runs to a terminal
+	// envelope in one shot. A ``needs-approval`` dispatch parks its own
+	// :class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose
+	// envelope names the parked request.
+	Status     OperationRunStatus `json:"status"`
+	TargetName *string            `json:"target_name"`
+}
+
+// OperationRunSummaryResponse One row of the operation-run list (“GET /operations/runs“).
+//
+// A scannable index row: identity, lifecycle state, dispatch coordinates,
+// timestamps. The full “result“ envelope is omitted — a caller wanting a
+// run's result polls “GET /operations/runs/{handle}“.
+type OperationRunSummaryResponse struct {
+	ApprovalRequestId *openapi_types.UUID `json:"approval_request_id"`
+	ConnectorId       string              `json:"connector_id"`
+	CreatedAt         time.Time           `json:"created_at"`
+	EndedAt           *time.Time          `json:"ended_at"`
+	OpId              string              `json:"op_id"`
+	Origin            string              `json:"origin"`
+	RunId             openapi_types.UUID  `json:"run_id"`
+	StartedAt         *time.Time          `json:"started_at"`
+
+	// Status Closed lifecycle status of an :class:`OperationRun`.
+	//
+	// Async governed dispatch (#3079). A ``POST /api/v1/operations/call``
+	// (or ``/approvals/{id}/approve``) submitted in async mode creates one
+	// durable ``operation_run`` row whose ``status`` walks an explicit,
+	// enforced state machine. The legal transitions live in
+	// :data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;
+	// the service rejects any edge not on that map so an illegal jump cannot
+	// land in the DB.
+	//
+	// Members:
+	//
+	// * :attr:`PENDING` -- the row was created but the background task has
+	//   not started executing the dispatch yet (initial state on insert).
+	// * :attr:`RUNNING` -- the background task is executing the governed
+	//   dispatch (target resolve + policy + connector call + audit).
+	// * :attr:`SUCCEEDED` -- the dispatch **completed** and its full
+	//   :class:`~meho_backplane.connectors.schemas.OperationResult` envelope
+	//   is persisted on ``result`` (terminal). Note this is the *run*
+	//   completing, not the op succeeding: a dispatch that returned
+	//   ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a
+	//   ``succeeded`` **run** whose persisted envelope carries that
+	//   dispatch status. The dropped-response class the feature eliminates
+	//   is exactly this: the envelope is durable regardless of the caller's
+	//   connection.
+	// * :attr:`FAILED` -- the background task itself did not complete: the
+	//   worker died mid-flight (lease lapsed, reaped by the operation-run
+	//   reaper) or the dispatch raised unexpectedly (terminal). Distinct
+	//   from a persisted error envelope on a ``succeeded`` run.
+	// * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
+	//   run (terminal).
+	//
+	// There is deliberately no ``awaiting_approval`` state (unlike
+	// :class:`AgentRunStatus`): a governed dispatch runs to a terminal
+	// envelope in one shot. A ``needs-approval`` dispatch parks its own
+	// :class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose
+	// envelope names the parked request.
+	Status     OperationRunStatus `json:"status"`
+	TargetName *string            `json:"target_name"`
 }
 
 // OperatorIdentity Operator identity surface exposed to the CLI and MCP “meho_status“.
@@ -8875,6 +9043,29 @@ type PostResultQueryApiV1OperationsResultQueryPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListOperationRunsApiV1OperationsRunsGetParams defines parameters for ListOperationRunsApiV1OperationsRunsGet.
+type ListOperationRunsApiV1OperationsRunsGetParams struct {
+	// Status Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state.
+	Status *OperationRunStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Limit Max runs per page (1..500).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Rows to skip for paging.
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetOperationRunStatusApiV1OperationsRunsHandleGetParams defines parameters for GetOperationRunStatusApiV1OperationsRunsHandleGet.
+type GetOperationRunStatusApiV1OperationsRunsHandleGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CancelOperationRunApiV1OperationsRunsHandleCancelPostParams defines parameters for CancelOperationRunApiV1OperationsRunsHandleCancelPost.
+type CancelOperationRunApiV1OperationsRunsHandleCancelPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
@@ -11762,6 +11953,15 @@ type ClientInterface interface {
 
 	PostResultQueryApiV1OperationsResultQueryPost(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOperationRunsApiV1OperationsRunsGet request
+	ListOperationRunsApiV1OperationsRunsGet(ctx context.Context, params *ListOperationRunsApiV1OperationsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetOperationRunStatusApiV1OperationsRunsHandleGet request
+	GetOperationRunStatusApiV1OperationsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetOperationRunStatusApiV1OperationsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelOperationRunApiV1OperationsRunsHandleCancelPost request
+	CancelOperationRunApiV1OperationsRunsHandleCancelPost(ctx context.Context, handle openapi_types.UUID, params *CancelOperationRunApiV1OperationsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetSearchApiV1OperationsSearchGet request
 	GetSearchApiV1OperationsSearchGet(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -14409,6 +14609,42 @@ func (c *Client) PostResultQueryApiV1OperationsResultQueryPostWithBody(ctx conte
 
 func (c *Client) PostResultQueryApiV1OperationsResultQueryPost(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostResultQueryApiV1OperationsResultQueryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListOperationRunsApiV1OperationsRunsGet(ctx context.Context, params *ListOperationRunsApiV1OperationsRunsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOperationRunsApiV1OperationsRunsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetOperationRunStatusApiV1OperationsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetOperationRunStatusApiV1OperationsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest(c.Server, handle, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelOperationRunApiV1OperationsRunsHandleCancelPost(ctx context.Context, handle openapi_types.UUID, params *CancelOperationRunApiV1OperationsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelOperationRunApiV1OperationsRunsHandleCancelPostRequest(c.Server, handle, params)
 	if err != nil {
 		return nil, err
 	}
@@ -25395,6 +25631,200 @@ func NewPostResultQueryApiV1OperationsResultQueryPostRequestWithBody(server stri
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListOperationRunsApiV1OperationsRunsGetRequest generates requests for ListOperationRunsApiV1OperationsRunsGet
+func NewListOperationRunsApiV1OperationsRunsGetRequest(server string, params *ListOperationRunsApiV1OperationsRunsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/runs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest generates requests for GetOperationRunStatusApiV1OperationsRunsHandleGet
+func NewGetOperationRunStatusApiV1OperationsRunsHandleGetRequest(server string, handle openapi_types.UUID, params *GetOperationRunStatusApiV1OperationsRunsHandleGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCancelOperationRunApiV1OperationsRunsHandleCancelPostRequest generates requests for CancelOperationRunApiV1OperationsRunsHandleCancelPost
+func NewCancelOperationRunApiV1OperationsRunsHandleCancelPostRequest(server string, handle openapi_types.UUID, params *CancelOperationRunApiV1OperationsRunsHandleCancelPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/runs/%s/cancel", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -40409,6 +40839,15 @@ type ClientWithResponsesInterface interface {
 
 	PostResultQueryApiV1OperationsResultQueryPostWithResponse(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error)
 
+	// ListOperationRunsApiV1OperationsRunsGetWithResponse request
+	ListOperationRunsApiV1OperationsRunsGetWithResponse(ctx context.Context, params *ListOperationRunsApiV1OperationsRunsGetParams, reqEditors ...RequestEditorFn) (*ListOperationRunsApiV1OperationsRunsGetResponse, error)
+
+	// GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse request
+	GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetOperationRunStatusApiV1OperationsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetOperationRunStatusApiV1OperationsRunsHandleGetResponse, error)
+
+	// CancelOperationRunApiV1OperationsRunsHandleCancelPostWithResponse request
+	CancelOperationRunApiV1OperationsRunsHandleCancelPostWithResponse(ctx context.Context, handle openapi_types.UUID, params *CancelOperationRunApiV1OperationsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse, error)
+
 	// GetSearchApiV1OperationsSearchGetWithResponse request
 	GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error)
 
@@ -43726,6 +44165,75 @@ func (r PostResultQueryApiV1OperationsResultQueryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostResultQueryApiV1OperationsResultQueryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListOperationRunsApiV1OperationsRunsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]OperationRunSummaryResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOperationRunsApiV1OperationsRunsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOperationRunsApiV1OperationsRunsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetOperationRunStatusApiV1OperationsRunsHandleGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationRunStatusResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetOperationRunStatusApiV1OperationsRunsHandleGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetOperationRunStatusApiV1OperationsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationRunSummaryResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -50821,6 +51329,33 @@ func (c *ClientWithResponses) PostResultQueryApiV1OperationsResultQueryPostWithR
 	return ParsePostResultQueryApiV1OperationsResultQueryPostResponse(rsp)
 }
 
+// ListOperationRunsApiV1OperationsRunsGetWithResponse request returning *ListOperationRunsApiV1OperationsRunsGetResponse
+func (c *ClientWithResponses) ListOperationRunsApiV1OperationsRunsGetWithResponse(ctx context.Context, params *ListOperationRunsApiV1OperationsRunsGetParams, reqEditors ...RequestEditorFn) (*ListOperationRunsApiV1OperationsRunsGetResponse, error) {
+	rsp, err := c.ListOperationRunsApiV1OperationsRunsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOperationRunsApiV1OperationsRunsGetResponse(rsp)
+}
+
+// GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse request returning *GetOperationRunStatusApiV1OperationsRunsHandleGetResponse
+func (c *ClientWithResponses) GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetOperationRunStatusApiV1OperationsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetOperationRunStatusApiV1OperationsRunsHandleGetResponse, error) {
+	rsp, err := c.GetOperationRunStatusApiV1OperationsRunsHandleGet(ctx, handle, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetOperationRunStatusApiV1OperationsRunsHandleGetResponse(rsp)
+}
+
+// CancelOperationRunApiV1OperationsRunsHandleCancelPostWithResponse request returning *CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse
+func (c *ClientWithResponses) CancelOperationRunApiV1OperationsRunsHandleCancelPostWithResponse(ctx context.Context, handle openapi_types.UUID, params *CancelOperationRunApiV1OperationsRunsHandleCancelPostParams, reqEditors ...RequestEditorFn) (*CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse, error) {
+	rsp, err := c.CancelOperationRunApiV1OperationsRunsHandleCancelPost(ctx, handle, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelOperationRunApiV1OperationsRunsHandleCancelPostResponse(rsp)
+}
+
 // GetSearchApiV1OperationsSearchGetWithResponse request returning *GetSearchApiV1OperationsSearchGetResponse
 func (c *ClientWithResponses) GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error) {
 	rsp, err := c.GetSearchApiV1OperationsSearchGet(ctx, params, reqEditors...)
@@ -57458,6 +57993,105 @@ func ParsePostResultQueryApiV1OperationsResultQueryPostResponse(rsp *http.Respon
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListOperationRunsApiV1OperationsRunsGetResponse parses an HTTP response from a ListOperationRunsApiV1OperationsRunsGetWithResponse call
+func ParseListOperationRunsApiV1OperationsRunsGetResponse(rsp *http.Response) (*ListOperationRunsApiV1OperationsRunsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOperationRunsApiV1OperationsRunsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []OperationRunSummaryResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetOperationRunStatusApiV1OperationsRunsHandleGetResponse parses an HTTP response from a GetOperationRunStatusApiV1OperationsRunsHandleGetWithResponse call
+func ParseGetOperationRunStatusApiV1OperationsRunsHandleGetResponse(rsp *http.Response) (*GetOperationRunStatusApiV1OperationsRunsHandleGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetOperationRunStatusApiV1OperationsRunsHandleGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationRunStatusResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelOperationRunApiV1OperationsRunsHandleCancelPostResponse parses an HTTP response from a CancelOperationRunApiV1OperationsRunsHandleCancelPostWithResponse call
+func ParseCancelOperationRunApiV1OperationsRunsHandleCancelPostResponse(rsp *http.Response) (*CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelOperationRunApiV1OperationsRunsHandleCancelPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationRunSummaryResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

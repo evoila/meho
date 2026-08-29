@@ -41,7 +41,8 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import status as http_status
 from fastapi.openapi.models import Example
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,6 +64,7 @@ from meho_backplane.operations.meta_tools import (
     preview_operation,
     search_operations,
 )
+from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
     ResultHandleNotFoundError,
@@ -266,6 +268,7 @@ async def get_search(
 @router.post("/call")
 async def post_call(
     body: CallOperationBody,
+    response: Response,
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """Invoke :func:`~meho_backplane.operations.dispatch` for an op id.
@@ -275,6 +278,17 @@ async def post_call(
     envelope (``status='error'`` + ``extras.error_code``) rather than
     HTTP 4xx. The route returns 200 on a structured-error envelope so
     callers see the dispatcher's error_code in ``extras``.
+
+    Async governed dispatch (#3079): when the body carries ``async: true``
+    the route does **not** dispatch inline. It creates a durable
+    ``operation_run`` row, launches the governed dispatch on a background
+    task, and returns HTTP 202 + the run handle immediately —
+    ``{"run_id", "status": "pending", "async": true}``. The caller polls /
+    cancels via ``/api/v1/operations/runs/{handle}``; the completed
+    ``OperationResult`` envelope is persisted on the run, so a dropped
+    response never loses the outcome (the motivating incident: an 83s
+    vendor call whose 200 was lost in transit). Default (``async`` absent /
+    false) is byte-identical to the pre-#3079 synchronous path below.
 
     Target-failure contract (#136, completed by #2110 Option A): **every**
     target-failure mode returns HTTP 200 + the dispatcher envelope — a
@@ -289,7 +303,16 @@ async def post_call(
     the candidate ``matches``. No target-failure mode returns a 4xx: a
     consumer's error handling is a single switch on ``extras.error_code``.
     """
-    return await call_operation(operator, body.model_dump())
+    # Drop the transport-only ``async_`` control before it reaches the
+    # dispatch arguments (``call_operation`` reads connector_id / op_id /
+    # target / params / work_ref; ``async`` is a MEHO submit control, not
+    # an op param).
+    arguments = body.model_dump(exclude={"async_"})
+    if body.async_:
+        run_id = await get_operation_run_service().submit_call(operator, arguments)
+        response.status_code = http_status.HTTP_202_ACCEPTED
+        return {"run_id": str(run_id), "status": "pending", "async": True}
+    return await call_operation(operator, arguments)
 
 
 class ResultQueryBody(BaseModel):

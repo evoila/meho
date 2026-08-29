@@ -57,6 +57,7 @@ from typing import Annotated, Any
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi import status as http_status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -76,6 +77,7 @@ from meho_backplane.operations.approval_queue import (
     reject_request,
     resume_dispatch_after_approval,
 )
+from meho_backplane.operations.operation_run_service import get_operation_run_service
 
 __all__ = ["router"]
 
@@ -120,7 +122,7 @@ class ApprovalRequestView(BaseModel):
 class ApproveRequestBody(BaseModel):
     """POST body for ``…/approve``."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     params: dict[str, Any] = Field(
         default_factory=dict,
@@ -132,6 +134,19 @@ class ApproveRequestBody(BaseModel):
     reason: str = Field(
         default="",
         description="Optional human-readable approval reason (recorded in the audit row).",
+    )
+    async_: bool = Field(
+        default=False,
+        alias="async",
+        description=(
+            "Async governed dispatch (#3079). When true, the decision is "
+            "still recorded synchronously, but the resumed op is dispatched "
+            "on a background task and the route returns HTTP 202 + a durable "
+            "run handle immediately instead of blocking for the resumed op's "
+            "full duration. Poll / cancel via "
+            "``/api/v1/operations/runs/{handle}``. Default false — the "
+            "response is byte-identical to the pre-#3079 inline resume."
+        ),
     )
 
 
@@ -369,35 +384,21 @@ async def get_approval_request(
     return _view(row)
 
 
-@router.post(
-    "/{request_id}/approve",
-    response_model=ApproveResponseBody,
-)
-async def approve_approval_request(
-    request_id: Annotated[uuid.UUID, Path()],
+async def _record_approval_decision(
+    request_id: uuid.UUID,
+    *,
+    operator: Operator,
     body: ApproveRequestBody,
-    operator: Operator = _require_operator,
-) -> ApproveResponseBody:
-    """Approve a pending request and re-dispatch the original operation.
+) -> ApprovalRequest:
+    """Commit + audit the approval decision, publish the event, map errors.
 
-    The ``params`` body must be the original params unchanged; the service
-    re-hashes them and rejects with 422 on a mismatch. On a successful
-    approval the original dispatch is re-executed and the result returned.
-
-    HTTP status codes:
-
-    * 200 — approved + re-dispatched successfully.
-    * 403 — operator lacks ``operator`` role, **or** the approver is the
-      requester and self-approval break-glass is disabled (G11.7-T1 #1401).
-    * 404 — request not found (or belongs to another tenant).
-    * 409 — request is already decided.
-    * 422 — params hash mismatch.
+    The synchronous half shared by both the inline-resume and the async
+    (#3079) approve paths: the decision is recorded + audited inside one
+    transaction and the ``approval.approved`` event is published only after
+    commit (G11.2-T5). Extracted so :func:`approve_approval_request` stays a
+    thin dispatcher over the two resume tails. Raises the typed
+    :class:`HTTPException` for each decision-time failure class.
     """
-    structlog.contextvars.bind_contextvars(
-        audit_op_id="approval.approve",
-        audit_op_class="write",
-        audit_approval_request_id=str(request_id),
-    )
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
@@ -447,6 +448,70 @@ async def approve_approval_request(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="params_hash_mismatch",
         ) from exc
+    return request
+
+
+@router.post(
+    "/{request_id}/approve",
+    response_model=ApproveResponseBody,
+)
+async def approve_approval_request(
+    request_id: Annotated[uuid.UUID, Path()],
+    body: ApproveRequestBody,
+    operator: Operator = _require_operator,
+) -> ApproveResponseBody | JSONResponse:
+    """Approve a pending request and re-dispatch the original operation.
+
+    The ``params`` body must be the original params unchanged; the service
+    re-hashes them and rejects with 422 on a mismatch. On a successful
+    approval the original dispatch is re-executed and the result returned.
+
+    Async governed dispatch (#3079): with ``async: true`` the decision is
+    still recorded + audited synchronously, but the resumed op is dispatched
+    on a background task and the route returns HTTP 202 + a durable run
+    handle (``{"run_id", "status": "pending", "async": true}``) instead of
+    blocking for the resumed op's full duration. The resume runs through the
+    same exactly-one-resumer claim + policy bypass + audit path the inline
+    resume uses. Default (``async`` absent / false) is byte-identical to the
+    pre-#3079 inline resume below.
+
+    HTTP status codes:
+
+    * 200 — approved + re-dispatched successfully (sync).
+    * 202 — approved; resume launched in the background (``async: true``).
+    * 403 — operator lacks ``operator`` role, **or** the approver is the
+      requester and self-approval break-glass is disabled (G11.7-T1 #1401).
+    * 404 — request not found (or belongs to another tenant).
+    * 409 — request is already decided.
+    * 422 — params hash mismatch.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.approve",
+        audit_op_class="write",
+        audit_approval_request_id=str(request_id),
+    )
+    request = await _record_approval_decision(request_id, operator=operator, body=body)
+
+    # Async governed dispatch (#3079): hand the resume to the background
+    # substrate and return the durable handle at 202 instead of blocking.
+    # The decision is already committed + audited above; the exactly-one-
+    # resumer claim (#2293) still guards the single execution, now won
+    # inside the background task.
+    if body.async_:
+        run_id = await get_operation_run_service().submit_approval_resume(
+            operator, request, params=body.params
+        )
+        _log.info(
+            "approval_request_resume_dispatched_async",
+            approval_request_id=str(request_id),
+            op_id=request.op_id,
+            operation_run_id=str(run_id),
+            operator_sub=operator.sub,
+        )
+        return JSONResponse(
+            content={"run_id": str(run_id), "status": "pending", "async": True},
+            status_code=http_status.HTTP_202_ACCEPTED,
+        )
 
     dispatch_result = await _resume_dispatch_after_approval(
         operator=operator, request=request, params=body.params

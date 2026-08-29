@@ -719,6 +719,7 @@ class HttpConnector(Connector):
         *,
         operator: Operator,
         verb: str = "POST",
+        params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
@@ -734,6 +735,14 @@ class HttpConnector(Connector):
         verb is validated against :data:`_IDEMPOTENT_METHODS` so a caller
         that accidentally routes an idempotent verb here (which would skip
         the tenacity retry on :meth:`_request_json`) fails loudly.
+
+        ``params`` are appended to the URL as the query string, mirroring
+        :meth:`_request_json`'s ``params=`` seam so a non-idempotent
+        ingested op whose spec locates a parameter ``in: query`` (not baked
+        into the path literal) reaches the wire with its query string
+        instead of silently dropping it (#3092). It defaults to ``None`` --
+        httpx's own default for ``params=`` -- so every existing caller that
+        omits it dispatches byte-identically to before.
 
         Two body shapes are supported and are mutually exclusive: ``json``
         serialises a JSON request body (``application/json``); ``data``
@@ -778,6 +787,7 @@ class HttpConnector(Connector):
         resp = await client.request(
             verb,
             path,
+            params=params,
             json=json,
             data=data,
             headers=headers,

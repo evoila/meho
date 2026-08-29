@@ -474,6 +474,7 @@ class VcfAutomationConnector(HttpConnector):
         *,
         operator: Operator,
         verb: str = "POST",
+        params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
@@ -482,10 +483,14 @@ class VcfAutomationConnector(HttpConnector):
         """Path-aware non-idempotent JSON request with per-plane 401 retry-once.
 
         Honours the *actual* non-idempotent verb (``POST``/``PUT``/``PATCH``/
-        ``DELETE``), an optional form-encoded ``data=`` body, and an optional
-        per-request ``timeout`` override, mirroring the base
-        :meth:`HttpConnector._post_json` contract (#1968, #3076) while keeping
-        the per-plane 401 retry-once dance.
+        ``DELETE``), an optional query string (``params=``), an optional
+        form-encoded ``data=`` body, and an optional per-request ``timeout``
+        override, mirroring the base :meth:`HttpConnector._post_json` contract
+        (#1968, #3076, #3092) while keeping the per-plane 401 retry-once dance.
+        Keeping ``params=`` in the override signature preserves contract parity
+        with the base seam the generic dispatcher now threads on the
+        non-idempotent path (#3092); it defaults to ``None`` so existing
+        callers dispatch byte-identically.
         """
         verb = verb.upper()
         if verb in {"GET", "HEAD", "OPTIONS"}:
@@ -497,7 +502,7 @@ class VcfAutomationConnector(HttpConnector):
             verb,
             path,
             operator=operator,
-            params=None,
+            params=params,
             json=json,
             data=data,
             extra_headers=extra_headers,

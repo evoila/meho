@@ -391,64 +391,79 @@ _DATASTORE_DETAIL: dict[str, dict[str, Any]] = {
     "datastore-22": {"capacity": 5000, "free_space": 2500, "type": "NFS"},
 }
 
-#: Per-datastore ``GET /vcenter/vm`` placement bodies. Distinct per datastore
-#: (a VM's working directory lives on exactly one datastore), so the composite's
-#: cross-row identical-sets guard (#2975) sees real placement rather than the
-#: global-list symptom it discards -- a single VM shared across every datastore
-#: would trip that guard.
-_DATASTORE_VMS: dict[str, list[dict[str, str]]] = {
-    "datastore-11": [{"name": "vm-x"}],
-    "datastore-22": [{"name": "vm-y"}],
+#: Global ``GET /vcenter/vm`` inventory (moid + name). The composite reads this
+#: unfiltered, then scopes each datastore row off vim placement (#2975) rather
+#: than a server-side datastore filter some builds silently ignore.
+_DATASTORE_GLOBAL_VMS: list[dict[str, str]] = [
+    {"vm": "vm-11", "name": "vm-x"},
+    {"vm": "vm-22", "name": "vm-y"},
+]
+
+#: Authoritative ``VirtualMachine.datastore`` placement (vim). One datastore per
+#: VM here, so the two rows get disjoint lists -- real placement, not the
+#: global-list symptom the belt-and-braces guard (#3049) discards.
+_DATASTORE_VM_PLACEMENT: dict[str, list[str]] = {
+    "vm-11": ["datastore-11"],
+    "vm-22": ["datastore-22"],
 }
 
 
-def _register_datastore_composite_routes(
-    mock: respx.MockRouter, *, mount: str, reject_prefixed_filter: bool = False
-) -> None:
+def _placement_retrieve_result() -> dict[str, Any]:
+    """A ``RetrieveResult`` carrying each VM's boxed ``datastore`` MoRef array.
+
+    Array-valued props arrive boxed on live VI-JSON 8.0.3 (#3106); the body
+    mirrors that so the composite's ``unwrap_vim_value`` path is exercised.
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": "VirtualMachine", "value": vm},
+                "propSet": [
+                    {
+                        "name": "datastore",
+                        "val": {
+                            "_typeName": "ArrayOfManagedObjectReference",
+                            "_value": [
+                                {
+                                    "_typeName": "ManagedObjectReference",
+                                    "type": "Datastore",
+                                    "value": ds,
+                                }
+                                for ds in dses
+                            ],
+                        },
+                    }
+                ],
+            }
+            for vm, dses in _DATASTORE_VM_PLACEMENT.items()
+        ]
+    }
+
+
+def _register_datastore_composite_routes(mock: respx.MockRouter, *, mount: str) -> None:
     """Register the datastore-usage composite's sub-op surface under *mount*.
 
     The composite issues, directly on the session (no ingested descriptor,
-    no dispatch_child): the datastore listing, one per-datastore detail
-    GET, and one per-datastore VM-placement GET filtered by datastore.
-    All are mounted onto ``mount`` (``/api`` modern or ``/rest`` legacy) by
-    ``mount_op_path``.
-
-    When *reject_prefixed_filter* is set (modern ``/api``), the VM route
-    mimics real vCenter 8.x: it returns HTTP 400 for the legacy
-    ``filter.``-prefixed query and 200 only for the bare param name. This
-    is the regression guard for #2298 — before the fix the composite sent
-    ``filter.datastores`` on every mount and 400'd this leg on real
-    vCenter, which the path-only respx route previously masked.
+    no dispatch_child): the datastore listing, one per-datastore detail GET,
+    one **global unfiltered** ``GET /vcenter/vm`` listing, and one
+    ``RetrievePropertiesEx`` reading each VM's authoritative
+    ``VirtualMachine.datastore`` placement (#2975). The REST legs mount onto
+    ``mount`` (``/api`` modern or ``/rest`` legacy) via ``mount_op_path``;
+    the vmomi RetrievePropertiesEx rides the VI-JSON seam
+    (``/sdk/vim25/{release}`` modern, ``/rest`` legacy; #2466).
     """
     mock.get(f"{mount}/vcenter/datastore").respond(200, json=_DATASTORE_LISTING)
     for ds_id, detail in _DATASTORE_DETAIL.items():
         mock.get(f"{mount}/vcenter/datastore/{ds_id}").respond(200, json=detail)
-
-    def _vms_for(request: httpx.Request) -> list[dict[str, str]]:
-        # Serve this datastore's own VMs, keyed off the placement filter the
-        # composite sends (bare ``datastores`` on /api, ``filter.datastores``
-        # on legacy /rest). Distinct per-datastore sets keep the cross-row
-        # identical-sets guard (#2975) from tripping on the fixture.
-        params = request.url.params
-        ds_id = params.get("datastores") or params.get("filter.datastores") or ""
-        return _DATASTORE_VMS.get(ds_id, [])
-
-    if reject_prefixed_filter:
-
-        def _vm_route(request: httpx.Request) -> httpx.Response:
-            # Modern /api addresses the FilterSpec field by its bare name
-            # and 400s the legacy ``filter.``-prefixed form.
-            if "filter." in request.url.query.decode():
-                return httpx.Response(400, json={"messages": ["unknown query parameter"]})
-            return httpx.Response(200, json=_vms_for(request))
-
-        mock.get(f"{mount}/vcenter/vm").mock(side_effect=_vm_route)
-    else:
-
-        def _vm_route_legacy(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json=_vms_for(request))
-
-        mock.get(f"{mount}/vcenter/vm").mock(side_effect=_vm_route_legacy)
+    # Global, unfiltered VM listing -- scoping is client-side off vim placement.
+    mock.get(f"{mount}/vcenter/vm").respond(200, json=_DATASTORE_GLOBAL_VMS)
+    # Authoritative placement read (vmomi RetrievePropertiesEx).
+    vmomi_path = (
+        "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        if mount == "/api"
+        else "/rest/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    )
+    mock.post(vmomi_path).respond(200, json=_placement_retrieve_result())
 
 
 @pytest.mark.asyncio
@@ -478,7 +493,10 @@ async def test_datastore_usage_composite_over_modern_mount(
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
-        _register_datastore_composite_routes(mock, mount="/api", reject_prefixed_filter=True)
+        # The vmomi placement read derives its VI-JSON {release} from
+        # about.version (#2466 / #2975).
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
+        _register_datastore_composite_routes(mock, mount="/api")
         mock.delete("/api/session").respond(204)
         try:
             out = await datastore_usage_composite(
@@ -494,12 +512,14 @@ async def test_datastore_usage_composite_over_modern_mount(
     assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
     assert rows[0]["capacity"] == 1000
     assert rows[0]["free_space"] == 400
-    # VM-placement enrichment populated on every row: the bare-param query
-    # the fix (#2298) sends is accepted (no 400 -> no enrichment_note skip).
+    # VM-placement enrichment scoped per datastore off authoritative vim
+    # placement (#2975): each row carries only its own VMs, disjoint across
+    # rows, so no enrichment_note skip and the identical-sets guard is silent.
     assert rows[0]["vm_count"] == 1
     assert rows[0]["vm_names"] == ["vm-x"]
     assert "enrichment_note" not in rows[0]
     assert rows[1]["vm_count"] == 1
+    assert rows[1]["vm_names"] == ["vm-y"]
     assert "enrichment_note" not in rows[1]
 
 
@@ -548,6 +568,11 @@ async def test_datastore_usage_composite_over_legacy_mount_routes_to_rest(
     rows = out["datastores"]
     assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
     assert rows[1]["capacity"] == 5000
+    # The vmomi placement read routes through the legacy /rest mount too, so
+    # each row is scoped per datastore off vim placement (#2466 / #2975).
+    assert rows[0]["vm_names"] == ["vm-x"]
+    assert rows[1]["vm_names"] == ["vm-y"]
+    assert all("enrichment_note" not in r for r in rows)
 
 
 # ---------------------------------------------------------------------------

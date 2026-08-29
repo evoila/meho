@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
+
+- `vmware.composite.datastore.usage` enriched every datastore row with the
+  **whole-inventory** VM list — identical `vm_count` (the cluster-wide total)
+  and identical `vm_names` on all rows — because it scoped placement with a
+  per-datastore `GET:/vcenter/vm?datastores=<ds>` filter that some vCenter
+  builds silently ignore, returning the unfiltered list on every call. The
+  classic "which VMs live on this filling-up datastore?" triage question got
+  the same wrong answer on every row. The composite now resolves placement
+  authoritatively: one unfiltered `GET:/vcenter/vm` (moid + name) plus one
+  `RetrievePropertiesEx` over the vim `VirtualMachine.datastore` property,
+  joined client-side into per-datastore `vm_count`/`vm_names`. Each row carries
+  only the VMs vim reports on that datastore regardless of whether any REST
+  filter is honoured (a VM whose disks span two datastores appears under both),
+  and the two batched reads replace N per-datastore calls. The #3049
+  identical-sets guard stays as belt-and-braces; authoritative placement makes
+  its firing condition impossible in practice.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

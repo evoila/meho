@@ -95,19 +95,25 @@ def _make_operator() -> Operator:
 
 
 class _SequenceConnector:
-    """Minimal ``VmwareRestConnector`` stand-in serving canned GETs in order.
+    """Minimal ``VmwareRestConnector`` stand-in serving canned sub-ops in order.
 
-    ``datastore.usage`` issues only GET sub-ops (list datastores -> per-DS
-    detail -> per-DS VM list), each routed through ``_read_sub_op``'s
-    ``mount_op_path`` -> ``adapt_op_query`` -> ``_get_json`` seam. This double
-    serves the responses sequentially and records each call's ``(path, query)``
-    so a test can assert the ``filter.names`` narrowing flowed to the listing.
+    ``datastore.usage`` issues GET sub-ops (list datastores -> per-DS detail ->
+    global VM listing) plus one vmomi ``RetrievePropertiesEx`` POST reading the
+    authoritative ``VirtualMachine.datastore`` placement (#2975), each routed
+    through ``_read_sub_op``. This double serves the responses sequentially and
+    records each GET call's ``(path, query)`` so a test can assert the
+    ``filter.names`` narrowing flowed to the listing.
     """
 
     def __init__(self, responses: list[Any]) -> None:
         self._responses = responses
         self._index = 0
         self.calls: list[dict[str, Any]] = []
+
+    def _next(self) -> Any:
+        payload = self._responses[self._index]
+        self._index += 1
+        return payload
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -129,9 +135,45 @@ class _SequenceConnector:
     ) -> Any:
         del target, operator
         self.calls.append({"path": path, "query": params})
-        payload = self._responses[self._index]
-        self._index += 1
-        return payload
+        return self._next()
+
+    async def _post_vmomi_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        del target, path, operator, json
+        return self._next()
+
+
+def _placement_on_one_datastore(vm_moids: list[str], ds_moid: str) -> dict[str, Any]:
+    """A ``RetrieveResult`` pinning every VM to a single datastore (boxed MoRefs)."""
+    return {
+        "objects": [
+            {
+                "obj": {"type": "VirtualMachine", "value": vm},
+                "propSet": [
+                    {
+                        "name": "datastore",
+                        "val": {
+                            "_typeName": "ArrayOfManagedObjectReference",
+                            "_value": [
+                                {
+                                    "_typeName": "ManagedObjectReference",
+                                    "type": "Datastore",
+                                    "value": ds_moid,
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+            for vm in vm_moids
+        ]
+    }
 
 
 async def _usage_one_datastore(
@@ -144,8 +186,14 @@ async def _usage_one_datastore(
     """Run the real handler for a single filtered datastore, return (payload, conn)."""
     listing = [{"datastore": "datastore-42", "name": name, "type": "vSAN"}]
     detail = {"capacity": capacity, "free_space": free_space, "type": "vSAN"}
-    vms = [{"name": vm_name} for vm_name in vm_names]
-    conn = _SequenceConnector([listing, detail, vms])
+    # Global VM inventory (moid + name), then vim placement pinning every VM to
+    # this datastore -- the authoritative scoping the composite joins on (#2975).
+    vm_moids = [f"vm-{i}" for i in range(len(vm_names))]
+    global_vms = [
+        {"vm": moid, "name": vm_name} for moid, vm_name in zip(vm_moids, vm_names, strict=True)
+    ]
+    placement = _placement_on_one_datastore(vm_moids, "datastore-42")
+    conn = _SequenceConnector([listing, detail, global_vms, placement])
     payload = await datastore_usage_composite(
         operator=_make_operator(),
         target=object(),

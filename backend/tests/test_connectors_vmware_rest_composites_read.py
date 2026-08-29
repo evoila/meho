@@ -49,6 +49,7 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.vim_body import vim_moref
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -206,6 +207,38 @@ def _retrieve_result(prop_sets: dict[str, Any]) -> dict[str, Any]:
                 "propSet": [{"name": name, "val": val} for name, val in prop_sets.items()],
             }
         ]
+    }
+
+
+def _retrieve_result_multi(
+    objects: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a multi-object ``RetrievePropertiesEx`` result payload.
+
+    Keyed by ``(mo_type, moid)`` so a single read can carry per-object
+    property sets -- the shape the datastore-usage placement read
+    (``VirtualMachine.datastore`` across every VM) consumes.
+    """
+    return {
+        "objects": [
+            {
+                "obj": {"type": mo_type, "value": moid},
+                "propSet": [{"name": name, "val": val} for name, val in props.items()],
+            }
+            for (mo_type, moid), props in objects.items()
+        ]
+    }
+
+
+def _vm_placement(datastore_moids: list[str]) -> dict[str, Any]:
+    """A boxed ``VirtualMachine.datastore`` prop value: an array of Datastore MoRefs.
+
+    Mirrors the live VI-JSON 8.0.3 boxing (#3106): array-valued props
+    arrive as ``{"_typeName": "ArrayOf...", "_value": [...]}``.
+    """
+    return {
+        "_typeName": "ArrayOfManagedObjectReference",
+        "_value": [vim_moref("Datastore", moid) for moid in datastore_moids],
     }
 
 
@@ -581,26 +614,34 @@ async def test_performance_summary_passes_through_interval_and_custom_perf_mgr()
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() -> None:
-    """Listing + per-DS detail + per-DS VM-listing; aggregated payload matches spec."""
+async def test_datastore_usage_aggregates_capacity_and_authoritative_placement() -> None:
+    """Listing + per-DS detail + one batched authoritative placement read;
+    aggregated payload matches spec (#2975)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
         {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
     ]
-    detail_by_id = {
-        "datastore-1": {"capacity": 100, "free_space": 40, "type": "VMFS"},
-        "datastore-2": {"capacity": 500, "free_space": 250, "type": "NFS"},
-    }
-    vms_by_ds: dict[str, list[dict[str, Any]]] = {
-        "datastore-1": [{"name": "vm-a"}, {"name": "vm-b"}],
-        "datastore-2": [{"name": "vm-c"}],
-    }
-
-    sequence: list[Any] = [listing]
-    for entry in listing:
-        sequence.append(detail_by_id[entry["datastore"]])
-        sequence.append(vms_by_ds[entry["datastore"]])
-    conn = _RecordingConnector(sequence)
+    global_vms = [
+        {"vm": "vm-1", "name": "vm-a"},
+        {"vm": "vm-2", "name": "vm-b"},
+        {"vm": "vm-3", "name": "vm-c"},
+    ]
+    placement = _retrieve_result_multi(
+        {
+            ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-3"): {"datastore": _vm_placement(["datastore-2"])},
+        }
+    )
+    conn = _RecordingConnector(
+        [
+            listing,
+            {"capacity": 100, "free_space": 40, "type": "VMFS"},
+            {"capacity": 500, "free_space": 250, "type": "NFS"},
+            global_vms,
+            placement,
+        ]
+    )
 
     out = await datastore_usage_composite(
         operator=_make_operator(),
@@ -609,18 +650,21 @@ async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() ->
         connector=conn,  # type: ignore[arg-type]
     )
 
-    # 1 listing + 2 datastores * 2 sub-ops each = 5 calls total.
+    # 1 listing + 2 per-DS detail + 1 global VM listing + 1 placement read.
     assert len(conn.calls) == 5
     assert conn.calls[0]["method"] == "GET"
     assert conn.calls[0]["path"] == "/api/vcenter/datastore"
     # No filter -> no query string.
     assert conn.calls[0]["query"] is None
-    # Per-DS detail call embeds the datastore moid in the mounted path.
+    # Per-DS detail calls embed the datastore moid in the mounted path;
+    # they run consecutively before the batched placement read.
     assert conn.calls[1]["path"] == "/api/vcenter/datastore/datastore-1"
-    # Per-DS VM call filters by datastore; on the modern /api mount the
-    # param is sent bare (#2298), not ``filter.datastores``.
-    assert conn.calls[2]["path"] == "/api/vcenter/vm"
-    assert conn.calls[2]["query"] == {"datastores": ["datastore-1"]}
+    assert conn.calls[2]["path"] == "/api/vcenter/datastore/datastore-2"
+    # The VM listing is global -- no per-datastore scoping query is sent
+    # upstream; scoping is done client-side off vim placement (#2975).
+    assert conn.calls[3]["path"] == "/api/vcenter/vm"
+    assert conn.calls[3]["query"] is None
+    assert conn.calls[4]["path"] == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
     # Final aggregated shape.
     assert out == {
         "datastores": [
@@ -722,10 +766,11 @@ async def test_datastore_usage_filter_names_passes_through_to_listing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_filter_params_keep_prefix_on_legacy_mount() -> None:
-    """On the legacy/vcsim ``/rest`` mount, filter params keep the ``filter.`` prefix (#2298)."""
+async def test_datastore_usage_listing_filter_keeps_prefix_on_legacy_mount() -> None:
+    """On the legacy/vcsim ``/rest`` mount the listing filter keeps the
+    ``filter.`` prefix (#2298); the global VM listing carries no filter."""
     listing = [{"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 10}]
-    sequence = [listing, {"capacity": 10, "free_space": 4}, [{"name": "vm-a"}]]
+    sequence = [listing, {"capacity": 10, "free_space": 4}, []]
     conn = _RecordingConnector(sequence, mount_prefix="/rest")
     await datastore_usage_composite(
         operator=_make_operator(),
@@ -733,19 +778,25 @@ async def test_datastore_usage_filter_params_keep_prefix_on_legacy_mount() -> No
         params={"filter_names": ["ds-prod-1"]},
         connector=conn,  # type: ignore[arg-type]
     )
-    # Listing keeps ``filter.names``; per-DS VM leg keeps ``filter.datastores``.
+    # Listing keeps ``filter.names`` on /rest; the global VM leg is unfiltered
+    # (per-datastore placement is resolved off vim, not a REST filter, #2975).
     assert conn.calls[0]["path"] == "/rest/vcenter/datastore"
     assert conn.calls[0]["query"] == {"filter.names": ["ds-prod-1"]}
-    assert conn.calls[2]["query"] == {"filter.datastores": ["datastore-1"]}
+    assert conn.calls[2]["path"] == "/rest/vcenter/vm"
+    assert conn.calls[2]["query"] is None
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_tolerates_legacy_envelope_on_listing() -> None:
-    """``{"value": [...]}`` listing envelope is unwrapped."""
+async def test_datastore_usage_tolerates_legacy_envelope_on_reads() -> None:
+    """``{"value": [...]}`` envelopes on the listing / detail / VM legs are unwrapped."""
+    placement = _retrieve_result_multi(
+        {("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])}}
+    )
     sequence = [
         {"value": [{"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"}]},
         {"value": {"capacity": 10, "free_space": 5}},
-        {"value": [{"name": "vm-x"}]},
+        {"value": [{"vm": "vm-1", "name": "vm-x"}]},
+        placement,
     ]
     conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
@@ -782,19 +833,21 @@ async def test_datastore_usage_skips_malformed_listing_entries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() -> None:
-    """A failed VM-placement sub-op keeps the row; vm_count/vm_names null + note (#1908)."""
+async def test_datastore_usage_placement_read_error_is_best_effort() -> None:
+    """A failed batched placement read keeps every row's capacity but nulls
+    vm_count/vm_names + records a note on all rows (best-effort, #1908 / #2975)."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+    ]
     sequence = [
-        [
-            {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
-            {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
-        ],
-        # datastore-1: detail OK, VM enrichment 400s -> best-effort skip.
+        listing,
         {"capacity": 100, "free_space": 40},
-        _http_error(400, "https://vc/api/vcenter/vm?filter.datastores=datastore-1"),
-        # datastore-2: detail OK, VM enrichment OK -> fully enriched.
         {"capacity": 500, "free_space": 250},
-        [{"name": "vm-c"}],
+        # The global VM listing succeeds; the placement RetrievePropertiesEx
+        # 403s -> the whole batched enrichment degrades on every row.
+        [{"vm": "vm-1", "name": "vm-a"}],
+        _http_error(403, "https://vc/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"),
     ]
     conn = _RecordingConnector(sequence)
     out = await datastore_usage_composite(
@@ -804,49 +857,52 @@ async def test_datastore_usage_vm_enrichment_is_best_effort_on_sub_op_error() ->
         connector=conn,  # type: ignore[arg-type]
     )
 
-    # All 5 sub-ops fired -- the failed VM leg did not short-circuit.
+    # All 5 sub-ops fired -- the failed placement read did not short-circuit
+    # the load-bearing capacity reads.
     assert len(conn.calls) == 5
     rows = out["datastores"]
     assert len(rows) == 2
 
-    # datastore-1: core data preserved, enrichment skipped.
-    ds1 = rows[0]
-    assert ds1["id"] == "datastore-1"
-    assert ds1["capacity"] == 100
-    assert ds1["free_space"] == 40
-    assert ds1["type"] == "VMFS"
-    assert ds1["vm_count"] is None
-    assert ds1["vm_names"] is None
-    note = ds1["enrichment_note"]
-    # The note names the sub-op, the 400, and the offending URL.
-    assert "GET:/vcenter/vm" in note
-    assert "400 Bad Request" in note
-    assert "filter.datastores=datastore-1" in note
-
-    # datastore-2: enriched normally, no note key.
-    ds2 = rows[1]
-    assert ds2["id"] == "datastore-2"
-    assert ds2["vm_count"] == 1
-    assert ds2["vm_names"] == ["vm-c"]
-    assert "enrichment_note" not in ds2
+    for row, cap, free in ((rows[0], 100, 40), (rows[1], 500, 250)):
+        # Core capacity data preserved; only the enrichment is dropped.
+        assert row["capacity"] == cap
+        assert row["free_space"] == free
+        assert row["vm_count"] is None
+        assert row["vm_names"] is None
+        note = row["enrichment_note"]
+        assert "placement read failed" in note
+        assert "403 Forbidden" in note
 
 
 @pytest.mark.asyncio
 async def test_datastore_usage_identical_vm_sets_across_rows_trip_guard() -> None:
-    """Identical VM sets on every row = the upstream per-datastore filter was
-    ignored (whole-inventory list returned per row); the guard nulls
-    vm_count/vm_names and records why on every enriched row (#2975)."""
+    """Identical non-empty VM sets on every row -- an anomaly authoritative
+    placement cannot produce in practice -- still trip the belt-and-braces
+    guard: vm_count/vm_names nulled + note on every row (#3049 / #2975)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
         {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
         {"datastore": "datastore-3", "name": "ds-3", "type": "vSAN"},
     ]
-    # Every per-datastore VM leg returns the SAME whole-inventory list.
-    global_vms = [{"name": "vm-a"}, {"name": "vm-b"}, {"name": "vm-c"}]
+    global_vms = [
+        {"vm": "vm-1", "name": "vm-a"},
+        {"vm": "vm-2", "name": "vm-b"},
+        {"vm": "vm-3", "name": "vm-c"},
+    ]
+    # Every VM reports it sits on all three datastores -> identical set per row.
+    all_three = ["datastore-1", "datastore-2", "datastore-3"]
+    placement = _retrieve_result_multi(
+        {
+            ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(all_three)},
+            ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(all_three)},
+            ("VirtualMachine", "vm-3"): {"datastore": _vm_placement(all_three)},
+        }
+    )
     sequence: list[Any] = [listing]
     for _ in listing:
         sequence.append({"capacity": 100, "free_space": 40})
-        sequence.append(global_vms)
+    sequence.append(global_vms)
+    sequence.append(placement)
     conn = _RecordingConnector(sequence)
 
     out = await datastore_usage_composite(
@@ -878,15 +934,27 @@ async def test_datastore_usage_distinct_vm_sets_across_rows_left_populated() -> 
         {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
         {"datastore": "datastore-3", "name": "ds-3", "type": "vSAN"},
     ]
-    vms_by_ds: dict[str, list[dict[str, Any]]] = {
-        "datastore-1": [{"name": "vm-a"}, {"name": "vm-b"}],
-        "datastore-2": [{"name": "vm-c"}],
-        "datastore-3": [{"name": "vm-d"}, {"name": "vm-e"}],
-    }
+    global_vms = [
+        {"vm": "vm-1", "name": "vm-a"},
+        {"vm": "vm-2", "name": "vm-b"},
+        {"vm": "vm-3", "name": "vm-c"},
+        {"vm": "vm-4", "name": "vm-d"},
+        {"vm": "vm-5", "name": "vm-e"},
+    ]
+    placement = _retrieve_result_multi(
+        {
+            ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-3"): {"datastore": _vm_placement(["datastore-2"])},
+            ("VirtualMachine", "vm-4"): {"datastore": _vm_placement(["datastore-3"])},
+            ("VirtualMachine", "vm-5"): {"datastore": _vm_placement(["datastore-3"])},
+        }
+    )
     sequence: list[Any] = [listing]
-    for entry in listing:
+    for _ in listing:
         sequence.append({"capacity": 100, "free_space": 40})
-        sequence.append(vms_by_ds[entry["datastore"]])
+    sequence.append(global_vms)
+    sequence.append(placement)
     conn = _RecordingConnector(sequence)
 
     out = await datastore_usage_composite(
@@ -905,17 +973,34 @@ async def test_datastore_usage_distinct_vm_sets_across_rows_left_populated() -> 
 
 
 @pytest.mark.asyncio
-async def test_datastore_usage_all_empty_vm_sets_do_not_trip_guard() -> None:
-    """Every datastore legitimately having zero VMs is real data, not the
-    global-list symptom; the guard's non-empty check excludes it (#2975)."""
+async def test_datastore_usage_vm_spanning_two_datastores_appears_in_both() -> None:
+    """A VM whose files span two datastores is real placement on both, so it
+    appears in both rows -- the union semantics of ``VirtualMachine.datastore``
+    (#2975)."""
     listing = [
         {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
         {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
     ]
-    sequence: list[Any] = [listing]
-    for _ in listing:
-        sequence.append({"capacity": 100, "free_space": 40})
-        sequence.append([])  # no VMs on this datastore
+    global_vms = [
+        {"vm": "vm-1", "name": "vm-a"},
+        {"vm": "vm-2", "name": "vm-span"},
+    ]
+    placement = _retrieve_result_multi(
+        {
+            ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+            # vm-span has disks on both datastores.
+            ("VirtualMachine", "vm-2"): {
+                "datastore": _vm_placement(["datastore-1", "datastore-2"])
+            },
+        }
+    )
+    sequence: list[Any] = [
+        listing,
+        {"capacity": 100, "free_space": 40},
+        {"capacity": 500, "free_space": 250},
+        global_vms,
+        placement,
+    ]
     conn = _RecordingConnector(sequence)
 
     out = await datastore_usage_composite(
@@ -925,6 +1010,118 @@ async def test_datastore_usage_all_empty_vm_sets_do_not_trip_guard() -> None:
         connector=conn,  # type: ignore[arg-type]
     )
 
+    rows = out["datastores"]
+    assert rows[0]["vm_names"] == ["vm-a", "vm-span"]
+    assert rows[1]["vm_names"] == ["vm-span"]
+    assert all("enrichment_note" not in r for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_scopes_vms_per_datastore_from_authoritative_placement() -> None:
+    """Reproduction of #2975: the raw VM listing is the WHOLE inventory (the
+    upstream per-datastore filter is not honoured), yet each row must carry
+    only the VMs actually placed on that datastore.
+
+    The composite scopes client-side off the authoritative vim
+    ``VirtualMachine.datastore`` property (one batched
+    ``RetrievePropertiesEx`` over every VM), never the server-side filter.
+    Two datastores hosting disjoint VM sets therefore get DIFFERENT lists
+    and the identical-sets guard (#3049) never fires -- the guard's firing
+    condition is made impossible in practice by the real fix."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+    ]
+    # The raw ``GET:/vcenter/vm`` listing carries the whole inventory with
+    # zero per-datastore scoping -- the exact symptom shape (#2975).
+    global_vms = [
+        {"vm": "vm-1", "name": "vm-a"},
+        {"vm": "vm-2", "name": "vm-b"},
+        {"vm": "vm-3", "name": "vm-c"},
+    ]
+    # Authoritative placement (vim ``VirtualMachine.datastore``): disjoint.
+    placement = _retrieve_result_multi(
+        {
+            ("VirtualMachine", "vm-1"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-2"): {"datastore": _vm_placement(["datastore-1"])},
+            ("VirtualMachine", "vm-3"): {"datastore": _vm_placement(["datastore-2"])},
+        }
+    )
+    sequence: list[Any] = [
+        listing,
+        {"capacity": 100, "free_space": 40},
+        {"capacity": 500, "free_space": 250},
+        global_vms,
+        placement,
+    ]
+    conn = _RecordingConnector(sequence)
+
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    # Call shape: listing -> per-DS detail x2 -> global VM listing (NO
+    # per-datastore filter) -> one RetrievePropertiesEx placement read.
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/datastore"),
+        ("GET", "/api/vcenter/datastore/datastore-1"),
+        ("GET", "/api/vcenter/datastore/datastore-2"),
+        ("GET", "/api/vcenter/vm"),
+        ("POST", "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"),
+    ]
+    # The VM listing is global -- no scoping query is sent upstream.
+    assert conn.calls[3]["query"] is None
+    # The placement read scopes VirtualMachine.datastore over every VM moid.
+    body = conn.calls[4]["body"]
+    prop = body["specSet"][0]["propSet"][0]
+    assert prop["type"] == "VirtualMachine"
+    assert prop["pathSet"] == ["datastore"]
+    assert {o["obj"]["value"] for o in body["specSet"][0]["objectSet"]} == {
+        "vm-1",
+        "vm-2",
+        "vm-3",
+    }
+
+    rows = out["datastores"]
+    ds1, ds2 = rows[0], rows[1]
+    assert ds1["vm_count"] == 2
+    assert ds1["vm_names"] == ["vm-a", "vm-b"]
+    assert ds2["vm_count"] == 1
+    assert ds2["vm_names"] == ["vm-c"]
+    assert "enrichment_note" not in ds1
+    assert "enrichment_note" not in ds2
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_all_empty_vm_sets_do_not_trip_guard() -> None:
+    """No VMs anywhere is real data, not the global-list symptom; the guard's
+    non-empty check excludes it and the placement read short-circuits (#2975)."""
+    listing = [
+        {"datastore": "datastore-1", "name": "ds-1", "type": "VMFS"},
+        {"datastore": "datastore-2", "name": "ds-2", "type": "NFS"},
+    ]
+    sequence: list[Any] = [
+        listing,
+        {"capacity": 100, "free_space": 40},
+        {"capacity": 100, "free_space": 40},
+        [],  # global VM listing empty -> every datastore has zero VMs
+    ]
+    conn = _RecordingConnector(sequence)
+
+    out = await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    # An empty inventory skips the RetrievePropertiesEx placement read.
+    assert len(conn.calls) == 4
+    retrieve_path = "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    assert all(c["path"] != retrieve_path for c in conn.calls)
     rows = out["datastores"]
     assert [r["vm_count"] for r in rows] == [0, 0]
     assert [r["vm_names"] for r in rows] == [[], []]

@@ -204,6 +204,15 @@ _PROP_DRS_CONFIG = "configurationEx.drsConfig"
 # vm.migrate DRS lookup already relies on.
 _PROP_DRS_RECOMMENDATION = "drsRecommendation"
 
+# vim constants for the datastore-usage VM-placement read. The
+# ``VirtualMachine.datastore`` property is the vim-authoritative set of
+# datastores a VM's files sit on (config + disks + snapshots + swap,
+# unioned) -- the placement source the datastore-usage composite scopes
+# each row from, instead of trusting a server-side ``GET:/vcenter/vm``
+# datastore filter that some builds silently ignore (#2975).
+_VIRTUAL_MACHINE_MO_TYPE = "VirtualMachine"
+_PROP_VM_DATASTORE = "datastore"
+
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
 # session. Pre-#2253 these fed the L2 pre-flight check that guarded a
@@ -229,6 +238,7 @@ _SUB_OPS_DATASTORE_USAGE: tuple[str, ...] = (
     _OP_LIST_DATASTORES,
     _OP_GET_DATASTORE,
     _OP_LIST_VMS,
+    _OP_RETRIEVE_PROPERTIES,
 )
 _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
@@ -345,6 +355,37 @@ def _extract_object_props(retrieve_result: Any) -> dict[str, Any]:
             if isinstance(name, str):
                 props[name] = unwrap_vim_value(entry.get("val"))
     return props
+
+
+def _extract_props_by_moid(retrieve_result: Any) -> dict[str, dict[str, Any]]:
+    """Flatten a multi-object ``RetrievePropertiesEx`` result to ``{moid: {name: val}}``.
+
+    Unlike :func:`_extract_object_props` (which merges every object's
+    ``propSet`` into one flat dict), this keeps per-object identity by
+    keying on the object's MoRef ``value`` -- what a batched read over
+    many objects of the same type (every VM's ``datastore`` property)
+    needs. vim omits unset properties from ``propSet``, so an object with
+    no matching property simply carries an empty inner dict.
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    by_moid: dict[str, dict[str, Any]] = {}
+    if not isinstance(objects, list):
+        return by_moid
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        ref = obj.get("obj")
+        moid = ref.get("value") if isinstance(ref, dict) else None
+        if not isinstance(moid, str):
+            continue
+        props: dict[str, Any] = {}
+        for entry in obj.get("propSet", []) or []:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if isinstance(name, str):
+                props[name] = unwrap_vim_value(entry.get("val"))
+        by_moid[moid] = props
+    return by_moid
 
 
 async def cluster_drs_recommendations_composite(
@@ -547,10 +588,75 @@ async def performance_summary_composite(
     }
 
 
-# Pre-existing >100-line handler from G3.1-T5 #508; G0.27 #1908 made the
-# per-datastore VM-placement leg best-effort. Refactor (e.g. extracting
-# the per-datastore row builder) is out of scope here.
-# code-quality-allow: pre-existing G3.1-T5 #508 handler; #1908 best-effort enrichment only
+async def _read_vm_placement(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+) -> tuple[dict[str, list[str]] | None, str | None]:
+    """Resolve authoritative ``{datastore_moid: [vm_name, ...]}`` placement.
+
+    #2975: the placement source is the vim ``VirtualMachine.datastore``
+    property, **not** a server-side ``GET:/vcenter/vm`` datastore filter.
+    Some vCenter builds silently ignore that filter and return the whole
+    inventory on every row -- the reported symptom -- so the composite no
+    longer trusts it. Two batched reads, joined client-side:
+
+    1. ``GET:/vcenter/vm`` (global, unfiltered) -- every VM's moid + name.
+    2. one ``RetrievePropertiesEx`` over every VM moid reading
+       ``datastore`` (the union of datastores the VM's files sit on). A VM
+       with disks spanning two datastores therefore appears under both --
+       genuine placement, unlike the ignored-filter global list.
+
+    VM-listing order is preserved so the per-datastore ``vm_names`` sample
+    is deterministic. Returns ``({}, None)`` when there are no VMs. The
+    read is **best-effort** (#1908): any transport error returns
+    ``(None, note)`` so the caller nulls enrichment on every row while
+    keeping the capacity data the storage-usage use case needs.
+    """
+    try:
+        vms_raw = await _read_sub_op(connector, target, operator, _OP_LIST_VMS)
+        vm_entries = _unwrap_value(vms_raw)
+        if not isinstance(vm_entries, list):
+            vm_entries = []
+        names_by_moid: dict[str, str] = {}
+        for vm in vm_entries:
+            if not isinstance(vm, dict):
+                continue
+            moid = vm.get("vm")
+            name = vm.get("name")
+            if isinstance(moid, str) and isinstance(name, str):
+                names_by_moid[moid] = name
+        if not names_by_moid:
+            return {}, None
+        retrieve = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_RETRIEVE_PROPERTIES,
+            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+            body=retrieve_properties_body(
+                _VIRTUAL_MACHINE_MO_TYPE, list(names_by_moid), [_PROP_VM_DATASTORE]
+            ),
+        )
+    except httpx.HTTPError as exc:
+        return None, (
+            f"vm-placement enrichment skipped: authoritative placement read "
+            f"failed with {type(exc).__name__}: {exc}"
+        )
+
+    props_by_vm = _extract_props_by_moid(retrieve)
+    placement: dict[str, list[str]] = {}
+    for moid, name in names_by_moid.items():
+        ds_refs = props_by_vm.get(moid, {}).get(_PROP_VM_DATASTORE)
+        if not isinstance(ds_refs, list):
+            continue
+        for ref in ds_refs:
+            ds_moid = ref.get("value") if isinstance(ref, dict) else None
+            if isinstance(ds_moid, str):
+                placement.setdefault(ds_moid, []).append(name)
+    return placement, None
+
+
 async def datastore_usage_composite(
     *,
     operator: Operator,
@@ -562,36 +668,34 @@ async def datastore_usage_composite(
 
     Op-id: ``vmware.composite.datastore.usage``.
 
-    Sub-ops read directly on the connector session (per-datastore, sequential):
+    Sub-ops read directly on the connector session:
 
     1. ``GET:/vcenter/datastore`` -- list every datastore (optionally
        narrowed via ``filter.names``).
-    2. For each datastore:
-       a. ``GET:/vcenter/datastore/{datastore}`` -- detailed capacity /
-          free / type / accessible flag (load-bearing: a failure here
-          sinks the composite).
-       b. ``GET:/vcenter/vm`` filtered by datastore -- VMs whose
-          working directory sits on this datastore. Drives the
-          ``vm_count`` + ``vm_names`` aggregation. The datastore filter
-          is authored as ``filter.datastores`` and keyed off the mount
-          flavor at the sub-call seam (bare ``datastores`` on modern
-          ``/api``, ``filter.datastores`` on legacy ``/rest``); before
-          #2298 it was sent prefixed on every mount, so real vCenter 8.x
-          400'd this leg on every row. It is also **best-effort**
-          (#1908): the capacity/free/type read -- the data the "which
-          datastores are filling up?" use case needs -- is already done
-          by the time it runs, so any residual VM-lookup error still
-          returns the row with ``vm_count`` / ``vm_names`` set to
-          ``null`` and an ``enrichment_note`` recording why, rather than
-          failing the whole composite.
+    2. For each datastore, ``GET:/vcenter/datastore/{datastore}`` --
+       detailed capacity / free / type / accessible flag (load-bearing:
+       a failure here sinks the composite).
+    3. VM-placement enrichment, resolved **once** for the whole result
+       (see :func:`_read_vm_placement`): ``GET:/vcenter/vm`` (global,
+       unfiltered) for every VM's moid + name, then one
+       ``RetrievePropertiesEx`` over every VM reading the vim-authoritative
+       ``VirtualMachine.datastore`` property. The two are joined
+       client-side into per-datastore ``vm_count`` + ``vm_names``.
 
-    Sequential dispatch is intentional: each datastore's detail call
-    inherits the prior call's authentication state, and the audit
-    chain reads cleanly as ``listing -> detail(ds1) -> vms(ds1) ->
-    detail(ds2) -> vms(ds2) -> ...``. A future v0.2.next optimisation
-    could ``asyncio.gather`` the per-datastore detail + VM calls
-    pairwise, but the simpler shape is easier to audit-trace through
-    operator UIs.
+    Why vim placement and not a ``GET:/vcenter/vm`` datastore filter
+    (#2975): a server-side per-datastore filter is silently ignored by
+    some builds, which returns the whole-inventory VM list on every row --
+    the reported bug. ``VirtualMachine.datastore`` is authoritative
+    (config + disks + snapshots + swap, unioned), so each row carries only
+    the VMs vim reports on that datastore regardless of whether any REST
+    filter is honoured. A VM whose disks span two datastores legitimately
+    appears under both.
+
+    The enrichment is **best-effort** (#1908): the capacity/free/type read
+    already satisfies the "which datastores are filling up?" use case, so a
+    transport error on the batched placement read nulls ``vm_count`` /
+    ``vm_names`` on every row and records an ``enrichment_note``, rather
+    than sinking the whole composite.
 
     Returns
     -------
@@ -600,17 +704,14 @@ async def datastore_usage_composite(
         "capacity": ..., "free_space": ..., "vm_count": ...,
         "vm_names": [...]}, ...]}``. The ``capacity`` / ``free_space``
         fields may be ``None`` if the upstream payload omits them
-        (e.g. a partially-mounted datastore). When the per-datastore
-        VM-placement enrichment errors, ``vm_count`` and ``vm_names``
-        are ``None`` and the row carries an ``enrichment_note`` string
+        (e.g. a partially-mounted datastore). When the batched
+        VM-placement read errors, ``vm_count`` and ``vm_names`` are
+        ``None`` and every row carries an ``enrichment_note`` string
         describing the skipped enrichment; on success the row has no
-        ``enrichment_note`` key. The same null + ``enrichment_note``
-        treatment is applied to every enriched row when the per-row VM
-        sets come back identical across all datastores -- the symptom of
-        an upstream per-datastore filter that was silently ignored and
-        returned the whole-inventory VM list on each row (#2975) -- so a
-        populated-but-wrong global list is never emitted as per-datastore
-        placement.
+        ``enrichment_note`` key. As belt-and-braces (#3049), the same null
+        + ``enrichment_note`` treatment is applied when the per-row VM sets
+        somehow come back identical and non-empty across every datastore --
+        a shape authoritative placement cannot produce in practice.
 
         ``vm_count`` is the exact VM total; ``vm_names`` is bounded to a
         sample of at most
@@ -635,10 +736,9 @@ async def datastore_usage_composite(
             f"got {type(entries).__name__}"
         )
 
-    aggregated: list[dict[str, Any]] = []
-    # Each successfully-enriched row paired with the full (pre-cap) set of VM
-    # names on it, for the cross-row identical-sets guard after the loop (#2975).
-    enriched: list[tuple[dict[str, Any], frozenset[str]]] = []
+    # Each datastore row paired with its moid, so the batched VM-placement
+    # read below can scope names onto it after the detail loop.
+    rows: list[tuple[dict[str, Any], str]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -674,55 +774,46 @@ async def datastore_usage_composite(
             "capacity": capacity,
             "free_space": free_space,
         }
+        rows.append((row, ds_id))
 
-        # VM-placement enrichment is best-effort (#1908). The
-        # capacity/free/type read above already satisfies the
-        # storage-usage use case, so any residual failure on the optional
-        # VM lookup nulls vm_count/vm_names and records why, rather than
-        # propagating the transport error and sinking every datastore row.
-        # The datastore filter is keyed off the mount flavor in
-        # ``_read_sub_op`` (#2298); the pre-#2298 unconditional
-        # ``filter.datastores`` was itself what 400'd this leg on modern
-        # ``/api`` vCenter, not an environmental vCenter quirk.
-        try:
-            vms_raw = await _read_sub_op(
-                connector, target, operator, _OP_LIST_VMS, query={"filter.datastores": [ds_id]}
-            )
-        except httpx.HTTPError as exc:
+    aggregated = [row for row, _ in rows]
+    if not rows:
+        return {"datastores": aggregated}
+
+    # VM-placement enrichment (#2975): scope each row to only the VMs vim
+    # reports on that datastore, resolved once from the authoritative
+    # ``VirtualMachine.datastore`` property rather than a per-datastore
+    # server-side filter some builds silently ignore. Best-effort (#1908):
+    # a transport error nulls enrichment on every row but keeps capacity.
+    placement, note = await _read_vm_placement(connector, target, operator)
+    if placement is None:
+        for row, _ in rows:
             row["vm_count"] = None
             row["vm_names"] = None
-            row["enrichment_note"] = (
-                f"vm-placement enrichment skipped: sub-op {_OP_LIST_VMS!r} "
-                f"failed with {type(exc).__name__}: {exc}"
-            )
-        else:
-            vm_entries = _unwrap_value(vms_raw)
-            if not isinstance(vm_entries, list):
-                vm_entries = []
-            vm_names = [
-                v["name"]
-                for v in vm_entries
-                if isinstance(v, dict) and isinstance(v.get("name"), str)
-            ]
-            # vm_count is the exact total, taken before the cap; vm_names is
-            # bounded to a sample so a one-name filter_names result stays
-            # inline under the dispatcher's 4096-byte JSONFlux threshold and
-            # a per-datastore Sensor can still select free_space (#2758).
-            # vm_count > len(vm_names) is the truncation signal.
-            row["vm_count"] = len(vm_names)
-            row["vm_names"] = vm_names[:DATASTORE_USAGE_MAX_VM_NAMES]
-            enriched.append((row, frozenset(vm_names)))
-        aggregated.append(row)
+            row["enrichment_note"] = note
+        return {"datastores": aggregated}
 
-    # Cross-row identical-sets guard (#2975). A VM's working directory lives on
-    # exactly one datastore, so genuinely-distinct datastores never share a
-    # non-empty VM set. An identical non-empty set across *every* enriched row
-    # is therefore not real placement data -- it is the global-list symptom of
-    # an upstream per-datastore filter that was silently ignored, returning the
-    # whole-inventory VM list on every row. Emitting that populated-but-wrong
-    # answer is worse than emitting none, so treat it as failed enrichment:
-    # null vm_count/vm_names and record why, the same best-effort contract used
-    # for a transport error above (#1908). The all-empty case (every datastore
+    # Each enriched row paired with its full (pre-cap) VM-name set, for the
+    # cross-row identical-sets guard below (#3049).
+    enriched: list[tuple[dict[str, Any], frozenset[str]]] = []
+    for row, ds_id in rows:
+        vm_names = placement.get(ds_id, [])
+        # vm_count is the exact total, taken before the cap; vm_names is
+        # bounded to a sample so a large result stays inline under the
+        # dispatcher's 4096-byte JSONFlux threshold and a per-datastore
+        # Sensor can still select free_space (#2758). vm_count >
+        # len(vm_names) is the truncation signal.
+        row["vm_count"] = len(vm_names)
+        row["vm_names"] = vm_names[:DATASTORE_USAGE_MAX_VM_NAMES]
+        enriched.append((row, frozenset(vm_names)))
+
+    # Cross-row identical-sets guard (#3049), retained as belt-and-braces.
+    # With authoritative ``VirtualMachine.datastore`` placement an identical
+    # non-empty VM set across *every* datastore cannot arise in practice (it
+    # would require every VM to sit on every datastore), so the guard's
+    # firing condition is effectively impossible now -- but it stays to
+    # refuse any populated-but-identical shape rather than emit it as
+    # per-datastore placement. The all-empty case (every datastore
     # legitimately has zero VMs) is excluded by the non-empty check.
     if len(enriched) > 1:
         vm_sets = [vm_set for _, vm_set in enriched]
@@ -730,10 +821,9 @@ async def datastore_usage_composite(
         if shared and all(vm_set == shared for vm_set in vm_sets[1:]):
             note = (
                 "vm-placement enrichment discarded: the VM set was identical "
-                f"across all {len(enriched)} enriched datastores, so the "
-                "upstream per-datastore filter was not applied (the "
-                "whole-inventory VM list was returned on every row); "
-                "vm_count/vm_names are unreliable and have been nulled."
+                f"across all {len(enriched)} enriched datastores, which is not "
+                "real per-datastore placement; vm_count/vm_names are "
+                "unreliable and have been nulled."
             )
             for row, _ in enriched:
                 row["vm_count"] = None

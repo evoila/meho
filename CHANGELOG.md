@@ -134,6 +134,26 @@ connector-related release-notes line.
   identical-sets guard stays as belt-and-braces; authoritative placement makes
   its firing condition impossible in practice.
 
+### Added — add-on capability advertisement: declare surfaces against the contract, activated only while paired and healthy (#3026)
+
+- A paired add-on can now **declare the surfaces it contributes** — meta-tool
+  families, CLI verb families, console panels, event kinds — against the
+  integration-contract version it negotiated (#3025). The declaration is
+  replace-all and persisted stamped with its `declared_contract_version`; an
+  unknown capability kind is rejected loudly (a 422, backed at rest by the
+  `addon_capability.kind` CHECK). **Activation is derived, never stored:** a
+  capability is active only while its pairing is present *and*
+  contract-healthy, so a pairing driven contract-incompatible reads
+  `active=false` and drops out of the tenant-wide activation view without any
+  surface being rewritten. Unpair cascade-deletes the capability rows
+  (`pairing_id ON DELETE CASCADE`), so deactivation leaves no dead surface. The
+  add-on declares as its **service** principal over
+  `PUT /api/v1/addons/pairings/{name}/capabilities` (a human principal is 403);
+  operators read the declaration + activation state over the matching `GET`.
+  Capability advertisement is data, never an MCP tool name — the agent
+  meta-tool surface is unchanged. New migration `0080` (`addon_capability`).
+  See `docs/codebase/addon-pairing.md`.
+
 ### Added — add-on pairing handshake + identity: pair once as a scoped service principal over a versioned contract (#3025)
 
 - The backplane gains the foundation of the add-on pairing contract

@@ -66,6 +66,52 @@ advertised version, or a downgrade that dropped the backplane version below
 the add-on's floor. Either way the pairing reads `contract_compatible=false`
 in `/status` and the console without a re-handshake.
 
+## Capability advertisement (#3026)
+
+On top of the pairing, an add-on **declares the surfaces it contributes** —
+meta-tool families, CLI verb families, console panels, event kinds — against
+the contract version it negotiated. The backplane persists the declaration and
+reports which surfaces are *active* (paired **and** contract-healthy).
+
+Capability advertisement is deliberately **not** MCP-tool registration
+(postulate 5): a declared surface is *data* (an `addon_capability` row), never
+a tool name on the agent waist. The `test_addon_pairing_conformance` seed still
+holds — an unpaired backplane grows no agent surface — and the capability
+plane is an operator/add-on-plane surface beside it.
+
+- **Vocabulary versioned with the contract.** `CapabilityKind` is the closed
+  set of surface kinds contract v1 understands (`meta_tool_family`,
+  `cli_verb_family`, `console_panel`, `event_kind`). A declaration naming an
+  unknown kind is rejected loudly — a 422 at the REST boundary, and the
+  `addon_capability.kind` CHECK constraint guards a direct insert at rest.
+  Growing the vocabulary is a coordinated change across the enum, the CHECK,
+  and `models.ADDON_CAPABILITY_KINDS` (drift-guarded in
+  `test_addon_capability_service`).
+- **Replace-all declaration.** `declare()` deletes the pairing's prior
+  capability rows and inserts the new set in one transaction, stamped with the
+  pairing's negotiated `declared_contract_version`. A capability dropped from
+  the list leaves no residue.
+- **Activation is derived, never stored.** A capability is active only while
+  its pairing satisfies `is_contract_compatible()`. `active` on the read
+  surface, and membership of the tenant-wide `active_capabilities()` view,
+  flip with pairing health without any row being written twice. A pairing
+  driven contract-incompatible reads `active=false` and drops out of the
+  activation view while its declaration persists (health can recover).
+- **Deactivation leaves no dead surfaces.** `addon_capability.pairing_id`
+  carries `ON DELETE CASCADE`; unpair (which hard-deletes the pairing row,
+  #3025) removes the capability rows in the same operation. The pairing
+  foundation carries no dependency on the capability plane — cleanup is the
+  cascade, not a reverse call.
+
+Routes (both under the `addon-pairing` tag):
+
+- `PUT /api/v1/addons/pairings/{name}/capabilities` — the paired add-on
+  (authenticating as its **service** principal; a human principal is 403)
+  declares its complete surface set. 404 when unpaired; 422 on an unknown kind
+  or a duplicate declaration. Audited (`op_id=addon.capabilities.declare`).
+- `GET /api/v1/addons/pairings/{name}/capabilities` — an operator reads the
+  declared surfaces + live activation state. 404 when absent / cross-tenant.
+
 ## Key types
 
 - `meho_backplane.operations.addon_pairing_contract` — pure negotiation:
@@ -84,6 +130,16 @@ in `/status` and the console without a re-handshake.
 - `meho_backplane.db.models.AddonPairing` — table `addon_pairing`; unique
   `(tenant_id, name)` and unique `keycloak_client_id`; migration `0079`.
 - `meho_backplane.api.v1.addon_pairing` — the REST surface.
+- `meho_backplane.operations.addon_capability_schemas` — `CapabilityKind`
+  (the versioned vocabulary), `DeclareCapabilitiesRequest` (replace-all
+  intake, `extra="forbid"`), `CapabilityDeclarationResponse` (declared set +
+  derived `active`), `ActiveCapabilityRead` (the tenant-wide activation unit).
+- `meho_backplane.operations.addon_capability.AddonCapabilityService` — the
+  capability lifecycle path (`declare` / `list_declared` / `active_capabilities`).
+- `meho_backplane.db.models.AddonCapability` — table `addon_capability`;
+  unique `(pairing_id, kind, name)`, `kind` CHECK, `pairing_id` FK with
+  `ON DELETE CASCADE`; migration `0080`.
+- `meho_backplane.api.v1.addon_capability` — the capability REST surface.
 - `meho_backplane.api.v1.health.PairingHealth` — the `/status` facet.
 - `meho_backplane.ui.routes.pairing` — the read-only `/ui/pairing` console
   panel.
@@ -141,13 +197,18 @@ lists active pairings and maps each to a `PairingHealth`
   security-review DoD item.
 - **Console is read-only**: pair / unpair are REST-only. Console write
   actions (a pair/unpair button behind CSRF) are a follow-up.
+- **Capabilities are not yet rendered in the console** or exposed as a
+  tenant-wide REST read. `active_capabilities()` is the in-process activation
+  plumbing the sibling event-push task (#3027) consumes; a console panel and a
+  `GET /api/v1/addons/capabilities` list surface are follow-ups.
 - Keycloak client provisioning is now duplicated three ways (agent, runner,
   add-on); a shared helper is an extraction candidate once the pattern
   stabilises (rule of three), but is out of scope for this task.
 
 ## References
 
-- Initiative #2900 (add-on pairing contract), Task #3025 (this foundation).
+- Initiative #2900 (add-on pairing contract), Task #3025 (the pairing
+  foundation), Task #3026 (capability advertisement + activation, this plane).
 - `service-principal-grants.md` — the scoping mechanism the paired principal
   relies on.
 - `connectors-keycloak.md` — the Keycloak admin client lifecycle.

@@ -4298,6 +4298,107 @@ class AddonPairing(Base):
     )
 
 
+#: The capability-surface kinds a paired add-on may advertise under the v1
+#: integration contract (#3026). Mirrors
+#: :class:`meho_backplane.operations.addon_capability_schemas.CapabilityKind`
+#: (the API-facing enum) and the ``addon_capability.kind`` CHECK below — the
+#: three are a coordinated change, guarded by ``test_addon_capability_service``
+#: so they cannot drift silently. ``models`` owns the tuple (not the enum) to
+#: avoid importing the operations layer into the DB layer.
+ADDON_CAPABILITY_KINDS: tuple[str, ...] = (
+    "meta_tool_family",
+    "cli_verb_family",
+    "console_panel",
+    "event_kind",
+)
+
+
+class AddonCapability(Base):
+    """One surface a paired add-on advertises — its capability declaration (#3026).
+
+    Foundation of Initiative #2900's capability-advertisement plane, built on
+    the #3025 pairing. Each row is one declared surface (``kind`` + ``name``)
+    owned by an :class:`AddonPairing`. The add-on declares its *complete*
+    surface set at once (replace-all — a re-declaration deletes the pairing's
+    prior rows and inserts the new set), so a dropped capability leaves no
+    residue.
+
+    Activation is **not** a column: a capability is *active* only while its
+    pairing is present and contract-healthy, re-evaluated live from the
+    pairing's negotiated-vs-current contract versions
+    (:func:`~meho_backplane.operations.addon_pairing_contract.is_contract_compatible`).
+    That keeps "activates surfaces only while paired and healthy" structural
+    rather than a stored flag that can drift out of sync with the pairing.
+
+    Schema decisions
+    ----------------
+
+    * ``pairing_id`` -- UUID NOT NULL, FK to ``addon_pairing.id`` with
+      ``ON DELETE CASCADE``. Unpair hard-deletes the pairing row (#3025); the
+      cascade removes the pairing's capability rows in the same operation, so
+      deactivation leaves no dead surface. No separate ``tenant_id`` column —
+      the tenant is the pairing's, reached through this FK.
+    * ``kind`` -- Text NOT NULL, constrained by the ``ck_addon_capability_kind``
+      CHECK to :data:`ADDON_CAPABILITY_KINDS`. The versioned capability
+      vocabulary at rest; the API rejects unknown kinds earlier (422) via the
+      Pydantic enum, so the CHECK is the at-rest guard against a direct insert.
+    * ``name`` -- Text NOT NULL. The surface identifier within its kind (a
+      meta-tool family, a CLI verb family, a console panel id, an event kind).
+    * ``display_label`` -- Text NULL. Optional human label for the surface.
+    * ``declared_contract_version`` -- Integer NOT NULL. The pairing's
+      negotiated contract version this declaration was advertised against, so
+      a declaration stays attributable to its contract after the backplane's
+      version advances.
+    * ``created_at`` -- ``timestamptz`` NOT NULL. Rows are immutable between
+      replace-all declarations (deleted + reinserted, never updated), so one
+      creation stamp is sufficient — no ``updated_at``.
+
+    Indexes
+    -------
+
+    * ``addon_capability_pairing_kind_name_idx`` -- unique composite on
+      ``(pairing_id, kind, name)``. Enforces one row per advertised surface
+      per pairing and drives the per-pairing capability lookup.
+    """
+
+    __tablename__ = "addon_capability"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    pairing_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("addon_pairing.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    declared_contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "kind IN ('meta_tool_family', 'cli_verb_family', 'console_panel', 'event_kind')",
+            name="ck_addon_capability_kind",
+        ),
+        Index(
+            "addon_capability_pairing_kind_name_idx",
+            "pairing_id",
+            "kind",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Initiative #2415 (#2499) — gateway assignment + result-ingest storage
 # ---------------------------------------------------------------------------

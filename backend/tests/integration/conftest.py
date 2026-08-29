@@ -441,6 +441,10 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   grants) carries a real ``REFERENCES tenant(id)`` FK; must be listed
         #   here or PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
         #   truncate a table referenced in a foreign key constraint``.
+        # * ``addon_pairing`` — migration 0079 (#3025 add-on pairing handshake)
+        #   carries a real ``REFERENCES tenant(id)`` FK; must be listed here or
+        #   PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
+        #   truncate a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
@@ -449,7 +453,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, "
+                "service_principal_grant, addon_pairing, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
@@ -519,7 +523,7 @@ async def pg_engine_empty_tenant(
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, "
+                "service_principal_grant, addon_pairing, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "

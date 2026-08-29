@@ -78,6 +78,7 @@ per-operator Vault tenant-scope exemption in
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -98,6 +99,8 @@ from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
+from meho_backplane.operations.addon_pairing import AddonPairingService
+from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
 from meho_backplane.settings import get_settings
 
 __all__ = ["build_health_response", "router"]
@@ -240,6 +243,25 @@ class SensorRunnerStatus(BaseModel):
     stall_threshold_seconds: float
 
 
+class PairingHealth(BaseModel):
+    """Health of one active add-on pairing (#3025).
+
+    ``contract_compatible`` re-evaluates the persisted pairing's negotiated
+    version pair against the *current* backplane contract, in both pinning
+    directions — so an add-on left behind by a backplane upgrade (or a
+    backplane rolled back below an add-on's required minimum) reads as
+    ``False`` here without a re-handshake. ``last_seen`` is the add-on's last
+    liveness heartbeat, ``None`` until it first checks in.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    addon: str
+    contract_version: int
+    contract_compatible: bool
+    last_seen: datetime | None
+
+
 class HealthResponse(BaseModel):
     """``GET /api/v1/health`` response body.
 
@@ -286,6 +308,12 @@ class HealthResponse(BaseModel):
     surfaces the same value on the unauthenticated readiness probe so
     a deploy operator can answer "which MCP revision will this server
     negotiate with my clients?" without an authenticated GET.
+
+    ``pairings`` (#3025) carries the tenant's active add-on pairings —
+    each add-on's negotiated contract version, whether it is still
+    contract-compatible with this backplane build, and its last liveness
+    heartbeat. The list is empty when nothing is paired; the empty-default
+    keeps response decoders generated against the pre-#3025 shape working.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -296,6 +324,7 @@ class HealthResponse(BaseModel):
     mcp_session_id_capture: str
     mcp_protocol_version: str = PROTOCOL_VERSION
     sensor_runner: SensorRunnerStatus | None = None
+    pairings: list[PairingHealth] = []
 
 
 class LivenessResponse(BaseModel):
@@ -561,6 +590,29 @@ def _sensor_runner_status() -> SensorRunnerStatus | None:
     )
 
 
+async def _pairing_health(tenant_id: UUID) -> list[PairingHealth]:
+    """Map the tenant's active add-on pairings onto the health wire model.
+
+    Empty list when nothing is paired — an unpaired backplane surfaces no
+    pairing content, keeping the facet's presence-vs-content distinction
+    honest. ``contract_compatible`` is computed per pairing via
+    :func:`~meho_backplane.operations.addon_pairing_contract.is_contract_compatible`.
+    """
+    pairings = await AddonPairingService().list_(tenant_id)
+    return [
+        PairingHealth(
+            addon=pairing.name,
+            contract_version=pairing.contract_version,
+            contract_compatible=is_contract_compatible(
+                addon_contract_version=pairing.addon_contract_version,
+                addon_min_backplane_version=pairing.addon_min_backplane_version,
+            ),
+            last_seen=pairing.last_seen_at,
+        )
+        for pairing in pairings
+    ]
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -589,6 +641,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         mcp_session_id_capture=mcp_session_id_capture_mode(),
         mcp_protocol_version=PROTOCOL_VERSION,
         sensor_runner=_sensor_runner_status(),
+        pairings=await _pairing_health(operator.tenant_id),
     )
 
 

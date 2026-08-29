@@ -95,10 +95,17 @@ May change or vanish without notice; sits outside the 1.0 stability promise. No 
 
 | Feature | Target GA | Gaps & promotion gate |
 | --- | --- | --- |
+| [addon_pairing](#addon_pairing) | _none committed_ | [#2900](https://github.com/evoila/meho/issues/2900) |
 | [agent_runtime](#agent_runtime) | _none committed_ | [#2656](https://github.com/evoila/meho/issues/2656) |
 | [connector_ingest](#connector_ingest) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
 | [doc_collections](#doc_collections) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
 | [two_world_ops](#two_world_ops) | _none committed_ | [#2661](https://github.com/evoila/meho/issues/2661) |
+
+### addon_pairing
+
+- **Tier:** experimental
+- **Target GA milestone:** none committed — outside the 1.0 promise
+- **Gaps & promotion gate:** known gaps and the road to promotion are tracked in [#2900](https://github.com/evoila/meho/issues/2900).
 
 ### agent_runtime
 

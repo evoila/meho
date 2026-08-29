@@ -385,6 +385,8 @@ def test_happy_path_returns_full_federation_response(
             "stalled": False,
             "stall_threshold_seconds": 60.0,
         },
+        # #3025: the add-on pairing facet — empty on an unpaired backplane.
+        "pairings": [],
     }
 
     # Vault was hit with the configured role / mount and the operator's

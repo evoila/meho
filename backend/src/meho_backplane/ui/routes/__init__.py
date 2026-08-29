@@ -104,6 +104,7 @@ from meho_backplane.ui.routes.kb import build_kb_router
 from meho_backplane.ui.routes.keycloak import build_keycloak_router
 from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
+from meho_backplane.ui.routes.pairing import build_pairing_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.runners import build_runners_router
@@ -133,6 +134,7 @@ __all__ = [
     "build_keycloak_router",
     "build_memory_router",
     "build_operations_router",
+    "build_pairing_router",
     "build_retrieval_router",
     "build_router",
     "build_runbooks_router",
@@ -275,6 +277,14 @@ def build_router() -> APIRouter:
     # (T2) registered before any ``{param}`` route binds first; included before
     # the stubs aggregate so its concrete paths win the first-match-wins lookup.
     router.include_router(build_keycloak_router())
+    # Add-on pairing registry (#3025, Initiative #2900): read-only
+    # ``/ui/pairing`` — every active add-on pairing with its negotiated
+    # contract version, live contract-compatibility re-evaluation, and last
+    # liveness heartbeat. One literal route, no ``{param}`` sub-path, so no
+    # first-match-wins shadowing concern; included before the stubs aggregate
+    # so its concrete path wins against ``/ui/{slug}``. Pair / unpair are REST
+    # (``/api/v1/addons/pairings``); the console is read-only.
+    router.include_router(build_pairing_router())
     # Audit-query forensic console (G10.15-T1 #1944): ``/ui/audit`` (filter
     # form + first result page) + ``/ui/audit/results`` (filter-submit +
     # forward-cursor "Load more" fragment). Reads dispatch the

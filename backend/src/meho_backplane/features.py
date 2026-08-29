@@ -223,6 +223,16 @@ FEATURE_MATURITY: dict[str, MaturityInfo] = {
         "target_ga": None,
         "tracking": f"{_TRACKER}/2661",
     },
+    # Add-on pairing contract (#2900): the pairing/identity foundation
+    # (#3025) — a sibling add-on paired as a scoped Keycloak service
+    # principal over a versioned integration contract. Experimental: the
+    # contract shape and paired surfaces evolve across the initiative's
+    # remaining tasks.
+    "addon_pairing": {
+        "maturity": "experimental",
+        "target_ga": None,
+        "tracking": f"{_TRACKER}/2900",
+    },
 }
 
 #: Which ``/ready`` entry maps to which :data:`FEATURE_MATURITY` key.

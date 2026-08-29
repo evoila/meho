@@ -127,6 +127,7 @@ async def _seed_tenant() -> None:
 #: convention by returning ``{items, next_cursor?}`` and being added
 #: here.
 _LIST_ENVELOPE_ENDPOINTS = [
+    pytest.param("/api/v1/addons/pairings", None, id="addon-pairings"),
     pytest.param("/api/v1/targets", None, id="targets"),
     pytest.param("/api/v1/connectors", "connectors", id="connectors"),
     pytest.param("/api/v1/conventions", "entries", id="conventions"),

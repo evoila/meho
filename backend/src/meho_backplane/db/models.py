@@ -3939,6 +3939,128 @@ class RunnerPrincipal(Base):
     )
 
 
+class AddonPairing(Base):
+    """A paired add-on product — a Keycloak service principal + a versioned contract.
+
+    Foundation of Initiative #2900 (#3025). Each row is one *active* pairing
+    between the backplane and a sibling add-on product (first consumers:
+    meho-automation, meho-ssp). Pairing is deliberately **not** connector
+    registration: an add-on is a peer control plane beside the narrow waist,
+    integrated through the governance planes, not a managed vendor system
+    below it.
+
+    Lifecycle
+    ---------
+
+    * **pair** negotiates the integration-contract version (both-direction
+      minimum-version pinning; see
+      :mod:`meho_backplane.operations.addon_pairing_contract`), provisions a
+      confidential Keycloak client-credentials client tagged
+      ``kind=service`` (``principal_kind=service``, ``tenant_role=read_only``
+      — no blanket admin; the service-principal gate parks every mutating op
+      by default), and inserts this row.
+    * **unpair** deletes the Keycloak client (the authoritative kill switch)
+      then hard-deletes this row. The row is intentionally *not* soft-kept:
+      an unpaired backplane is byte-identical to a never-paired one, so the
+      table holds only live pairings. The append-only ``audit_log`` retains
+      the full pair/unpair history.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key; PG ``gen_random_uuid()`` via the migration,
+      ORM ``default=uuid.uuid4`` for SQLite / out-of-band inserts.
+    * ``tenant_id`` -- UUID NOT NULL, FK to ``tenant.id``. A pairing belongs
+      to a real tenant; the ``NO ACTION`` FK prevents deleting a tenant that
+      still has live pairings.
+    * ``name`` -- Text NOT NULL. The operator-facing add-on handle (e.g.
+      ``automation``). Unique within a tenant
+      (``addon_pairing_tenant_name_idx``).
+    * ``keycloak_client_id`` -- Text NOT NULL UNIQUE. The OAuth ``clientId``
+      in Keycloak — conventionally ``addon:<name>`` to keep add-on clients
+      visually distinct from agent / runner / user clients. Globally unique
+      (Keycloak has no per-tenant client-id namespace).
+    * ``keycloak_internal_id`` -- Text NOT NULL. Keycloak's internal UUID for
+      the client, used by the unpair path to issue the delete without a
+      lookup-by-clientId.
+    * ``owner_sub`` -- Text NOT NULL. The ``sub`` of the responsible party
+      for this add-on (the NHI governance kill-switch model, as for agent
+      principals).
+    * ``contract_version`` -- Integer NOT NULL. The **negotiated** contract
+      version both sides operate on.
+    * ``addon_contract_version`` / ``addon_min_backplane_version`` -- Integer
+      NOT NULL. What the add-on brought to the handshake — its advertised
+      version and its backplane floor. Retained so the health surface can
+      re-evaluate skew against the current backplane version without a
+      re-handshake.
+    * ``created_by_sub`` -- Text NOT NULL. Operator ``sub`` who paired.
+    * ``paired_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL. PG server
+      defaults; ORM ``lambda: datetime.now(UTC)`` for SQLite.
+    * ``last_seen_at`` -- ``timestamptz`` NULL. Stamped by the add-on's
+      liveness heartbeat; ``NULL`` until the add-on first checks in.
+
+    Indexes
+    -------
+
+    * ``addon_pairing_tenant_name_idx`` -- unique composite on
+      ``(tenant_id, name)``. Enforces per-tenant name uniqueness and drives
+      the tenant-scoped list / by-name lookup.
+    * ``addon_pairing_keycloak_client_id_idx`` -- unique on
+      ``keycloak_client_id``.
+    """
+
+    __tablename__ = "addon_pairing"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_internal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    addon_contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    addon_min_backplane_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    paired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "addon_pairing_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "addon_pairing_keycloak_client_id_idx",
+            "keycloak_client_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Initiative #2415 (#2499) — gateway assignment + result-ingest storage
 # ---------------------------------------------------------------------------

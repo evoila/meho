@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Add-on pairing registry table-rows fragment (#3025).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As the standalone fragment ``GET /ui/pairing`` returns when the
+      ``HX-Request`` header is set (the 30s auto-refresh poll). HTMX
+      outerHTML-swaps it into the existing ``#pairing-table-body`` element.
+
+  The ``Last seen`` / ``Paired`` columns render a relative string ("3 h ago")
+  with a tooltip carrying the full ISO timestamp — pure server-side via the
+  ``_rel`` macro, no JS. ``contract_compatible`` reuses a server-derived
+  badge class; a pairing whose add-on has never sent a heartbeat has
+  ``last_seen == None`` and renders the em-dash placeholder.
+-#}
+{% macro _rel(ts) -%}
+  {%- set ago = (now_utc - ts).total_seconds() | int -%}
+  {%- if ago < 60 -%}just now
+  {%- elif ago < 3600 -%}{{ (ago // 60) }} min ago
+  {%- elif ago < 86400 -%}{{ (ago // 3600) }} h ago
+  {%- elif ago < 604800 -%}{{ (ago // 86400) }} d ago
+  {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="pairing-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-addon-name="{{ row.addon }}">
+        <td class="font-medium">{{ row.addon }}</td>
+        <td class="text-xs"><span class="font-mono">v{{ row.contract_version }}</span></td>
+        <td>
+          <span class="badge {{ row.compat_badge }} badge-sm">{{ row.compat_label }}</span>
+        </td>
+        <td>
+          {% if row.last_seen %}
+            <span class="text-xs" title="{{ row.last_seen.isoformat() }}">{{ _rel(row.last_seen) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="text-xs" title="{{ row.paired_at.isoformat() }}">{{ _rel(row.paired_at) }}</span>
+        </td>
+        <td class="text-xs"><span class="font-mono">{{ row.owner_sub }}</span></td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="6" class="text-center text-sm opacity-60 py-6">
+        No add-ons paired. Pair one via
+        <code>POST /api/v1/addons/pairings</code>.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

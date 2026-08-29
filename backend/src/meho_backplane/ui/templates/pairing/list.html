@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the add-on pairing registry (#3025, Initiative #2900).
+  Extends ``base.html`` so the chrome matches the rest of the console. One
+  glance answers "which add-ons are paired / which are still contract-
+  compatible with this backplane / which have gone quiet?": each row shows a
+  pairing's add-on name, its negotiated contract version, a compatibility
+  badge (both-direction skew re-evaluated live against the current backplane
+  contract), its last liveness heartbeat, when it was paired, and its owner.
+
+  Auto-refresh: the table arms an ``hx-trigger="every 30s"`` poll so the
+  liveness + compatibility projection stays live. Read-only — pair / unpair
+  stay on the REST surface (``/api/v1/addons/pairings``).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Pairing &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold">Pairing{% include "_maturity_badge.html" %}</h1>
+      <p class="text-sm opacity-70">
+        Paired add-on products — each a scoped Keycloak service principal on a
+        versioned integration contract. This backplane speaks contract
+        <span class="font-mono">v{{ backplane_contract_version }}</span>.
+        Pairing / unpairing is a <code>tenant_admin</code> action on the REST
+        surface; this console is read-only.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table
+      class="table table-sm"
+      hx-get="/ui/pairing"
+      hx-trigger="every 30s"
+      hx-target="#pairing-table-body"
+      hx-swap="outerHTML"
+    >
+      <thead>
+        <tr>
+          <th>Add-on</th>
+          <th>Contract</th>
+          <th>Compatibility</th>
+          <th>Last seen</th>
+          <th>Paired</th>
+          <th>Owner</th>
+        </tr>
+      </thead>
+      {% include "pairing/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

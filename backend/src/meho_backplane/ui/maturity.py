@@ -66,6 +66,7 @@ MATURITY_INDEX_URL = "https://evoila.github.io/meho/latest/reference/maturity/"
 #: test suite pins this dict against ``base.html``'s registry so the
 #: two cannot drift silently.
 SURFACE_FEATURE: dict[str, str] = {
+    "pairing": "addon_pairing",
     "broadcast": "broadcast",
     "knowledge": "memory_knowledge",
     "corpus": "doc_collections",

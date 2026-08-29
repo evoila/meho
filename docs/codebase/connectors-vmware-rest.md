@@ -1040,41 +1040,53 @@ wraps into a `connector_error` envelope -- the whole composite fails.
 An optional enrichment failure must **not** sink the composite: the
 leg degrades and the rows the core use case needs are still returned.
 
-`datastore.usage` is the canonical example. Its per-datastore layout is
+`datastore.usage` is the canonical example. Its layout is
 `GET:/vcenter/datastore` (listing, load-bearing) → per row
 `GET:/vcenter/datastore/{datastore}` (capacity/free/type, load-bearing)
-→ `GET:/vcenter/vm?filter.datastores=...` (VM placement, **best-effort**).
-The "which datastores are filling up?" use case is satisfied by the
-capacity/free/type read, which has already succeeded by the time the VM
-lookup runs. So when the VM lookup errors -- e.g. an 8.0 vCenter that
-400s the `filter.datastores` query the 9.0 spec emits -- the row is
-still returned with `capacity`/`free_space`/`type` intact,
-`vm_count`/`vm_names` set to `null`, and an `enrichment_note` string
-recording the failing sub-op, its status, and the underlying error.
+→ a **single batched VM-placement read** (`_read_vm_placement`,
+**best-effort**) resolved once for the whole result. The "which
+datastores are filling up?" use case is satisfied by the
+capacity/free/type reads, which have already succeeded by the time the
+placement read runs. So when that read errors, every row is still
+returned with `capacity`/`free_space`/`type` intact, `vm_count`/`vm_names`
+set to `null`, and an `enrichment_note` string recording the failure.
 The response schema marks `vm_count`/`vm_names` as nullable and adds the
-optional `enrichment_note` key (present only on a skipped row).
+optional `enrichment_note` key (present only when enrichment was skipped
+or discarded).
 
-The same null + `enrichment_note` treatment is extended to a second,
-subtler failure mode by the **cross-row identical-sets guard** (#2975).
-A per-datastore VM leg can *succeed* (HTTP 200) yet still be wrong: if
-the target silently ignores the per-datastore filter, `GET:/vcenter/vm`
-returns the whole-inventory VM list, so every datastore row is
-enriched with the identical global list — `vm_count` equal to the
-cluster-wide VM total and an identical `vm_names` sample on all rows.
-That poisons the classic "which VMs live on this filling-up datastore?"
-triage question with the same wrong answer on every row. Because a VM's
-working directory lives on exactly one datastore, genuinely-distinct
-datastores never share a non-empty VM set; so an identical **non-empty**
-set across *every* enriched row is treated as failed enrichment — all
-those rows are nulled and carry an `enrichment_note` explaining the
-filter was not applied — rather than emitting the populated-but-wrong
-global list. The non-empty condition excludes the legitimate all-empty
-case (every datastore really has zero VMs), and the guard needs at least
-two enriched rows to compare, so a single-datastore result is never
-touched. The guard is defence-in-depth: it stands regardless of *why*
-the filter was ignored (the upstream root cause is diagnosed separately
-from the dispatch audit row), so it protects the data even when a target
-build mishandles the filter param.
+**Placement is vim-authoritative, not a server-side filter (#2975).**
+The original layout scoped each row with
+`GET:/vcenter/vm?filter.datastores=<ds>` — one filtered call per
+datastore — and trusted the target to honour it. Some builds silently
+ignore that filter and return the whole-inventory VM list on every call,
+so every datastore row was enriched with the identical global list
+(`vm_count` = cluster-wide total, identical `vm_names` on every row),
+poisoning the classic "which VMs live on this filling-up datastore?"
+triage question with the same wrong answer everywhere. The seam that
+strips the `filter.` prefix on modern mounts (#2298) is not the cause;
+the code cannot emit `/api` + `filter.datastores`, and the real cause is
+undetermined from code (legacy `/rest` mount vs the build ignoring the
+bare `datastores=` param). The fix stops depending on the filter
+altogether: `_read_vm_placement` reads `GET:/vcenter/vm` **unfiltered**
+(every VM's moid + name), then one `RetrievePropertiesEx` over every VM
+reading the vim-authoritative `VirtualMachine.datastore` property (the
+union of datastores a VM's config/disks/snapshots/swap sit on), and
+joins the two client-side into per-datastore `vm_count`/`vm_names`. Each
+row therefore carries only the VMs vim reports on that datastore
+regardless of whether any REST filter is honoured; a VM whose disks span
+two datastores legitimately appears under both. This also replaces N
+per-datastore calls with two batched reads.
+
+The **cross-row identical-sets guard** (#3049) is retained as
+belt-and-braces: an identical **non-empty** VM set across *every*
+enriched row is nulled + noted rather than emitted as per-datastore
+placement. With authoritative placement that shape cannot arise in
+practice (it would require every VM to sit on every datastore), so the
+guard's firing condition is effectively impossible — but it stays to
+refuse any populated-but-identical anomaly. The non-empty condition
+excludes the legitimate all-empty case (every datastore really has zero
+VMs), and the guard needs at least two enriched rows to compare, so a
+single-datastore result is never touched.
 
 ### Per-entity capacity sensing (`filter_names`, #2758)
 

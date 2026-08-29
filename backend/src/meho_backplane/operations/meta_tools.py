@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import Annotated, Any, Final
 
 import structlog
@@ -102,6 +103,10 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
+from meho_backplane.operations.addon_orchestration import (
+    bound_parent_linkage,
+    resolve_or_open_orchestration_run,
+)
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
 from meho_backplane.targets.resolver import (
@@ -1065,14 +1070,29 @@ async def _call_operation_impl(
     if isinstance(work_ref_arg, str) and work_ref_arg:
         work_ref_token = work_ref_var.set(work_ref_arg)
     try:
-        result = await dispatch(
-            operator=operator,
-            connector_id=connector_id,
-            op_id=op_id,
-            target=resolved_target,
-            params=params,
-            _approved=approved,
-        )
+        async with AsyncExitStack() as linkage_stack:
+            # #3028 out-of-process parent-linkage: when a paired add-on service
+            # principal dispatches under a ``work_ref``, group its per-step
+            # dispatches into one audit-replay subtree by binding the
+            # orchestration run's synthesized ``session_id`` + anchor
+            # ``parent_audit_id`` around the dispatch. Resolution reads the
+            # *effective* work_ref (the arg above or an ambient ``Meho-Work-Ref``
+            # header) and returns ``None`` for any non-paired caller, so the
+            # pre-#3028 behaviour (an independent audit row) is untouched for
+            # users, agents, and unpaired service principals.
+            effective_work_ref = work_ref_var.get()
+            if effective_work_ref:
+                linkage_run = await resolve_or_open_orchestration_run(operator, effective_work_ref)
+                if linkage_run is not None:
+                    await linkage_stack.enter_async_context(bound_parent_linkage(linkage_run))
+            result = await dispatch(
+                operator=operator,
+                connector_id=connector_id,
+                op_id=op_id,
+                target=resolved_target,
+                params=params,
+                _approved=approved,
+            )
     finally:
         if work_ref_token is not None:
             work_ref_var.reset(work_ref_token)

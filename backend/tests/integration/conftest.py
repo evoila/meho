@@ -455,6 +455,11 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   same statement (``cannot truncate a table referenced in a foreign
         #   key constraint``). No direct ``tenant`` FK — the tenant-FK drift
         #   guard does not cover it, so it is listed by hand here.
+        # * ``addon_orchestration_run`` — migration 0080 (#3028 out-of-process
+        #   audit parent-linkage) carries a real ``REFERENCES tenant(id)`` FK;
+        #   same rule — list it here or the per-test TRUNCATE of ``tenant``
+        #   fails with ``cannot truncate a table referenced in a foreign key
+        #   constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
@@ -463,7 +468,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, addon_pairing, operation_run, addon_capability, "
+                "service_principal_grant, addon_pairing, operation_run, "
+                "addon_capability, addon_orchestration_run, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
@@ -534,7 +540,8 @@ async def pg_engine_empty_tenant(
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, addon_pairing, operation_run, addon_capability, "
+                "service_principal_grant, addon_pairing, operation_run, "
+                "addon_capability, addon_orchestration_run, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "

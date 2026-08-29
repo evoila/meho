@@ -435,6 +435,31 @@ class AddonPairingService:
             return None
         return PairedAddonRead.model_validate(row)
 
+    async def get_by_client_id(
+        self,
+        keycloak_client_id: str,
+    ) -> PairedAddonRead | None:
+        """Fetch one live pairing by its Keycloak ``clientId``; ``None`` if absent.
+
+        The clientId is globally unique (Keycloak has no per-tenant clientId
+        namespace; ``addon_pairing_keycloak_client_id_idx``), so this needs no
+        tenant scope — the returned row *carries* its ``tenant_id`` for the
+        caller to cross-check against the request's tenant. This is the lookup
+        the #3028 add-on parent-linkage seam uses to answer "is this dispatch's
+        service principal a paired add-on, and which pairing?".
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(AddonPairing).where(
+                    AddonPairing.keycloak_client_id == keycloak_client_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return PairedAddonRead.model_validate(row)
+
     async def heartbeat(
         self,
         tenant_id: uuid.UUID,

@@ -114,6 +114,7 @@ def _make_app() -> FastAPI:
         return {
             "sub": operator.sub,
             "principal_kind": operator.principal_kind.value,
+            "client_id": operator.client_id or "",
         }
 
     return mini
@@ -391,3 +392,78 @@ def test_custom_claim_name(monkeypatch: pytest.MonkeyPatch) -> None:
             resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["principal_kind"] == "agent"
+
+
+# ---------------------------------------------------------------------------
+# clientId recovery for the add-on parent-linkage seam (#3028)
+# ---------------------------------------------------------------------------
+#
+# A paired add-on's Keycloak service-account username is
+# ``service-account-<clientId>``; stripping the reserved prefix recovers the
+# ``clientId`` (== ``addon_pairing.keycloak_client_id``), which the #3028
+# out-of-process parent-linkage matches a dispatch's principal against.
+
+
+def _client_id(token: str, key: Any) -> str:
+    """Drive a token through ``verify_jwt`` and return the resolved client_id."""
+    app = _make_app()
+    with respx.mock as r:
+        r.get(_DISCOVERY_URL).mock(
+            return_value=httpx.Response(200, json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL})
+        )
+        r.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=_public_jwks(key)))
+        with TestClient(app) as client:
+            resp = client.get("/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["client_id"]
+
+
+def test_client_id_recovered_from_service_account_username() -> None:
+    """A ``service-account-addon:<name>`` username → client_id ``addon:<name>``."""
+    key = _make_key("kid-cid-svc")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "service-account-addon:automation"},
+    )
+    assert _client_id(token, key) == "addon:automation"
+
+
+def test_client_id_absent_for_ordinary_user() -> None:
+    """An interactive user's username has no service-account marker → empty client_id."""
+    key = _make_key("kid-cid-user")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "alice"},
+    )
+    assert _client_id(token, key) == ""
+
+
+def test_client_id_uses_custom_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The clientId derivation strips the configured (custom) prefix."""
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "svc:")
+    get_settings.cache_clear()
+    clear_jwks_cache()
+    key = _make_key("kid-cid-prefix")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"preferred_username": "svc:addon:ssp"},
+    )
+    assert _client_id(token, key) == "addon:ssp"
+
+
+def test_extract_client_id_unit() -> None:
+    """``_extract_client_id`` reads the marker directly off a claims mapping."""
+    from meho_backplane.auth.jwt import _extract_client_id
+
+    settings = get_settings()
+    assert (
+        _extract_client_id({"preferred_username": "service-account-addon:automation"}, settings)
+        == "addon:automation"
+    )
+    assert _extract_client_id({"preferred_username": "alice"}, settings) is None
+    assert _extract_client_id({}, settings) is None
+    # A bare prefix with no clientId body resolves to None, not "".
+    assert _extract_client_id({"preferred_username": "service-account-"}, settings) is None

@@ -116,6 +116,24 @@ connector-related release-notes line.
   Supersedes the label-humanization pass (internal#230) by folding it
   into both drawers.
 
+### Added — out-of-process audit parent-linkage for paired add-on orchestrations (#3028)
+
+- A paired add-on orchestrating from outside the backplane can now group all
+  the `call_operation` dispatches of one run into a **single audit-replay
+  subtree**, extending #2086's in-process lineage to out-of-process parents.
+  The first dispatch a paired service principal issues under a given `work_ref`
+  opens an orchestration run (a synthesized replay `session_id` + an
+  `addon.orchestration` anchor audit row); every later dispatch for that
+  work_ref resolves the same run and back-links to the anchor, so
+  `GET /api/v1/audit/sessions/{id}/replay` reconstructs the orchestration and
+  its resulting dispatches as one tree. Linkage is accepted **only** from a
+  paired principal for its **own** work_refs — keyed by the caller's
+  `keycloak_client_id`, so a different add-on presenting the same work_ref
+  string gets its own isolated subtree, and non-paired principals (users,
+  agents, unpaired service accounts) are unaffected. Audit stays synchronous
+  append-only: the anchor is an ordinary audit row carrying only its own
+  columns (new migration `0082`, `addon_orchestration_run`).
+
 ### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
 
 - `vmware.composite.datastore.usage` enriched every datastore row with the

@@ -272,6 +272,14 @@ def test_page_renders_filter_bar_with_all_four_controls() -> None:
     # The filter bar HTMX-submits the three server filters to the fragment route.
     assert 'hx-get="/ui/broadcast/feed"' in body
     assert 'hx-target="#broadcast-feed"' in body
+    # #229: the hx-trigger must wire BOTH selects (op_class + target), not
+    # just the first. htmx `from:find select` binds only the first matching
+    # descendant, so `change from:find select` alone left the Target select
+    # dead. Each select is named explicitly; op_id stays client-side (no
+    # server trigger clause).
+    assert "change from:find select[name=op_class]" in body
+    assert "change from:find select[name=target]" in body
+    assert "from:find select," not in body  # the old first-select-only trigger is gone
 
 
 def test_page_op_class_options_cover_the_closed_vocabulary() -> None:

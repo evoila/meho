@@ -262,6 +262,26 @@ connector-related release-notes line.
   release notes, and `fail_on_unmatched_files` keeps the step fail-closed.
   Next tag run publishes all five assets without manual intervention.
 
+### Added — `fleet-lcm` Bearer token-provisioning seam + operator onboarding runbook (#3047)
+
+- The modern `fleet-lcm-9.0` connector's `auth_headers` already preferred
+  `Authorization: Bearer <token>` (the spec's primary `bearerToken` scheme)
+  when the loaded credentials carried a `token`, but its default Vault loader
+  only ever surfaced the `username`/`password` pair, so Bearer was
+  unreachable in production. The default `load_credentials_from_vault` now
+  reads the raw KV-v2 payload and surfaces an **optional** `token` alongside
+  the required pair — so an operator opts a target into Bearer simply by
+  staging a `token` field in its Vault secret, no `auth_model` change (the
+  proxmox / github field-discriminator shape). Proven end to end through the
+  real default loader against a Vault fake (Basic without a token, Bearer with
+  one, whitespace-strip, fail-closed on a missing pair). The **live**
+  `basicAuth` → mint-`bearerToken` exchange and Bearer verification against a
+  real appliance remain the documented follow-up, gated on reachable hardware
+  (#1002 / #995). A new operator runbook
+  ([`docs/cross-repo/fleet-lcm-onboarding.md`](docs/cross-repo/fleet-lcm-onboarding.md))
+  documents target registration, the token seam, and the optional
+  `meho connector ingest` of the wider 51-op `/v1/*` breadth.
+
 ## [0.31.0] - 2026-08-27
 
 ### Breaking changes — MCP agent surface is claim-gated: default drops to the 25-tool working surface (#3154 / #3160)

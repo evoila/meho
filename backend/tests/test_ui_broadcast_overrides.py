@@ -283,6 +283,14 @@ def test_overrides_tab_tenant_admin_gated() -> None:
     assert "vault.kv.read" in admin_resp.text
     assert 'aria-label="Broadcast suppression rules"' in admin_resp.text
     assert "Overrides require tenant_admin" not in admin_resp.text
+    # #231: the "New rule" create dialog is migrated off dead daisyUI-v4
+    # classes (removed in v5 — zero compiled rules — which collapsed the
+    # label-over-input column), and the scope-value toggle hooks survive.
+    assert "form-control" not in admin_resp.text
+    assert "label-text" not in admin_resp.text
+    assert 'id="broadcast-override-create-form"' in admin_resp.text
+    assert 'data-action="scope-select"' in admin_resp.text
+    assert "data-scope-value-row" in admin_resp.text
 
     # Clear the cached JWKS so the operator client's distinct keypair is
     # re-fetched -- the two clients mint under the same kid, and a stale

@@ -39,17 +39,21 @@ from typing import Any
 from uuid import UUID
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import get_result_handle_store
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations.result_query import (
+    MAX_LIMIT,
+    ResultHandleNotFoundError,
+    read_result_window,
+)
 
 __all__: list[str] = []
 
 #: Mirror of the inline-sample upper bound's sibling list tools: a single
 #: page returns at most this many rows so one read-back can't pull an
-#: unbounded slice in one call. Matches the ``search_operations`` /
-#: ``list_targets`` max-page convention.
-_MAX_LIMIT = 500
+#: unbounded slice in one call. Sourced from the transport-neutral core so
+#: the MCP ``inputSchema`` and the REST body share one ceiling (#3179).
+_MAX_LIMIT = MAX_LIMIT
 
 
 async def _result_query_handler(
@@ -60,9 +64,10 @@ async def _result_query_handler(
 
     The MCP dispatcher has already validated ``arguments`` against the
     tool's ``inputSchema`` (``handle_id`` required, ``offset`` / ``limit``
-    bounded), so the body parses the UUID and fetches the window. The
-    tenant comes from ``operator.tenant_id`` — the arguments carry no
-    tenant, by design.
+    bounded), so the body parses the UUID and delegates the windowed read
+    to the shared :func:`read_result_window` core (the same core the REST
+    ``POST /api/v1/operations/result-query`` route wraps). The tenant comes
+    from ``operator.tenant_id`` — the arguments carry no tenant, by design.
     """
     raw_handle = arguments["handle_id"]
     try:
@@ -73,35 +78,13 @@ async def _result_query_handler(
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 
-    if operator.tenant_id is None:
-        # An operator with no tenant can never own a spilled handle
-        # (the reducer keys the spill on tenant_id). Treat as not-found
-        # rather than leaking a distinct "no tenant" signal.
-        raise _handle_not_found(handle_id)
-
     offset = int(arguments.get("offset", 0))
     limit = int(arguments.get("limit", 50))
 
-    window = await get_result_handle_store().fetch_window(
-        tenant_id=operator.tenant_id,
-        operator_sub=operator.sub,
-        handle_id=handle_id,
-        offset=offset,
-        limit=limit,
-    )
-    if window is None:
-        raise _handle_not_found(handle_id)
-
-    return {
-        "handle_id": str(handle_id),
-        "rows": window.rows,
-        "offset": offset,
-        "limit": limit,
-        "returned_rows": len(window.rows),
-        "total_rows": window.total_rows,
-        "stored_rows": window.stored_rows,
-        "truncated": window.truncated,
-    }
+    try:
+        return await read_result_window(operator, handle_id, offset, limit)
+    except ResultHandleNotFoundError as exc:
+        raise _handle_not_found(handle_id) from exc
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:

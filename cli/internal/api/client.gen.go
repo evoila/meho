@@ -5784,6 +5784,29 @@ type ResultIngestResponse struct {
 	Duplicates int `json:"duplicates"`
 }
 
+// ResultQueryBody POST body for “/api/v1/operations/result-query“ (#3179).
+//
+// The REST twin of the MCP “result_query“ tool's “inputSchema“:
+// “handle_id“ is the UUID minted onto a reduced “/call“ response's
+// “result.handle.handle_id“ / “fetch_more.drill_in.example_call“, and
+// “offset“ / “limit“ window the spilled set. The bounds mirror the MCP
+// schema (“offset >= 0“; “1 <= limit <= MAX_LIMIT“) so the two surfaces
+// validate identically. “extra="forbid"“ rejects unknown body fields with
+// a 422, matching the sibling “CallOperationBody“ posture.
+//
+// Filtering / projection is out of scope (issue #3179 non-goal): parity is
+// the same offset/limit window the MCP tool serves, not more.
+type ResultQueryBody struct {
+	// HandleId The result handle's UUID, taken from a reduced `/call` response's `result.handle.handle_id` or `fetch_more.drill_in.example_call.args.handle_id`.
+	HandleId openapi_types.UUID `json:"handle_id"`
+
+	// Limit Page size. Default 50; max 500. Matches the `result_query` MCP tool's upper bound.
+	Limit *int `json:"limit,omitempty"`
+
+	// Offset Zero-based index of the first row to return. Page by advancing this by the previous `limit`.
+	Offset *int `json:"offset,omitempty"`
+}
+
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
 //
 // Frozen + “extra="forbid"“ so the CLI's “--json“ consumers can
@@ -8750,6 +8773,11 @@ type PostPreviewApiV1OperationsPreviewPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// PostResultQueryApiV1OperationsResultQueryPostParams defines parameters for PostResultQueryApiV1OperationsResultQueryPost.
+type PostResultQueryApiV1OperationsResultQueryPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
 	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
@@ -9582,6 +9610,9 @@ type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
 
 // PostPreviewApiV1OperationsPreviewPostJSONRequestBody defines body for PostPreviewApiV1OperationsPreviewPost for application/json ContentType.
 type PostPreviewApiV1OperationsPreviewPostJSONRequestBody = PreviewOperationBody
+
+// PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody defines body for PostResultQueryApiV1OperationsResultQueryPost for application/json ContentType.
+type PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody = ResultQueryBody
 
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
@@ -11608,6 +11639,11 @@ type ClientInterface interface {
 	PostPreviewApiV1OperationsPreviewPostWithBody(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PostPreviewApiV1OperationsPreviewPost(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostResultQueryApiV1OperationsResultQueryPostWithBody request with any body
+	PostResultQueryApiV1OperationsResultQueryPostWithBody(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostResultQueryApiV1OperationsResultQueryPost(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetSearchApiV1OperationsSearchGet request
 	GetSearchApiV1OperationsSearchGet(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14157,6 +14193,30 @@ func (c *Client) PostPreviewApiV1OperationsPreviewPostWithBody(ctx context.Conte
 
 func (c *Client) PostPreviewApiV1OperationsPreviewPost(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostPreviewApiV1OperationsPreviewPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultQueryApiV1OperationsResultQueryPostWithBody(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultQueryApiV1OperationsResultQueryPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultQueryApiV1OperationsResultQueryPost(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultQueryApiV1OperationsResultQueryPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -24817,6 +24877,61 @@ func NewPostPreviewApiV1OperationsPreviewPostRequestWithBody(server string, para
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/operations/preview")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostResultQueryApiV1OperationsResultQueryPostRequest calls the generic PostResultQueryApiV1OperationsResultQueryPost builder with application/json body
+func NewPostResultQueryApiV1OperationsResultQueryPostRequest(server string, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostResultQueryApiV1OperationsResultQueryPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostResultQueryApiV1OperationsResultQueryPostRequestWithBody generates requests for PostResultQueryApiV1OperationsResultQueryPost with any type of body
+func NewPostResultQueryApiV1OperationsResultQueryPostRequestWithBody(server string, params *PostResultQueryApiV1OperationsResultQueryPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/result-query")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -39797,6 +39912,11 @@ type ClientWithResponsesInterface interface {
 
 	PostPreviewApiV1OperationsPreviewPostWithResponse(ctx context.Context, params *PostPreviewApiV1OperationsPreviewPostParams, body PostPreviewApiV1OperationsPreviewPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostPreviewApiV1OperationsPreviewPostResponse, error)
 
+	// PostResultQueryApiV1OperationsResultQueryPostWithBodyWithResponse request with any body
+	PostResultQueryApiV1OperationsResultQueryPostWithBodyWithResponse(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error)
+
+	PostResultQueryApiV1OperationsResultQueryPostWithResponse(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error)
+
 	// GetSearchApiV1OperationsSearchGetWithResponse request
 	GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error)
 
@@ -42974,6 +43094,29 @@ func (r PostPreviewApiV1OperationsPreviewPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostPreviewApiV1OperationsPreviewPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostResultQueryApiV1OperationsResultQueryPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostResultQueryApiV1OperationsResultQueryPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostResultQueryApiV1OperationsResultQueryPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -49978,6 +50121,23 @@ func (c *ClientWithResponses) PostPreviewApiV1OperationsPreviewPostWithResponse(
 	return ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp)
 }
 
+// PostResultQueryApiV1OperationsResultQueryPostWithBodyWithResponse request with arbitrary body returning *PostResultQueryApiV1OperationsResultQueryPostResponse
+func (c *ClientWithResponses) PostResultQueryApiV1OperationsResultQueryPostWithBodyWithResponse(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+	rsp, err := c.PostResultQueryApiV1OperationsResultQueryPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultQueryApiV1OperationsResultQueryPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostResultQueryApiV1OperationsResultQueryPostWithResponse(ctx context.Context, params *PostResultQueryApiV1OperationsResultQueryPostParams, body PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+	rsp, err := c.PostResultQueryApiV1OperationsResultQueryPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultQueryApiV1OperationsResultQueryPostResponse(rsp)
+}
+
 // GetSearchApiV1OperationsSearchGetWithResponse request returning *GetSearchApiV1OperationsSearchGetResponse
 func (c *ClientWithResponses) GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error) {
 	rsp, err := c.GetSearchApiV1OperationsSearchGet(ctx, params, reqEditors...)
@@ -56408,6 +56568,39 @@ func ParsePostPreviewApiV1OperationsPreviewPostResponse(rsp *http.Response) (*Po
 	}
 
 	response := &PostPreviewApiV1OperationsPreviewPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostResultQueryApiV1OperationsResultQueryPostResponse parses an HTTP response from a PostResultQueryApiV1OperationsResultQueryPostWithResponse call
+func ParsePostResultQueryApiV1OperationsResultQueryPostResponse(rsp *http.Response) (*PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostResultQueryApiV1OperationsResultQueryPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-import meho_backplane.mcp.tools.result_query as result_query_module
+import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.result_handle_store import SpilledWindow
 from meho_backplane.mcp.schemas import INVALID_PARAMS
@@ -84,9 +84,14 @@ class _FakeStore:
 
 @pytest.fixture
 def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
-    """Replace the production store getter with an in-memory fake."""
+    """Replace the production store getter with an in-memory fake.
+
+    Patched on the shared core module (:mod:`meho_backplane.operations.
+    result_query`) where the getter is now called (#3179) rather than on the
+    MCP tool module — the MCP handler delegates the windowed read to the core.
+    """
     store = _FakeStore()
-    monkeypatch.setattr(result_query_module, "get_result_handle_store", lambda: store)
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: store)
     return store
 
 

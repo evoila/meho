@@ -331,3 +331,66 @@ func TestPrettyJSONRejectsInvalid(t *testing.T) {
 		t.Fatalf("expected unmarshal error; got nil")
 	}
 }
+
+// TestPrintResultQueryResultWindow — happy-path render shows the window
+// header (position + counts) and pretty-prints the rows.
+func TestPrintResultQueryResultWindow(t *testing.T) {
+	r := &ResultQueryResult{
+		HandleID:     "11111111-1111-1111-1111-111111111111",
+		Rows:         []json.RawMessage{json.RawMessage(`{"i":5,"name":"row-5"}`)},
+		Offset:       5,
+		Limit:        50,
+		ReturnedRows: 1,
+		TotalRows:    60,
+		StoredRows:   60,
+	}
+	var buf bytes.Buffer
+	printResultQueryResult(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"rows 5..6 of 60", "stored 60", "returned 1", `"name"`, "row-5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printResultQueryResult missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintResultQueryResultEmptyWindow — an offset past the end returns
+// zero rows; the render announces the end-of-set rather than an error.
+func TestPrintResultQueryResultEmptyWindow(t *testing.T) {
+	r := &ResultQueryResult{
+		HandleID:     "h",
+		Rows:         nil,
+		Offset:       100,
+		Limit:        50,
+		ReturnedRows: 0,
+		TotalRows:    60,
+		StoredRows:   60,
+	}
+	var buf bytes.Buffer
+	printResultQueryResult(&buf, r)
+	out := buf.String()
+	if !strings.Contains(out, "empty window") {
+		t.Errorf("empty window should announce end-of-set; got:\n%s", out)
+	}
+}
+
+// TestPrintResultQueryResultTruncated — a spill capped below total surfaces
+// the truncation note so the operator knows the tail is unreachable.
+func TestPrintResultQueryResultTruncated(t *testing.T) {
+	r := &ResultQueryResult{
+		HandleID:     "h",
+		Rows:         []json.RawMessage{json.RawMessage(`{"i":0}`)},
+		Offset:       0,
+		Limit:        50,
+		ReturnedRows: 1,
+		TotalRows:    100,
+		StoredRows:   40,
+		Truncated:    true,
+	}
+	var buf bytes.Buffer
+	printResultQueryResult(&buf, r)
+	out := buf.String()
+	if !strings.Contains(out, "capped at 40 of 100") {
+		t.Errorf("truncated render should flag the spill cap; got:\n%s", out)
+	}
+}

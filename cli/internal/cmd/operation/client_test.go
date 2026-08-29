@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	openapi_types "github.com/oapi-codegen/runtime/types"
+
 	"github.com/evoila/meho/cli/internal/api"
 )
 
@@ -30,25 +32,29 @@ type fakeOperationsClient struct {
 	// Recorded params from the most recent call to each verb. Tests
 	// inspect these to verify that typed params are passed (not
 	// raw-string URL concatenation).
-	lastCallParams   *api.PostCallApiV1OperationsCallPostParams
-	lastCallBody     *api.CallOperationBody
-	lastGroupsParams *api.GetGroupsApiV1OperationsGroupsGetParams
-	lastSearchParams *api.GetSearchApiV1OperationsSearchGetParams
+	lastCallParams        *api.PostCallApiV1OperationsCallPostParams
+	lastCallBody          *api.CallOperationBody
+	lastGroupsParams      *api.GetGroupsApiV1OperationsGroupsGetParams
+	lastSearchParams      *api.GetSearchApiV1OperationsSearchGetParams
+	lastResultQueryParams *api.PostResultQueryApiV1OperationsResultQueryPostParams
+	lastResultQueryBody   *api.ResultQueryBody
 
 	// Sequenced canned responses — pop one per call (per verb). Tests
 	// register two responses on the auth-refresh scenarios (first a
 	// 401, then the post-refresh outcome) and one on every other
 	// path.
-	callResponses   []*api.PostCallApiV1OperationsCallPostResponse
-	groupsResponses []*api.GetGroupsApiV1OperationsGroupsGetResponse
-	searchResponses []*api.GetSearchApiV1OperationsSearchGetResponse
+	callResponses        []*api.PostCallApiV1OperationsCallPostResponse
+	groupsResponses      []*api.GetGroupsApiV1OperationsGroupsGetResponse
+	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
+	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
 
 	// Per-verb transport-error queues. Drain in the same order as
 	// the response queues so a refresh-then-transport-failure scenario
 	// can be authored.
-	callErrors   []error
-	groupsErrors []error
-	searchErrors []error
+	callErrors        []error
+	groupsErrors      []error
+	searchErrors      []error
+	resultQueryErrors []error
 
 	// refreshCount tracks how many times Refresh was invoked across
 	// the whole client's lifetime. The 401 dance asserts this hits
@@ -89,9 +95,32 @@ func (f *fakeOperationsClient) GetSearchApiV1OperationsSearchGetWithResponse(
 	return popSearchResp(&f.searchResponses), popErr(&f.searchErrors)
 }
 
+func (f *fakeOperationsClient) PostResultQueryApiV1OperationsResultQueryPostWithResponse(
+	_ context.Context,
+	params *api.PostResultQueryApiV1OperationsResultQueryPostParams,
+	body api.PostResultQueryApiV1OperationsResultQueryPostJSONRequestBody,
+	_ ...api.RequestEditorFn,
+) (*api.PostResultQueryApiV1OperationsResultQueryPostResponse, error) {
+	f.lastResultQueryParams = params
+	bodyCopy := body
+	f.lastResultQueryBody = &bodyCopy
+	return popResultQueryResp(&f.resultQueryResponses), popErr(&f.resultQueryErrors)
+}
+
 func (f *fakeOperationsClient) Refresh(_ context.Context) error {
 	f.refreshCount++
 	return f.refreshErr
+}
+
+func popResultQueryResp(
+	q *[]*api.PostResultQueryApiV1OperationsResultQueryPostResponse,
+) *api.PostResultQueryApiV1OperationsResultQueryPostResponse {
+	if len(*q) == 0 {
+		return nil
+	}
+	r := (*q)[0]
+	*q = (*q)[1:]
+	return r
 }
 
 func popCallResp(q *[]*api.PostCallApiV1OperationsCallPostResponse) *api.PostCallApiV1OperationsCallPostResponse {
@@ -672,5 +701,177 @@ func TestCallHumanRenderOmitsExtrasOnOK(t *testing.T) {
 		t.Errorf("human render printed extras on status=ok — the CLI gap closed; "+
 			"update docs/codebase/checks-advisory.md § Operator reach and the "+
 			"CHANGELOG bullet, then flip this assertion. Output: %q", out.String())
+	}
+}
+
+// ---- postResultQuery (#3179) ----
+
+func makeHandleUUID(t *testing.T, s string) openapi_types.UUID {
+	t.Helper()
+	var u openapi_types.UUID
+	if err := u.UnmarshalText([]byte(s)); err != nil {
+		t.Fatalf("parse handle uuid %q: %v", s, err)
+	}
+	return u
+}
+
+// TestPostResultQueryPassesTypedBody — the happy path asserts the typed
+// body carries HandleId + Offset + Limit pointers (no raw URL/body
+// concatenation) and the 200 envelope decodes into ResultQueryResult.
+func TestPostResultQueryPassesTypedBody(t *testing.T) {
+	rq, _ := json.Marshal(ResultQueryResult{
+		HandleID:     "11111111-1111-1111-1111-111111111111",
+		Rows:         []json.RawMessage{json.RawMessage(`{"i":5}`)},
+		Offset:       5,
+		Limit:        50,
+		ReturnedRows: 1,
+		TotalRows:    60,
+		StoredRows:   60,
+		Truncated:    false,
+	})
+	f := &fakeOperationsClient{
+		resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: rq},
+		},
+	}
+	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
+	got, err := postResultQuery(context.Background(), f, handle, 5, 50)
+	if err != nil {
+		t.Fatalf("postResultQuery: %v", err)
+	}
+	b := f.lastResultQueryBody
+	if b == nil {
+		t.Fatalf("postResultQuery should populate body")
+	}
+	if b.HandleId != handle {
+		t.Fatalf("body should carry typed HandleId=%v; got %v", handle, b.HandleId)
+	}
+	if b.Offset == nil || *b.Offset != 5 {
+		t.Fatalf("body should carry Offset=5; got %+v", b.Offset)
+	}
+	if b.Limit == nil || *b.Limit != 50 {
+		t.Fatalf("body should carry Limit=50; got %+v", b.Limit)
+	}
+	if got.TotalRows != 60 || got.ReturnedRows != 1 || got.Offset != 5 {
+		t.Fatalf("decoded result-query envelope wrong shape: %+v", got)
+	}
+}
+
+// TestPostResultQueryRefreshOn401 — same one-shot refresh dance as the
+// sibling verbs, exercised through postResultQuery.
+func TestPostResultQueryRefreshOn401(t *testing.T) {
+	rq, _ := json.Marshal(ResultQueryResult{HandleID: "h", TotalRows: 0})
+	f := &fakeOperationsClient{
+		resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{
+			{HTTPResponse: makeHTTPResp(401), Body: []byte(`{"detail":"token expired"}`)},
+			{HTTPResponse: makeHTTPResp(200), Body: rq},
+		},
+	}
+	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
+	if _, err := postResultQuery(context.Background(), f, handle, 0, 50); err != nil {
+		t.Fatalf("postResultQuery after refresh: %v", err)
+	}
+	if f.refreshCount != 1 {
+		t.Fatalf("expected exactly one Refresh; got %d", f.refreshCount)
+	}
+}
+
+// TestPostResultQueryNotFoundClassifiesAsApiResponseError — the 404
+// handle-not-found miss wraps as *apiResponseError (so renderRequestError
+// maps it to unexpected_response) and preserves the structured
+// reason=handle_not_found detail in the body for the operator to read.
+func TestPostResultQueryNotFoundClassifiesAsApiResponseError(t *testing.T) {
+	notFound := `{"detail":{"reason":"handle_not_found","handle_id":"11111111-1111-1111-1111-111111111111"}}`
+	f := &fakeOperationsClient{
+		resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{
+			{HTTPResponse: makeHTTPResp(404), Body: []byte(notFound)},
+		},
+	}
+	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
+	_, err := postResultQuery(context.Background(), f, handle, 0, 50)
+	if err == nil {
+		t.Fatalf("expected non-2xx error; got nil")
+	}
+	var apiErr *apiResponseError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
+		t.Fatalf("expected *apiResponseError{StatusCode:404}; got %+v", err)
+	}
+	if !strings.Contains(apiErr.Body, "handle_not_found") {
+		t.Fatalf("404 body should preserve the reason=handle_not_found detail; got %q", apiErr.Body)
+	}
+}
+
+// TestPostResultQueryTransportErrorPropagates — a pure transport failure
+// returns verbatim so renderRequestError can classify it as unreachable.
+func TestPostResultQueryTransportErrorPropagates(t *testing.T) {
+	transportErr := errors.New("dial tcp: connection refused")
+	f := &fakeOperationsClient{resultQueryErrors: []error{transportErr}}
+	handle := makeHandleUUID(t, "11111111-1111-1111-1111-111111111111")
+	_, err := postResultQuery(context.Background(), f, handle, 0, 50)
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("expected transport error to propagate verbatim; got %v", err)
+	}
+	var apiErr *apiResponseError
+	if errors.As(err, &apiErr) {
+		t.Fatalf("transport error should not wrap as *apiResponseError")
+	}
+}
+
+// TestRunResultQueryInvalidUUIDShortCircuits — a malformed handle_id is
+// caught CLI-side (before the backplane is even resolved), surfacing as
+// unexpected_response with the "not a valid UUID" hint. No client call
+// is made.
+func TestRunResultQueryInvalidUUIDShortCircuits(t *testing.T) {
+	f := &fakeOperationsClient{}
+	withFakeClient(t, f)
+
+	cmd := newResultQueryCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"not-a-uuid", "--backplane", "https://x"})
+	// The invalid-UUID branch returns the rendered StructuredError (nil
+	// process error on the human path); assert the diagnostic reached stderr.
+	_ = cmd.Execute()
+	if !strings.Contains(errBuf.String(), "not a valid UUID") {
+		t.Fatalf("expected 'not a valid UUID' diagnostic on stderr; got %q", errBuf.String())
+	}
+	if f.lastResultQueryBody != nil {
+		t.Fatalf("invalid UUID should short-circuit before any client call; got body %+v", f.lastResultQueryBody)
+	}
+}
+
+// TestRunResultQueryHappyPathRendersWindow — the full runResultQuery path
+// (real cobra command + fake client) renders the window header + rows on
+// stdout and exits 0.
+func TestRunResultQueryHappyPathRendersWindow(t *testing.T) {
+	rq, _ := json.Marshal(ResultQueryResult{
+		HandleID:     "11111111-1111-1111-1111-111111111111",
+		Rows:         []json.RawMessage{json.RawMessage(`{"i":0}`), json.RawMessage(`{"i":1}`)},
+		Offset:       0,
+		Limit:        50,
+		ReturnedRows: 2,
+		TotalRows:    2,
+		StoredRows:   2,
+	})
+	f := &fakeOperationsClient{
+		resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: rq},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newResultQueryCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"11111111-1111-1111-1111-111111111111", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for _, want := range []string{"rows 0..2 of 2", `"i": 0`, `"i": 1`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("result-query render missing %q in output:\n%s", want, out.String())
+		}
 	}
 }

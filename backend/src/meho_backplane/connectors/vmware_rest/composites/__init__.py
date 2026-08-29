@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 29 composites land before
+``endpoint_descriptor`` upserts for the 32 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -31,15 +31,17 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 20 write composites (G3.1-T6 / #509, the guest-ops write
+* 23 write composites (G3.1-T6 / #509, the guest-ops write
   ``vm.guest.file.write`` / #3100, single-VM ``vm.power`` /
   #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
   folder-template ``vm.clone_from_template`` / #2894, the vim
   cluster / inventory writes ``cluster.drs_rule.create`` +
   ``folder.create`` / #2895, the #2891 post-clone hardware
   reconfigure trio ``vm.resize`` / ``vm.nic.repoint`` /
-  ``vm.device.cdrom``, the two GOSC composites / #2892, and the OVF/OVA
-  content-library deploy ``vm.deploy_from_library`` / #2909) -- inherit
+  ``vm.device.cdrom``, the two GOSC composites / #2892, the OVF/OVA
+  content-library deploy ``vm.deploy_from_library`` / #2909, and the
+  three host-domain writes ``host.datastore_mount_nfs`` /
+  ``host.disk_mark_flash`` / ``host.service_control`` / #3182) -- inherit
   T4's ``safety_level="dangerous"`` +
   ``requires_approval=True`` defaults.
   They cover every state-mutating workflow Goal #214 names as

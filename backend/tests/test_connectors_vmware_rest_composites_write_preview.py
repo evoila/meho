@@ -306,7 +306,7 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 22 write composites register a builder (criterion 4)
+# Wiring — all 23 write composites register a builder (criterion 4)
 # ===========================================================================
 
 

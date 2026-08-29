@@ -235,8 +235,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (`StartProgramInGuest`) is a deliberately deferred tier.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 27
-  `_CompositeSpec` rows (5 read + 22 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 32
+  `_CompositeSpec` rows (9 read + 23 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -363,9 +363,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 23 `vmware.composite.*` rows with
-   `source_kind="composite"` (5 reads with `safety_level="safe"` +
-   `requires_approval=False`; 19 writes with `safety_level="dangerous"`
+   queued registrar and upserts: the 32 `vmware.composite.*` rows with
+   `source_kind="composite"` (9 reads with `safety_level="safe"` +
+   `requires_approval=False`; 23 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -461,7 +461,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 29 composites (9 reads + 20 writes) land as `source_kind="composite"`
+The 32 composites (9 reads + 23 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -528,7 +528,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 24 composites are hand-authored aggregators the connector ships as
+The 32 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

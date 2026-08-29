@@ -23,9 +23,9 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* The 5 read composites are read-only -- the registration call site
+* The 9 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 18 write composites inherit T4's
+  each. The 23 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template

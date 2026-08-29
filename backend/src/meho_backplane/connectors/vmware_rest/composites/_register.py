@@ -28,7 +28,7 @@ The 9 read composites (T5 / #508 + the 4 guest-ops reads
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 20 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 23 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -36,8 +36,10 @@ VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
 hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
 ``vm.device.cdrom``, the two GOSC composites
-``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
-OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909) inherit
+``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
+OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and the
+three host-domain writes ``host.datastore_mount_nfs`` /
+``host.disk_mark_flash`` / ``host.service_control`` / #3182) inherit
 the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
 at the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +

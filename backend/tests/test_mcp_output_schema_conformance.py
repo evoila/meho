@@ -40,7 +40,7 @@ import jsonschema
 import pytest
 from fastapi.testclient import TestClient
 
-import meho_backplane.mcp.tools.result_query as result_query_module
+import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.result_handle_store import SpilledWindow
 from meho_backplane.db.engine import get_sessionmaker
@@ -448,7 +448,9 @@ def test_result_query_conforms(
                 truncated=False,
             )
 
-    monkeypatch.setattr(result_query_module, "get_result_handle_store", lambda: _StubStore())
+    # Patch the shared core's store getter — the windowed read moved there in
+    # #3179 and the MCP handler now delegates to it.
+    monkeypatch.setattr(result_query_core, "get_result_handle_store", lambda: _StubStore())
     payload = _assert_conforms(
         "result_query",
         _call(client, "result_query", {"handle_id": str(handle_id), "limit": 5}),

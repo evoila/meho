@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
+from meho_backplane.connectors.vmware_rest.composites._guest import guest_file_write_composite
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     folder_create_composite,
@@ -958,3 +959,86 @@ async def test_folder_create_human_operator_vmomi_write_auto_executes(
     assert len(conn.create_writes) == 1
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# guest.file.write (#3100) -- the guest-ops channel's one gated write.
+# It gates FIRST (before resolving guest credentials or the file manager),
+# so a parked / denied write resolves no credential and issues nothing.
+# ---------------------------------------------------------------------------
+
+_GUEST_FILE_WRITE_OP_ID = "POST:/GuestFileManager/{moId}/InitiateFileTransferToGuest"
+
+
+class _GuestWriteRecordingConnector:
+    """Records vmomi calls + PUTs so the gate tests can assert nothing fired."""
+
+    def __init__(self) -> None:
+        self.vmomi_calls: list[str] = []
+        self.put_calls: list[str] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append(path)
+        return {"_typeName": "string", "_value": "https://vc.example.test/g?t=1"}
+
+    async def _http_client(self, target: Any) -> Any:  # pragma: no cover - never reached on a park
+        raise AssertionError("a parked/denied guest.file.write must not open a transfer client")
+
+
+@pytest.mark.asyncio
+async def test_guest_file_write_gated_queues_and_resolves_no_credential(
+    session: AsyncSession,
+) -> None:
+    """An agent-gated guest.file.write queues for approval before any guest reach.
+
+    The write gates on the ``InitiateFileTransferToGuest`` governance op_id
+    *first*: with a ``needs_approval`` grant it returns ``awaiting_approval``,
+    writes a durable pending row, resolves no guest credential, issues no
+    vmomi method, and opens no transfer client.
+    """
+    await _grant(
+        principal_sub="agent-write-composite",
+        op_pattern=_GUEST_FILE_WRITE_OP_ID,
+        verdict=PermissionVerdict.NEEDS_APPROVAL,
+    )
+    conn = _GuestWriteRecordingConnector()
+
+    out = await guest_file_write_composite(
+        operator=_operator(),
+        target=None,
+        params={"vm": "vm-1", "guest_path": "/etc/mtu.conf", "content": "MTU=1400\n"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _GUEST_FILE_WRITE_OP_ID
+    request_id = uuid.UUID(out.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.op_id == _GUEST_FILE_WRITE_OP_ID
+    assert row.connector_id == "vmware-rest-9.0"
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    # Gate first: no vmomi method mint, no transfer client, no bytes.
+    assert conn.vmomi_calls == []
+    assert conn.put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_guest_file_write_denied_without_grant(session: AsyncSession) -> None:
+    """An agent with no grant is denied the dangerous guest.file.write; it never runs."""
+    conn = _GuestWriteRecordingConnector()
+    out = await guest_file_write_composite(
+        operator=_operator(sub="agent-no-grant"),
+        target=None,
+        params={"vm": "vm-1", "guest_path": "/etc/mtu.conf", "content": "MTU=1400\n"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "denied"
+    assert out.op_id == _GUEST_FILE_WRITE_OP_ID
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    assert conn.vmomi_calls == []

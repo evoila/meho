@@ -97,6 +97,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.host.datastore_mount_nfs",
     "vmware.composite.host.disk_mark_flash",
     "vmware.composite.host.service_control",
+    # Guest-ops channel write (#3100).
+    "vmware.composite.vm.guest.file.write",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -109,6 +111,11 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.performance.summary",
     "vmware.composite.datastore.usage",
     "vmware.composite.network.portgroup.audit",
+    # Guest-ops channel reads (#3100).
+    "vmware.composite.vm.guest.process.list",
+    "vmware.composite.vm.guest.env.read",
+    "vmware.composite.vm.guest.net.show",
+    "vmware.composite.vm.guest.file.read",
 )
 
 # 27 total -- 5 read (T5 / #508) + 22 write (T6 / #509 + vm.power / #2301 +
@@ -186,6 +193,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.host.service_control": (
         "meho_backplane.connectors.vmware_rest.composites._host.service_control_composite"
     ),
+    "vmware.composite.vm.guest.file.write": (
+        "meho_backplane.connectors.vmware_rest.composites._guest.guest_file_write_composite"
+    ),
 }
 
 
@@ -212,6 +222,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.host.datastore_mount_nfs": "host",
     "vmware.composite.host.disk_mark_flash": "host",
     "vmware.composite.host.service_control": "host",
+    "vmware.composite.vm.guest.file.write": "guest_ops",
 }
 
 
@@ -260,10 +271,10 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_inserts_nineteen_write_rows(
+async def test_register_vmware_composite_operations_inserts_all_write_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar lands all 22 write op_ids in ``endpoint_descriptor``."""
+    """Running the registrar lands all 23 write op_ids in ``endpoint_descriptor``."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -280,14 +291,14 @@ async def test_register_vmware_composite_operations_inserts_nineteen_write_rows(
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_twenty_four_composite_rows(
+async def test_full_registration_produces_twenty_nine_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """5 reads (#508) + 22 writes (#509 + vm.power #2301 + vm.disk.grow #2893 +
-    vm.clone_from_template #2894 + cluster.drs_rule.create + folder.create #2895 +
-    #2891 hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom +
-    GOSC create/apply #2892 + OVF deploy #2909 + host-domain writes #3182)
-    = 27 rows. DoD bar."""
+    """9 reads (#508 + guest-ops reads #3100) + 23 writes (#509 + vm.power #2301 +
+    vm.disk.grow #2893 + vm.clone_from_template #2894 + cluster.drs_rule.create +
+    folder.create #2895 + #2891 hardware writes vm.resize / vm.nic.repoint /
+    vm.device.cdrom + GOSC create/apply #2892 + OVF deploy #2909 + host-domain
+    writes #3182 + guest-ops write vm.guest.file.write #3100) = 32 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -301,7 +312,7 @@ async def test_full_registration_produces_twenty_four_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 27
+    assert len(rows) == 32
 
 
 @pytest.mark.asyncio
@@ -600,17 +611,17 @@ async def test_write_composite_tags_include_composite_and_write(
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_twenty_four(
+async def test_register_vmware_composite_operations_is_idempotent_across_twenty_nine(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 27 rows total, embedding called 27x once."""
+    """Running the registrar twice -> 32 rows total, embedding called 32x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 27
+    assert first_count == 32
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 27.
+    # pipeline; the row count stays at 32.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -624,7 +635,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_twenty_
             .scalars()
             .all()
         )
-    assert len(rows) == 27
+    assert len(rows) == 32
 
 
 # ---------------------------------------------------------------------------

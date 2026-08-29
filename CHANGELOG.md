@@ -374,6 +374,28 @@ connector-related release-notes line.
   any write. Omitting `disks` keeps the REST create body byte-identical to
   a pre-#3117 call.
 
+### Added — governed guest-operations channel for arbitrary VMs (#3100)
+
+- New `vmware.composite.vm.guest.*` op family on the `vmware-rest`
+  connector rides VMware Tools guest operations (vim
+  `GuestOperationsManager`) over the existing VI-JSON write seam
+  (`_post_vmomi_json`) — no `pyvmomi`, no SSH. It replaces the
+  out-of-band `govc guest.run` fallback with a governed, audited,
+  approval-gated channel. Guest OS credentials resolve from the target's
+  Vault `secret_ref` (`guest_username` / `guest_password`) and never
+  travel in operation params. First increment: four read-only ops —
+  `guest.process.list` (`ListProcessesInGuest`), `guest.env.read`
+  (`ReadEnvironmentVariableInGuest`), `guest.file.read`
+  (`InitiateFileTransferFromGuest`), and `guest.net.show` (Tools-reported
+  `guest.net` / `guest.ipStack`, no guest creds) — plus one
+  approval-gated write, `guest.file.write` (`InitiateFileTransferToGuest`,
+  `dangerous` + `requires_approval`, riding the standard approvals plane).
+  Set-shaped responses are JSONFlux-wrapped (postulate 6). The design
+  note (`docs/codebase/connectors-vmware-rest-guest-ops.md`) records the
+  chosen vim-guest-ops path over the deferred generic-ssh tier and the
+  full safety model. The freeform in-guest program-exec tier (e.g.
+  `guest.net.set_mtu` via `StartProgramInGuest`) is deliberately deferred.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

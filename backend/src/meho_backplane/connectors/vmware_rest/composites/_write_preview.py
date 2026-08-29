@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 19 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 20 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -900,9 +900,33 @@ async def _host_service_control_preview(ctx: PreviewContext) -> dict[str, Any] |
     }
 
 
-#: op_id → builder for the 22 write composites. Module-level so the
+async def _guest_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.guest.file.write`` — echo path + byte size + overwrite only.
+
+    The reviewer must see *what file* the write lands and *how big* it is,
+    never the content. Echoes the VM moid, the guest path, the UTF-8 byte
+    size of the content, and the overwrite intent; the ``content`` param is
+    deliberately never read into the preview (it can be arbitrary config
+    text and does not belong on the durable approval row). Declines
+    (``None``) on malformed params.
+    """
+    vm = ctx.params.get("vm")
+    guest_path = ctx.params.get("guest_path")
+    content = ctx.params.get("content")
+    if not isinstance(vm, str) or not isinstance(guest_path, str) or not isinstance(content, str):
+        return None
+    return {
+        "vm": vm,
+        "guest_path": guest_path,
+        "size_bytes": len(content.encode("utf-8")),
+        "overwrite": bool(ctx.params.get("overwrite", False)),
+    }
+
+
+#: op_id → builder for the 23 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
+    "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
     "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
@@ -929,9 +953,9 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 22 write-composite park-time preview builders. Import-time.
+    """Wire the 23 write-composite park-time preview builders. Import-time.
 
-    The 5 read composites register no builder — they are
+    The 9 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be
     dead code.
     """

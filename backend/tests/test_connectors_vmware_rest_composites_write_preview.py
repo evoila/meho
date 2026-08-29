@@ -94,6 +94,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.datastore_mount_nfs",
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
+        "vmware.composite.vm.guest.file.write",
     }
 )
 
@@ -312,7 +313,7 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 22
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 23
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 

@@ -544,6 +544,16 @@ def test_drawer_renders_full_detail_for_non_aggregate_op() -> None:
     # Drawer carries the Alpine click-outside dismiss island.
     assert 'id="event-drawer"' in body
     assert "click.outside" in body
+    # #230: detail rows use human-readable labels, not raw machine keys.
+    for label in ("Operator", "Method", "Status", "Occurred", "Audit ID", "Request ID", "Event ID"):
+        assert f">{label}</dt>" in body, f"missing humanized label {label!r}"
+    assert ">occurred_at</dt>" not in body
+    assert ">audit_id</dt>" not in body
+    # #230: occurred_at renders in the console-standard format (machine ISO
+    # in <time datetime>, `%Y-%m-%d %H:%M UTC` for display) — not a bare
+    # isoformat() dump.
+    assert "<time datetime=" in body
+    assert "UTC</time>" in body
 
 
 def test_drawer_strips_internal_payload_keys() -> None:

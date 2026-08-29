@@ -23,19 +23,21 @@ addressable as a datastore path (`[datastore1] iso/esxi-9.iso`).
 
 | # | Step | Op (governed id) | Kind |
 |---|------|------------------|------|
-| 1 | Base VM **+ VHV** | `vmware.composite.vm.create` (`nested_hv: true`, #3093) | composite |
+| 1 | Base VM **+ VHV + data disks** | `vmware.composite.vm.create` (`nested_hv: true`, `disks: [...]`, #3093/#3117) | composite |
 | 2 | VHV, 9.x-only alternative | `POST:/VirtualMachine/{moId}/ReconfigVM_Task` | raw ingested (VI-JSON) |
-| 3 | Data disks (× N) | `POST:/vcenter/vm/{vm}/hardware/disk` | raw ingested |
+| 3 | Extra disks later (optional) | `POST:/vcenter/vm/{vm}/hardware/disk` | raw ingested |
 | 4 | Resize later (optional) | `PATCH:/vcenter/vm/{vm}/hardware/cpu` (or `vmware.composite.vm.resize`) | raw ingested / composite |
 | 5 | Installer media | `POST:/vcenter/vm/{vm}/hardware/cdrom` | raw ingested |
 | 6 | Power on | `vmware.composite.vm.power` (`{"vm": …, "verb": "on"}`) | composite |
 
-Steps 3–5 target the powered-off VM step 1 created; power on last. Step
-2 exists only for a VM created *without* `nested_hv` on a 9.x fleet. All
-raw bodies are the **flat `/api` `*Spec` shape** — never the legacy
-`/rest`-style `{"spec": {...}}` envelope (#2973/#3071 class; the one
-`"spec"` key in step 2 is the vim request type's genuine required
-parameter, not an envelope).
+Since #3117 the data disks fold into step 1's `disks` param (one governed
+create for the whole VM, storage included); step 3 is now only for adding
+disks to an already-created VM. Steps 3–5 target the powered-off VM step 1
+created; power on last. Step 2 exists only for a VM created *without*
+`nested_hv` on a 9.x fleet. All raw bodies are the **flat `/api` `*Spec`
+shape** — never the legacy `/rest`-style `{"spec": {...}}` envelope
+(#2973/#3071 class; the one `"spec"` key in step 2 is the vim request
+type's genuine required parameter, not an envelope).
 
 ### 1. Base VM — `vmware.composite.vm.create`
 
@@ -47,6 +49,7 @@ parameter, not an envelope).
   "cpu_count": 8,
   "memory_mib": 16384,
   "nics": [{"network": "<portgroup-moid>", "backing_type": "DISTRIBUTED_PORTGROUP"}],
+  "disks": [{"capacity_gb": 128}, {"capacity_gb": 128}, {"capacity_gb": 128}],
   "nested_hv": true,
   "power_on_after_create": false
 }
@@ -102,12 +105,25 @@ parameter, not an envelope).
   inventories. Absent pins keep the create body byte-identical to a
   pre-#3096 call. (`cluster` is served by the pinned PlacementSpec but
   not exposed — pin the cluster via its root resource pool.)
-- The composite does **not** expose the CreateSpec's `disks`, `cdroms`,
-  `boot`, `boot_devices`, or `hardware_version` — vCenter creates a
-  single guest-specific blank boot disk by default. When the shape needs
-  those knobs at create time (e.g. EFI + CDROM-first boot order in one
-  call), drop to the raw `POST:/vcenter/vm` — its pinned CreateSpec
-  carries all of them inline, keyed `guest_os` (required, snake_case).
+- **Data disks are first-class on the composite (#3117):** the optional
+  `disks` param (`[{capacity_gb}]`) lands the VM with its data disks in
+  the one governed create instead of the create → `scsi-adapter` → N×
+  `disk-add` chain. On the REST arm each entry threads into the CreateSpec
+  `disks` as a SCSI `new_vmdk` (vCenter fabricates the controller); on the
+  pre-9.0 vim arm — where `CreateVM_Task` builds the VM verbatim and adds
+  **no** controller — the arm ALWAYS folds one `VirtualLsiLogicSASController`
+  (so a fresh VM has a controller for the governed disk-add even when
+  `disks` is empty, closing the reported `500 UNABLE_TO_ALLOCATE_RESOURCE`)
+  plus one `VirtualDisk` (`fileOperation: create`, empty `fileName` so
+  vCenter auto-generates the path in the VM home, `persistent`, thin) per
+  entry, bound to it. Thin-vs-thick follows the datastore default on both
+  arms (`new_vmdk` carries no provisioning knob — gap 3). Empty `disks`
+  keeps the REST create byte-identical to a pre-#3117 call. The composite
+  still does **not** expose the CreateSpec's `cdroms`, `boot`,
+  `boot_devices`, or `hardware_version`; when the shape needs those knobs
+  at create time (e.g. EFI + CDROM-first boot order in one call), drop to
+  the raw `POST:/vcenter/vm` — its pinned CreateSpec carries all of them
+  inline, keyed `guest_os` (required, snake_case).
 
 ### 2. VHV — raw VI-JSON `ReconfigVM_Task` (9.x-only alternative)
 
@@ -147,7 +163,10 @@ and the same op_id is governance-registered as a composite sub-op
   404s — on an 8.0.x outer vCenter, `vm.create(nested_hv=true)` is the
   only governed route.
 
-### 3. Data disks — raw disk add, one call per disk
+### 3. Extra disks later — raw disk add, one call per disk
+
+Prefer step 1's `disks` param for disks known at create time. This raw
+op adds a disk to an **already-created** VM:
 
 ```json
 {"vm": "<vm-id>", "body": {"type": "SCSI", "new_vmdk": {"capacity": 137438953472}}}
@@ -155,8 +174,14 @@ and the same op_id is governance-registered as a composite sub-op
 
 - `capacity` is **bytes** (int64). `new_vmdk` and `backing` are
   exactly-one-of; `scsi`/`ide`/`sata`/`nvme` address specs are optional
-  (server picks a free address — the guest-default SCSI adapter from
-  step 1 serves the usual nested-lab shapes).
+  (server picks a free address on an existing controller).
+- **A controller must already exist** for the server to place the disk.
+  On the REST arm vCenter fabricates one at create; on the pre-9.0 vim
+  arm step 1 always folds a `VirtualLsiLogicSASController` (#3117), so a
+  fresh vim-arm VM is disk-add-ready. Before #3117 the vim arm left the
+  VM controller-less and this raw op 500'd `UNABLE_TO_ALLOCATE_RESOURCE`
+  ("No free controller/slot") — the sharp edge that motivated the
+  create-time `disks` param.
 - **Provisioning format is not expressible** (gap 3): `VmdkCreateSpec`
   is `{name, capacity, storage_policy}` — thin vs thick follows the
   target datastore's default unless a `storage_policy` id is passed.

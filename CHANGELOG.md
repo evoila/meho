@@ -351,6 +351,29 @@ connector-related release-notes line.
   New settings: `OPERATION_RUN_REAPER_ENABLED` (default on) + the tick / lease
   knobs.
 
+### Added — `vmware.composite.vm.create` lands VMs with storage: `disks[]` + a default controller on the vim arm (#3117)
+
+- New optional **`disks: [{capacity_gb}]`** param on
+  `vmware.composite.vm.create` creates data disks as part of the one
+  governed create. On the REST arm (9.0+/unresolved) each entry threads
+  into the CreateSpec `disks` as a SCSI `new_vmdk` (vCenter fabricates the
+  controller); on the pre-9.0 vim arm each becomes a `VirtualDisk`
+  (`fileOperation: create`) folded into the single `CreateVM_Task`
+  ConfigSpec — the whole VM, storage included, lands in one policy-gated,
+  audited op instead of the old create → `scsi-adapter` → N× `disk-add`
+  chain.
+- **The pre-9.0 vim arm now always folds a `VirtualLsiLogicSASController`
+  into the create, even when `disks` is omitted.** `Folder.CreateVM_Task`
+  builds the VM verbatim and — unlike REST `POST:/vcenter/vm` — added no
+  controller, so a fresh vim-arm VM was controller-less and the documented
+  governed disk-add (`POST:/vcenter/vm/{vm}/hardware/disk`) failed with an
+  opaque `500 UNABLE_TO_ALLOCATE_RESOURCE` ("No free controller/slot").
+  Fresh vim-arm VMs are now disk-add-ready by default.
+- The `steps_succeeded` ledger gains `disk_attach` when disks were
+  requested; an invalid `capacity_gb` fails closed with `disk_spec` before
+  any write. Omitting `disks` keeps the REST create body byte-identical to
+  a pre-#3117 call.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

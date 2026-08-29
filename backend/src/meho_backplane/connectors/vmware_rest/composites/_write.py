@@ -340,9 +340,10 @@ _DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
 # spec shape and placement (proven by live controlled probes), while the
 # identical create through the vim surface succeeds. When the live
 # ``about.version`` major is < 9 the whole create rides this task-polled
-# vim path, with NICs and the VHV flag folded into the one
-# ``VirtualMachineConfigSpec`` (collapsing the #3093 second call on that
-# arm); 9.0+ and unresolved versions keep the REST create byte-identical.
+# vim path, with the SCSI controller, disks (#3117), NICs and the VHV flag
+# folded into the one ``VirtualMachineConfigSpec`` (collapsing the #3093
+# second call on that arm); 9.0+ and unresolved versions keep the REST
+# create byte-identical.
 _OP_CREATE_VM_TASK = "POST:/Folder/{moId}/CreateVM_Task"
 _VIM_SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
@@ -411,6 +412,44 @@ _VIRTUAL_VMXNET3_TYPE = "VirtualVmxnet3"
 _DV_PORT_BACKING_TYPE = "VirtualEthernetCardDistributedVirtualPortBackingInfo"
 _STANDARD_NETWORK_BACKING_TYPE = "VirtualEthernetCardNetworkBackingInfo"
 _DV_PORT_CONNECTION_TYPE = "DistributedVirtualSwitchPortConnection"
+
+# vim storage shape for the pre-9.0 create arm (#3117). ``Folder.CreateVM_Task``
+# builds an *empty* VM from the ConfigSpec verbatim — unlike REST
+# ``POST:/vcenter/vm``, which fabricates a guest-default disk controller — so a
+# vim-arm VM lands with **no SCSI controller** unless the ConfigSpec folds one
+# in, and the documented governed disk-add
+# (``POST:/vcenter/vm/{vm}/hardware/disk``) then 500s
+# ``UNABLE_TO_ALLOCATE_RESOURCE`` for lack of a free controller slot. The arm
+# therefore always folds a single ``VirtualLsiLogicSASController`` into the
+# create (the issue's minimum ask), and each requested disk is a
+# ``VirtualDisk`` device-add with ``fileOperation: create`` bound to that
+# controller (the preferred ask). Shapes are the canonical govmomi
+# ``CreateDisk`` / ``CreateSCSIController`` form: LSI Logic SAS is the
+# universally-bootable default (ESXi / Linux / Windows guests), the disk
+# backing is ``VirtualDiskFlatVer2BackingInfo`` with an **empty** ``fileName``
+# so vCenter auto-generates a unique path inside the VM home
+# (``files.vmPathName``), ``diskMode: persistent`` and ``thinProvisioned:
+# true``. Every DataObject carries its ``_typeName`` (#3103).
+_VIRTUAL_LSILOGIC_SAS_CONTROLLER_TYPE = "VirtualLsiLogicSASController"
+_VIRTUAL_DISK_FLAT_BACKING_TYPE = "VirtualDiskFlatVer2BackingInfo"
+# ``VirtualSCSISharing`` enum value: a private (non-shared) SCSI bus.
+_VIM_SCSI_NO_SHARING = "noSharing"
+_VIM_DISK_MODE_PERSISTENT = "persistent"
+# New-device temp keys are negative (the vim new-device convention); the folded
+# controller and disks sit in a distinct band from the NIC keys (``-1``… above)
+# so no add collides. The controller is ``-100``; disks count down from
+# ``-200``.
+_VIM_SCSI_CONTROLLER_KEY = -100
+_VIM_DISK_KEY_BASE = -200
+# SCSI reserves unit 7 for the controller itself; guest disks skip it.
+_VIM_SCSI_CONTROLLER_UNIT = 7
+# GiB → bytes for the ``capacity_gb`` disk param (``VirtualDisk.capacityInBytes``
+# is ``xsd:long`` bytes, the non-deprecated capacity field).
+_GIB_IN_BYTES = 1024**3
+# ``Vcenter.Vm.Hardware.Disk.CreateSpec.type`` value threaded through the REST
+# arm's ``CreateSpec.disks`` — a SCSI-attached ``new_vmdk`` (matches the
+# governed raw disk-add's ``{"type": "SCSI", "new_vmdk": {...}}`` shape).
+_REST_DISK_TYPE_SCSI = "SCSI"
 
 # vim data-object ``_typeName`` discriminators for the request-body specs
 # the write composites assemble by hand (#3103, all spec-verified against
@@ -1482,6 +1521,100 @@ async def _resolve_vim_nic_backing(
     )
 
 
+def _disk_capacities_bytes(disks: list[dict[str, Any]]) -> tuple[list[int] | None, str | None]:
+    """Validate the ``disks`` param and return per-disk capacities in bytes (#3117).
+
+    Each entry is a ``{capacity_gb: int}`` spec (the dispatch schema
+    already floors ``capacity_gb`` at 1 and requires it; this is the
+    fail-closed handler-side net for a hand-built call that skips
+    validation). Returns ``(bytes_list, None)`` or ``(None, reason)`` —
+    the caller folds the reason into a ``rolled_back`` envelope before any
+    write, mirroring the ``guest_id_mapping`` / ``placement_params``
+    fail-closed refusals.
+    """
+    capacities: list[int] = []
+    for index, disk in enumerate(disks):
+        capacity_gb = disk.get("capacity_gb") if isinstance(disk, dict) else None
+        if isinstance(capacity_gb, bool) or not isinstance(capacity_gb, int) or capacity_gb < 1:
+            return None, (
+                f"disks[{index}] needs a positive integer ``capacity_gb``; got {capacity_gb!r}"
+            )
+        capacities.append(capacity_gb * _GIB_IN_BYTES)
+    return capacities, None
+
+
+def _scsi_unit_number(index: int) -> int:
+    """The SCSI unit number for the *index*-th folded disk, skipping unit 7.
+
+    SCSI reserves unit 7 for the controller, so guest disks fill 0-6 then
+    resume at 8 (the govmomi convention). Keeps the folded disks on the
+    single controller the arm adds without ever colliding with its unit.
+    """
+    return index if index < _VIM_SCSI_CONTROLLER_UNIT else index + 1
+
+
+def _build_vim_disk_device_changes(capacities_bytes: list[int]) -> list[dict[str, Any]]:
+    """Build the controller + per-disk ``deviceChange`` adds for the vim arm (#3117).
+
+    Always emits one ``VirtualLsiLogicSASController`` add (so a fresh
+    vim-arm VM has a controller for the governed REST disk-add even when no
+    disks were requested — the issue's minimum ask), followed by one
+    ``VirtualDisk`` add per requested capacity, each with ``fileOperation:
+    create`` and bound to that controller. The disk backing uses an empty
+    ``fileName`` (vCenter auto-generates a unique path inside the VM home),
+    ``persistent`` mode and thin provisioning — the canonical govmomi
+    ``CreateDisk`` shape. Every DataObject carries its ``_typeName`` (#3103).
+    """
+    controller: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+        "operation": "add",
+        "device": {
+            _VMOMI_TYPE_NAME_KEY: _VIRTUAL_LSILOGIC_SAS_CONTROLLER_TYPE,
+            "key": _VIM_SCSI_CONTROLLER_KEY,
+            "busNumber": 0,
+            "sharedBus": _VIM_SCSI_NO_SHARING,
+        },
+    }
+    disk_changes = [
+        {
+            _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+            "operation": "add",
+            "fileOperation": "create",
+            "device": {
+                _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_TYPE,
+                "key": _VIM_DISK_KEY_BASE - index,
+                "controllerKey": _VIM_SCSI_CONTROLLER_KEY,
+                "unitNumber": _scsi_unit_number(index),
+                "capacityInBytes": capacity_bytes,
+                "backing": {
+                    _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_FLAT_BACKING_TYPE,
+                    "fileName": "",
+                    "diskMode": _VIM_DISK_MODE_PERSISTENT,
+                    "thinProvisioned": True,
+                },
+            },
+        }
+        for index, capacity_bytes in enumerate(capacities_bytes)
+    ]
+    return [controller, *disk_changes]
+
+
+def _build_rest_disk_specs(capacities_bytes: list[int]) -> list[dict[str, Any]]:
+    """Build the REST ``CreateSpec.disks`` list (#3117).
+
+    Each entry is a flat ``Vcenter.Vm.Hardware.Disk.CreateSpec`` — a
+    SCSI-attached ``new_vmdk`` sized in bytes (``int64``). vCenter
+    fabricates the backing controller for these disks the same way it does
+    for the guest-default boot disk, so the REST arm needs no explicit
+    controller. Thin-vs-thick follows the datastore default (``new_vmdk``
+    carries no provisioning knob — the recipe's documented gap).
+    """
+    return [
+        {"type": _REST_DISK_TYPE_SCSI, "new_vmdk": {"capacity": capacity_bytes}}
+        for capacity_bytes in capacities_bytes
+    ]
+
+
 def _build_vim_create_request(
     *,
     name: str,
@@ -1490,22 +1623,30 @@ def _build_vim_create_request(
     memory_mib: int,
     datastore_name: str,
     nic_backings: list[dict[str, Any]],
+    disk_capacities_bytes: list[int],
     nested_hv: bool,
     pool_moid: str,
     host_moid: str | None,
 ) -> dict[str, Any]:
-    """Assemble the ``Folder.CreateVM_Task`` request body (#3099).
+    """Assemble the ``Folder.CreateVM_Task`` request body (#3099, #3117).
 
     ``CreateVMRequestType`` (spec-verified against the pinned
     ``vi-json.yaml``): ``{config: VirtualMachineConfigSpec, pool:
     ResourcePool-MoRef, host?: HostSystem-MoRef}``. The ConfigSpec carries
     the same logical inputs the REST CreateSpec did — ``name`` /
     ``guestId`` / ``numCPUs`` / ``memoryMB`` — plus the vim-only shape:
-    ``files.vmPathName`` (the VM home, ``"[<datastore-name>] <name>"``),
-    the NIC ``deviceChange`` adds (vmxnet3, negative temp keys — the new-
-    device convention), and ``nestedHVEnabled`` folded inline when the
+    ``files.vmPathName`` (the VM home, ``"[<datastore-name>] <name>"``) and
+    a ``deviceChange`` list, and ``nestedHVEnabled`` folded inline when the
     operator asked for the #3093 leg. Every DataObject in the body carries
     its ``_typeName`` discriminator (#3103).
+
+    The ``deviceChange`` list is always non-empty on this arm (#3117): it
+    leads with a ``VirtualLsiLogicSASController`` add (so a fresh vim-arm VM
+    always has a controller for the governed REST disk-add — REST
+    ``POST:/vcenter/vm`` fabricates one, ``CreateVM_Task`` does not),
+    followed by the per-disk ``VirtualDisk`` ``fileOperation: create`` adds
+    bound to it, then the NIC (vmxnet3, negative temp keys — the new-device
+    convention) adds.
     """
     config: dict[str, Any] = {
         _VMOMI_TYPE_NAME_KEY: _VM_CONFIG_SPEC_TYPE,
@@ -1520,19 +1661,22 @@ def _build_vim_create_request(
     }
     if nested_hv:
         config["nestedHVEnabled"] = True
-    if nic_backings:
-        config["deviceChange"] = [
-            {
-                _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
-                "operation": "add",
-                "device": {
-                    _VMOMI_TYPE_NAME_KEY: _VIRTUAL_VMXNET3_TYPE,
-                    "key": -(index + 1),
-                    "backing": backing,
-                },
-            }
-            for index, backing in enumerate(nic_backings)
-        ]
+    nic_changes = [
+        {
+            _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+            "operation": "add",
+            "device": {
+                _VMOMI_TYPE_NAME_KEY: _VIRTUAL_VMXNET3_TYPE,
+                "key": -(index + 1),
+                "backing": backing,
+            },
+        }
+        for index, backing in enumerate(nic_backings)
+    ]
+    config["deviceChange"] = [
+        *_build_vim_disk_device_changes(disk_capacities_bytes),
+        *nic_changes,
+    ]
     body: dict[str, Any] = {"config": config, "pool": _moref(_RESOURCE_POOL_MO_TYPE, pool_moid)}
     if host_moid is not None:
         body["host"] = _moref(_HOST_SYSTEM_MO_TYPE, host_moid)
@@ -1642,14 +1786,16 @@ async def _vm_create_via_vim(
     """The pre-9.0 arm of :func:`vm_create_composite` (#3099): vim ``CreateVM_Task``.
 
     Same logical inputs, same response envelope, same rollback contract as
-    the REST arm — only the create transport differs. NICs and the optional
-    ``nested_hv`` flag fold into the one ``VirtualMachineConfigSpec`` (the
-    create is atomic vCenter-side, so there are no per-NIC / per-flag
-    partial-failure legs), and the task is polled to terminal through the
-    shared #2893 substrate. Fail-closed validations run before any
-    sub-call: an unmapped ``guest_os`` enum, missing ``resource_pool`` /
-    ``datastore`` pins (vim needs an explicit pool and VM home — vCenter-
-    side placement defaulting exists only on the REST create), and an
+    the REST arm — only the create transport differs. NICs, disks (each a
+    ``VirtualDisk`` ``fileOperation: create`` add on the always-folded SCSI
+    controller, #3117) and the optional ``nested_hv`` flag fold into the one
+    ``VirtualMachineConfigSpec`` (the create is atomic vCenter-side, so
+    there are no per-NIC / per-disk / per-flag partial-failure legs), and
+    the task is polled to terminal through the shared #2893 substrate.
+    Fail-closed validations run before any sub-call: an unmapped
+    ``guest_os`` enum, missing ``resource_pool`` / ``datastore`` pins (vim
+    needs an explicit pool and VM home — vCenter-side placement defaulting
+    exists only on the REST create), an invalid disk ``capacity_gb``, and an
     unsupported NIC backing each return a structured ``rolled_back``.
     """
     folder_name = params.get("folder_name")
@@ -1658,6 +1804,7 @@ async def _vm_create_via_vim(
     cpu_count = int(params.get("cpu_count", 1))
     memory_mib = int(params.get("memory_mib", 1024))
     nics: list[dict[str, Any]] = list(params.get("nics") or [])
+    disks: list[dict[str, Any]] = list(params.get("disks") or [])
     nested_hv = bool(params.get("nested_hv", False))
     power_on = bool(params.get("power_on_after_create", False))
     pool_moid = params.get("resource_pool")
@@ -1686,6 +1833,9 @@ async def _vm_create_via_vim(
                 "only on the REST create"
             ),
         )
+    disk_capacities_bytes, disk_err = _disk_capacities_bytes(disks)
+    if disk_capacities_bytes is None:
+        return _rolled_back(steps=[], failed_step="disk_spec", reason=disk_err or "")
 
     steps: list[str] = []
     folder_moid: str | None
@@ -1730,6 +1880,7 @@ async def _vm_create_via_vim(
         memory_mib=memory_mib,
         datastore_name=datastore_name,
         nic_backings=nic_backings,
+        disk_capacities_bytes=disk_capacities_bytes,
         nested_hv=nested_hv,
         pool_moid=pool_moid,
         host_moid=host_moid if isinstance(host_moid, str) else None,
@@ -1748,6 +1899,7 @@ async def _vm_create_via_vim(
         "cpu_count": cpu_count,
         "memory_mib": memory_mib,
         "nics": [nic.get("network") for nic in nics],
+        "disks": [disk.get("capacity_gb") for disk in disks],
         "nested_hv": nested_hv,
     }
     gate, vm_id, create_failure = await _issue_vim_create(
@@ -1764,6 +1916,8 @@ async def _vm_create_via_vim(
     if create_failure is not None or vm_id is None:
         return _rolled_back(steps=steps, failed_step="create", reason=create_failure or "")
     steps.append("create")
+    if disks:
+        steps.append("disk_attach")
     if nics:
         steps.append("nic_attach")
     if nested_hv:
@@ -1814,6 +1968,16 @@ async def vm_create_composite(
     pins leave vCenter's placement defaulting untouched and keep the
     create body byte-identical to a pre-#3096 call.
 
+    Storage (#3117): the optional ``disks`` param (``[{capacity_gb}]``)
+    lands the VM with data disks in the one create. On the REST arm each
+    disk threads into the CreateSpec ``disks`` (vCenter fabricates the
+    controller); on the pre-9.0 vim arm — where ``CreateVM_Task`` builds
+    the VM verbatim and adds no controller — the arm **always** folds a
+    ``VirtualLsiLogicSASController`` (so a fresh VM has a controller for the
+    governed REST disk-add even with no ``disks``) plus a ``VirtualDisk``
+    ``fileOperation: create`` per requested disk. Absent ``disks`` keeps the
+    REST create body byte-identical to a pre-#3117 call.
+
     Folder resolution (#3115): an explicit ``folder`` moid pin skips the
     display-name lookup entirely (on both arms; the ``folder_lookup``
     ledger entry is omitted); a multi-match ``folder_name`` lookup
@@ -1827,7 +1991,7 @@ async def vm_create_composite(
     ``about.version`` major is < 9 the whole create rides vim
     ``Folder.CreateVM_Task`` (:func:`_vm_create_via_vim`) — bare REST
     ``POST /api/vcenter/vm`` is vendor-defective on vCenter 8.0.x — with
-    NICs and ``nested_hv`` folded into the one ConfigSpec. 9.0+ and
+    NICs, disks and ``nested_hv`` folded into the one ConfigSpec. 9.0+ and
     unresolved versions keep the REST path below byte-identical.
     """
     about_version = await connector._about_version(target, operator)
@@ -1842,11 +2006,16 @@ async def vm_create_composite(
     cpu_count = int(params.get("cpu_count", 1))
     memory_mib = int(params.get("memory_mib", 1024))
     nics: list[dict[str, Any]] = list(params.get("nics") or [])
+    disks: list[dict[str, Any]] = list(params.get("disks") or [])
     placement_pins: dict[str, Any] = {
         key: params[key] for key in ("resource_pool", "datastore", "host") if key in params
     }
     nested_hv = bool(params.get("nested_hv", False))
     power_on = bool(params.get("power_on_after_create", False))
+
+    disk_capacities_bytes, disk_err = _disk_capacities_bytes(disks)
+    if disk_capacities_bytes is None:
+        return _rolled_back(steps=[], failed_step="disk_spec", reason=disk_err or "")
 
     steps: list[str] = []
 
@@ -1869,13 +2038,18 @@ async def vm_create_composite(
             return _folder_lookup_rolled_back(steps, folder_err, folder_candidates)
         steps.append("folder_lookup")
 
-    create_spec = {
+    create_spec: dict[str, Any] = {
         "name": name,
         "guest_OS": guest_os,
         "placement": {"folder": folder_moid, **placement_pins},
         "cpu": {"count": cpu_count},
         "memory": {"size_MiB": memory_mib},
     }
+    if disk_capacities_bytes:
+        # #3117: fold the requested disks into the CreateSpec inline (vCenter
+        # fabricates the controller). Absent disks keep the create body
+        # byte-identical to the pre-#3117 shape.
+        create_spec["disks"] = _build_rest_disk_specs(disk_capacities_bytes)
     try:
         gate, create_payload = await _write_sub_op(
             connector, target, operator, _OP_CREATE_VM, create_spec
@@ -1893,6 +2067,10 @@ async def vm_create_composite(
             reason=f"create returned non-string vm id payload: {type(vm_id).__name__}",
         )
     steps.append("create")
+    if disks:
+        # Folded into the CreateSpec above — a distinct ledger entry so the
+        # envelope names the storage that landed, mirroring ``nic_attach``.
+        steps.append("disk_attach")
 
     for nic in nics:
         # ``Ethernet.CreateSpec``: the network rides the ``backing`` spec

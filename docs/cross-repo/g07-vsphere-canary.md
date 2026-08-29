@@ -68,8 +68,8 @@ parameter-ref parser branch and #503 extended this canary):
    top-3 even within their group and are xfail-documented; see
    *Known gaps* below. Raw corpus-wide ranking is deliberately not
    asserted — at the 3,470-op two-spec scale it fails intuitive
-   relevance bars (evoila/meho#3006 tracks whether that is worth
-   improving).
+   relevance bars (evoila/meho#3006 resolved this working-as-designed;
+   see *Known gaps* §2).
 
 ## Prerequisites
 
@@ -360,7 +360,8 @@ dependency, the chassis stays narrow. The test then asserts the
 `vcenter.yaml` only), naming any that miss. Unlike the stub
 benchmark (group-scoped since PR #2995), the eyeball deliberately
 searches **raw** — it measures exactly the raw-relevance question
-evoila/meho#3006 tracks, and it never runs in CI. This is the
+evoila/meho#3006 examined (resolved working-as-designed; see *Known
+gaps* §2), and it never runs in CI. This is the
 parallel signal the parent Initiative's acceptance criteria call
 for; the stub-path xfail markers remain unchanged.
 

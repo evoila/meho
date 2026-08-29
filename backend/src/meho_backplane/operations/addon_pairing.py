@@ -174,7 +174,7 @@ class AddonPairingService:
         client_id = _keycloak_client_id(payload.name)
         audience = get_settings().keycloak_audience
 
-        internal_id, client_secret = await self._provision_keycloak_client(
+        internal_id, client_secret, service_account_sub = await self._provision_keycloak_client(
             name=payload.name,
             tenant_id=tenant_id,
             owner_sub=owner,
@@ -186,6 +186,7 @@ class AddonPairingService:
             name=payload.name,
             keycloak_client_id=client_id,
             keycloak_internal_id=internal_id,
+            service_account_sub=service_account_sub,
             owner_sub=owner,
             contract_version=negotiated.negotiated_version,
             addon_contract_version=payload.addon_contract_version,
@@ -216,17 +217,22 @@ class AddonPairingService:
         tenant_id: uuid.UUID,
         owner_sub: str,
         audience: str,
-    ) -> tuple[str, str]:
-        """Create the add-on's ``kind=service`` client and read back its secret.
+    ) -> tuple[str, str, str]:
+        """Create the add-on's ``kind=service`` client and read back its identity.
 
         Isolated so its rollback contract is one unit: if anything after
-        ``create_client`` raises — most importantly ``get_client_secret`` —
-        the just-created live client is deleted before the error propagates.
-        A 409 conflict surfaces as :class:`AddonAlreadyPairedError` (the
-        conflicting client belongs to a prior pairing and is not ours to
-        delete).
+        ``create_client`` raises — ``get_client_secret`` or
+        ``get_service_account_user_id`` — the just-created live client is
+        deleted before the error propagates. A 409 conflict surfaces as
+        :class:`AddonAlreadyPairedError` (the conflicting client belongs to
+        a prior pairing and is not ours to delete).
 
-        Returns the ``(keycloak_internal_id, client_secret)`` pair.
+        Returns the ``(keycloak_internal_id, client_secret,
+        service_account_sub)`` triple. ``service_account_sub`` is the OIDC
+        ``sub`` the add-on's tokens carry (#3027) — the join key for the
+        step-event subscription; captured here, at the one point the
+        backplane provisions the identity, so it is never inferred from an
+        unverified token later.
         """
         client_id = _keycloak_client_id(name)
         internal_id: str | None = None
@@ -244,6 +250,7 @@ class AddonPairingService:
                     kind_attribute="service",
                 )
                 client_secret = await kc_client.get_client_secret(internal_id)
+                service_account_sub = await kc_client.get_service_account_user_id(internal_id)
         except KeycloakClientConflictError as exc:
             raise AddonAlreadyPairedError(name) from exc
         except BaseException as exc:
@@ -252,7 +259,7 @@ class AddonPairingService:
                     internal_id, tenant_id=tenant_id, name=name, cause=exc
                 )
             raise
-        return internal_id, client_secret
+        return internal_id, client_secret, service_account_sub
 
     async def _insert_row(
         self,

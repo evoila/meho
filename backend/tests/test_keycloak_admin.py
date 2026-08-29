@@ -266,3 +266,43 @@ async def test_get_client_secret_unexpected_status_raises() -> None:
         async with _client() as kc:
             with pytest.raises(KeycloakAdminError):
                 await kc.get_client_secret(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_service_account_user_id_returns_id() -> None:
+    """The service-account user's id is the ``sub`` the add-on's tokens carry (#3027)."""
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/service-account-user").mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "sa-user-uuid", "username": "service-account-addon:automation"},
+            )
+        )
+        async with _client() as kc:
+            sub = await kc.get_service_account_user_id(_INTERNAL_ID)
+    assert sub == "sa-user-uuid"
+
+
+@pytest.mark.asyncio
+async def test_get_service_account_user_id_not_found_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/service-account-user").mock(
+            return_value=httpx.Response(404)
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakClientNotFoundError):
+                await kc.get_service_account_user_id(_INTERNAL_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_service_account_user_id_empty_id_raises() -> None:
+    with respx.mock as r:
+        _mock_token(r)
+        r.get(f"{_ADMIN_URL}/clients/{_INTERNAL_ID}/service-account-user").mock(
+            return_value=httpx.Response(200, json={"id": ""})
+        )
+        async with _client() as kc:
+            with pytest.raises(KeycloakAdminError):
+                await kc.get_service_account_user_id(_INTERNAL_ID)

@@ -80,6 +80,7 @@ from meho_backplane.db.models import (
     ScheduledTriggerInFlightPolicy,
 )
 from meho_backplane.events.outbox import publish as publish_event
+from meho_backplane.operations.addon_step_events import AddonStepEventService
 
 #: Event kind the agent-run terminal-transition emits onto the outbox.
 #: The event drain's subscription matcher (:mod:`meho_backplane.events.matcher`)
@@ -559,6 +560,27 @@ async def transition(
                 # under, so a subscriber's JSONB filter can route the
                 # follow-up against runs of a specific change record.
                 # NULL when the run carried no ticket.
+                "work_ref": row.work_ref,
+            },
+        )
+        # #3027 step-event push: durably record the dispatch completion
+        # for the paired add-on that owns this run (matched by the run's
+        # responsible principal ``identity_sub``). In the producer's
+        # transaction — a run-transition rollback discards it too. A no-op
+        # when the run's principal is not a paired add-on.
+        await AddonStepEventService().record_if_owned(
+            session,
+            tenant_id=row.tenant_id,
+            owner_principal_sub=row.identity_sub,
+            event_kind=AGENT_RUN_COMPLETED_EVENT_KIND,
+            work_ref=row.work_ref,
+            audit_id=None,
+            payload={
+                "run_id": str(row.id),
+                "status": to_status.value,
+                "agent_definition_id": (
+                    str(row.agent_definition_id) if row.agent_definition_id is not None else None
+                ),
                 "work_ref": row.work_ref,
             },
         )

@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import Annotated, Final
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi import status as http_status
 from fastapi.responses import Response
 
@@ -63,6 +63,10 @@ from meho_backplane.operations.addon_pairing_schemas import (
     PairedAddonListResponse,
     PairedAddonRead,
 )
+from meho_backplane.operations.addon_step_events import (
+    AddonStepEventService,
+    StepEventListResponse,
+)
 
 __all__ = ["router"]
 
@@ -82,7 +86,12 @@ _OP_IDS: Final[dict[str, str]] = {
     "pair": "addon.pair",
     "unpair": "addon.unpair",
     "heartbeat": "addon.heartbeat",
+    "events": "addon.events",
 }
+
+#: Default / maximum step-event page size for the subscription read.
+_EVENTS_DEFAULT_LIMIT: Final[int] = 100
+_EVENTS_MAX_LIMIT: Final[int] = 500
 
 
 def _handle_admin_error(exc: KeycloakAdminError) -> HTTPException:
@@ -231,3 +240,56 @@ async def heartbeat_pairing(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="addon_not_paired",
         ) from exc
+
+
+@router.get("/{name}/events", response_model=StepEventListResponse)
+async def list_step_events(
+    name: Annotated[str, Path()],
+    after: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=_EVENTS_MAX_LIMIT)] = _EVENTS_DEFAULT_LIMIT,
+    operator: Operator = _require_jwt,
+) -> StepEventListResponse:
+    """Durable, resumable step-event subscription for the paired add-on (#3027).
+
+    The add-on authenticates as its own **service** principal (a non-service
+    principal is 403) and reads the step events (approval outcomes, dispatch
+    completions) that belong to **its own** work. Scoping is cryptographic:
+    the caller is bound to a pairing by its token ``sub`` (which is the
+    pairing's ``service_account_sub``), and ``{name}`` must be that same
+    pairing — a service principal can never read another add-on's log. A
+    caller whose ``sub`` binds to no pairing, or whose bound pairing is not
+    ``{name}``, gets 404 (indistinguishable from a missing pairing).
+
+    Resume: ``after`` is the last ``seq`` the add-on saw (``0`` reads from
+    the start of the retained log); the response's ``next_cursor`` is the
+    ``seq`` to pass as ``after`` on the next poll, so an add-on never misses
+    a committed event across its own restarts.
+    """
+    if operator.principal_kind is not PrincipalKind.SERVICE:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="events_require_service_principal",
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_IDS["events"],
+        audit_op_class="read",
+        audit_addon_name=name,
+    )
+    service = AddonStepEventService()
+    pairing = await service.resolve_pairing_for_sub(
+        tenant_id=operator.tenant_id,
+        service_account_sub=operator.sub,
+    )
+    # A 404 whether the caller binds to no pairing or to a different one:
+    # never reveal another add-on's pairing name, and never leak whether a
+    # name exists to a principal that does not own it.
+    if pairing is None or pairing.name != name:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="addon_not_paired",
+        )
+    return await service.list_for_pairing(
+        pairing_id=pairing.id,
+        after_seq=after,
+        limit=limit,
+    )

@@ -22,7 +22,7 @@ dependencies = [
     # requirement is explicit (same pattern as dnspython / cryptography).
     "anyio>=4.14.2",
     "hvac>=2.4.0",
-    "sqlalchemy[asyncio]>=2.0.51",
+    "sqlalchemy[asyncio]>=2.0.52",
     "asyncpg>=0.29",
     "alembic>=1.19.1",
     "jsonschema>=4.26.0",

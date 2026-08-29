@@ -504,3 +504,45 @@ async def test_file_write_gated_short_circuits(
     assert creds.calls == []
     assert conn.vmomi_calls == []
     assert conn.put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manager_resolution_failure_raises_with_override_hint(creds: _CredRecorder) -> None:
+    """A GuestOperationsManager missing the sub-manager prop raises actionably."""
+    empty = {
+        "objects": [
+            {
+                "obj": {"type": "GuestOperationsManager", "value": "guestOperationsManager"},
+                "propSet": [],
+            }
+        ]
+    }
+    conn = _GuestRecordingConnector(vmomi={"GuestOperationsManager": empty})
+    with pytest.raises(RuntimeError, match="guest_ops_manager_moid"):
+        await _guest.guest_process_list_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42"},
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_file_write_put_failure_propagates(
+    creds: _CredRecorder, auto_gate: _GateRecorder
+) -> None:
+    """A non-2xx PUT to the transfer URL raises for the dispatcher to wrap."""
+    conn = _GuestRecordingConnector(
+        vmomi={
+            "GuestOperationsManager": _file_mgr(),
+            "/GuestFileManager/fm-1/InitiateFileTransferToGuest": "https://vc.example.test/g?t=1",
+        },
+        put_status=500,
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await _guest.guest_file_write_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "guest_path": "/tmp/x", "content": "hi"},
+            connector=conn,  # type: ignore[arg-type]
+        )

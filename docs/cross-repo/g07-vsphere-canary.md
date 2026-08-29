@@ -478,10 +478,25 @@ because pgvector's IVFFlat approximation can drift ranks between
 runs — and the integration lane runs ``pytest -x``, where a single
 variance flap would kill the lane) with the measured in-group rank
 in each reason string. The canary's other 9 queries plus the
-non-benchmark assertions verify the substrate is healthy. Raw
-corpus-wide ranking at multi-spec scale is a separate, broader
-question — evoila/meho#3006 holds that evidence and decides whether
-ranking work is warranted.
+non-benchmark assertions verify the substrate is healthy.
+
+**Resolved (evoila/meho#3006, 2026-08-29):** raw corpus-wide ranking
+at multi-spec scale is **working as designed**. A live two-spec probe
+(3470 ops, real bge-small embeddings) confirmed postulate 4 across
+five cross-spec queries: raw search ranks the REST cardinal 3rd–7th
+(or below top-8) because vi-json Managed-Object ops carrying the same
+noun in their indexed ``summary``/``description`` win the BM25 arm,
+while the cardinal's path — the token that matters — feeds neither
+ranking signal. Group-scoped search (the sanctioned flow:
+``list_operation_groups`` → ``search_operations(group=…)``) lands
+every cardinal at rank 1–2, the vi-json siblings being filtered into
+their ``*_managed_objects`` groups. The three raw-corpus levers
+considered (spec-source weighting, exact-path-token boost, cross-spec
+dedupe) would improve only the raw flow agents are told not to use;
+the residual in-group cardinal misses are the *separate*
+per-op-description-enrichment gap tracked here (T3 does not yet
+rewrite per-op ``summary``/``llm_instructions``), which those levers
+would not fix. No raw-ranking work filed.
 
 ### 3. `tests/integration/conftest.py` TRUNCATE statement is stale
 

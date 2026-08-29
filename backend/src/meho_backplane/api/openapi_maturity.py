@@ -59,6 +59,7 @@ __all__ = [
 #: Route tag → :data:`FEATURE_MATURITY` key. See module docstring for
 #: the deliberately-unmapped set.
 TAG_FEATURE: Final[dict[str, str]] = {
+    "addon-pairing": "addon_pairing",
     "agent-grants": "agent_runtime",
     "agent-principals": "agent_runtime",
     "agents": "agent_runtime",

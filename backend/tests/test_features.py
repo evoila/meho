@@ -423,6 +423,7 @@ def test_maturity_registry_covers_the_2664_classification() -> None:
         "agent_runtime",
         "doc_collections",
         "two_world_ops",
+        "addon_pairing",
     }
 
 

@@ -61,6 +61,7 @@ from meho_backplane.agents import (
     stop_grant_expiry_sweeper,
 )
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
+from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
 from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
     router as api_v1_agent_principals_router,
@@ -1051,6 +1052,10 @@ app.include_router(api_v1_approvals_router)
 # #3151 -- operator-managed standing scoped auto-approval grants for
 # service principals (the persistent form of an approve decision).
 app.include_router(api_v1_service_grants_router)
+# #3025 -- add-on pairing handshake (pair / unpair / list / heartbeat): a
+# sibling add-on product paired as a scoped Keycloak service principal over a
+# versioned integration contract (Initiative #2900 foundation).
+app.include_router(api_v1_addon_pairing_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;
 # writes gated to tenant_admin. Tenant-scoped via the JWT's

@@ -4539,6 +4539,12 @@ type HTTPValidationError struct {
 // surfaces the same value on the unauthenticated readiness probe so
 // a deploy operator can answer "which MCP revision will this server
 // negotiate with my clients?" without an authenticated GET.
+//
+// “pairings“ (#3025) carries the tenant's active add-on pairings —
+// each add-on's negotiated contract version, whether it is still
+// contract-compatible with this backplane build, and its last liveness
+// heartbeat. The list is empty when nothing is paired; the empty-default
+// keeps response decoders generated against the pre-#3025 shape working.
 type HealthResponse struct {
 	// Db Database migration status.
 	//
@@ -4573,6 +4579,7 @@ type HealthResponse struct {
 	// ``model_dump(mode="json")`` — the same wire shape the
 	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
+	Pairings *[]PairingHealth `json:"pairings,omitempty"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
 	//
@@ -5364,6 +5371,71 @@ type OperatorIdentity struct {
 	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
 	// ``"role=TenantRole.TENANT_ADMIN"``.
 	TenantRole TenantRole `json:"tenant_role"`
+}
+
+// PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
+//
+// “addon_contract_version“ is the contract version the add-on speaks;
+// “addon_min_backplane_version“ is the oldest backplane contract the
+// add-on will accept. Both drive the bidirectional negotiation in
+// :mod:`meho_backplane.operations.addon_pairing_contract`.
+type PairAddonRequest struct {
+	AddonContractVersion     int     `json:"addon_contract_version"`
+	AddonMinBackplaneVersion int     `json:"addon_min_backplane_version"`
+	Name                     string  `json:"name"`
+	OwnerSub                 *string `json:"owner_sub"`
+}
+
+// PairAddonResult One-time pairing response carrying the add-on's fresh credentials.
+//
+// “client_secret“ is repr-hidden so it never lands in a log line or an
+// exception render; it is serialised in the HTTP body once (the handshake
+// response) and is unrecoverable afterwards.
+type PairAddonResult struct {
+	BackplaneContractVersion  int    `json:"backplane_contract_version"`
+	ClientId                  string `json:"client_id"`
+	ClientSecret              string `json:"client_secret"`
+	NegotiatedContractVersion int    `json:"negotiated_contract_version"`
+
+	// Pairing Row representation returned by list / get / heartbeat accessors.
+	Pairing PairedAddonRead `json:"pairing"`
+}
+
+// PairedAddonListResponse Unified list envelope (api-shape-conventions §2) for paired add-ons.
+type PairedAddonListResponse struct {
+	Items      []PairedAddonRead `json:"items"`
+	NextCursor *string           `json:"next_cursor"`
+}
+
+// PairedAddonRead Row representation returned by list / get / heartbeat accessors.
+type PairedAddonRead struct {
+	AddonContractVersion     int                `json:"addon_contract_version"`
+	AddonMinBackplaneVersion int                `json:"addon_min_backplane_version"`
+	ContractVersion          int                `json:"contract_version"`
+	CreatedBySub             string             `json:"created_by_sub"`
+	Id                       openapi_types.UUID `json:"id"`
+	KeycloakClientId         string             `json:"keycloak_client_id"`
+	LastSeenAt               *time.Time         `json:"last_seen_at"`
+	Name                     string             `json:"name"`
+	OwnerSub                 string             `json:"owner_sub"`
+	PairedAt                 time.Time          `json:"paired_at"`
+	TenantId                 openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt                time.Time          `json:"updated_at"`
+}
+
+// PairingHealth Health of one active add-on pairing (#3025).
+//
+// “contract_compatible“ re-evaluates the persisted pairing's negotiated
+// version pair against the *current* backplane contract, in both pinning
+// directions — so an add-on left behind by a backplane upgrade (or a
+// backplane rolled back below an add-on's required minimum) reads as
+// “False“ here without a re-handshake. “last_seen“ is the add-on's last
+// liveness heartbeat, “None“ until it first checks in.
+type PairingHealth struct {
+	Addon              string     `json:"addon"`
+	ContractCompatible bool       `json:"contract_compatible"`
+	ContractVersion    int        `json:"contract_version"`
+	LastSeen           *time.Time `json:"last_seen"`
 }
 
 // PermissionVerdict Three-state verdict returned by the permission resolver.
@@ -8223,6 +8295,31 @@ type MehoBackplaneUiRoutesConnectorsListViewSortColumn string
 // “"_SortColumn.NAME"“).
 type MehoBackplaneUiRoutesTopologyTableSortColumn string
 
+// ListPairingsApiV1AddonsPairingsGetParams defines parameters for ListPairingsApiV1AddonsPairingsGet.
+type ListPairingsApiV1AddonsPairingsGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PairAddonApiV1AddonsPairingsPostParams defines parameters for PairAddonApiV1AddonsPairingsPost.
+type PairAddonApiV1AddonsPairingsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UnpairAddonApiV1AddonsPairingsNameDeleteParams defines parameters for UnpairAddonApiV1AddonsPairingsNameDelete.
+type UnpairAddonApiV1AddonsPairingsNameDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowPairingApiV1AddonsPairingsNameGetParams defines parameters for ShowPairingApiV1AddonsPairingsNameGet.
+type ShowPairingApiV1AddonsPairingsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams defines parameters for HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost.
+type HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListAgentPrincipalsApiV1AgentPrincipalsGetParams defines parameters for ListAgentPrincipalsApiV1AgentPrincipalsGet.
 type ListAgentPrincipalsApiV1AgentPrincipalsGetParams struct {
 	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -9517,6 +9614,9 @@ type VaultVersionsUiVaultVersionsGetParams struct {
 	Mount  *string `form:"mount,omitempty" json:"mount,omitempty"`
 	Path   *string `form:"path,omitempty" json:"path,omitempty"`
 }
+
+// PairAddonApiV1AddonsPairingsPostJSONRequestBody defines body for PairAddonApiV1AddonsPairingsPost for application/json ContentType.
+type PairAddonApiV1AddonsPairingsPostJSONRequestBody = PairAddonRequest
 
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
 type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
@@ -11308,6 +11408,23 @@ type ClientInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGet request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListPairingsApiV1AddonsPairingsGet request
+	ListPairingsApiV1AddonsPairingsGet(ctx context.Context, params *ListPairingsApiV1AddonsPairingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PairAddonApiV1AddonsPairingsPostWithBody request with any body
+	PairAddonApiV1AddonsPairingsPostWithBody(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PairAddonApiV1AddonsPairingsPost(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, body PairAddonApiV1AddonsPairingsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnpairAddonApiV1AddonsPairingsNameDelete request
+	UnpairAddonApiV1AddonsPairingsNameDelete(ctx context.Context, name string, params *UnpairAddonApiV1AddonsPairingsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowPairingApiV1AddonsPairingsNameGet request
+	ShowPairingApiV1AddonsPairingsNameGet(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost request
+	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGet request
 	ListAgentPrincipalsApiV1AgentPrincipalsGet(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12508,6 +12625,9 @@ type ClientInterface interface {
 	// OperationsSearchUiOperationsSearchGet request
 	OperationsSearchUiOperationsSearchGet(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiPairingListUiPairingGet request
+	UiPairingListUiPairingGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RetrievalIndexUiRetrievalGet request
 	RetrievalIndexUiRetrievalGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12741,6 +12861,78 @@ func (c *Client) RootGet(ctx context.Context, reqEditors ...RequestEditorFn) (*h
 
 func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListPairingsApiV1AddonsPairingsGet(ctx context.Context, params *ListPairingsApiV1AddonsPairingsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListPairingsApiV1AddonsPairingsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PairAddonApiV1AddonsPairingsPostWithBody(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPairAddonApiV1AddonsPairingsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PairAddonApiV1AddonsPairingsPost(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, body PairAddonApiV1AddonsPairingsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPairAddonApiV1AddonsPairingsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnpairAddonApiV1AddonsPairingsNameDelete(ctx context.Context, name string, params *UnpairAddonApiV1AddonsPairingsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnpairAddonApiV1AddonsPairingsNameDeleteRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowPairingApiV1AddonsPairingsNameGet(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowPairingApiV1AddonsPairingsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18163,6 +18355,18 @@ func (c *Client) OperationsSearchUiOperationsSearchGet(ctx context.Context, para
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiPairingListUiPairingGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiPairingListUiPairingGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) RetrievalIndexUiRetrievalGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrievalIndexUiRetrievalGetRequest(c.Server)
 	if err != nil {
@@ -19184,6 +19388,250 @@ func NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(serve
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListPairingsApiV1AddonsPairingsGetRequest generates requests for ListPairingsApiV1AddonsPairingsGet
+func NewListPairingsApiV1AddonsPairingsGetRequest(server string, params *ListPairingsApiV1AddonsPairingsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPairAddonApiV1AddonsPairingsPostRequest calls the generic PairAddonApiV1AddonsPairingsPost builder with application/json body
+func NewPairAddonApiV1AddonsPairingsPostRequest(server string, params *PairAddonApiV1AddonsPairingsPostParams, body PairAddonApiV1AddonsPairingsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPairAddonApiV1AddonsPairingsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPairAddonApiV1AddonsPairingsPostRequestWithBody generates requests for PairAddonApiV1AddonsPairingsPost with any type of body
+func NewPairAddonApiV1AddonsPairingsPostRequestWithBody(server string, params *PairAddonApiV1AddonsPairingsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUnpairAddonApiV1AddonsPairingsNameDeleteRequest generates requests for UnpairAddonApiV1AddonsPairingsNameDelete
+func NewUnpairAddonApiV1AddonsPairingsNameDeleteRequest(server string, name string, params *UnpairAddonApiV1AddonsPairingsNameDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowPairingApiV1AddonsPairingsNameGetRequest generates requests for ShowPairingApiV1AddonsPairingsNameGet
+func NewShowPairingApiV1AddonsPairingsNameGetRequest(server string, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest generates requests for HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost
+func NewHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostRequest(server string, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s/heartbeat", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -36723,6 +37171,33 @@ func NewOperationsSearchUiOperationsSearchGetRequest(server string, params *Oper
 	return req, nil
 }
 
+// NewUiPairingListUiPairingGetRequest generates requests for UiPairingListUiPairingGet
+func NewUiPairingListUiPairingGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/pairing")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewRetrievalIndexUiRetrievalGetRequest generates requests for RetrievalIndexUiRetrievalGet
 func NewRetrievalIndexUiRetrievalGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -39580,6 +40055,23 @@ type ClientWithResponsesInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error)
 
+	// ListPairingsApiV1AddonsPairingsGetWithResponse request
+	ListPairingsApiV1AddonsPairingsGetWithResponse(ctx context.Context, params *ListPairingsApiV1AddonsPairingsGetParams, reqEditors ...RequestEditorFn) (*ListPairingsApiV1AddonsPairingsGetResponse, error)
+
+	// PairAddonApiV1AddonsPairingsPostWithBodyWithResponse request with any body
+	PairAddonApiV1AddonsPairingsPostWithBodyWithResponse(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PairAddonApiV1AddonsPairingsPostResponse, error)
+
+	PairAddonApiV1AddonsPairingsPostWithResponse(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, body PairAddonApiV1AddonsPairingsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PairAddonApiV1AddonsPairingsPostResponse, error)
+
+	// UnpairAddonApiV1AddonsPairingsNameDeleteWithResponse request
+	UnpairAddonApiV1AddonsPairingsNameDeleteWithResponse(ctx context.Context, name string, params *UnpairAddonApiV1AddonsPairingsNameDeleteParams, reqEditors ...RequestEditorFn) (*UnpairAddonApiV1AddonsPairingsNameDeleteResponse, error)
+
+	// ShowPairingApiV1AddonsPairingsNameGetWithResponse request
+	ShowPairingApiV1AddonsPairingsNameGetWithResponse(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*ShowPairingApiV1AddonsPairingsNameGetResponse, error)
+
+	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request
+	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error)
+
 	// ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request
 	ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse(ctx context.Context, params *ListAgentPrincipalsApiV1AgentPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListAgentPrincipalsApiV1AgentPrincipalsGetResponse, error)
 
@@ -40780,6 +41272,9 @@ type ClientWithResponsesInterface interface {
 	// OperationsSearchUiOperationsSearchGetWithResponse request
 	OperationsSearchUiOperationsSearchGetWithResponse(ctx context.Context, params *OperationsSearchUiOperationsSearchGetParams, reqEditors ...RequestEditorFn) (*OperationsSearchUiOperationsSearchGetResponse, error)
 
+	// UiPairingListUiPairingGetWithResponse request
+	UiPairingListUiPairingGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiPairingListUiPairingGetResponse, error)
+
 	// RetrievalIndexUiRetrievalGetWithResponse request
 	RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error)
 
@@ -41037,6 +41532,120 @@ func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) Sta
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListPairingsApiV1AddonsPairingsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PairedAddonListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListPairingsApiV1AddonsPairingsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListPairingsApiV1AddonsPairingsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PairAddonApiV1AddonsPairingsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *PairAddonResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PairAddonApiV1AddonsPairingsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PairAddonApiV1AddonsPairingsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnpairAddonApiV1AddonsPairingsNameDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UnpairAddonApiV1AddonsPairingsNameDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnpairAddonApiV1AddonsPairingsNameDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowPairingApiV1AddonsPairingsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PairedAddonRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowPairingApiV1AddonsPairingsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowPairingApiV1AddonsPairingsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PairedAddonRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -47824,6 +48433,27 @@ func (r OperationsSearchUiOperationsSearchGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiPairingListUiPairingGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiPairingListUiPairingGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiPairingListUiPairingGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RetrievalIndexUiRetrievalGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -49061,6 +49691,59 @@ func (c *ClientWithResponses) ProtectedResourceMetadataWellKnownOauthProtectedRe
 		return nil, err
 	}
 	return ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp)
+}
+
+// ListPairingsApiV1AddonsPairingsGetWithResponse request returning *ListPairingsApiV1AddonsPairingsGetResponse
+func (c *ClientWithResponses) ListPairingsApiV1AddonsPairingsGetWithResponse(ctx context.Context, params *ListPairingsApiV1AddonsPairingsGetParams, reqEditors ...RequestEditorFn) (*ListPairingsApiV1AddonsPairingsGetResponse, error) {
+	rsp, err := c.ListPairingsApiV1AddonsPairingsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListPairingsApiV1AddonsPairingsGetResponse(rsp)
+}
+
+// PairAddonApiV1AddonsPairingsPostWithBodyWithResponse request with arbitrary body returning *PairAddonApiV1AddonsPairingsPostResponse
+func (c *ClientWithResponses) PairAddonApiV1AddonsPairingsPostWithBodyWithResponse(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PairAddonApiV1AddonsPairingsPostResponse, error) {
+	rsp, err := c.PairAddonApiV1AddonsPairingsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePairAddonApiV1AddonsPairingsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PairAddonApiV1AddonsPairingsPostWithResponse(ctx context.Context, params *PairAddonApiV1AddonsPairingsPostParams, body PairAddonApiV1AddonsPairingsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PairAddonApiV1AddonsPairingsPostResponse, error) {
+	rsp, err := c.PairAddonApiV1AddonsPairingsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePairAddonApiV1AddonsPairingsPostResponse(rsp)
+}
+
+// UnpairAddonApiV1AddonsPairingsNameDeleteWithResponse request returning *UnpairAddonApiV1AddonsPairingsNameDeleteResponse
+func (c *ClientWithResponses) UnpairAddonApiV1AddonsPairingsNameDeleteWithResponse(ctx context.Context, name string, params *UnpairAddonApiV1AddonsPairingsNameDeleteParams, reqEditors ...RequestEditorFn) (*UnpairAddonApiV1AddonsPairingsNameDeleteResponse, error) {
+	rsp, err := c.UnpairAddonApiV1AddonsPairingsNameDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnpairAddonApiV1AddonsPairingsNameDeleteResponse(rsp)
+}
+
+// ShowPairingApiV1AddonsPairingsNameGetWithResponse request returning *ShowPairingApiV1AddonsPairingsNameGetResponse
+func (c *ClientWithResponses) ShowPairingApiV1AddonsPairingsNameGetWithResponse(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*ShowPairingApiV1AddonsPairingsNameGetResponse, error) {
+	rsp, err := c.ShowPairingApiV1AddonsPairingsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowPairingApiV1AddonsPairingsNameGetResponse(rsp)
+}
+
+// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request returning *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse
+func (c *ClientWithResponses) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error) {
+	rsp, err := c.HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp)
 }
 
 // ListAgentPrincipalsApiV1AgentPrincipalsGetWithResponse request returning *ListAgentPrincipalsApiV1AgentPrincipalsGetResponse
@@ -52969,6 +53652,15 @@ func (c *ClientWithResponses) OperationsSearchUiOperationsSearchGetWithResponse(
 	return ParseOperationsSearchUiOperationsSearchGetResponse(rsp)
 }
 
+// UiPairingListUiPairingGetWithResponse request returning *UiPairingListUiPairingGetResponse
+func (c *ClientWithResponses) UiPairingListUiPairingGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiPairingListUiPairingGetResponse, error) {
+	rsp, err := c.UiPairingListUiPairingGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiPairingListUiPairingGetResponse(rsp)
+}
+
 // RetrievalIndexUiRetrievalGetWithResponse request returning *RetrievalIndexUiRetrievalGetResponse
 func (c *ClientWithResponses) RetrievalIndexUiRetrievalGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RetrievalIndexUiRetrievalGetResponse, error) {
 	rsp, err := c.RetrievalIndexUiRetrievalGet(ctx, reqEditors...)
@@ -53719,6 +54411,164 @@ func ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rs
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListPairingsApiV1AddonsPairingsGetResponse parses an HTTP response from a ListPairingsApiV1AddonsPairingsGetWithResponse call
+func ParseListPairingsApiV1AddonsPairingsGetResponse(rsp *http.Response) (*ListPairingsApiV1AddonsPairingsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListPairingsApiV1AddonsPairingsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PairedAddonListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePairAddonApiV1AddonsPairingsPostResponse parses an HTTP response from a PairAddonApiV1AddonsPairingsPostWithResponse call
+func ParsePairAddonApiV1AddonsPairingsPostResponse(rsp *http.Response) (*PairAddonApiV1AddonsPairingsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PairAddonApiV1AddonsPairingsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest PairAddonResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUnpairAddonApiV1AddonsPairingsNameDeleteResponse parses an HTTP response from a UnpairAddonApiV1AddonsPairingsNameDeleteWithResponse call
+func ParseUnpairAddonApiV1AddonsPairingsNameDeleteResponse(rsp *http.Response) (*UnpairAddonApiV1AddonsPairingsNameDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnpairAddonApiV1AddonsPairingsNameDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowPairingApiV1AddonsPairingsNameGetResponse parses an HTTP response from a ShowPairingApiV1AddonsPairingsNameGetWithResponse call
+func ParseShowPairingApiV1AddonsPairingsNameGetResponse(rsp *http.Response) (*ShowPairingApiV1AddonsPairingsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowPairingApiV1AddonsPairingsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PairedAddonRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse parses an HTTP response from a HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse call
+func ParseHeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse(rsp *http.Response) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PairedAddonRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 
@@ -62392,6 +63242,22 @@ func ParseOperationsSearchUiOperationsSearchGetResponse(rsp *http.Response) (*Op
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiPairingListUiPairingGetResponse parses an HTTP response from a UiPairingListUiPairingGetWithResponse call
+func ParseUiPairingListUiPairingGetResponse(rsp *http.Response) (*UiPairingListUiPairingGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiPairingListUiPairingGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

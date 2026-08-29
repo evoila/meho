@@ -108,6 +108,27 @@ connector-related release-notes line.
   identical-sets guard stays as belt-and-braces; authoritative placement makes
   its firing condition impossible in practice.
 
+### Added — add-on pairing handshake + identity: pair once as a scoped service principal over a versioned contract (#3025)
+
+- The backplane gains the foundation of the add-on pairing contract
+  (Initiative #2900): a one-time handshake that registers a sibling add-on
+  product (first consumers meho-automation, meho-ssp) as a confidential
+  Keycloak client-credentials **service** principal
+  (`principal_kind=service`, `tenant_role=read_only` — scoped by
+  construction, no blanket admin) bound to a **negotiated integration
+  contract version**. Negotiation pins minimum-version skew in both
+  directions (add-on-too-old / backplane-too-old), and the negotiated
+  version is persisted. Unpair is reversible: it deletes the Keycloak client
+  then hard-deletes the pairing row, so an unpaired backplane is
+  byte-identical to a never-paired one (the append-only audit log keeps the
+  history). Pair / unpair run at `tenant_admin` over
+  `POST`/`DELETE /api/v1/addons/pairings`; every pairing's contract
+  compatibility (re-evaluated live) and last liveness heartbeat surface in
+  `/api/v1/health` (and so `meho_status` / `meho status`) and a read-only
+  `/ui/pairing` console panel. The agent meta-tool surface is unchanged — an
+  add-on identifier is data, never a tool name. New migration `0079`
+  (`addon_pairing`). See `docs/codebase/addon-pairing.md`.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

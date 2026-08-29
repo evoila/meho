@@ -717,6 +717,56 @@ def test_drawer_falls_back_to_http_op_id_heuristic() -> None:
 
 
 # ---------------------------------------------------------------------------
+# internal#236: reference-resolution substance
+# ---------------------------------------------------------------------------
+
+
+def test_event_drawer_renders_what_happened_and_full_audit_link() -> None:
+    """The event drawer shows the plain-language line + a one-click audit link.
+
+    ``BroadcastEvent.audit_id`` already keys this drawer to its audit row;
+    the "full audit row" cross-link makes that row one click away (the
+    resolved detail surface), per internal#236.
+    """
+    audit_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        payload={"op_id": "vsphere.vm.list", "params": {"datacenter": "dc-1"}},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/broadcast/event/{audit_id}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The plain-language "what happened" banner renders.
+    assert 'aria-label="What happened"' in body
+    # One-click cross-link from the event to its fully-resolved audit row.
+    assert f"/ui/audit?audit_id={audit_id}" in body
+
+
+def test_event_drawer_resolves_principal_display_name() -> None:
+    """The event drawer shows the principal display name, not just the sub."""
+    audit_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        operator_sub="6e776fc1-aaaa-bbbb-cccc-ddddeeeeffff",
+        payload={
+            "op_id": "vsphere.vm.list",
+            "params": {},
+            "principal_name": "Grace Hopper",
+        },
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/broadcast/event/{audit_id}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The resolved name is shown; the raw sub survives only in a title attr.
+    assert "Grace Hopper" in body
+    assert 'title="6e776fc1-aaaa-bbbb-cccc-ddddeeeeffff"' in body
+
+
+# ---------------------------------------------------------------------------
 # op_id reflected-XSS hardening (review finding on PR #1044)
 # ---------------------------------------------------------------------------
 

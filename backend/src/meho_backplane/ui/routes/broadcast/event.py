@@ -88,6 +88,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
+from meho_backplane.ui.references import resolve_audit_references
+from meho_backplane.ui.roles import is_ui_tenant_admin
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
     INTERNAL_PAYLOAD_KEYS,
@@ -149,6 +151,13 @@ def build_event_router() -> APIRouter:
         op_id = resolve_op_id(row)
         op_class = classify_op(op_id)
         aggregate_only = is_aggregate_only(row, op_class)
+        # Gate the lineage replay deep-link on the same tenant_admin lift the
+        # audit drawer uses (the replay surface is tenant_admin-only); fails
+        # soft to a disabled link for a plain operator.
+        is_admin = await is_ui_tenant_admin(session_ctx)
+        references = await resolve_audit_references(
+            db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin
+        )
         # The "suppress this op" cross-link is gated on the sensitive
         # op-class *set* (decision #3), not the badge colour: of the
         # three, ``credential_read`` / ``credential_mint`` are
@@ -173,6 +182,11 @@ def build_event_router() -> APIRouter:
             "aggregate_only": aggregate_only,
             "is_sensitive": is_sensitive,
             "request_payload": request_payload,
+            # Named, linked substance for every reference GUID on the row
+            # (internal#236) -- shared with the audit drawer so both surfaces
+            # resolve identically, including the one-click "full audit row"
+            # link back from this event to its resolved audit detail.
+            "references": references,
             # The ephemeral broadcast id, for display only -- not a PG
             # column. Empty string when the row was opened from a path
             # that did not carry it.

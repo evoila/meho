@@ -1,0 +1,170 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Shared reference-resolution macros for the audit + broadcast detail
+  drawers (internal#236). Both drawers pass the same ``references`` object
+  (built by ``meho_backplane.ui.references.resolve_audit_references``) so
+  every reference GUID renders as named, linked substance identically on
+  both surfaces -- and degrades to the raw id with an ``unresolved`` marker
+  when a store carries no name for it. The raw id stays reachable via the
+  ``title`` attribute on every resolved chip (and, canonically, in each
+  drawer's Identifiers section).
+
+  Macros:
+    what_happened(refs)          -- the plain-language "what happened" banner
+    principal_chip(principal)    -- display name + service marker (title=sub)
+    operation_ref(operation)     -- summary + group + op_id
+    target_ref(target)           -- linked target name, or raw id + unresolved
+    status_badge(status)         -- toned badge with human label + code
+    timestamp(t)                 -- <time> display + relative "X ago"
+    work_ref_ref(work_ref)       -- linked change ticket, or raw + unresolved
+    lineage(refs, surface)       -- parent / replay / run / cross-drawer links
+-#}
+
+{%- macro _unresolved(raw) -%}
+  <span class="font-mono text-xs break-all" title="{{ raw }}">{{ raw }}</span>
+  <span class="badge badge-ghost badge-xs align-middle opacity-70" title="This id could not be resolved to a named entity (deleted, cross-tenant, or unknown).">unresolved</span>
+{%- endmacro -%}
+
+{%- macro what_happened(refs) -%}
+  <section aria-label="What happened" class="rounded bg-base-200 p-3">
+    <p class="text-sm font-medium">{{ refs.what_happened }}</p>
+  </section>
+{%- endmacro -%}
+
+{%- macro principal_chip(principal) -%}
+  <span class="inline-flex flex-wrap items-center gap-1">
+    {% if principal.resolved %}
+      <span class="font-medium" title="{{ principal.sub }}">{{ principal.name }}</span>
+      {% if principal.email %}
+        <span class="text-xs opacity-60">&lt;{{ principal.email }}&gt;</span>
+      {% endif %}
+    {% else %}
+      <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded for this row)">{{ principal.sub }}</span>
+    {% endif %}
+    {% if principal.is_service %}
+      <span class="badge badge-outline badge-xs" title="Non-interactive principal (agent session or delegated actor), not a person.">service</span>
+    {% endif %}
+  </span>
+{%- endmacro -%}
+
+{%- macro operation_ref(operation) -%}
+  <span class="inline-flex flex-wrap items-center gap-1">
+    {% if operation.summary %}
+      <span>{{ operation.summary }}</span>
+    {% endif %}
+    {% if operation.group_name %}
+      <span class="badge badge-ghost badge-xs" title="Operation group">{{ operation.group_name }}</span>
+    {% endif %}
+    <span class="font-mono text-xs opacity-60 break-all">{{ operation.op_id }}</span>
+    {% if not operation.resolved %}
+      <span class="badge badge-ghost badge-xs opacity-70" title="No connector operation descriptor matched this op id (e.g. a chassis HTTP route or UI view).">no summary</span>
+    {% endif %}
+  </span>
+{%- endmacro -%}
+
+{%- macro target_ref(target) -%}
+  {% if target.resolved %}
+    <a
+      class="link link-primary break-all"
+      href="{{ target.href }}"
+      title="{{ target.id }}"
+      aria-label="Open target {{ target.name }}"
+    >{{ target.name }}</a>
+  {% elif target.present %}
+    {{ _unresolved(target.id) }}
+  {% else %}
+    <span class="opacity-50">—</span>
+  {% endif %}
+{%- endmacro -%}
+
+{%- macro status_badge(status) -%}
+  {%- set tone = {"success": "badge-success", "warning": "badge-warning", "error": "badge-error", "neutral": "badge-ghost"} -%}
+  <span class="badge badge-sm {{ tone.get(status.tone, 'badge-ghost') }}">{{ status.label }}</span>
+  <span class="font-mono text-xs opacity-60">{{ status.code }}</span>
+{%- endmacro -%}
+
+{%- macro timestamp(t) -%}
+  <span>
+    <time datetime="{{ t.absolute }}">{{ t.display }} UTC</time>
+    <span class="text-xs opacity-60">({{ t.relative }})</span>
+  </span>
+{%- endmacro -%}
+
+{%- macro work_ref_ref(work_ref) -%}
+  {% if work_ref.resolved %}
+    <a class="link link-primary break-all" href="{{ work_ref.href }}" target="_blank" rel="noopener" title="{{ work_ref.raw }}">{{ work_ref.label }}</a>
+  {% elif work_ref.present %}
+    <span class="font-mono text-xs break-all">{{ work_ref.raw }}</span>
+  {% else %}
+    <span class="opacity-50">—</span>
+  {% endif %}
+{%- endmacro -%}
+
+{#- Lineage links. ``surface`` is "audit" (parent re-swaps the in-page
+    ``#audit-drawer``) or "broadcast" (parent + audit cross-link navigate to
+    the full audit page, which has no drawer slot to swap into). -#}
+{%- macro lineage(refs, surface) -%}
+  {% set has_lineage = refs.parent.present or refs.session.present or refs.run.present or surface == "broadcast" %}
+  {% if has_lineage %}
+    <section aria-label="Lineage">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Lineage</h3>
+      <div class="flex flex-wrap items-center gap-1">
+        {% if surface == "broadcast" %}
+          <a
+            class="btn btn-ghost btn-xs gap-1"
+            href="{{ refs.audit_href }}"
+            aria-label="Open the full audit row for this event"
+          >full audit row</a>
+        {% endif %}
+        {% if refs.parent.present %}
+          {% if surface == "audit" %}
+            <a
+              class="btn btn-ghost btn-xs gap-1"
+              hx-get="/ui/audit/show/{{ refs.parent.id }}"
+              hx-target="#audit-drawer"
+              hx-swap="outerHTML"
+              href="/ui/audit/show/{{ refs.parent.id }}"
+              title="{{ refs.parent.id }}"
+              aria-label="Open parent audit row"
+            >parent: {{ refs.parent.summary_line or refs.parent.id }}</a>
+          {% else %}
+            <a
+              class="btn btn-ghost btn-xs gap-1"
+              href="/ui/audit?audit_id={{ refs.parent.id }}"
+              title="{{ refs.parent.id }}"
+              aria-label="Open parent audit row"
+            >parent: {{ refs.parent.summary_line or refs.parent.id }}</a>
+          {% endif %}
+        {% endif %}
+        {% if refs.session.present %}
+          {% if refs.session.replay_enabled %}
+            <a
+              class="btn btn-ghost btn-xs gap-1"
+              href="{{ refs.session.replay_href }}"
+              title="{{ refs.session.id }}"
+              aria-label="Replay agent session"
+            >replay session</a>
+          {% else %}
+            <span
+              class="btn btn-ghost btn-xs btn-disabled gap-1"
+              aria-disabled="true"
+              title="Session replay requires the tenant_admin role"
+            >replay session</span>
+          {% endif %}
+        {% endif %}
+        {% if refs.run.present %}
+          <a
+            class="btn btn-ghost btn-xs gap-1"
+            href="{{ refs.run.href }}"
+            title="{{ refs.run.id }}"
+            aria-label="Open originating runbook run"
+          >
+            {% if refs.run.resolved %}run: {{ refs.run.template }} ({{ refs.run.state }}){% else %}originating run{% endif %}
+          </a>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+{%- endmacro -%}

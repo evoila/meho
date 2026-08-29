@@ -49,7 +49,14 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AuditLog, Tenant
+from meho_backplane.db.models import (
+    AuditLog,
+    EndpointDescriptor,
+    OperationGroup,
+    RunbookRun,
+    Target,
+    Tenant,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -162,13 +169,16 @@ def _seed_audit_row(
     work_ref: str | None = None,
     parent_audit_id: uuid.UUID | None = None,
     agent_session_id: uuid.UUID | None = None,
+    target_id: uuid.UUID | None = None,
+    run_id: uuid.UUID | None = None,
+    actor_sub: str | None = None,
     row_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Insert one ``audit_log`` row at ``_BASE + second``; return its id.
 
     ``payload_extra`` merges into the base ``{op_id, op_class}`` payload so a
-    test can stamp the G6.3 ``broadcast_detail_effective`` verdict or extra
-    request params.
+    test can stamp the G6.3 ``broadcast_detail_effective`` verdict, the MCP
+    writer's ``principal_name``, or extra request params.
     """
     resolved_id = row_id or uuid.uuid4()
     payload: dict[str, Any] = {"op_id": op_id, "op_class": op_class}
@@ -192,11 +202,94 @@ def _seed_audit_row(
                     work_ref=work_ref,
                     parent_audit_id=parent_audit_id,
                     agent_session_id=agent_session_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    actor_sub=actor_sub,
                 )
             )
         return resolved_id
 
     return asyncio.run(_do())
+
+
+def _seed_target(*, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    """Insert one ``targets`` row; return its id (the audit ``target_id``)."""
+    target_id = uuid.uuid4()
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=tenant_id,
+                    name=name,
+                    aliases=[],
+                    product="synthetic-product",
+                    host=f"{name}.example.test",
+                )
+            )
+
+    asyncio.run(_do())
+    return target_id
+
+
+def _seed_operation(*, op_id: str, summary: str, group_name: str) -> None:
+    """Insert a global ``endpoint_descriptor`` + its ``operation_group``."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            group_id = uuid.uuid4()
+            session.add(
+                OperationGroup(
+                    id=group_id,
+                    product="synthetic-product",
+                    version="1.0",
+                    impl_id="synthetic-impl",
+                    group_key="grp",
+                    name=group_name,
+                    when_to_use="when testing",
+                )
+            )
+            session.add(
+                EndpointDescriptor(
+                    id=uuid.uuid4(),
+                    product="synthetic-product",
+                    version="1.0",
+                    impl_id="synthetic-impl",
+                    op_id=op_id,
+                    source_kind="typed",
+                    summary=summary,
+                    group_id=group_id,
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def _seed_run(*, tenant_id: uuid.UUID, template: str, state: str) -> uuid.UUID:
+    """Insert one ``runbook_runs`` row; return its ``run_id``."""
+    run_id = uuid.uuid4()
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                RunbookRun(
+                    run_id=run_id,
+                    tenant_id=tenant_id,
+                    template_slug=template,
+                    template_version=1,
+                    assigned_to="op-synthetic",
+                    target="synthetic-target",
+                    started_by="op-synthetic",
+                    state=state,
+                )
+            )
+
+    asyncio.run(_do())
+    return run_id
 
 
 def _seed_session_sync(
@@ -558,3 +651,109 @@ def test_page_deep_link_unknown_id_renders_page_without_drawer() -> None:
     body = response.text
     assert "<title>Audit" in body
     assert 'aria-label="Audit row detail drawer"' not in body
+
+
+# ===========================================================================
+# internal#236: reference-resolution substance
+# ===========================================================================
+
+
+def test_drawer_renders_resolved_substance() -> None:
+    """A row's references resolve to named, linked substance, not raw GUIDs.
+
+    Principal display name (+ service marker for an agent session), target
+    name linked to its detail page, operation summary + group, and the
+    plain-language "what happened" line -- resolved from the stores the
+    backplane already has.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = _seed_target(tenant_id=_TENANT_A, name="edge-gateway-01")
+    _seed_operation(
+        op_id="vsphere.vm.list", summary="List virtual machines", group_name="Inventory"
+    )
+    row_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        op_id="vsphere.vm.list",
+        operator_sub="6e776fc1-aaaa-bbbb-cccc-ddddeeeeffff",
+        payload_extra={"principal_name": "Ada Lovelace"},
+        target_id=target_id,
+        agent_session_id=uuid.uuid4(),
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Principal resolves to the display name + a non-interactive service marker.
+    assert "Ada Lovelace" in body
+    assert ">service</span>" in body
+    # Target resolves to a linked name (raw id only in the title attribute).
+    assert "edge-gateway-01" in body
+    assert "/ui/connectors/edge-gateway-01" in body
+    # Operation resolves to its human summary + group.
+    assert "List virtual machines" in body
+    assert "Inventory" in body
+    # The plain-language "what happened" banner is present.
+    assert 'aria-label="What happened"' in body
+    # The raw target GUID is NOT rendered as the primary label (name wins);
+    # it remains reachable only via the chip's title attribute.
+    assert f">{target_id}</a>" not in body
+
+
+def test_drawer_unresolved_target_shows_marker_and_raw_id() -> None:
+    """A target_id with no live target degrades to raw id + unresolved marker."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    orphan_target = uuid.uuid4()
+    row_id = _seed_audit_row(
+        tenant_id=_TENANT_A,
+        op_id="vsphere.vm.list",
+        target_id=orphan_target,
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The raw id stays reachable, flagged unresolved (never blank, never crash).
+    assert str(orphan_target) in body
+    assert ">unresolved</span>" in body
+
+
+def test_drawer_renders_run_lineage_link() -> None:
+    """A row issued inside a runbook run links to the resolved run."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    run_id = _seed_run(tenant_id=_TENANT_A, template="nightly-drain", state="in_progress")
+    row_id = _seed_audit_row(tenant_id=_TENANT_A, op_id="vsphere.vm.list", run_id=run_id)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{row_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert f"/ui/runbooks/runs/{run_id}" in body
+    assert "nightly-drain" in body
+
+
+def test_drawer_parent_lineage_is_labelled_not_bare_uuid() -> None:
+    """The parent lineage link carries the resolved op label, not just a UUID."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    parent_id = _seed_audit_row(tenant_id=_TENANT_A, second=0, op_id="vsphere.vm.create")
+    child_id = _seed_audit_row(
+        tenant_id=_TENANT_A, second=1, op_id="vsphere.vm.poweron", parent_audit_id=parent_id
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/audit/show/{child_id}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The link is still there (unchanged deep-link contract)...
+    assert f"/ui/audit/show/{parent_id}" in body
+    # ...but labelled with the parent op, not a bare UUID.
+    assert "parent: vsphere.vm.create" in body

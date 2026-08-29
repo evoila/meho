@@ -104,17 +104,13 @@ from meho_backplane.audit_query import (
     query_audit,
     replay_session,
 )
-from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
-from meho_backplane.ui.auth.refresh import (
-    load_fresh_session,
-    verify_access_token_with_refresh,
-)
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.references import resolve_audit_references
+from meho_backplane.ui.roles import is_ui_tenant_admin
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
     INTERNAL_PAYLOAD_KEYS,
@@ -180,67 +176,6 @@ _require_session = Depends(require_ui_session)
 #: (same B008 guard) -- the drawer resolves one row directly, not through
 #: the cursor-paged substrate.
 _get_raw_session_dep = Depends(get_raw_session)
-
-
-async def _resolve_role(session_ctx: UISessionContext) -> Operator | None:
-    """Re-verify the session's access token to lift the operator's role.
-
-    :class:`UISessionContext` carries ``operator_sub`` + ``tenant_id`` only,
-    so the admin-vs-operator distinction the replay pivot needs is resolved
-    by decrypting the stored access token and re-running the chassis JWT
-    chain -- the same lift :func:`meho_backplane.ui.routes.runbooks.routes._resolve_role`
-    performs -- through
-    :func:`~meho_backplane.ui.auth.refresh.verify_access_token_with_refresh`,
-    which silently refreshes once on the ``token_expired`` 401 before
-    re-verifying, so an expired-but-refreshable token lifts the real role
-    instead of degrading the operator mid-session.
-
-    Fails **soft**: any hiccup (session row vanished between the middleware
-    check and here, JWKS transiently unreachable, refresh unavailable,
-    identity mismatch on the decoded token) returns ``None`` -- the caller
-    then treats the request as a plain operator (the replay pivot renders
-    disabled). An unavailable role lift must never 5xx the read surface.
-    """
-    try:
-        decrypted = await load_fresh_session(session_ctx.session_id)
-        if decrypted is None:
-            return None
-        settings = get_settings()
-        _refreshed, operator = await verify_access_token_with_refresh(
-            decrypted,
-            expected_audience=settings.keycloak_audience,
-        )
-    except Exception as exc:
-        log.info(
-            "ui_audit_role_lift_unavailable",
-            session_id=str(session_ctx.session_id),
-            reason=type(exc).__name__,
-        )
-        return None
-    # A token whose identity diverges from the session row is a security
-    # anomaly; treat it as "no admin" rather than honouring the elevated
-    # claim (the replay pivot stays disabled).
-    if operator.sub != session_ctx.operator_sub or operator.tenant_id != session_ctx.tenant_id:
-        log.warning(
-            "ui_audit_role_lift_identity_mismatch",
-            session_sub=session_ctx.operator_sub,
-            token_sub=operator.sub,
-        )
-        return None
-    return operator
-
-
-async def _is_tenant_admin(session_ctx: UISessionContext) -> bool:
-    """Resolve whether the session's operator is a ``tenant_admin``.
-
-    Thin wrapper over :func:`_resolve_role` returning just the admin verdict
-    the replay-pivot render needs. Fails soft to ``False`` (operator
-    privileges) so the pivot is disabled whenever the role lift can't
-    complete; the T3 replay route re-checks server-side, so a forged
-    enabled pivot still 403s there.
-    """
-    operator = await _resolve_role(session_ctx)
-    return operator is not None and operator.tenant_role is TenantRole.TENANT_ADMIN
 
 
 def _filter_form_context(
@@ -421,7 +356,9 @@ def _project_replay_node(node: ReplayNode, *, is_admin: bool) -> dict[str, objec
     }
 
 
-def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]:
+async def _build_drawer_context(
+    db_session: AsyncSession, row: AuditLog, *, is_admin: bool
+) -> dict[str, object]:
     """Assemble the row-detail drawer context for one ``audit_log`` row.
 
     Classifies the op via the same :func:`classify_op` chain the broadcast
@@ -430,10 +367,17 @@ def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]
     / ``audit_query`` row -- or any row whose ``broadcast_detail_effective``
     is ``"aggregate"`` -- renders the 🔒 placeholder and **no** payload, and
     strips the audit-only classification + G6.3 forensic keys from the
-    rendered request payload otherwise. The replay deep-link is enabled only
-    when the session lifted to ``tenant_admin`` (``is_admin``) and the row
-    carries an ``agent_session_id``; the parent-row deep-link re-opens the
-    drawer on ``parent_audit_id``.
+    rendered request payload otherwise.
+
+    The ``references`` object (internal#236) turns every reference GUID on
+    the row into named, linked substance -- principal display name + service
+    marker, target name + link, op summary + group, labelled parent /
+    session / run lineage, humanized status + timestamp, and the
+    plain-language "what happened" line -- shared with the broadcast drawer
+    via :func:`~meho_backplane.ui.references.resolve_audit_references`. The
+    replay deep-link inside it is enabled only when the session lifted to
+    ``tenant_admin`` (``is_admin``) and the row carries an
+    ``agent_session_id``.
     """
     op_id = resolve_op_id(row)
     op_class = classify_op(op_id)
@@ -445,8 +389,9 @@ def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]
         if aggregate_only
         else {k: v for k, v in row.payload.items() if k not in INTERNAL_PAYLOAD_KEYS}
     )
-    agent_session_id = str(row.agent_session_id) if row.agent_session_id is not None else None
-    parent_audit_id = str(row.parent_audit_id) if row.parent_audit_id is not None else None
+    references = await resolve_audit_references(
+        db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin
+    )
     return {
         "row": row,
         "op_id": op_id,
@@ -459,11 +404,7 @@ def _build_drawer_context(row: AuditLog, *, is_admin: bool) -> dict[str, object]
         # placeholder copy, so the drawer text stays honest about which
         # ops are aggregate-only without a second hard-coded list.
         "gated_op_classes": sorted(AGGREGATE_ONLY_OP_CLASSES),
-        "agent_session_id": agent_session_id,
-        "parent_audit_id": parent_audit_id,
-        # The replay surface is TENANT_ADMIN-gated (#1844); the pivot is an
-        # enabled deep-link only for an admin lift on a session-bearing row.
-        "replay_enabled": is_admin and agent_session_id is not None,
+        "references": references,
     }
 
 
@@ -487,8 +428,8 @@ async def _resolve_deep_link_drawer(
     row = await fetch_audit_row(db_session, tenant_id=session.tenant_id, audit_id=audit_id)
     if row is None:
         return None
-    is_admin = await _is_tenant_admin(session)
-    return _build_drawer_context(row, is_admin=is_admin)
+    is_admin = await is_ui_tenant_admin(session)
+    return await _build_drawer_context(db_session, row, is_admin=is_admin)
 
 
 async def _build_my_recent_context(session: UISessionContext) -> dict[str, object]:
@@ -502,7 +443,7 @@ async def _build_my_recent_context(session: UISessionContext) -> dict[str, objec
     the same detail drawer. A bad cursor / duration is impossible here (the
     window is the fixed ``_MY_RECENT_SINCE`` shorthand, no operator input).
     """
-    is_admin = await _is_tenant_admin(session)
+    is_admin = await is_ui_tenant_admin(session)
     filters = _build_filters(
         target="",
         principal=session.operator_sub,
@@ -610,7 +551,7 @@ async def _build_results_context(
     cursor-reset re-run) and echoed via :func:`_filter_form_context` so the
     session pre-filter survives the cursor-reset and "Load more" paths.
     """
-    is_admin = await _is_tenant_admin(session)
+    is_admin = await is_ui_tenant_admin(session)
     context: dict[str, object] = {
         **_filter_form_context(
             target=target,
@@ -844,8 +785,8 @@ async def _drawer_handler(
             {"audit_id": str(audit_id)},
             status_code=404,
         )
-    is_admin = await _is_tenant_admin(session)
-    context = _build_drawer_context(row, is_admin=is_admin)
+    is_admin = await is_ui_tenant_admin(session)
+    context = await _build_drawer_context(db_session, row, is_admin=is_admin)
     return get_templates().TemplateResponse(request, "audit/_drawer.html", context)
 
 
@@ -860,7 +801,8 @@ async def _replay_handler(
     another principal's full session trace -- a privileged forensic act,
     matching the REST replay route's ``_require_tenant_admin`` gate
     (``api/v1/audit.py``) and the MCP ``meho_audit_replay`` posture. The role
-    is lifted via the fail-soft :func:`_resolve_role`; a ``read_only`` /
+    is lifted via the fail-soft
+    :func:`~meho_backplane.ui.roles.resolve_ui_operator`; a ``read_only`` /
     ``operator`` -- or any failed lift -- renders the 403 forbidden fragment
     ("session replay is a tenant-admin forensic action"), never the tree.
 
@@ -872,7 +814,7 @@ async def _replay_handler(
     state (``root=[]``), never a 404. Sets + echoes the CSRF cookie per the
     chassis double-submit convention.
     """
-    if not await _is_tenant_admin(session):
+    if not await is_ui_tenant_admin(session):
         return get_templates().TemplateResponse(
             request,
             "audit/_replay_forbidden.html",

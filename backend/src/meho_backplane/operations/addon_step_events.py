@@ -30,6 +30,19 @@ Two responsibilities, one cohesive service:
   last ``seq`` it saw, reconnects, and reads strictly forward — no missed
   events across its own restarts (durable delivery with resume).
 
+The ``seq > after`` high-watermark cursor is only exact if, for a given
+pairing, ``seq`` order equals **commit** order. It does not on its own:
+``seq`` is drawn at INSERT (flush) but a row only becomes visible at
+COMMIT, so two concurrent writes to the same pairing can commit out of
+``seq`` order — a lower ``seq`` still uncommitted while a higher ``seq``
+is already visible. A reader that advances its cursor past the higher
+``seq`` would then permanently skip the lower one. The recorder closes
+that gap by holding a **transaction-scoped per-pairing advisory lock**
+(:func:`_pairing_seq_lock_key`) across the ``seq``-assign→commit window,
+so the two windows cannot interleave and commit order equals ``seq``
+order per pairing. The "no missed events" property is therefore
+structural, not best-effort.
+
 Scoping is structural: attribution happens at write time by identity, so a
 pairing's log only ever contains that pairing's events. An event outside
 the paired principal's lineage is never written into another pairing's log
@@ -39,12 +52,13 @@ pins.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime
 
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -57,6 +71,28 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: Domain-separation prefix for the per-pairing seq-serialization advisory
+#: key, so this key space never collides with another subsystem that hashes
+#: a bare UUID into ``pg_advisory_xact_lock`` (the topology scheduler, the
+#: checks dashboard-transition claim). A collision would only cost a
+#: spurious wait, never a correctness bug, but the prefix keeps the key
+#: spaces disjoint by construction.
+_SEQ_LOCK_KEY_DOMAIN = b"addon_step_event_seq:"
+
+
+def _pairing_seq_lock_key(pairing_id: uuid.UUID) -> int:
+    """Map a pairing id to a stable signed-63-bit advisory-lock key.
+
+    ``pg_advisory_xact_lock`` takes a ``bigint`` (signed 64-bit). A blake2b
+    digest of the pairing UUID under a domain-separation prefix is
+    deterministic and well-distributed; masking to 63 bits keeps it
+    non-negative so it round-trips through asyncpg's ``bigint`` binding
+    without tripping the sign bit. Mirrors
+    :func:`meho_backplane.checks.investigate._dashboard_transition_lock_key`.
+    """
+    digest = hashlib.blake2b(_SEQ_LOCK_KEY_DOMAIN + pairing_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 class StepEventRead(BaseModel):
@@ -119,6 +155,41 @@ class AddonStepEventService:
         )
         return result.scalar_one_or_none()
 
+    async def _serialize_pairing_seq(self, session: AsyncSession, pairing_id: uuid.UUID) -> None:
+        """Serialize the ``seq``-assign→commit window for *pairing_id* on PG.
+
+        The durable-resume guarantee (AC1) is that a reader resuming from
+        ``seq > after`` never skips a **committed** lower ``seq``. ``seq``
+        is a ``BIGSERIAL`` drawn at INSERT (flush) but only made visible at
+        COMMIT, so without serialization two writes to the same pairing can
+        commit out of ``seq`` order: writer A draws ``seq=N`` and commits
+        slowly while writer B draws ``seq=N+1`` and commits first. A reader
+        that advances its cursor to ``N+1`` before A commits then never
+        returns ``N`` — a permanently skipped event.
+
+        A transaction-scoped per-pairing advisory lock, taken **before** the
+        INSERT and held to the caller's commit (``pg_advisory_xact_lock``
+        releases only at COMMIT / ROLLBACK), forces one writer's whole
+        [draw ``seq`` … commit] window to complete before the next writer to
+        the same pairing can draw its ``seq``. For a given pairing, ``seq``
+        order therefore equals commit order, so when a committed row with
+        ``seq=M`` is visible every ``seq < M`` for that pairing has already
+        committed — the high-watermark cursor is exact.
+
+        Scope is per pairing, so the lock never contends across pairings, and
+        the per-pairing write rate (one add-on's own approval outcomes +
+        dispatch completions) is low, so the serialization cost is
+        negligible. A no-op on non-PostgreSQL dialects: the SQLite unit-test
+        path is single-writer, so ``seq`` order already equals commit order
+        there. Mirrors
+        :func:`meho_backplane.checks.investigate._lock_dashboard_transition`.
+        """
+        conn = await session.connection()
+        if conn.dialect.name != "postgresql":
+            return
+        key = _pairing_seq_lock_key(pairing_id)
+        await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+
     async def record_if_owned(
         self,
         session: AsyncSession,
@@ -137,6 +208,13 @@ class AddonStepEventService:
         transaction owns the commit, so a producer rollback discards the
         step event alongside the state change that produced it.
 
+        Before the INSERT draws ``seq``, the caller's transaction takes the
+        per-pairing advisory lock (:meth:`_serialize_pairing_seq`) held to
+        commit, so concurrent writes to the same pairing commit in ``seq``
+        order and the resume cursor can never skip a committed lower ``seq``.
+        The lock is taken only once the owner is known to be a paired add-on,
+        so the common non-add-on producer path never touches it.
+
         Returns the inserted :class:`AddonStepEvent`, or ``None`` when
         *owner_principal_sub* is absent or not a paired add-on's
         service-account ``sub`` (the cheap no-op common path).
@@ -150,6 +228,7 @@ class AddonStepEventService:
         )
         if pairing_id is None:
             return None
+        await self._serialize_pairing_seq(session, pairing_id)
         row = AddonStepEvent(
             tenant_id=tenant_id,
             pairing_id=pairing_id,

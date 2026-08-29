@@ -130,6 +130,45 @@ isolation is total because attribution happened at write time by identity:
 the cross-pairing containment is not a read-time filter that could be
 bypassed but a property of which rows exist in which pairing's log.
 
+## Ordering under concurrent writers
+
+The `seq > after` resume cursor is a **high-watermark**: once an add-on
+advances its stored cursor past `seq = N`, it never re-reads anything at or
+below `N`. That is only safe if, for a given pairing, `seq` order equals
+**commit** order — because `seq` is a `BIGSERIAL` drawn at INSERT (flush)
+while the row becomes visible only at COMMIT. Those two moments are not the
+same, so two concurrent writes to the same pairing can commit out of `seq`
+order: writer A draws `seq = N` and commits slowly, writer B draws
+`seq = N+1` and commits first. A reader between the two commits sees only
+`N+1`, advances its cursor to `N+1`, and then `seq > N+1` **permanently
+skips** the committed `N`. That is a lost event, which the durable-resume
+acceptance criterion forbids.
+
+The recorder closes the gap by holding a **transaction-scoped per-pairing
+advisory lock** (`pg_advisory_xact_lock`, keyed by
+`_pairing_seq_lock_key(pairing_id)`) taken **before** the INSERT draws
+`seq` and released only at the caller's COMMIT / ROLLBACK. One writer's
+whole `[draw seq … commit]` window therefore completes before the next
+writer to the same pairing can draw its `seq`, so commit order equals `seq`
+order per pairing. When a committed row with `seq = M` is visible, every
+`seq < M` for that pairing has already committed — the high-watermark
+cursor is exact and the "no missed events" property is **structural, not
+best-effort**.
+
+Cost is negligible: the lock is per pairing (no cross-pairing contention),
+it is taken only once the producer is known to be a paired add-on (the
+overwhelmingly common non-add-on path never touches it), and a single
+pairing's write rate — its own approval outcomes plus dispatch completions
+— is low. On SQLite (the unit-test dialect) the lock is a no-op: that path
+is single-writer, so `seq` order already equals commit order. The
+serialization is proven on real PostgreSQL by
+`tests/integration/test_addon_step_events_concurrency.py`, which stages the
+out-of-order-commit interleaving explicitly (writer A holds an uncommitted
+lower `seq` while writer B is blocked at the lock, then asserts a cursor
+walk misses nothing). This is the same `pg_advisory_xact_lock` discipline
+the checks dashboard-transition claim uses
+(`checks/investigate.py::_lock_dashboard_transition`).
+
 ## Durability posture
 
 - The **dispatch-completion** record is in the producer's transaction —

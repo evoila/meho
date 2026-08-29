@@ -4345,8 +4345,13 @@ class AddonStepEvent(Base):
     * ``seq`` -- ``BIGSERIAL`` primary key. The monotonic resume cursor:
       an add-on resumes with ``WHERE pairing_id = :p AND seq > :after
       ORDER BY seq`` and never misses a committed event across its own
-      restarts. ``BIGSERIAL`` on PG; ``Integer`` autoincrement on SQLite
-      via :data:`_PORTABLE_BIG_SERIAL` (same shape as
+      restarts. That "never misses" property needs commit order to equal
+      ``seq`` order per pairing (``seq`` is drawn at INSERT but visible only
+      at COMMIT); the recorder guarantees it with a per-pairing advisory
+      lock across the assign→commit window
+      (:meth:`~meho_backplane.operations.addon_step_events.AddonStepEventService._serialize_pairing_seq`).
+      ``BIGSERIAL`` on PG; ``Integer`` autoincrement on SQLite via
+      :data:`_PORTABLE_BIG_SERIAL` (same shape as
       :attr:`EventOutbox.event_id`).
     * ``id`` -- UUID. Stable, client-facing event id (distinct from the
       dialect-specific ``seq``) so an add-on can dedupe on reconnect.

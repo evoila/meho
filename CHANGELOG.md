@@ -90,7 +90,7 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975)
+### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
 
 - `vmware.composite.datastore.usage` enriched every datastore row with the
   **whole-inventory** VM list — identical `vm_count` (the cluster-wide total)

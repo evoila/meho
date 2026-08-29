@@ -249,7 +249,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "identity_budget",
     "operation_group",
     # ``operation_run.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
-    # migration ``0079`` (#3079 async governed dispatch — durable run handle).
+    # migration ``0080`` (#3079 async governed dispatch — durable run handle).
     # PG rejects truncating ``tenant`` unless every referencing table is listed
     # in the same statement, so ``operation_run`` must appear here or every
     # PG-backed acceptance test errors at setup with ``cannot truncate a table

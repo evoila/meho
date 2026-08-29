@@ -49,7 +49,7 @@ load-bearing:
   resume runs), `status`, `result` (the persisted envelope JSON), `error`
   (run-crash / reaper reason), `lease_owner` / `lease_expires_at`, and the
   `created_at` / `started_at` / `ended_at` timestamps. Table created by
-  migration `0079`.
+  migration `0080`.
 - `OperationRunStatus` / `OperationRunOrigin` — closed enums backed by DB
   `CHECK` constraints; drift-guarded against the migration's frozen tuples in
   `tests/test_operation_run_lifecycle.py`.
@@ -155,4 +155,4 @@ the `main.py` lifespan alongside the other background sweeps.
   per-operation: a run is `succeeded` only after the dispatch's audit row
   commits).
 - [`agent-run.md`](agent-run.md) — the substrate this mirrors.
-- Migration `0079` — the `operation_run` table.
+- Migration `0080` — the `operation_run` table.

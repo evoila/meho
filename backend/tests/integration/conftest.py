@@ -445,7 +445,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   carries a real ``REFERENCES tenant(id)`` FK; must be listed here or
         #   PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
         #   truncate a table referenced in a foreign key constraint``.
-        # * ``operation_run`` — migration 0079 (#3079 async governed dispatch —
+        # * ``operation_run`` — migration 0080 (#3079 async governed dispatch —
         #   durable run handle) carries a real ``REFERENCES tenant(id)`` FK; must
         #   be listed here or PG rejects the per-test TRUNCATE of ``tenant`` with
         #   ``cannot truncate a table referenced in a foreign key constraint``.
@@ -517,7 +517,7 @@ async def pg_engine_empty_tenant(
         # including ``agent_run`` from migration 0017,
         # ``agent_principal`` from migration 0018, ``sensor_results``
         # (FK to ``sensor``) from migration 0071, and ``operation_run``
-        # from migration 0079 (#3079 async governed dispatch) — must be
+        # from migration 0080 (#3079 async governed dispatch) — must be
         # listed here). Deliberately no follow-up INSERT —
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(

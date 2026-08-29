@@ -455,14 +455,14 @@ def test_origin_literals_match_model_enum() -> None:
     assert set(_OPERATION_RUN_ORIGINS) == {o.value for o in OperationRunOrigin}
 
 
-def _load_migration_0079() -> object:
+def _load_migration_0080() -> object:
     path = (
         Path(__file__).resolve().parent.parent
         / "alembic"
         / "versions"
-        / "0079_create_operation_run.py"
+        / "0080_create_operation_run.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0079", path)
+    spec = importlib.util.spec_from_file_location("_migration_0080", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -470,7 +470,7 @@ def _load_migration_0079() -> object:
 
 
 def test_migration_literals_match_model_enum() -> None:
-    """Migration ``0079``'s frozen tuples match the model enums (drift guard)."""
-    module = _load_migration_0079()
+    """Migration ``0080``'s frozen tuples match the model enums (drift guard)."""
+    module = _load_migration_0080()
     assert set(module._OPERATION_RUN_STATUSES) == {s.value for s in OperationRunStatus}  # type: ignore[attr-defined]
     assert set(module._OPERATION_RUN_ORIGINS) == {o.value for o in OperationRunOrigin}  # type: ignore[attr-defined]

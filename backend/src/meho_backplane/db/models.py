@@ -3814,7 +3814,7 @@ class OperationRun(Base):
       resumes there is nothing that needs them re-hydrated. The running
       task holds them in memory for the single dispatch.
 
-    Schema highlights (full column rationale in migration ``0079``):
+    Schema highlights (full column rationale in migration ``0080``):
 
     * ``id`` -- UUID primary key; **the handle** the 202 hands back and
       the poll / cancel routes resolve.

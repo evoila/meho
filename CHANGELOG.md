@@ -174,6 +174,23 @@ connector-related release-notes line.
   past expiry). Push-only stands (#2877); implementation seams are filed as
   Tasks under #2901, unimplemented.
 
+### Added — governed delete path behind a dedicated destructive safety tier: decision (#3183)
+
+- Design-only, no code. Records the operator-ratified reversal of the standing
+  "delete-shaped operations are deliberately ungoverned" posture
+  (`docs/decisions/governed-delete-operations.md`). Delete-shaped ops gain a
+  **governed** path gated strictly harder than any existing write tier: mandatory
+  human approval always (no standing grant, no self-approval, no autonomous-session
+  approval — reusing the approvals plane's human-only line, v0.1-spec §7),
+  mandatory `preview_operation` with its **result hash** bound to the approval,
+  a blast-radius statement (object identity, child objects, irreversibility class)
+  on the approval payload, and a **new `safety_level` tier above `dangerous`**
+  excluded by default from every policy/filter — including the satellite runner's
+  safe-only wall (deletes are never minted to a satellite, agreeing with the
+  satellite write-path decision, #2901 / #3187). Driven by the
+  management-plane-lockdown Goal (evoila-bosnia/meho-internal#234). Implementation
+  seams are filed as Tasks under #3183, unimplemented.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

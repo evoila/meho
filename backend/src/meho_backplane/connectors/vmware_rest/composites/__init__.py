@@ -58,6 +58,11 @@ Scope:
   ``govc library.deploy``) (#2909).
 """
 
+from meho_backplane.connectors.vmware_rest.composites._host import (
+    datastore_mount_nfs_composite,
+    disk_mark_flash_composite,
+    service_control_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -107,7 +112,9 @@ __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
+    "datastore_mount_nfs_composite",
     "datastore_usage_composite",
+    "disk_mark_flash_composite",
     "event_tail_composite",
     "folder_create_composite",
     "guest_customization_spec_create_composite",
@@ -116,6 +123,7 @@ __all__ = [
     "network_portgroup_audit_composite",
     "performance_summary_composite",
     "register_vmware_composite_operations",
+    "service_control_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",

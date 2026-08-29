@@ -199,6 +199,34 @@ connector-related release-notes line.
   as the identity join key. New migration `0083` (`addon_step_event` +
   `service_account_sub`). See `docs/codebase/addon-step-events.md`.
 
+### Added — vmware host-domain write composites: NFS datastore mount, disk flash-marking, bounded host service control (#3182)
+
+- Three governed, vCenter-mediated **host-domain** write composites on the
+  typed `vmware-rest-9.0` surface, filling the `#2907` coverage register's
+  host-domain gap a governed nested-VCF factory bring-up hit (each write had
+  dropped to a documented out-of-band fallback). All three ride the existing
+  VI-JSON write seam the `#2893` disk-grow write established (`_post_vmomi_json`
+  through the `enforce_subop_policy` gate — no `pyvmomi`), select the host by
+  display name **or** moref, and register `dangerous` + `requires_approval`
+  with full param/response schemas, tags, `llm_instructions`, and a park-time
+  preview builder:
+  - `vmware.composite.host.datastore_mount_nfs` — mounts an NFS export as a
+    datastore via the synchronous `HostDatastoreSystem.CreateNasDatastore`
+    (returns the new datastore summary).
+  - `vmware.composite.host.disk_mark_flash` — marks host disks as flash (SSD)
+    or non-flash (HDD) via `HostStorageSystem.MarkAsSsd_Task` /
+    `MarkAsNonSsd_Task` (task-polled), keyed on a `mode` param; returns a
+    set-shaped per-disk `results` array (JSONFlux-reduced when large,
+    partial-failure tolerated).
+  - `vmware.composite.host.service_control` — start/stop/restart a host
+    service + optional `UpdateServicePolicy` via `HostServiceSystem`, **bounded
+    to a curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd`);
+    an out-of-list service name is refused with a structured
+    `service_not_allowed` before any resolution or write, never passed through.
+  - Grounding note: the real vim method for the HDD direction is
+    `MarkAsNonSsd_Task` (the issue's `MarkAsHdd_Task` was a mis-spelling); the
+    pinned-`vi-json.yaml` reconcile lane asserts every host vim path exists.
+
 ### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
 
 - `vmware.composite.datastore.usage` enriched every datastore row with the

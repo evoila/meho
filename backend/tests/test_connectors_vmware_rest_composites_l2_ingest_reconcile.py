@@ -83,7 +83,7 @@ import httpx
 import pytest
 import respx
 
-from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.composites import _host, _write
 from meho_backplane.operations.ingest import parse_openapi
 from tests.acceptance._vcenter_spec import (
     VCENTER_SPEC_REASON,
@@ -834,4 +834,97 @@ def test_vm_create_guest_id_map_is_grounded_in_both_pinned_specs() -> None:
             f"{vim_guest_id!r} is not a VirtualMachineGuestOsIdentifier enum "
             "value in the pinned vi-json.yaml — the #3099 guestId map targets "
             "a vim identifier the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# host.datastore_mount_nfs / host.disk_mark_flash / host.service_control
+# VI-JSON sub-op reconciliation (#3182)
+# ---------------------------------------------------------------------------
+#
+# The three host-domain write composites' mutating paths are vi-json, not
+# vcenter REST: HostDatastoreSystem.CreateNasDatastore,
+# HostStorageSystem.MarkAsSsd_Task / MarkAsNonSsd_Task, and the four
+# HostServiceSystem methods (StartService / StopService / RestartService /
+# UpdateServicePolicy), each plus the shared configManager PropertyCollector
+# read. These are declared in ``_host._VIM_SUB_OPS_HOST_*`` (deliberately NOT
+# in any ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep skips them). Same
+# ``METHOD:/path`` keying as disk-grow — the moId rides the path as ``{moId}``
+# — so the same reconciliation proof applies, additionally checked against the
+# pinned ``vi-json.yaml`` when the spec-shelf is configured.
+
+
+def test_host_vi_json_sub_op_manifests_are_the_expected_sets() -> None:
+    """Pin the host-domain vi-json manifests so a drift can't shrink the reconcile."""
+    assert set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS) == {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostDatastoreSystem/{moId}/CreateNasDatastore",
+    }
+    assert set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH) == {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostStorageSystem/{moId}/MarkAsSsd_Task",
+        "POST:/HostStorageSystem/{moId}/MarkAsNonSsd_Task",
+    }
+    assert set(_host._VIM_SUB_OPS_HOST_SERVICE_CONTROL) == {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HostServiceSystem/{moId}/StartService",
+        "POST:/HostServiceSystem/{moId}/StopService",
+        "POST:/HostServiceSystem/{moId}/RestartService",
+        "POST:/HostServiceSystem/{moId}/UpdateServicePolicy",
+    }
+
+
+def test_host_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The host-domain vi-json op_ids are byte-for-byte what the parser emits.
+
+    Proves the ``METHOD:/path`` op_id strings the composites gate on match
+    what ``parse_openapi`` produces from a vi-json-shaped spec (the ``{moId}``
+    path template survives), so ``enforce_subop_policy``'s op_id / a grant's
+    op_pattern resolve against the ingested rows once the operator ingests
+    ``vi-json.yaml`` — the vi-json analogue of the vcenter reconcile above.
+    """
+    required = (
+        set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS)
+        | set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH)
+        | set(_host._VIM_SUB_OPS_HOST_SERVICE_CONTROL)
+    )
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_host_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each host-domain vi-json sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #3182 grounding: the host-domain write composites must
+    target paths that actually exist in the pinned spec (the issue's
+    ``MarkAsHdd_Task`` mis-spelling is exactly the drift this catches — the
+    real method is ``MarkAsNonSsd_Task``). Skips when the spec-shelf is not
+    configured, so CI — where the env vars are wired — is the operator-visible
+    signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    op_ids = (
+        set(_host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS)
+        | set(_host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH)
+        | set(_host._VIM_SUB_OPS_HOST_SERVICE_CONTROL)
+    )
+    for op_id in op_ids:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — a "
+            "host-domain vi-json sub-op targets a path the spec does not serve"
         )

@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — service-principal grants inert: client-credentials tokens now classify as `service` (#3178)
+
+- An OAuth2 client-credentials (service-account) token carries no
+  interactive user and, unless the realm sets an explicit `principal_kind`
+  mapper, arrived with the claim absent — so the classifier fell back to
+  `principal_kind=user`, the #3152 standing-grants gate never evaluated,
+  and every governed dispatch by an automation principal parked for
+  approval (then self-approved). The absent-claim path now positively
+  identifies a service-account token by its username marker (Keycloak's
+  reserved `service-account-<clientId>` naming on `preferred_username`,
+  both the claim and the prefix configurable via
+  `JWT_SERVICE_ACCOUNT_USERNAME_CLAIM` / `_PREFIX`) and classifies it
+  `service` so standing grants are honoured. Fail-closed and policy-safe:
+  an explicit `principal_kind` claim always wins, and only a positive
+  marker upgrades — any unrecognised token shape stays `user`. A new WARN
+  (`policy_gate_grant_holder_classified_non_service`) fires when a parking
+  non-service principal still holds ≥1 live grant, surfacing any residual
+  misclassification.
+
 ### Changed — coverage sweep sharded into a 3-way matrix + fan-in combine (#3172 / PR #3177)
 
 - With the heavy-pool OOM class closed by the 14Gi resize

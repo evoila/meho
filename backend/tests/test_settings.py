@@ -375,6 +375,49 @@ def test_result_handle_max_spill_rows_env_override_takes_effect(
 
 
 # ---------------------------------------------------------------------------
+# #3178 — service-account marker claim / prefix env round-trips
+# ---------------------------------------------------------------------------
+
+
+def test_service_account_marker_defaults_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset markers → Keycloak's ``preferred_username`` / ``service-account-`` defaults."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("JWT_SERVICE_ACCOUNT_USERNAME_CLAIM", raising=False)
+    monkeypatch.delenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.jwt_service_account_username_claim == "preferred_username"
+        assert settings.jwt_service_account_username_prefix == "service-account-"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_service_account_marker_env_overrides_take_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``JWT_SERVICE_ACCOUNT_USERNAME_CLAIM`` / ``_PREFIX`` flow through ``get_settings()``.
+
+    The same inert-mapping trap the other round-trips pin: ``Settings`` is a
+    plain ``BaseModel`` whose ``get_settings()`` hand-maps every env var, so
+    a field declared without its mapping would leave the #3178 service-account
+    classification knobs a silent no-op.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_CLAIM", "client_id")
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "svc:")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.jwt_service_account_username_claim == "client_id"
+        assert settings.jwt_service_account_username_prefix == "svc:"
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # G11.5-T6 #1080 — AGENT_RUNS_DISABLED_TENANTS UUID validation
 # ---------------------------------------------------------------------------
 

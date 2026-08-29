@@ -338,6 +338,81 @@ async def test_user_principal_requires_approval_parks_and_ignores_grant() -> Non
 
 
 # ---------------------------------------------------------------------------
+# misclassification WARN (#3178) — grant-holding non-service principal parks
+# ---------------------------------------------------------------------------
+#
+# A client-credentials token that missed the service-account marker
+# classifies ``user``; its standing grants are then silently inert and its
+# ops park (then self-approve). When such a principal parks while holding a
+# live grant, the gate emits a WARN so an operator can spot the residual
+# misclassification. Scoped to the park path — never on auto-execute.
+
+_WARN_EVENT = "policy_gate_grant_holder_classified_non_service"
+
+
+@pytest.mark.asyncio
+async def test_grant_holding_user_park_emits_misclassification_warn(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A parking non-service principal that holds a live grant → WARN."""
+    await _seed_grant(principal_sub="human-op")
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="safe",
+        requires_approval=True,  # a USER only parks on requires_approval
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    out, _ = capfd.readouterr()
+    assert _WARN_EVENT in out, f"expected {_WARN_EVENT!r} in structlog stdout; got: {out!r}"
+
+
+@pytest.mark.asyncio
+async def test_parking_user_without_grant_emits_no_warn(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A parking non-service principal holding NO grant → no misclassification WARN."""
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="safe",
+        requires_approval=True,
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    out, _ = capfd.readouterr()
+    assert _WARN_EVENT not in out
+
+
+@pytest.mark.asyncio
+async def test_service_principal_park_emits_no_misclassification_warn(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A correctly-classified SERVICE principal parking → no misclassification WARN."""
+    await _seed_grant(op_id="other.op")  # a live grant on a different op → still parks
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    out, _ = capfd.readouterr()
+    assert _WARN_EVENT not in out
+
+
+# ---------------------------------------------------------------------------
 # classification helper unit tests (method-based branch)
 # ---------------------------------------------------------------------------
 

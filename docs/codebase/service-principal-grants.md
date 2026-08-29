@@ -47,6 +47,21 @@ is distinguished from "service principal": the `principal_kind` claim
 (`user` vs `service`, `auth/jwt.py::_extract_principal_kind`). Agents are
 unaffected — they keep the `AgentPermission` verdict model.
 
+**Classifying `SERVICE` (#3178).** An explicit `principal_kind` claim
+always wins, but a Keycloak client-credentials client often carries **no**
+such claim (no `principal_kind` mapper), which historically fell back to
+the `user` default and left this whole gate — and any standing grants —
+silently inert. `_extract_principal_kind` therefore infers `service` for
+the **absent-claim** case when the token is positively identified as an IdP
+service account: its username claim (default `preferred_username`,
+`JWT_SERVICE_ACCOUNT_USERNAME_CLAIM`) bears Keycloak's reserved
+`service-account-<clientId>` prefix (default `service-account-`,
+`JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`). Fail-closed for the policy path:
+only a positive marker *upgrades*; any unrecognised shape stays `user`. As
+a residual-drift signal, `_non_agent_verdict` emits a WARN
+(`policy_gate_grant_holder_classified_non_service`) whenever a **parking**
+non-service principal still holds ≥1 live grant.
+
 **"Mutating" is grounded in existing descriptor fields** (no new column,
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈
 `{GET, HEAD}` (the `READ_HTTP_METHODS` set); a typed / composite op
@@ -160,6 +175,7 @@ after any signature change).
 
 - There is **no server-side service-principal registry** to validate
   `principal_sub` against (a service principal is any Keycloak
-  client-credentials client carrying `principal_kind=service`), so — unlike
+  client-credentials client classified `principal_kind=service` — by an
+  explicit claim or the #3178 service-account marker), so — unlike
   `AgentGrantService`, which rejects an unregistered agent principal — a
   grant whose `principal_sub` never authenticates simply sits inert.

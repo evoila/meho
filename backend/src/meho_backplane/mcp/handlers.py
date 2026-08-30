@@ -99,12 +99,14 @@ from meho_backplane.mcp.human_only import human_only_remediation
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
+    addon_family_active,
     all_listed_resources_for,
     all_resource_templates_for,
     all_tools_for,
     capability_satisfied,
     get_resource_for_uri,
     get_tool,
+    has_addon_gated_tools,
     redacted_audit_uri,
     role_at_least,
     surface_visible,
@@ -185,6 +187,28 @@ def _read_mcp_broadcast_detail(raw_params: dict[str, Any]) -> Literal["full"] | 
 # ---------------------------------------------------------------------------
 
 
+async def _active_addon_families(operator: Operator) -> frozenset[str]:
+    """Resolve the meta-tool families a paired, healthy add-on activates.
+
+    The per-request bridge from the add-on capability plane
+    (:class:`~meho_backplane.operations.addon_capability.AddonCapabilityService`)
+    into the ``required_addon_family`` gate (Initiative #2900, Task #3029). A
+    single indexed read scoped to the caller's tenant; empty (fail-closed)
+    when nothing is paired. Callers guard on
+    :func:`~meho_backplane.mcp.registry.has_addon_gated_tools` (list path) or
+    the tool's own ``required_addon_family`` (call path) so the DB round-trip
+    only happens when an add-on-gated tool is actually in play.
+
+    The :class:`~meho_backplane.operations.addon_capability.AddonCapabilityService`
+    import is function-local: the capability plane transitively pulls in the
+    agent / scheduler chain, which re-enters this module at package-import time,
+    so a top-level import would be a cycle.
+    """
+    from meho_backplane.operations.addon_capability import AddonCapabilityService
+
+    return await AddonCapabilityService().active_meta_tool_families(operator.tenant_id)
+
+
 async def handle_tools_list(
     operator: Operator,
     _params: dict[str, Any] | None,
@@ -195,8 +219,18 @@ async def handle_tools_list(
     through G0.5-T4, growing into tens through G3+). The MCP spec allows
     a server to return all tools in one response and omit the
     ``nextCursor`` field, which is what this handler does.
+
+    Resolves the tenant's active add-on meta-tool families only when the
+    registry actually carries an add-on-gated tool (Task #3029), so the
+    common listing stays a pure in-memory registry filter and never pays for
+    a DB round-trip it can't use.
     """
-    visible = [defn.to_wire() for defn in all_tools_for(operator)]
+    active_families = (
+        await _active_addon_families(operator) if has_addon_gated_tools() else frozenset()
+    )
+    visible = [
+        defn.to_wire() for defn in all_tools_for(operator, active_addon_families=active_families)
+    ]
     return {"tools": visible}
 
 
@@ -359,6 +393,32 @@ async def handle_tools_call(
                 f"forbidden: {name!r} is on the operator surface and requires "
                 "an elevated (mcp:admin) MCP session",
             )
+
+        # Add-on family gate (Initiative #2900, Task #3029): a tool bound to a
+        # paired add-on's meta-tool family gates invocation too, not just
+        # listing. all_tools_for already hides it while the add-on is
+        # unpaired / contract-unhealthy, but a client that learned the name
+        # out-of-band could still try to call it. Re-check here — resolving the
+        # active family set only for a tool that actually declares the gate, so
+        # a non-add-on call never pays the DB round-trip — same 403-projected
+        # path as the gates above.
+        if defn.required_addon_family is not None:
+            active_families = await _active_addon_families(operator)
+            if not addon_family_active(active_families, defn.required_addon_family):
+                _log.warning(
+                    "mcp_tool_call_addon_family_forbidden",
+                    tool=name,
+                    required_addon_family=defn.required_addon_family,
+                )
+                status_code = 403
+                raise McpInvalidParamsError(
+                    f"forbidden: {name!r} requires the {defn.required_addon_family!r} "
+                    "add-on to be paired and contract-healthy",
+                    data={
+                        "reason": "addon_family_inactive",
+                        "required_addon_family": defn.required_addon_family,
+                    },
+                )
 
         # Validate arguments against the tool's inputSchema. ``cls`` is
         # pinned to :class:`jsonschema.Draft202012Validator` to make the

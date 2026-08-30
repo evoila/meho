@@ -1,0 +1,61 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the paired-automation panel (#3029, Initiative #2900).
+  Extends ``base.html`` so the chrome matches the rest of the console. One
+  glance answers "is a governed automation add-on live in this tenant, and
+  what surface does it advertise?": each provider row shows the add-on name,
+  its negotiated contract version, a compatibility badge (both-direction skew
+  re-evaluated live against the current backplane contract), its last liveness
+  heartbeat, when it was paired, and the surfaces it declares.
+
+  Gated on activation: rows appear only while a paired, contract-healthy
+  add-on advertises the ``automation`` meta-tool family; the surface
+  disappears cleanly on unpair. Auto-refresh: the table arms an
+  ``hx-trigger="every 30s"`` poll so the projection stays live. Read-only —
+  pairing / unpairing stay on the REST surface (``/api/v1/addons/pairings``).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Automation &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="flex items-center gap-2 text-2xl font-semibold">Automation{% include "_maturity_badge.html" %}</h1>
+      <p class="text-sm opacity-70">
+        The paired automation add-on surface — activated only while an
+        automation add-on is paired and contract-healthy, and gone when it
+        unpairs. Blueprint and workflow identifiers stay the add-on's own
+        data; this panel shows the advertised surface, never per-workflow
+        controls. Read-only.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table
+      class="table table-sm"
+      hx-get="/ui/automation"
+      hx-trigger="every 30s"
+      hx-target="#automation-table-body"
+      hx-swap="outerHTML"
+    >
+      <thead>
+        <tr>
+          <th>Add-on</th>
+          <th>Contract</th>
+          <th>Compatibility</th>
+          <th>Last seen</th>
+          <th>Paired</th>
+          <th>Advertised surface</th>
+        </tr>
+      </thead>
+      {% include "automation/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

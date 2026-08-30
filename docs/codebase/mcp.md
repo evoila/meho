@@ -319,7 +319,7 @@ rather than publish a schema its payloads violate.
 
 ## Agent-surface scoping (working vs. operator, #3154)
 
-`tools/list` is filtered by **three orthogonal gates**, all AND-composed
+`tools/list` is filtered by **four orthogonal gates**, all AND-composed
 in `all_tools_for` (`mcp/registry.py`) and re-checked at `tools/call` in
 `handle_tools_call` (`mcp/handlers.py`):
 
@@ -332,8 +332,22 @@ in `all_tools_for` (`mcp/registry.py`) and re-checked at `tools/call` in
    `ToolSurface` (`working` | `operator`); `surface_visible` admits the
    working surface to everyone and the operator surface only to an
    **elevated** session (Initiative #3153).
+4. **add-on family** — a tool declaring `required_addon_family` (only
+   the `automation` family today, Task #3029) is absent unless a
+   **paired, contract-healthy** add-on advertises a `meta_tool_family`
+   capability of that name for the tenant (`addon_family_active`). Unlike
+   the static `required_capability` claim, this axis tracks **live
+   pairing state**: the listing handler resolves the tenant's active
+   families once per request from
+   `AddonCapabilityService.active_meta_tool_families` (the add-on
+   capability plane, `addon-pairing.md`) and passes them to
+   `all_tools_for`; the tool appears only while the add-on is paired and
+   healthy and disappears cleanly on unpair. The resolution is guarded by
+   `has_addon_gated_tools()` so a registry with no add-on-gated tool pays
+   no DB round-trip, and at `tools/call` it runs only for a tool that
+   actually declares the gate — the hot path stays DB-free.
 
-All three are *true-absence* gates: a tool a session may not use never
+All four are *true-absence* gates: a tool a session may not use never
 appears in its `tools/list`, and naming it directly at `tools/call` is
 rejected 403-class (INVALID_PARAMS, handler never runs) — the listing
 filter is enforced, not cosmetic.
@@ -376,9 +390,15 @@ table can never silently drift from the code:
   reclassification or an un-pinned addition fails CI at the listing path
   a client actually observes.
 
-Counts: **25 working + 53 operator = 78 registered tools**, plus the
-**3 human-only verbs** (below) that carry no MCP registration under any
-claim set.
+Counts: **25 working + 53 operator + 1 pairing-gated automation =
+79 registered tools**, plus the **3 human-only verbs** (below) that
+carry no MCP registration under any claim set. The 25 working and 53
+operator counts are the **unpaired baseline** — a session with every
+capability provisioned but no add-on paired — so they stay byte-identical
+to a build that never carried the automation family; the single
+pairing-gated tool (`meho_automation_list`, #3029) is absent from that
+baseline and joins the working surface only while its add-on is paired
+and contract-healthy.
 
 **Name authority ↔ consumer docs (#3150).** The tool *names* in this
 inventory are the authority the consumer-facing docs/skills
@@ -396,9 +416,12 @@ is exposed*; #3150 owns *how consumer docs spell it*.
 Gating recap — a tool appears in a session's `tools/list` iff **role**
 `≥` its minimum **AND** the tenant holds any required **capability**
 **AND** the session clears the **surface** gate (working = always;
-operator = `mcp:admin`-elevated). The "Role" and "Extra gate" columns
-below are the per-tool half; the surface's scope requirement is stated
-in each table heading.
+operator = `mcp:admin`-elevated) **AND** any required **add-on family**
+is active (a paired, contract-healthy add-on advertises it). The "Role"
+and "Extra gate" columns below are the per-tool half; the surface's scope
+requirement is stated in each table heading. The "Extra gate" column
+carries both the `meho-docs` capability keys and the `automation (paired)`
+add-on-family gate.
 
 ### Working surface (default — every session, no elevation)
 
@@ -490,6 +513,24 @@ session (on top of the Role + Extra-gate columns).
 | `meho_topology_delete_node` | tenant_admin | — | Hard-delete a manually-seeded graph node. |
 | `meho_topology_unannotate` | tenant_admin | — | Delete a curated graph edge (re-promotes any superseded auto edge). |
 | `query_audit` | operator | — | Query the audit log for forensic reconstruction. |
+
+### Pairing-gated — automation family (paired add-on required, #3029)
+
+The first surface gated on **add-on pairing state** rather than a static
+tenant capability (Initiative #2900). The family is on the working
+surface (no `mcp:admin` elevation) but absent from every session's
+listing until a paired, contract-healthy add-on advertises the
+`automation` `meta_tool_family` capability; it disappears cleanly on
+unpair. The `automation` identifier is a **family** name — a paired
+add-on's own entity identifiers (blueprint names, workflow names) stay
+data in results, never tool names (CLAUDE.md postulate 5). The family is
+seeded with one discovery tool and grows behind the same gate. CLI twin:
+`meho automation list`; REST twin: `GET /api/v1/automation`; console:
+`/ui/automation`.
+
+| Tool | Role | Extra gate | What it does |
+|---|---|---|---|
+| `meho_automation_list` | read_only | `automation` (paired) | List the paired automation add-on(s) and the surface each advertises (families, panels, event kinds) with live health. |
 
 ### Human-only (no MCP path under any claim set)
 

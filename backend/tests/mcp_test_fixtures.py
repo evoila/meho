@@ -230,6 +230,7 @@ def isolated_registry() -> Iterator[None]:
         topology_create_node,
         topology_delete_node,
     )
+    from meho_backplane.mcp.tools import automation as automation_tools
     from meho_backplane.mcp.tools import broadcast as broadcast_tools
     from meho_backplane.mcp.tools import (
         doc_collections as doc_collections_tools,
@@ -345,6 +346,13 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(sensors)
     importlib.reload(memory_tools)
     importlib.reload(memory_promote_tool)
+    # #3029: the pairing-gated ``meho_automation_list`` meta-tool joins the
+    # reload list for the same reason every other tool module does -- the
+    # autouse ``clear_registries()`` above would otherwise leave it
+    # unregistered in any test file that imports this fixture after the first
+    # one runs in the process, so the surface-partition + activation-gate pins
+    # would see a registry missing the automation family.
+    importlib.reload(automation_tools)
     # G11.1-T2 (#809): the agent-definition MCP tools join the reload
     # list for the same reason every other tool module does -- the
     # autouse clear_registries() above would otherwise leave them

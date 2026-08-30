@@ -67,6 +67,9 @@ MATURITY_INDEX_URL = "https://evoila.github.io/meho/latest/reference/maturity/"
 #: two cannot drift silently.
 SURFACE_FEATURE: dict[str, str] = {
     "pairing": "addon_pairing",
+    # Paired-surface activation (#3029): the automation panel is part of the
+    # add-on pairing contract (Initiative #2900) and shares its maturity.
+    "automation": "addon_pairing",
     "broadcast": "broadcast",
     "knowledge": "memory_knowledge",
     "corpus": "doc_collections",

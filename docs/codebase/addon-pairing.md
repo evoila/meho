@@ -112,6 +112,45 @@ Routes (both under the `addon-pairing` tag):
 - `GET /api/v1/addons/pairings/{name}/capabilities` — an operator reads the
   declared surfaces + live activation state. 404 when absent / cross-tenant.
 
+## Paired-surface activation (#3029)
+
+Capability advertisement declares *what* an add-on contributes; **activation**
+is where the backplane turns a declared, healthy `meta_tool_family` into a live
+operator/agent surface. The `automation` family is the first: a paired add-on
+advertising a `meta_tool_family` capability named `automation` activates a
+small, first-party surface across all three fronts, gated on pairing health.
+
+- **Agent waist (MCP).** `ToolDefinition` gains a fourth gating axis,
+  `required_addon_family`, orthogonal to role / capability / surface
+  (`mcp/registry.py`; the full four-gate story is in `mcp.md`). A tool declaring
+  it is filtered out of `tools/list` and rejected 403-class at `tools/call`
+  unless the family is active. The listing handler resolves the tenant's active
+  families once per request via `AddonCapabilityService.active_meta_tool_families`
+  and passes them to `all_tools_for`; the check is guarded by
+  `has_addon_gated_tools()` (list path) and the tool's own gate (call path) so
+  the DB round-trip only happens when an add-on-gated tool is in play. The one
+  tool today is `meho_automation_list`.
+- **CLI + REST.** `meho automation list` → `GET /api/v1/automation`. Following
+  the static-surface discipline (#2109), the route is always registered and the
+  CLI verb always compiled in; activation is enforced **inside** the handler
+  (403 `automation_addon_not_active` while inactive), keeping the OpenAPI
+  snapshot deterministic. All three fronts read one projection
+  (`operations/addon_automation.active_automation_surface`) so they never
+  diverge.
+- **Console.** `/ui/automation` renders the advertised surface of the paired,
+  healthy add-on and an inactive empty state otherwise — the console analogue of
+  the meta-tool's true-absence gate.
+
+Postulate-5 discipline holds throughout: the family name and the add-on's
+declared surfaces are **data** (capability rows, result fields); a paired
+add-on's own entity identifiers — blueprint names, workflow names — are never
+tool names, and there is no per-blueprint / per-workflow tool anywhere. The
+surface is the single `automation` family, which activates and deactivates as a
+unit with pairing health. Key types:
+`operations/addon_automation` (the shared read + value types),
+`mcp/tools/automation` (the meta-tool), `api/v1/automation` (the REST twin),
+`ui/routes/automation` (the console panel).
+
 ## Key types
 
 - `meho_backplane.operations.addon_pairing_contract` — pure negotiation:
@@ -201,10 +240,12 @@ lists active pairings and maps each to a `PairingHealth`
   See `addon-step-events.md` for the step-event push contract that uses it.
 - **Console is read-only**: pair / unpair are REST-only. Console write
   actions (a pair/unpair button behind CSRF) are a follow-up.
-- **Capabilities are not yet rendered in the console** or exposed as a
-  tenant-wide REST read. `active_capabilities()` is the in-process activation
-  plumbing the sibling event-push task (#3027) consumes; a console panel and a
-  `GET /api/v1/addons/capabilities` list surface are follow-ups.
+- **Paired-surface activation (#3029) is the first real consumer of the
+  capability-activation plumbing.** The `automation` meta-tool family (MCP), the
+  `meho automation` CLI verbs, and the `/ui/automation` console panel are all
+  gated on activation state — see "Paired-surface activation" below. A generic
+  tenant-wide `GET /api/v1/addons/capabilities` list surface (beyond the
+  automation-scoped `GET /api/v1/automation`) is still a follow-up.
 - Keycloak client provisioning is now duplicated three ways (agent, runner,
   add-on); a shared helper is an extraction candidate once the pattern
   stabilises (rule of three), but is out of scope for this task.
@@ -212,7 +253,10 @@ lists active pairings and maps each to a `PairingHealth`
 ## References
 
 - Initiative #2900 (add-on pairing contract), Task #3025 (the pairing
-  foundation), Task #3026 (capability advertisement + activation, this plane).
+  foundation), Task #3026 (capability advertisement + activation, this plane),
+  Task #3029 (paired-surface activation — the automation family across MCP / CLI
+  / console). `mcp.md` (the four-gate agent-surface scoping + the pairing-gated
+  inventory row).
 - `service-principal-grants.md` — the scoping mechanism the paired principal
   relies on.
 - `connectors-keycloak.md` — the Keycloak admin client lifecycle.

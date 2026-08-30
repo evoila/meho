@@ -77,6 +77,7 @@ from meho_backplane.api.v1.ask_docs import router as api_v1_ask_docs_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.automation import router as api_v1_automation_router
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
@@ -1103,6 +1104,12 @@ app.include_router(api_v1_addon_pairing_router)
 # against the negotiated contract; the backplane persists the declaration and
 # activates surfaces only while paired and contract-healthy (Initiative #2900).
 app.include_router(api_v1_addon_capability_router)
+# #3029 -- paired-surface activation (automation): the REST twin of the
+# ``meho_automation_list`` meta-tool and ``meho automation list`` CLI verb.
+# Always registered (static surface, #2109); activation is gated inside the
+# handler (403 while the automation add-on is unpaired / contract-unhealthy),
+# so the OpenAPI snapshot stays deterministic (Initiative #2900).
+app.include_router(api_v1_automation_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;
 # writes gated to tenant_admin. Tenant-scoped via the JWT's

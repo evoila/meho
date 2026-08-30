@@ -39,7 +39,7 @@ The pinned snapshots are tied to the live registry by
 never drift from reality (a reclassification breaks the per-claim-shape
 pins; an unclassified addition breaks the partition guard). The
 authoritative human-readable enumeration of the same split — name +
-one-liner + surface + gating claim for all 78 tools — lives in
+one-liner + surface + gating claim for all 79 tools — lives in
 ``docs/codebase/mcp.md`` (the dual-surface inventory).
 """
 
@@ -78,6 +78,18 @@ _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
 }
+
+#: The **pairing-gated** automation family (Task #3029). Unlike the docs
+#: capability (a static tenant JWT claim), these tools are gated on live add-on
+#: pairing state — absent from every session's listing until a paired,
+#: contract-healthy add-on advertises the ``automation`` meta-tool family, so
+#: they sit on neither the pinned working nor operator surface (both of which
+#: represent a provisioned-but-unpaired session). Their appear-on-pair /
+#: disappear-on-unpair behaviour is pinned by ``test_mcp_automation_activation``;
+#: here they only complete the registry partition. Kept a separate set so the
+#: unpaired working/operator listings stay byte-identical to a build that never
+#: carried the family.
+_AUTOMATION_GATED_TOOLS: frozenset[str] = frozenset({"meho_automation_list"})
 
 #: The default working surface, as the exact sorted listing a ``tools/list``
 #: response carries for a session that clears role + capability but is NOT
@@ -233,24 +245,49 @@ def test_pinned_surfaces_are_sorted_and_unique() -> None:
 
 
 def test_pinned_surfaces_partition_the_live_registry() -> None:
-    """The two pinned listings partition the whole registry (exhaustive + disjoint).
+    """The pinned listings partition the whole registry (exhaustive + disjoint).
 
     This is the tie that keeps the snapshots honest: an unclassified new
     tool (once it clears #3154's construction-time surface requirement)
-    lands in the registry but neither pinned listing, breaking the
+    lands in the registry but no pinned listing, breaking the
     exhaustiveness check; a reclassified tool breaks the per-claim-shape
     listing pins below. Either way CI fails visibly.
+
+    Three disjoint sets now partition the registry: the working surface, the
+    operator surface, and the pairing-gated automation family (#3029) — which
+    is on neither default surface because it is absent until an add-on pairs,
+    so it is carried separately here rather than folded into the working
+    listing (which would break the byte-identical-unpaired pins below).
     """
     working = set(WORKING_SURFACE_SORTED)
     operator = set(OPERATOR_SURFACE_SORTED)
+    automation = set(_AUTOMATION_GATED_TOOLS)
     assert working.isdisjoint(operator)
-    assert working | operator == set(mcp_registry._TOOLS)
+    assert working.isdisjoint(automation)
+    assert operator.isdisjoint(automation)
+    assert working | operator | automation == set(mcp_registry._TOOLS)
 
 
 def test_full_surface_is_working_plus_operator() -> None:
     """The elevated listing is exactly the union of the two surfaces."""
     assert set(FULL_SURFACE_SORTED) == set(WORKING_SURFACE_SORTED) | set(OPERATOR_SURFACE_SORTED)
     assert len(FULL_SURFACE_SORTED) == len(WORKING_SURFACE_SORTED) + len(OPERATOR_SURFACE_SORTED)
+
+
+def test_automation_family_absent_from_default_surfaces() -> None:
+    """The pairing-gated automation family is on neither pinned default surface (#3029).
+
+    The pinned working / operator listings represent a provisioned-but-unpaired
+    session, so the automation family — absent until an add-on pairs — must not
+    appear in either. This is the static half of the byte-identical-unpaired
+    guarantee; the live-DB half (the wire listing with and without a paired
+    add-on) is pinned by ``test_mcp_automation_activation``.
+    """
+    automation = set(_AUTOMATION_GATED_TOOLS)
+    assert automation.isdisjoint(set(WORKING_SURFACE_SORTED))
+    assert automation.isdisjoint(set(OPERATOR_SURFACE_SORTED))
+    # The family is nonetheless registered — it is a real, gated tool.
+    assert automation <= set(mcp_registry._TOOLS)
 
 
 def test_human_only_verbs_absent_from_both_surfaces() -> None:

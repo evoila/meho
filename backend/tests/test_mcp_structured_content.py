@@ -57,6 +57,7 @@ from tests.mcp_test_fixtures import (
 EXPECTED_DECLARING_TOOLS: frozenset[str] = frozenset(
     {
         "call_operation",
+        "meho_automation_list",
         "create_doc_collections",
         "delete_doc_collections",
         "list_doc_collections",

@@ -214,6 +214,22 @@ class AddonCapabilityService:
         active.sort(key=lambda c: (c.addon, c.kind.value, c.name))
         return active
 
+    async def active_meta_tool_families(self, tenant_id: uuid.UUID) -> frozenset[str]:
+        """Return the names of the tenant's active meta-tool families.
+
+        The paired-surface activation view the MCP / CLI / console surfaces
+        gate on (Initiative #2900, Task #3029): a meta-tool family name is
+        present iff a **paired, contract-healthy** add-on advertises it (a
+        ``meta_tool_family`` capability, via :meth:`active_capabilities`). The
+        single source of truth for the gate — a frozenset so the caller can
+        pass it straight into :func:`~meho_backplane.mcp.registry.addon_family_active`.
+        Empty (fail-closed) when nothing is paired or every pairing is
+        contract-incompatible, so an unpaired backplane activates no add-on
+        surface.
+        """
+        active = await self.active_capabilities(tenant_id, kind=CapabilityKind.META_TOOL_FAMILY)
+        return frozenset(cap.name for cap in active)
+
     @staticmethod
     async def _pairing_capabilities(
         session: AsyncSession, pairing_id: uuid.UUID

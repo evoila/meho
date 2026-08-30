@@ -111,6 +111,7 @@ error naming the `principal_kind=agent` enforcement scope.
    | `safe` | `auto-execute` |
    | `caution` | `needs-approval` |
    | `dangerous` | `deny` |
+   | `destructive` | `deny` |
    | unknown | `deny` (fail-closed) |
 
 4. **Apply safety-level ceiling.** A row's verdict can only tighten to the
@@ -120,11 +121,16 @@ error naming the `principal_kind=agent` enforcement scope.
    |---|---|---|
    | `safe` | none | Any row verdict is valid |
    | `caution` | `needs-approval` | `auto-execute` row → `needs-approval` |
-   | `dangerous` | `needs-approval` | `auto-execute` row → `needs-approval`; a destructive op is grantable up to human approval, never auto-executed. The *default* (no grant) stays `deny`. |
+   | `dangerous` | `needs-approval` | `auto-execute` row → `needs-approval`; a dangerous op is grantable up to human approval, never auto-executed. The *default* (no grant) stays `deny`. |
+   | `destructive` | `deny` | `auto-execute` / `needs-approval` row → `deny`; the tier is **non-grantable for agents** — no `AgentPermission` grant lifts an agent principal off `deny` (#3183). |
 
-   This is the "destructive = deny **unless granted**" rule (#820): the
-   no-grant default is `deny`, but an explicit grant *is* honoured up to the
-   `needs-approval` ceiling.
+   For `caution` / `dangerous` this is the "deny **unless granted**" rule
+   (#820): the no-grant default is `deny`, but an explicit grant *is*
+   honoured up to the `needs-approval` ceiling. The `destructive` tier
+   (#3183) is the exception — its ceiling is `deny`, so it is denied for
+   agent principals regardless of any grant. Governed execution of a
+   destructive op is a human decision on the non-agent approval path
+   (#3197 / #3198), never an agent verdict.
 
 5. **Apply role ceiling.** `READ_ONLY` principals are capped at `needs-approval`;
    `OPERATOR` and `TENANT_ADMIN` are uncapped.

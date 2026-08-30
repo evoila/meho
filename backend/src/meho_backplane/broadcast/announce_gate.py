@@ -70,7 +70,12 @@ _log = structlog.get_logger(__name__)
 #: so this map is the single place the ``>= caution`` threshold is encoded.
 #: An unknown level (never expected -- the column is CHECK-constrained)
 #: ranks ``0`` so the gate stays permissive (fail-open) on it.
-_SAFETY_RANK: Final[dict[str, int]] = {"safe": 0, "caution": 1, "dangerous": 2}
+_SAFETY_RANK: Final[dict[str, int]] = {
+    "safe": 0,
+    "caution": 1,
+    "dangerous": 2,
+    "destructive": 3,
+}
 _SAFETY_GATE_THRESHOLD: Final[int] = _SAFETY_RANK["caution"]
 
 #: Per-tenant enablement cache, mirroring ``overrides._TENANT_CACHE``.

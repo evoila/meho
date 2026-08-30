@@ -66,14 +66,18 @@ non-service principal still holds ≥1 live grant.
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈
 `{GET, HEAD}` (the `READ_HTTP_METHODS` set); a typed / composite op
 carries no `method`, so its curated `safety_level` stands in (`safe` =
-read, `caution` / `dangerous` = write). `dangerous` parks always; a
-`caution` op parks only when mutating.
+read, `caution` / `dangerous` / `destructive` = write). `destructive`
+parks always **and is never grant-satisfiable** (#3183); `dangerous`
+parks always; a `caution` op parks only when mutating.
 
 When a `SERVICE` op would park, the gate consults a live standing grant
 (`connector_id` must be supplied so the grant's connector scope can be
 matched — the dispatcher and the composite sub-op gate both pass it; the
 gateway path is safe-only and never needs it). A match auto-approves the
 op and records the use; absent a match, the op parks for a human decision.
+The one exception is the `destructive` tier: `consult_and_record_grant`
+refuses it **before** any grant lookup, so even a stale grant row cannot
+auto-approve a destructive op — the tier always parks for a human.
 
 ### The grant (`db/models.py::ServicePrincipalGrant`, `operations/service_grants.py`)
 
@@ -113,8 +117,15 @@ delete-shaped ops:
   env `SERVICE_GRANT_DELETE_SHAPED_PATTERNS`, `fnmatchcase` over the op id;
   default `DELETE:*`, `*.delete`, `*.destroy`, `*.remove`, `*.purge`), and
 - **by descriptor** (best-effort when a descriptor resolves via
-  `lookup_descriptor`): the HTTP `DELETE` verb, or a hand-authored
-  `destructive` tag on a typed op.
+  `lookup_descriptor`): the `destructive` safety tier (#3183), the HTTP
+  `DELETE` verb, or a hand-authored `destructive` tag on a typed op.
+
+`_delete_shaped_reason_by_descriptor` single-sources that descriptor-level
+classification and is consulted at **both** ends: create-time (above) and
+dispatch-time (`consult_and_record_grant`, so a stale grant predating an
+op's promotion into the `destructive` tier can never satisfy it). That is
+what makes "a standing grant can never satisfy a destructive op" hold
+whether the grant is being created or consulted.
 
 Ops the workflow models as its human gate (e.g. a bring-up start) are
 expected to stay ungranted — the grant list is the floor, not a bypass.

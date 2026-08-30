@@ -264,6 +264,46 @@ async def test_dangerous_op_with_no_grant_denies() -> None:
     assert "dangerous" in reason
 
 
+# ---------------------------------------------------------------------------
+# Destructive tier (#3183) — deny by default, non-grantable for agents
+# ---------------------------------------------------------------------------
+
+
+async def test_destructive_op_denied_by_default() -> None:
+    """``safety_level='destructive'`` with no rows → ``deny``."""
+    verdict, reason = await _resolve(safety_level="destructive")
+    assert verdict == PermissionVerdict.DENY
+    assert "safety_level default" in reason
+
+
+async def test_auto_execute_grant_cannot_lift_destructive_off_deny() -> None:
+    """An ``auto-execute`` grant on a ``destructive`` op stays ``deny``.
+
+    The ``destructive`` tier (#3183) has a ``deny`` ceiling — unlike
+    ``dangerous`` (ceiling ``needs-approval``), *no* ``AgentPermission``
+    grant lifts an agent principal off ``deny``. This is the "no grant can
+    lift it" contract: even the most permissive grant is clamped back to
+    ``deny`` by the ceiling.
+    """
+    await _seed_tenant(_TENANT_ID, "t-destructive-autoexec")
+    await _insert_permission(op_pattern="*", verdict="auto-execute")
+    verdict, reason = await _resolve(safety_level="destructive")
+    assert verdict == PermissionVerdict.DENY
+    assert "ceiling" in reason
+
+
+async def test_needs_approval_grant_cannot_lift_destructive_off_deny() -> None:
+    """A ``needs-approval`` grant on a ``destructive`` op stays ``deny``.
+
+    Even a grant sitting at what would be a human-approval verdict cannot
+    park a destructive op for an agent — the ``deny`` ceiling pins it.
+    """
+    await _seed_tenant(_TENANT_ID, "t-destructive-needs")
+    await _insert_permission(op_pattern="*", verdict="needs-approval")
+    verdict, _reason = await _resolve(safety_level="destructive")
+    assert verdict == PermissionVerdict.DENY
+
+
 async def test_expired_grant_ignored_by_resolver() -> None:
     """A grant past its ``expires_at`` no longer counts (G11.2-T6 #819).
 

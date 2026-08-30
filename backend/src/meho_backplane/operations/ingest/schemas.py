@@ -21,7 +21,7 @@ __all__ = [
     "SafetyLevel",
 ]
 
-SafetyLevel = Literal["safe", "caution", "dangerous"]
+SafetyLevel = Literal["safe", "caution", "dangerous", "destructive"]
 
 
 class EndpointDescriptorProto(BaseModel):
@@ -92,7 +92,9 @@ class EndpointDescriptorProto(BaseModel):
     """Heuristic from the HTTP verb. ``GET`` / ``HEAD`` / ``OPTIONS``
     → ``safe``; ``POST`` / ``PUT`` / ``PATCH`` → ``caution``;
     ``DELETE`` → ``dangerous``. Operator can override at review
-    (T4 state machine)."""
+    (T4 state machine), including to the most-restrictive
+    ``destructive`` tier (#3183) — the parser never assigns
+    ``destructive`` itself; it is an operator/typed-op decision."""
 
     requires_approval: bool = False
     """Always ``False`` at parse time. Operators flip per-op during

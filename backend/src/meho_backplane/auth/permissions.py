@@ -125,12 +125,13 @@ _log = structlog.get_logger(__name__)
 
 #: Default verdict when no AgentPermission row matches, keyed by
 #: safety_level value. ``safe`` → auto-execute, ``caution`` →
-#: needs-approval, ``dangerous`` → deny. Unknown safety_level falls
-#: back to deny (fail-closed).
+#: needs-approval, ``dangerous`` → deny, ``destructive`` → deny.
+#: Unknown safety_level falls back to deny (fail-closed).
 _SAFETY_DEFAULT: dict[str, PermissionVerdict] = {
     "safe": PermissionVerdict.AUTO_EXECUTE,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
     "dangerous": PermissionVerdict.DENY,
+    "destructive": PermissionVerdict.DENY,
 }
 
 #: Hard upper-bound ceiling for each safety_level.  A permission row
@@ -139,13 +140,21 @@ _SAFETY_DEFAULT: dict[str, PermissionVerdict] = {
 #: valid -- the ``None`` sentinel is handled in ``_apply_ceiling``).
 #: ``dangerous`` is capped at ``needs-approval`` (not ``deny``) so an
 #: explicit grant *is* honoured -- "deny **unless granted**" (#820) --
-#: while a granted destructive op still lands on human approval rather
+#: while a granted dangerous op still lands on human approval rather
 #: than auto-executing. The *default* (no grant) for ``dangerous``
 #: stays ``deny`` via ``_SAFETY_DEFAULT``.
+#:
+#: ``destructive`` (#3183) is the exception to "deny unless granted":
+#: its ceiling is ``deny``, so *no* AgentPermission grant can lift an
+#: agent principal off ``deny`` — the tier is non-grantable for agents
+#: by construction (default deny + deny ceiling). Governed execution of
+#: a destructive op is a human decision on the non-agent approval path
+#: (#3197 / #3198), never an agent verdict.
 _SAFETY_CEILING: dict[str, PermissionVerdict | None] = {
     "safe": None,
     "caution": PermissionVerdict.NEEDS_APPROVAL,
     "dangerous": PermissionVerdict.NEEDS_APPROVAL,
+    "destructive": PermissionVerdict.DENY,
 }
 
 # Verdict ordering: lower index = more permissive. Used to compare
@@ -292,7 +301,8 @@ async def resolve_verdict(
         ``"vault.kv.read"``).
     safety_level:
         The op's :attr:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
-        column value: one of ``"safe"``, ``"caution"``, ``"dangerous"``.
+        column value: one of ``"safe"``, ``"caution"``, ``"dangerous"``,
+        ``"destructive"``.
     target_id:
         The dispatch target's identifier (UUID or any object with a
         ``.id`` attribute), or ``None`` when the op is target-agnostic.

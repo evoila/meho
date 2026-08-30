@@ -194,6 +194,26 @@ async def test_gate_blocks_enabled_write_caution_no_claim() -> None:
     assert "meho_broadcast_announce" in block
 
 
+async def test_gate_blocks_enabled_write_destructive_no_claim() -> None:
+    """enabled + destructive tier + no claim -> remediation string.
+
+    The ``destructive`` tier (#3183) ranks above ``caution`` in
+    ``_SAFETY_RANK`` (rank 3), so it is at-or-above the gate threshold and
+    is *not* mistaken for a fail-open unknown level (which would rank 0 and
+    slip the gate).
+    """
+    await _seed_tenant(enabled=True)
+    with patch(
+        "meho_backplane.broadcast.announce_gate.caller_has_active_announce_claim",
+        new=AsyncMock(return_value=False),
+    ):
+        block = await announce_gate_blocks(
+            _operator(), op_id="vault.kv.delete", safety_level="destructive", target_name="vault-1"
+        )
+    assert block is not None
+    assert "meho_broadcast_announce" in block
+
+
 async def test_gate_passes_when_claim_covers_op() -> None:
     """An active covering claim lets the op through."""
     await _seed_tenant(enabled=True)

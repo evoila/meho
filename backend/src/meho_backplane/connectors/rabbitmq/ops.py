@@ -78,7 +78,7 @@ class RabbitMqOp:
     group_key: str
     tags: tuple[str, ...]
     llm_instructions: dict[str, Any]
-    safety_level: Literal["safe", "caution", "dangerous"] = "safe"
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "safe"
     requires_approval: bool = False
 
 

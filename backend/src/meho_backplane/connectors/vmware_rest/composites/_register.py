@@ -278,7 +278,7 @@ class _CompositeSpec(NamedTuple):
     response_schema: dict[str, Any]
     group_key: str
     tags: list[str]
-    safety_level: Literal["safe", "caution", "dangerous"]
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
 
 

@@ -155,9 +155,20 @@ def _delete_shaped_reason_by_pattern(op_id: str, patterns: tuple[str, ...]) -> s
 def _delete_shaped_reason_by_descriptor(descriptor: EndpointDescriptor) -> str | None:
     """Return a refusal reason if the resolved descriptor marks destruction.
 
-    Best-effort second check (only when a descriptor resolves): the HTTP
-    ``DELETE`` verb, or a hand-authored ``destructive`` tag on a typed op.
+    Best-effort second check (only when a descriptor resolves): the
+    ``destructive`` safety tier (#3183), the HTTP ``DELETE`` verb, or a
+    hand-authored ``destructive`` tag on a typed op. The three inputs
+    single-source the delete-shaped classification — ``DELETE:`` verbs and
+    ``destructive``-tagged typed ops are the shapes an operator resolves
+    into the ``destructive`` tier, so once the tier is set it is itself the
+    authoritative signal.
     """
+    if descriptor.safety_level == "destructive":
+        return (
+            f"op {descriptor.op_id!r} is safety_level=destructive; delete-shaped "
+            "operations are never grantable — a standing grant is the floor of "
+            "what runs unattended, not a bypass of a destructive gate"
+        )
     method = (descriptor.method or "").upper()
     if method == "DELETE":
         return (
@@ -483,7 +494,28 @@ async def consult_and_record_grant(
     grant-use audit row (``approval.decision`` shape) in its own committed
     transaction and publishes a fail-open broadcast — same visibility as a
     human approval decision — before returning.
+
+    A ``destructive``-tier op (#3183) is refused here **before** any grant
+    lookup: the tier is non-grantable, so even a stale grant row that
+    predates the op's promotion into the tier can never auto-approve it.
+    This is the dispatch-time twin of the create-time refusal in
+    :func:`_delete_shaped_reason_by_descriptor`; together they make
+    "a standing grant can never satisfy a destructive op" hold whether the
+    grant is being created or consulted.
     """
+    destructive_reason = _delete_shaped_reason_by_descriptor(descriptor)
+    if destructive_reason is not None:
+        _log.info(
+            "service_grant_refused_delete_shaped",
+            op_id=descriptor.op_id,
+            connector_id=connector_id,
+            safety_level=descriptor.safety_level,
+            principal_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            reason=destructive_reason,
+        )
+        return None
+
     target_id = _target_uuid(target)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

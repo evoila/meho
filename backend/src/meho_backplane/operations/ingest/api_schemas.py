@@ -937,7 +937,7 @@ class EditOpBody(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     custom_description: str | None = Field(default=None, min_length=1, max_length=4096)
-    safety_level: Literal["safe", "caution", "dangerous"] | None = None
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"] | None = None
     requires_approval: bool | None = None
     is_enabled: bool | None = None
 

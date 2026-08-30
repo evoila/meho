@@ -114,6 +114,29 @@ connector-related release-notes line.
   write-path (#2901 / #3187) and governed-delete (#3183 / #3195) decisions;
   implementation seams are filed as sibling Tasks under #3207.
 
+### Added — `destructive` safety tier + default policy/filter exclusions (evoila-bosnia/meho-internal#3183 / #3196)
+
+- Added a fourth, most-restrictive `safety_level` value —
+  `safe < caution < dangerous < destructive` — the foundation of the
+  governed delete-shaped-operations path
+  (`docs/decisions/governed-delete-operations.md`, requirement 4). A
+  new Alembic migration widens the `ck_endpoint_descriptor_safety_level`
+  CHECK constraint; the `SafetyLevel` alias, both `VALID_SAFETY_LEVELS`
+  frozensets, every `Literal["safe", "caution", "dangerous"]` union, and
+  the MCP/console enums are widened in lockstep. The tier is **excluded
+  by default at every gate**: the agent policy gate maps it to `deny`
+  with a `deny` ceiling that no `AgentPermission` grant can lift
+  (non-grantable for agents); the service-principal gate parks it always
+  and a standing `ServicePrincipalGrant` can never satisfy it (refused at
+  both grant-creation and dispatch-time consult, single-sourced through
+  the delete-shaped classifier); and the satellite mint wall's existing
+  safe-only rule refuses it with `MintRefusalCode.OP_NOT_SAFE`, so
+  **deletes are never minted to a satellite** (agreeing with the
+  satellite write-path decision, #2901 / #3187). No connector adopts the
+  tier yet — this ships the tier and its exclusions only; the
+  preview-hash binding (#3197) and the first governed delete op family
+  (#3198) build on it.
+
 ### Changed — Audit + Broadcast console drawers resolve reference GUIDs to human-investigable substance (evoila-bosnia/meho-internal#236)
 
 - The operator console's **Audit row** and **Broadcast event** detail

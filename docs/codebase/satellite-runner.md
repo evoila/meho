@@ -229,7 +229,12 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
   (`GET /gateway/{runner}/next` / `POST /gateway/{runner}/result`) — #2498.
 - Single-use capability-command minting + request-id dedup — #2500. The
   runner's `safe`-only executor guard is defence in depth, not the mint
-  rule.
+  rule. The central mint wall (`mint_gateway_command`) refuses any
+  `safety_level != "safe"` op with `MintRefusalCode.OP_NOT_SAFE` *before*
+  the policy gate, so the `destructive` tier (#3183) is transitively
+  excluded from every satellite the day it exists — **deletes are never
+  minted to a satellite**, agreeing with the satellite write-path decision
+  (#2901 / #3187).
 - Heartbeat + central stale/unknown flipping — #2501.
 - The scoped per-runner service principal + credential scoping — #2502.
   `MEHO_RUNNER_TOKEN` is the seam it fills; this chassis treats it as an

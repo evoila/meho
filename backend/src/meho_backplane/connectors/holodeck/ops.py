@@ -66,7 +66,7 @@ class HolodeckOp:
     response_schema: dict[str, Any] | None
     group_key: str | None
     tags: tuple[str, ...]
-    safety_level: Literal["safe", "caution", "dangerous"]
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
     llm_instructions: dict[str, Any] | None
 

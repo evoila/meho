@@ -1410,6 +1410,10 @@ class EndpointDescriptor(Base):
     hooks. ``safety_level='safe'`` operations execute under the
     default-allow policy (v0.2); ``'caution'`` and ``'dangerous'``
     flow through G7 / G10 policy logic once those Goals land.
+    ``'destructive'`` is the fourth, most-restrictive tier (#3183):
+    an operator-assigned floor for delete-shaped ops that is
+    denied for agent principals, parked for service principals, and
+    never minted to a satellite — excluded by default at every gate.
     ``requires_approval=true`` (independent of ``safety_level``)
     forces the dispatcher to write an audit row in
     ``status='pending'`` and wait for an operator decision before
@@ -1628,7 +1632,7 @@ class EndpointDescriptor(Base):
             name="ck_endpoint_descriptor_source_kind",
         ),
         sa.CheckConstraint(
-            "safety_level IN ('safe', 'caution', 'dangerous')",
+            "safety_level IN ('safe', 'caution', 'dangerous', 'destructive')",
             name="ck_endpoint_descriptor_safety_level",
         ),
     )

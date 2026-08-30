@@ -73,6 +73,7 @@ def _mock_kc_ok(internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
     mock_client = AsyncMock()
     mock_client.create_client = AsyncMock(return_value=internal_id)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
     mock_client.delete_client = AsyncMock(return_value=None)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -219,6 +220,34 @@ async def test_secret_readback_failure_rolls_back_keycloak_client() -> None:
     factory = _mock_kc_ok()
     mock_client = factory.return_value
     mock_client.get_client_secret = AsyncMock(side_effect=RuntimeError("kc flap"))
+    with patch(_PATCH_TARGET, factory), pytest.raises(RuntimeError):
+        await AddonPairingService().pair(_TENANT, "op-admin", _request())
+    mock_client.create_client.assert_awaited_once()
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    assert await _fetch(_TENANT) == []
+
+
+@pytest.mark.asyncio
+async def test_pair_persists_service_account_sub() -> None:
+    """The Keycloak service-account subject is captured on the pairing (#3027)."""
+    await _seed_tenant()
+    factory = _mock_kc_ok()
+    mock_client = factory.return_value
+    with patch(_PATCH_TARGET, factory):
+        await AddonPairingService().pair(_TENANT, "op-admin", _request())
+    mock_client.get_service_account_user_id.assert_awaited_once_with(_KC_INTERNAL_ID)
+    rows = await _fetch(_TENANT)
+    assert len(rows) == 1
+    assert rows[0].service_account_sub == "svc-account-uuid"
+
+
+@pytest.mark.asyncio
+async def test_service_account_fetch_failure_rolls_back_keycloak_client() -> None:
+    """A ``get_service_account_user_id`` failure rolls the just-created client back."""
+    await _seed_tenant()
+    factory = _mock_kc_ok()
+    mock_client = factory.return_value
+    mock_client.get_service_account_user_id = AsyncMock(side_effect=RuntimeError("kc flap"))
     with patch(_PATCH_TARGET, factory), pytest.raises(RuntimeError):
         await AddonPairingService().pair(_TENANT, "op-admin", _request())
     mock_client.create_client.assert_awaited_once()

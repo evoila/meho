@@ -194,7 +194,11 @@ lists active pairings and maps each to a `PairingHealth`
   principal in the pairing's tenant, matched by add-on name. A finer binding
   (verifying the caller's client id against the pairing's
   `keycloak_client_id`) is a hardening follow-up for the initiative's
-  security-review DoD item.
+  security-review DoD item. Task #3027 added
+  `AddonPairing.service_account_sub` (the add-on's token `sub`, captured at
+  pair time), which enables exactly this check — heartbeat could verify
+  `operator.sub == service_account_sub` — though it is not yet wired here.
+  See `addon-step-events.md` for the step-event push contract that uses it.
 - **Console is read-only**: pair / unpair are REST-only. Console write
   actions (a pair/unpair button behind CSRF) are a follow-up.
 - **Capabilities are not yet rendered in the console** or exposed as a

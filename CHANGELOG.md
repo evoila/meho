@@ -134,6 +134,24 @@ connector-related release-notes line.
   append-only: the anchor is an ordinary audit row carrying only its own
   columns (new migration `0082`, `addon_orchestration_run`).
 
+### Added — step-event push contract: durable, resumable subscription scoped to the paired add-on's lineage (#3027)
+
+- A paired add-on gains a **durable, resumable** outbound subscription to
+  the step events that belong to its own work — approval outcomes and
+  dispatch completions — replacing the at-most-once, count-trimmed Valkey
+  SSE feed a restart silently loses events across. The add-on reads
+  `GET /api/v1/addons/pairings/{name}/events?after=<seq>` as its own
+  service principal; each event carries a monotonic `seq`, so the add-on
+  persists the last `seq` it saw and reads strictly forward on reconnect —
+  no missed events across its own restarts. Scoping is structural: a step
+  event is attributed to a pairing at **write** time by the responsible
+  principal's Keycloak `sub`, so a pairing's durable log only ever holds
+  its own events and one add-on can never read another's — even when their
+  events share a `work_ref`. Pairing now captures the add-on's
+  service-account `sub` at pair time (`AddonPairing.service_account_sub`)
+  as the identity join key. New migration `0083` (`addon_step_event` +
+  `service_account_sub`). See `docs/codebase/addon-step-events.md`.
+
 ### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
 
 - `vmware.composite.datastore.usage` enriched every datastore row with the

@@ -88,6 +88,7 @@ def _mock_kc_ok(internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
     mock_client.create_client = AsyncMock(return_value=internal_id)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
     mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     return MagicMock(return_value=mock_client)

@@ -322,6 +322,14 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # FKs from migration ``0082``; listed so the per-test TRUNCATE of both
     # parents does not error.
     "addon_orchestration_run",
+    # ``addon_step_event`` carries real ``REFERENCES tenant(id)`` and
+    # ``REFERENCES addon_pairing(id)`` FKs from migration ``0082`` (#3027
+    # step-event push). PG rejects truncating ``tenant`` / ``addon_pairing``
+    # unless every referencing table is listed in the same statement, so
+    # this must appear here or every PG-backed acceptance test errors at
+    # setup with ``cannot truncate a table referenced in a foreign key
+    # constraint``.
+    "addon_step_event",
     "targets",
     "tenant",
 )

@@ -1239,7 +1239,31 @@ async def publish_approval_event(
     ``"rejected"``, or ``"expired"`` (sweeper-driven). The broadcast
     ``op_id`` is ``approval.<decision>`` so operator watchers can match
     the family with a simple glob (``approval.*``).
+
+    #3027 step-event push: alongside the fail-open Valkey broadcast, the
+    outcome is durably recorded for the paired add-on that **requested**
+    the approval (matched by ``request.principal_sub`` — the requester's
+    ``sub``, constant across the request's lifecycle, so every decision
+    routes to the same add-on regardless of who decided it). The record is
+    a self-contained fail-open commit; a no-op when the requester is not a
+    paired add-on.
     """
+    from meho_backplane.operations.addon_step_events import AddonStepEventService
+
+    await AddonStepEventService().record_if_owned_committed(
+        tenant_id=tenant_id,
+        owner_principal_sub=request.principal_sub,
+        event_kind=f"approval.{decision}",
+        work_ref=request.work_ref,
+        audit_id=audit_id,
+        payload={
+            "approval_request_id": str(request.id),
+            "decision": decision,
+            "connector_id": request.connector_id,
+            "approval_op_id": request.op_id,
+            "work_ref": request.work_ref,
+        },
+    )
     try:
         from meho_backplane.broadcast.events import BroadcastEvent, classify_op
         from meho_backplane.broadcast.publisher import publish_event

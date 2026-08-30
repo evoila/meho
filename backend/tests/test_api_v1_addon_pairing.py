@@ -36,6 +36,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.main import app
 from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
+from meho_backplane.operations.addon_step_events import AddonStepEventService
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -103,6 +104,10 @@ def _mock_kc_ok() -> MagicMock:
     mock_client = AsyncMock()
     mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    # The service token below authenticates with sub="addon-svc"; the pair
+    # flow captures the same value as service_account_sub so the paired
+    # add-on's subscription binds to its own pairing (#3027).
+    mock_client.get_service_account_user_id = AsyncMock(return_value="addon-svc")
     mock_client.delete_client = AsyncMock(return_value=None)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -251,3 +256,65 @@ async def test_heartbeat_unpaired_is_404(client: TestClient) -> None:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.post("/api/v1/addons/pairings/ghost/heartbeat", headers=headers)
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_events_service_principal_only_and_scoped(client: TestClient) -> None:
+    """The subscription is service-principal-only and bound to the caller's own pairing."""
+    await _seed_tenant()
+    key = make_rsa_keypair("kid-ev")
+    admin_headers = {"Authorization": f"Bearer {_token(key)}"}
+    service_headers = {"Authorization": f"Bearer {_service_token(key)}"}
+    with patch(_PATCH_TARGET, _mock_kc_ok()), respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        client.post("/api/v1/addons/pairings", json=_pair_body(), headers=admin_headers)
+
+        # A human principal cannot subscribe.
+        human = client.get("/api/v1/addons/pairings/automation/events", headers=admin_headers)
+        assert human.status_code == 403, human.text
+
+        # The paired service principal reads its own (initially empty) log.
+        mine = client.get("/api/v1/addons/pairings/automation/events", headers=service_headers)
+        assert mine.status_code == 200, mine.text
+        assert mine.json() == {"items": [], "next_cursor": None}
+
+        # A different pairing name -> 404: never another add-on's log.
+        other = client.get("/api/v1/addons/pairings/ssp/events", headers=service_headers)
+        assert other.status_code == 404, other.text
+
+
+@pytest.mark.asyncio
+async def test_events_durable_resume(client: TestClient) -> None:
+    """Durable delivery with resume: read once, resume past the cursor gap-free."""
+    await _seed_tenant()
+    key = make_rsa_keypair("kid-evr")
+    admin_headers = {"Authorization": f"Bearer {_token(key)}"}
+    service_headers = {"Authorization": f"Bearer {_service_token(key)}"}
+    with patch(_PATCH_TARGET, _mock_kc_ok()), respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        client.post("/api/v1/addons/pairings", json=_pair_body(), headers=admin_headers)
+
+        # A step event lands for the paired add-on (owner sub == its token sub).
+        await AddonStepEventService().record_if_owned_committed(
+            tenant_id=_TENANT,
+            owner_principal_sub="addon-svc",
+            event_kind="approval.approved",
+            work_ref="gh:evoila/meho#5",
+            audit_id=None,
+            payload={"decision": "approved"},
+        )
+
+        first = client.get("/api/v1/addons/pairings/automation/events", headers=service_headers)
+        assert first.status_code == 200, first.text
+        body = first.json()
+        assert [e["event_kind"] for e in body["items"]] == ["approval.approved"]
+        cursor = body["next_cursor"]
+        assert cursor is not None
+
+        # Resume strictly past the cursor -> nothing missed, nothing repeated.
+        resumed = client.get(
+            f"/api/v1/addons/pairings/automation/events?after={cursor}",
+            headers=service_headers,
+        )
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json() == {"items": [], "next_cursor": None}

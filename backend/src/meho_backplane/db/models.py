@@ -4261,6 +4261,18 @@ class AddonPairing(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
     keycloak_internal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The Keycloak service-account user id (the OIDC ``sub`` the add-on's
+    # ``client_credentials`` tokens carry). The join key that binds a
+    # produced row (``approval_request.principal_sub`` /
+    # ``agent_run.identity_sub``) and a subscription request
+    # (``operator.sub``) back to this pairing (#3027 step-event push).
+    # NULL for pairings created before migration 0082 -- a NULL never
+    # matches a produced ``sub`` (fail-closed) until the add-on re-pairs.
+    service_account_sub: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
     owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
     contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
     addon_contract_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -4292,6 +4304,125 @@ class AddonPairing(Base):
         Index(
             "addon_pairing_keycloak_client_id_idx",
             "keycloak_client_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # Drives the #3027 produce-time attribution lookup
+        # (``service_account_sub == owner_principal_sub``) and the
+        # subscription bind (``service_account_sub == operator.sub``).
+        Index(
+            "addon_pairing_service_account_sub_idx",
+            "service_account_sub",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class AddonStepEvent(Base):
+    """One durable step event delivered to a paired add-on (#3027).
+
+    The step-event push contract's durable substrate (Initiative #2900,
+    Task #3027): a paired add-on subscribes to a resumable stream of the
+    step events that belong to **its own** work — approval outcomes
+    (``approval.approved`` / ``approval.rejected`` / ``approval.expired``)
+    and dispatch completions (``agent_run.completed``) — replacing the
+    at-most-once, count-trimmed Valkey SSE feed a restart would silently
+    lose events across.
+
+    Attribution is by identity, enforced at write time: a step event is
+    recorded only when the producing row's responsible principal
+    (``approval_request.principal_sub`` / ``agent_run.identity_sub``, both
+    the add-on's Keycloak service-account ``sub``) matches a pairing's
+    :attr:`AddonPairing.service_account_sub`. The row is therefore stamped
+    with that ``pairing_id``, and a subscription — bound to the caller's
+    own pairing by its token ``sub`` — only ever reads its own rows. An
+    event outside the paired principal's lineage is never written into
+    another pairing's log, so it can never be delivered.
+
+    Columns
+    -------
+
+    * ``seq`` -- ``BIGSERIAL`` primary key. The monotonic resume cursor:
+      an add-on resumes with ``WHERE pairing_id = :p AND seq > :after
+      ORDER BY seq`` and never misses a committed event across its own
+      restarts. That "never misses" property needs commit order to equal
+      ``seq`` order per pairing (``seq`` is drawn at INSERT but visible only
+      at COMMIT); the recorder guarantees it with a per-pairing advisory
+      lock across the assign→commit window
+      (:meth:`~meho_backplane.operations.addon_step_events.AddonStepEventService._serialize_pairing_seq`).
+      ``BIGSERIAL`` on PG; ``Integer`` autoincrement on SQLite via
+      :data:`_PORTABLE_BIG_SERIAL` (same shape as
+      :attr:`EventOutbox.event_id`).
+    * ``id`` -- UUID. Stable, client-facing event id (distinct from the
+      dialect-specific ``seq``) so an add-on can dedupe on reconnect.
+    * ``tenant_id`` -- UUID NOT NULL, real ``REFERENCES tenant(id)`` FK.
+    * ``pairing_id`` -- UUID NOT NULL, ``REFERENCES addon_pairing(id) ON
+      DELETE CASCADE``. Unpair hard-deletes the pairing row, cascading the
+      step-event log away so an unpaired backplane is byte-identical to a
+      never-paired one.
+    * ``event_kind`` -- Text NOT NULL. The step-event discriminator
+      (``approval.<decision>``, ``agent_run.completed``). Free-text, same
+      discipline as :attr:`EventOutbox.event_kind`.
+    * ``work_ref`` -- Text nullable. The external change-ticket reference
+      the add-on filters its own work on; ``None`` when the producing row
+      carried none.
+    * ``audit_id`` -- UUID nullable. Convention-only reference to
+      ``audit_log.id`` (no enforced FK, mirroring
+      :attr:`~meho_backplane.broadcast.events.BroadcastEvent.audit_id`):
+      audit is the canonical record, this is the durable delivery view.
+    * ``payload`` -- portable JSON -> JSONB NOT NULL default ``{}``. The
+      event-specific body the add-on consumes.
+    * ``created_at`` -- ``timestamptz`` NOT NULL DEFAULT ``now()``.
+
+    Migration ``0082``.
+    """
+
+    __tablename__ = "addon_step_event"
+
+    seq: Mapped[int] = mapped_column(
+        _PORTABLE_BIG_SERIAL,
+        primary_key=True,
+        autoincrement=True,
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        nullable=False,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    pairing_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("addon_pairing.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    work_ref: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "addon_step_event_pairing_seq_idx",
+            "pairing_id",
+            "seq",
+            postgresql_using="btree",
+        ),
+        Index(
+            "addon_step_event_id_idx",
+            "id",
             unique=True,
             postgresql_using="btree",
         ),

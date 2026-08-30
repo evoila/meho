@@ -523,6 +523,57 @@ class KeycloakAdminClient:
             )
         return secret
 
+    async def get_service_account_user_id(self, keycloak_internal_id: str) -> str:
+        """Return the Keycloak service-account user id for a confidential client.
+
+        Calls ``GET /clients/{id}/service-account-user`` (#3027). A
+        confidential ``serviceAccountsEnabled`` client owns a hidden
+        service-account **user**; the OIDC ``sub`` its ``client_credentials``
+        tokens carry is that user's id, not the client's ``clientId`` or
+        internal id. The add-on pairing path persists this as
+        ``AddonPairing.service_account_sub`` so a produced row
+        (``approval_request.principal_sub`` / ``agent_run.identity_sub``)
+        and a subscription request (``operator.sub``) both join back to the
+        pairing.
+
+        Raises
+        ------
+        KeycloakClientNotFoundError
+            The internal id is unknown (Keycloak 404).
+        KeycloakAdminError
+            A non-404 failure, or a 200 whose body carries no ``id`` (a
+            client without service accounts enabled).
+        """
+        assert self._http is not None
+        assert self._token
+        log = structlog.get_logger(__name__)
+        url = f"{self._admin_url}/clients/{keycloak_internal_id}/service-account-user"
+        try:
+            resp = await self._http.get(url, headers=self._auth_headers())
+        except httpx.HTTPError as exc:
+            raise KeycloakAdminError(
+                f"Keycloak get_service_account_user_id network error: {type(exc).__name__}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeycloakClientNotFoundError(f"Keycloak client {keycloak_internal_id!r} not found")
+        if resp.status_code != 200:
+            log.warning(
+                "keycloak_get_service_account_user_failed",
+                keycloak_internal_id=keycloak_internal_id,
+                status=resp.status_code,
+            )
+            raise KeycloakAdminError(
+                f"Keycloak get_service_account_user_id failed: HTTP {resp.status_code}"
+            )
+        representation: dict[str, Any] = resp.json()
+        service_account_sub = str(representation.get("id", "")).strip()
+        if not service_account_sub:
+            raise KeycloakAdminError(
+                f"Keycloak get_service_account_user_id returned no user id for "
+                f"client {keycloak_internal_id!r} (service accounts not enabled?)"
+            )
+        return service_account_sub
+
     async def disable_client(self, keycloak_internal_id: str) -> None:
         """Disable the Keycloak client identified by *keycloak_internal_id*.
 

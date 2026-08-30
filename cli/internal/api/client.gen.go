@@ -7518,6 +7518,28 @@ type StepBodyVerify struct {
 // StepBodyVerifyType defines model for StepBodyVerify.Type.
 type StepBodyVerifyType string
 
+// StepEventListResponse A page of step events plus the cursor to resume past it.
+//
+// “next_cursor“ is the “seq“ of the last returned event (as a string
+// so the wire cursor is opaque and dialect-agnostic); “None“ when the
+// page is empty. The add-on passes it back as “after“ to read strictly
+// forward on the next poll / reconnect.
+type StepEventListResponse struct {
+	Items      []StepEventRead `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
+}
+
+// StepEventRead One step event as delivered to a subscribed add-on.
+type StepEventRead struct {
+	AuditId   *openapi_types.UUID    `json:"audit_id"`
+	CreatedAt time.Time              `json:"created_at"`
+	EventKind string                 `json:"event_kind"`
+	Id        openapi_types.UUID     `json:"id"`
+	Payload   map[string]interface{} `json:"payload"`
+	Seq       int                    `json:"seq"`
+	WorkRef   *string                `json:"work_ref"`
+}
+
 // StepPosition 1-indexed position of the current step within the template.
 //
 // :attr:`n` is the 1-indexed step number; :attr:`total` is the
@@ -8573,6 +8595,13 @@ type ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams struct {
 
 // DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams defines parameters for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut.
 type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListStepEventsApiV1AddonsPairingsNameEventsGetParams defines parameters for ListStepEventsApiV1AddonsPairingsNameEventsGet.
+type ListStepEventsApiV1AddonsPairingsNameEventsGetParams struct {
+	After         *int    `form:"after,omitempty" json:"after,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11717,6 +11746,9 @@ type ClientInterface interface {
 
 	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListStepEventsApiV1AddonsPairingsNameEventsGet request
+	ListStepEventsApiV1AddonsPairingsNameEventsGet(ctx context.Context, name string, params *ListStepEventsApiV1AddonsPairingsNameEventsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13261,6 +13293,18 @@ func (c *Client) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBo
 
 func (c *Client) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListStepEventsApiV1AddonsPairingsNameEventsGet(ctx context.Context, name string, params *ListStepEventsApiV1AddonsPairingsNameEventsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListStepEventsApiV1AddonsPairingsNameEventsGetRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -20056,6 +20100,93 @@ func NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequestWithBody
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListStepEventsApiV1AddonsPairingsNameEventsGetRequest generates requests for ListStepEventsApiV1AddonsPairingsNameEventsGet
+func NewListStepEventsApiV1AddonsPairingsNameEventsGetRequest(server string, name string, params *ListStepEventsApiV1AddonsPairingsNameEventsGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.After != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "after", runtime.ParamLocationQuery, *params.After); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -40758,6 +40889,9 @@ type ClientWithResponsesInterface interface {
 
 	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithResponse(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error)
 
+	// ListStepEventsApiV1AddonsPairingsNameEventsGetWithResponse request
+	ListStepEventsApiV1AddonsPairingsNameEventsGetWithResponse(ctx context.Context, name string, params *ListStepEventsApiV1AddonsPairingsNameEventsGetParams, reqEditors ...RequestEditorFn) (*ListStepEventsApiV1AddonsPairingsNameEventsGetResponse, error)
+
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error)
 
@@ -42367,6 +42501,29 @@ func (r DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse) Statu
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListStepEventsApiV1AddonsPairingsNameEventsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *StepEventListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListStepEventsApiV1AddonsPairingsNameEventsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListStepEventsApiV1AddonsPairingsNameEventsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -50576,6 +50733,15 @@ func (c *ClientWithResponses) DeclareCapabilitiesApiV1AddonsPairingsNameCapabili
 	return ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse(rsp)
 }
 
+// ListStepEventsApiV1AddonsPairingsNameEventsGetWithResponse request returning *ListStepEventsApiV1AddonsPairingsNameEventsGetResponse
+func (c *ClientWithResponses) ListStepEventsApiV1AddonsPairingsNameEventsGetWithResponse(ctx context.Context, name string, params *ListStepEventsApiV1AddonsPairingsNameEventsGetParams, reqEditors ...RequestEditorFn) (*ListStepEventsApiV1AddonsPairingsNameEventsGetResponse, error) {
+	rsp, err := c.ListStepEventsApiV1AddonsPairingsNameEventsGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListStepEventsApiV1AddonsPairingsNameEventsGetResponse(rsp)
+}
+
 // HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request returning *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse
 func (c *ClientWithResponses) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error) {
 	rsp, err := c.HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx, name, params, reqEditors...)
@@ -55457,6 +55623,39 @@ func ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse(rsp 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest CapabilityDeclarationResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListStepEventsApiV1AddonsPairingsNameEventsGetResponse parses an HTTP response from a ListStepEventsApiV1AddonsPairingsNameEventsGetWithResponse call
+func ParseListStepEventsApiV1AddonsPairingsNameEventsGetResponse(rsp *http.Response) (*ListStepEventsApiV1AddonsPairingsNameEventsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListStepEventsApiV1AddonsPairingsNameEventsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest StepEventListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

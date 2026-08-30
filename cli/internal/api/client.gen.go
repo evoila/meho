@@ -1519,6 +1519,42 @@ type AuthoredCheckItem struct {
 	TargetName     string                  `json:"target_name"`
 }
 
+// AutomationProvider A paired add-on advertising the automation family, with its live health.
+//
+// “paired_at“ / “last_seen_at“ are :class:`~datetime.datetime` so the
+// console panel can render them relatively; the MCP wire (“model_dump(
+// mode="json")“) and the REST response serialise them to ISO-8601 strings,
+// matching the meta-tool's “outputSchema“.
+type AutomationProvider struct {
+	Addon              string                   `json:"addon"`
+	ContractCompatible bool                     `json:"contract_compatible"`
+	ContractVersion    int                      `json:"contract_version"`
+	LastSeenAt         *time.Time               `json:"last_seen_at"`
+	PairedAt           time.Time                `json:"paired_at"`
+	Surfaces           []AutomationSurfaceEntry `json:"surfaces"`
+}
+
+// AutomationSurfaceEntry One advertised surface of a paired automation add-on.
+type AutomationSurfaceEntry struct {
+	DisplayLabel *string `json:"display_label"`
+
+	// Kind The surface kinds a paired add-on may advertise under contract v1.
+	//
+	// A ``str`` enum so it serialises as its wire value and an unknown kind on
+	// the request path fails Pydantic validation with a 422 that names the
+	// offending value — the "rejected loudly" contract. The vocabulary is
+	// versioned with the integration contract: adding a kind is a coordinated
+	// change across this enum, the ``addon_capability.kind`` CHECK constraint,
+	// and :data:`meho_backplane.db.models.ADDON_CAPABILITY_KINDS`.
+	Kind CapabilityKind `json:"kind"`
+	Name string         `json:"name"`
+}
+
+// AutomationSurfaceResponse The tenant's active automation surface — zero or more providers.
+type AutomationSurfaceResponse struct {
+	Providers []AutomationProvider `json:"providers"`
+}
+
 // BackendReadiness Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
 //
 // The liveness snapshot a probe reads back from a collection's backend.
@@ -8813,6 +8849,11 @@ type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListAutomationSurfaceApiV1AutomationGetParams defines parameters for ListAutomationSurfaceApiV1AutomationGet.
+type ListAutomationSurfaceApiV1AutomationGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
 type ListOverridesApiV1BroadcastOverridesGetParams struct {
 	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
@@ -11879,6 +11920,9 @@ type ClientInterface interface {
 	// AuthConfigApiV1AuthConfigGet request
 	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListAutomationSurfaceApiV1AutomationGet request
+	ListAutomationSurfaceApiV1AutomationGet(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListOverridesApiV1BroadcastOverridesGet request
 	ListOverridesApiV1BroadcastOverridesGet(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12508,6 +12552,9 @@ type ClientInterface interface {
 
 	// UiAuthLogoutUiAuthLogoutGet request
 	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAutomationListUiAutomationGet request
+	UiAutomationListUiAutomationGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastFeedUiBroadcastGet request
 	UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13861,6 +13908,18 @@ func (c *Client) WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, ta
 
 func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthConfigApiV1AuthConfigGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListAutomationSurfaceApiV1AutomationGet(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAutomationSurfaceApiV1AutomationGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -16657,6 +16716,18 @@ func (c *Client) UiAuthLoginUiAuthLoginGet(ctx context.Context, params *UiAuthLo
 
 func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiAuthLogoutUiAuthLogoutGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAutomationListUiAutomationGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAutomationListUiAutomationGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -22390,6 +22461,48 @@ func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListAutomationSurfaceApiV1AutomationGetRequest generates requests for ListAutomationSurfaceApiV1AutomationGet
+func NewListAutomationSurfaceApiV1AutomationGetRequest(server string, params *ListAutomationSurfaceApiV1AutomationGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/automation")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -32975,6 +33088,33 @@ func NewUiAuthLogoutUiAuthLogoutGetRequest(server string) (*http.Request, error)
 	return req, nil
 }
 
+// NewUiAutomationListUiAutomationGetRequest generates requests for UiAutomationListUiAutomationGet
+func NewUiAutomationListUiAutomationGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/automation")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiBroadcastFeedUiBroadcastGetRequest generates requests for UiBroadcastFeedUiBroadcastGet
 func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastFeedUiBroadcastGetParams) (*http.Request, error) {
 	var err error
@@ -41022,6 +41162,9 @@ type ClientWithResponsesInterface interface {
 	// AuthConfigApiV1AuthConfigGetWithResponse request
 	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
 
+	// ListAutomationSurfaceApiV1AutomationGetWithResponse request
+	ListAutomationSurfaceApiV1AutomationGetWithResponse(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*ListAutomationSurfaceApiV1AutomationGetResponse, error)
+
 	// ListOverridesApiV1BroadcastOverridesGetWithResponse request
 	ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error)
 
@@ -41651,6 +41794,9 @@ type ClientWithResponsesInterface interface {
 
 	// UiAuthLogoutUiAuthLogoutGetWithResponse request
 	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
+
+	// UiAutomationListUiAutomationGetWithResponse request
+	UiAutomationListUiAutomationGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAutomationListUiAutomationGetResponse, error)
 
 	// UiBroadcastFeedUiBroadcastGetWithResponse request
 	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
@@ -43306,6 +43452,29 @@ func (r AuthConfigApiV1AuthConfigGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListAutomationSurfaceApiV1AutomationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AutomationSurfaceResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAutomationSurfaceApiV1AutomationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAutomationSurfaceApiV1AutomationGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -47116,6 +47285,27 @@ func (r UiAuthLogoutUiAuthLogoutGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiAuthLogoutUiAuthLogoutGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAutomationListUiAutomationGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAutomationListUiAutomationGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAutomationListUiAutomationGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -51148,6 +51338,15 @@ func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx conte
 	return ParseAuthConfigApiV1AuthConfigGetResponse(rsp)
 }
 
+// ListAutomationSurfaceApiV1AutomationGetWithResponse request returning *ListAutomationSurfaceApiV1AutomationGetResponse
+func (c *ClientWithResponses) ListAutomationSurfaceApiV1AutomationGetWithResponse(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*ListAutomationSurfaceApiV1AutomationGetResponse, error) {
+	rsp, err := c.ListAutomationSurfaceApiV1AutomationGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAutomationSurfaceApiV1AutomationGetResponse(rsp)
+}
+
 // ListOverridesApiV1BroadcastOverridesGetWithResponse request returning *ListOverridesApiV1BroadcastOverridesGetResponse
 func (c *ClientWithResponses) ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error) {
 	rsp, err := c.ListOverridesApiV1BroadcastOverridesGet(ctx, params, reqEditors...)
@@ -53174,6 +53373,15 @@ func (c *ClientWithResponses) UiAuthLogoutUiAuthLogoutGetWithResponse(ctx contex
 		return nil, err
 	}
 	return ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp)
+}
+
+// UiAutomationListUiAutomationGetWithResponse request returning *UiAutomationListUiAutomationGetResponse
+func (c *ClientWithResponses) UiAutomationListUiAutomationGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAutomationListUiAutomationGetResponse, error) {
+	rsp, err := c.UiAutomationListUiAutomationGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAutomationListUiAutomationGetResponse(rsp)
 }
 
 // UiBroadcastFeedUiBroadcastGetWithResponse request returning *UiBroadcastFeedUiBroadcastGetResponse
@@ -56765,6 +56973,39 @@ func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigA
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListAutomationSurfaceApiV1AutomationGetResponse parses an HTTP response from a ListAutomationSurfaceApiV1AutomationGetWithResponse call
+func ParseListAutomationSurfaceApiV1AutomationGetResponse(rsp *http.Response) (*ListAutomationSurfaceApiV1AutomationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAutomationSurfaceApiV1AutomationGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AutomationSurfaceResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 
@@ -61809,6 +62050,22 @@ func ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp *http.Response) (*UiAuthLogout
 	}
 
 	response := &UiAuthLogoutUiAuthLogoutGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAutomationListUiAutomationGetResponse parses an HTTP response from a UiAutomationListUiAutomationGetWithResponse call
+func ParseUiAutomationListUiAutomationGetResponse(rsp *http.Response) (*UiAutomationListUiAutomationGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAutomationListUiAutomationGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

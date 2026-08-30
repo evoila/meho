@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/approvals"
 	"github.com/evoila/meho/cli/internal/cmd/argocd"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
+	"github.com/evoila/meho/cli/internal/cmd/automation"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
@@ -152,6 +153,17 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `audit` parent.
 	root.AddCommand(audit.NewRootCmd())
+
+	// #3029 -- the `meho automation` tree for Initiative #2900's
+	// paired-surface activation. One verb: `automation list` wraps the
+	// GET /api/v1/automation route, the CLI twin of the
+	// `meho_automation_list` meta-tool. The tree compiles into every binary
+	// and carries no client-side pairing gate (#2109): activation is decided
+	// server-side (403 `automation_addon_not_active` while nothing is paired),
+	// so CLI / REST / MCP give one verdict for one tenant. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow the
+	// built-in `automation` parent.
+	root.AddCommand(automation.NewRootCmd())
 
 	// G6.3-T4 (#381) -- broadcast-detail override management verbs
 	// (overrides list / set / remove) for Initiative #376. Wraps the

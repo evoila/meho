@@ -93,6 +93,7 @@ from meho_backplane.ui.routes.agents.grants import build_agent_grants_router
 from meho_backplane.ui.routes.agents.runs import build_runs_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.audit import build_audit_router
+from meho_backplane.ui.routes.automation import build_automation_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.checks import build_checks_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
@@ -124,6 +125,7 @@ __all__ = [
     "build_agents_router",
     "build_approvals_router",
     "build_audit_router",
+    "build_automation_router",
     "build_broadcast_router",
     "build_checks_router",
     "build_connectors_router",
@@ -285,6 +287,15 @@ def build_router() -> APIRouter:
     # so its concrete path wins against ``/ui/{slug}``. Pair / unpair are REST
     # (``/api/v1/addons/pairings``); the console is read-only.
     router.include_router(build_pairing_router())
+    # Paired-automation panel (#3029, Initiative #2900): read-only
+    # ``/ui/automation`` — the console twin of the ``meho_automation_list``
+    # meta-tool / ``meho automation list`` CLI verb. Gated on activation (not
+    # registration): renders the advertised surface of a paired,
+    # contract-healthy automation add-on and the inactive empty state
+    # otherwise. One literal route, no ``{param}`` sub-path, so no
+    # first-match-wins shadowing concern; included before the stubs aggregate
+    # so its concrete path wins against ``/ui/{slug}``.
+    router.include_router(build_automation_router())
     # Audit-query forensic console (G10.15-T1 #1944): ``/ui/audit`` (filter
     # form + first result page) + ``/ui/audit/results`` (filter-submit +
     # forward-cursor "Load more" fragment). Reads dispatch the

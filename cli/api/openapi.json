@@ -10153,6 +10153,50 @@
         }
       }
     },
+    "/api/v1/automation": {
+      "get": {
+        "tags": [
+          "automation"
+        ],
+        "summary": "List Automation Surface",
+        "description": "Return the paired automation add-on(s) and their advertised surface.\n\n``403`` (``automation_addon_not_active``) when the automation family is\ninactive \u2014 nothing paired, or every candidate pairing is\ncontract-incompatible \u2014 so an unpaired backplane has no live automation\nsurface here, matching the MCP tool's true-absence gate. Otherwise returns\nthe non-empty provider list.",
+        "operationId": "list_automation_surface_api_v1_automation_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationSurfaceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -19728,6 +19772,28 @@
         }
       }
     },
+    "/ui/automation": {
+      "get": {
+        "tags": [
+          "ui-automation"
+        ],
+        "summary": "Ui Automation List",
+        "description": "Serve ``GET /ui/automation``. See module docstring.",
+        "operationId": "ui_automation_list_ui_automation_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/audit/results": {
       "get": {
         "tags": [
@@ -22250,6 +22316,92 @@
         ],
         "title": "AuthoredCheckItem",
         "description": "One operator-authored check in a runner's assignment document.\n\nThe runner-facing ``GET`` materialises each of these into a wire\n:class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:\n``target_name`` is resolved to a live target descriptor, ``op`` to the\nresolved connector's enabled descriptor (yielding ``handler_ref`` +\n``safety_level`` + the ``(product, version, impl_id)`` key). ``op`` is\nthe connector-side op id (e.g. ``\"vsphere.host.list\"``); the connector\ntriple is derived from the resolved target, not authored here."
+      },
+      "AutomationProvider": {
+        "properties": {
+          "addon": {
+            "type": "string",
+            "title": "Addon"
+          },
+          "contract_version": {
+            "type": "integer",
+            "title": "Contract Version"
+          },
+          "contract_compatible": {
+            "type": "boolean",
+            "title": "Contract Compatible"
+          },
+          "paired_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Paired At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
+          },
+          "surfaces": {
+            "items": {
+              "$ref": "#/components/schemas/AutomationSurfaceEntry"
+            },
+            "type": "array",
+            "title": "Surfaces"
+          }
+        },
+        "type": "object",
+        "required": [
+          "addon",
+          "contract_version",
+          "contract_compatible",
+          "paired_at",
+          "last_seen_at",
+          "surfaces"
+        ],
+        "title": "AutomationProvider",
+        "description": "A paired add-on advertising the automation family, with its live health.\n\n``paired_at`` / ``last_seen_at`` are :class:`~datetime.datetime` so the\nconsole panel can render them relatively; the MCP wire (``model_dump(\nmode=\"json\")``) and the REST response serialise them to ISO-8601 strings,\nmatching the meta-tool's ``outputSchema``."
+      },
+      "AutomationSurfaceEntry": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/CapabilityKind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "display_label": {
+            "type": "string",
+            "nullable": true,
+            "title": "Display Label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "display_label"
+        ],
+        "title": "AutomationSurfaceEntry",
+        "description": "One advertised surface of a paired automation add-on."
+      },
+      "AutomationSurfaceResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/AutomationProvider"
+            },
+            "type": "array",
+            "title": "Providers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "providers"
+        ],
+        "title": "AutomationSurfaceResponse",
+        "description": "The tenant's active automation surface \u2014 zero or more providers."
       },
       "BackendReadiness": {
         "properties": {
@@ -33108,6 +33260,10 @@
     {
       "name": "auth",
       "x-maturity": "ga"
+    },
+    {
+      "name": "automation",
+      "x-maturity": "experimental"
     },
     {
       "name": "broadcast",

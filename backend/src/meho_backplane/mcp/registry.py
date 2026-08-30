@@ -85,6 +85,7 @@ __all__ = [
     "ToolDefinition",
     "ToolHandler",
     "ToolSurface",
+    "addon_family_active",
     "all_listed_resources_for",
     "all_resource_templates_for",
     "all_tools_for",
@@ -93,6 +94,7 @@ __all__ = [
     "eager_import_mcp_modules",
     "get_resource_for_uri",
     "get_tool",
+    "has_addon_gated_tools",
     "register_mcp_resource",
     "register_mcp_tool",
     "role_at_least",
@@ -256,6 +258,38 @@ def surface_visible(operator: Operator, surface: ToolSurface) -> bool:
     return MCP_ADMIN_SCOPE in operator.scopes
 
 
+def addon_family_active(
+    active_addon_families: frozenset[str],
+    required_addon_family: str | None,
+) -> bool:
+    """Return True when *required_addon_family* is currently activated.
+
+    The **paired-surface** gate (Initiative #2900, Task #3029) — a fourth
+    axis AND-ed with role / capability / surface. A tool with
+    ``required_addon_family=None`` has no add-on gate and is always admitted.
+    When a family *is* required, the tool is admitted iff that family name is
+    in *active_addon_families* — the set of meta-tool families a **paired,
+    contract-healthy** add-on advertises for the caller's tenant
+    (:meth:`~meho_backplane.operations.addon_capability.AddonCapabilityService.active_meta_tool_families`).
+    The caller resolves that set once (an async DB read against the add-on
+    pairing / capability plane) and passes it in, keeping this gate a pure
+    membership test — the same shape as :func:`capability_satisfied` and
+    :func:`surface_visible`.
+
+    Fail-closed: the set is empty when nothing is paired, so an **unpaired**
+    backplane never admits an add-on-gated tool — its ``tools/list`` stays
+    byte-identical to a build that never had the paired family. Unlike the
+    ``required_capability`` axis (a static tenant JWT claim resolved in
+    :func:`capability_satisfied`), this axis reflects **live pairing health**:
+    the tool drops out the moment its add-on unpairs or drifts
+    contract-incompatible, and reappears when health recovers, without any
+    tool being re-registered.
+    """
+    if required_addon_family is None:
+        return True
+    return required_addon_family in active_addon_families
+
+
 #: JSON-Schema combinator keywords the Anthropic Messages API rejects at
 #: the *top level* of a tool's ``input_schema``. A request carrying one
 #: 400s with ``input_schema does not support oneOf, allOf, or anyOf at
@@ -291,8 +325,8 @@ class ToolDefinition(BaseModel):
 
     The wire shape exposed via ``tools/list`` is derived through
     :meth:`to_wire`, which drops the MEHO-internal fields (``required_role``,
-    ``op_class``, ``required_capability``, ``surface``) — clients don't
-    need them and they'd leak server-side policy detail.
+    ``op_class``, ``required_capability``, ``surface``, ``required_addon_family``)
+    — clients don't need them and they'd leak server-side policy detail.
 
     ``inputSchema`` is a JSON Schema 2020-12 object the handler validates
     incoming ``tools/call.arguments`` against. ``outputSchema`` is
@@ -327,6 +361,22 @@ class ToolDefinition(BaseModel):
     with the role + capability gates by :func:`surface_visible`;
     MEHO-internal — dropped from the wire shape like the RBAC fields.
 
+    ``required_addon_family`` (Initiative #2900, Task #3029) is an optional
+    fourth gating axis, *orthogonal* to the other three, that binds a tool to
+    a **paired add-on's** advertised meta-tool family. When set, the tool is
+    filtered out of ``tools/list`` and rejected at ``tools/call`` unless a
+    **paired, contract-healthy** add-on advertises a ``meta_tool_family``
+    capability of that name for the caller's tenant — true absence for an
+    unpaired backplane, so the surface appears only while the add-on is paired
+    and healthy and disappears cleanly on unpair. Distinct from
+    ``required_capability`` (a static tenant JWT claim): this axis reflects
+    live pairing health resolved from the add-on capability plane, so the gate
+    is applied by :func:`addon_family_active` against a per-request-resolved
+    active-family set rather than a pure operator-claim membership test.
+    ``None`` (the default) means "no add-on gate", so every existing tool
+    keeps its behaviour. MEHO-internal — dropped from the wire shape like the
+    RBAC fields.
+
     ``feature`` (#2675) names the tool's owning entry in
     :data:`~meho_backplane.features.FEATURE_MATURITY` so
     :func:`register_mcp_tool` can resolve the tool's maturity tier and
@@ -356,6 +406,7 @@ class ToolDefinition(BaseModel):
     required_role: TenantRole = TenantRole.OPERATOR
     op_class: str = "read"
     required_capability: str | None = None
+    required_addon_family: str | None = None
 
     @field_validator("feature")
     @classmethod
@@ -382,9 +433,9 @@ class ToolDefinition(BaseModel):
         Spec fields kept: ``name``, ``description``, ``inputSchema``,
         optional ``title`` / ``outputSchema``. MEHO fields dropped:
         ``required_role``, ``op_class``, ``required_capability``,
-        ``surface``. The drop is deliberate — clients don't need
-        server-side RBAC / capability / surface details and shouldn't
-        see them.
+        ``surface``, ``required_addon_family``. The drop is deliberate —
+        clients don't need server-side RBAC / capability / surface /
+        pairing details and shouldn't see them.
 
         ``inputSchema`` is additionally passed through
         :func:`_wire_safe_input_schema`, which strips top-level
@@ -633,10 +684,14 @@ def get_resource_for_uri(
     return None
 
 
-def all_tools_for(operator: Operator) -> list[ToolDefinition]:
+def all_tools_for(
+    operator: Operator,
+    *,
+    active_addon_families: frozenset[str] = frozenset(),
+) -> list[ToolDefinition]:
     """Return tools the operator may see, in registration order.
 
-    Three orthogonal gates, all AND-ed:
+    Four orthogonal gates, all AND-ed:
 
     * **role** — the operator's :class:`TenantRole` must meet
       ``required_role``.
@@ -649,8 +704,14 @@ def all_tools_for(operator: Operator) -> list[ToolDefinition]:
       session lists only :attr:`ToolSurface.WORKING`; the
       :attr:`ToolSurface.OPERATOR` planes are absent unless the session
       is :data:`MCP_ADMIN_SCOPE`-elevated (Initiative #3153, #3154).
+    * **add-on family** — when the tool declares a ``required_addon_family``,
+      that family must be in *active_addon_families* (the meta-tool families a
+      paired, contract-healthy add-on advertises for the tenant, per
+      :func:`addon_family_active`). Callers that can resolve the active set
+      (the listing handler) pass it; callers that cannot leave it empty, which
+      fail-closed hides every add-on-gated tool (Initiative #2900, #3029).
 
-    All three are *absence* gates (true absence, not a greyed-out entry),
+    All four are *absence* gates (true absence, not a greyed-out entry),
     so a tool a session may not use never appears in its ``tools/list``.
     """
     return [
@@ -659,7 +720,20 @@ def all_tools_for(operator: Operator) -> list[ToolDefinition]:
         if role_at_least(operator.tenant_role, defn.required_role)
         and capability_satisfied(operator, defn.required_capability)
         and surface_visible(operator, defn.surface)
+        and addon_family_active(active_addon_families, defn.required_addon_family)
     ]
+
+
+def has_addon_gated_tools() -> bool:
+    """Return True when any registered tool declares a ``required_addon_family``.
+
+    The listing handler consults this before doing the (async, DB-backed)
+    active-family resolution: with no add-on-gated tool registered the
+    resolution can only ever remove nothing, so it is skipped and
+    ``tools/list`` stays a pure in-memory registry filter — the common case.
+    A single-pass registry scan, cheap relative to the DB round-trip it guards.
+    """
+    return any(defn.required_addon_family is not None for defn, _ in _TOOLS.values())
 
 
 def all_resource_templates_for(

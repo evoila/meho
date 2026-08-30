@@ -34,7 +34,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jsonschema
 import pytest
@@ -49,6 +49,15 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.mcp import registry as mcp_registry
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.operations.addon_capability import AddonCapabilityService
+from meho_backplane.operations.addon_capability_schemas import (
+    CapabilityDeclaration,
+    CapabilityKind,
+    DeclareCapabilitiesRequest,
+)
+from meho_backplane.operations.addon_pairing import AddonPairingService
+from meho_backplane.operations.addon_pairing_contract import BACKPLANE_CONTRACT_VERSION
+from meho_backplane.operations.addon_pairing_schemas import PairAddonRequest
 from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -73,6 +82,7 @@ _PUBLISH_DELETE = "meho_backplane.topology.node_delete.publish_event"
 _COVERED_TOOLS: frozenset[str] = frozenset(
     {
         "call_operation",
+        "meho_automation_list",
         "create_doc_collections",
         "delete_doc_collections",
         "list_doc_collections",
@@ -617,6 +627,60 @@ async def test_list_targets_conforms(
     payload = _assert_conforms("list_targets", _call(client, "list_targets", {}))
     assert [t["name"] for t in payload["targets"]] == ["rdc-vault", "rdc-vcenter"]
     assert payload["next_cursor"] is None
+
+
+# ---------------------------------------------------------------------------
+# Automation family (paired-surface activation, #3029)
+# ---------------------------------------------------------------------------
+
+
+_ADDON_KC_PATCH = "meho_backplane.operations.addon_pairing.KeycloakAdminClient.from_settings"
+
+
+def _mock_addon_kc() -> Any:
+    """A mocked Keycloak admin client so pairing needs no live Keycloak."""
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value="kc-automation-internal")
+    mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=mock_client)
+
+
+async def test_meho_automation_list_conforms(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The pairing-gated automation surface payload conforms to its outputSchema.
+
+    Seeds a paired, contract-healthy automation add-on advertising the
+    ``automation`` meta-tool family so the gate admits the call, then validates
+    the emitted ``structuredContent`` against the declared schema.
+    """
+    client, _op = client_with_operator
+    await _seed_tenant()
+    with patch(_ADDON_KC_PATCH, _mock_addon_kc()):
+        await AddonPairingService().pair(
+            OPERATOR_TENANT_ID,
+            "op-admin",
+            PairAddonRequest(
+                name="automation",
+                addon_contract_version=BACKPLANE_CONTRACT_VERSION,
+                addon_min_backplane_version=BACKPLANE_CONTRACT_VERSION,
+            ),
+        )
+    await AddonCapabilityService().declare(
+        OPERATOR_TENANT_ID,
+        "automation",
+        DeclareCapabilitiesRequest(
+            capabilities=[
+                CapabilityDeclaration(kind=CapabilityKind.META_TOOL_FAMILY, name="automation"),
+            ],
+        ),
+    )
+    payload = _assert_conforms("meho_automation_list", _call(client, "meho_automation_list", {}))
+    assert [p["addon"] for p in payload["providers"]] == ["automation"]
 
 
 # ---------------------------------------------------------------------------

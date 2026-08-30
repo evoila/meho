@@ -173,6 +173,30 @@ connector-related release-notes line.
     (`flight_recorder.record_trace`) is best-effort (F7 — never raises into a
     dispatch). Under #3207.
 
+### Added — paired-surface activation: the automation meta-tool family, CLI verbs, and console panel (#3029)
+
+- The first backplane surface gated on live **add-on pairing state** rather
+  than a static tenant capability (Initiative #2900). When a paired,
+  contract-healthy add-on advertises the `automation` `meta_tool_family`
+  capability, a small first-party surface activates across all three fronts —
+  the `meho_automation_list` MCP meta-tool, the `meho automation list` CLI
+  verb, and the `/ui/automation` console panel — and disappears cleanly on
+  unpair. A new fourth gating axis (`required_addon_family` on
+  `ToolDefinition`, resolved from
+  `AddonCapabilityService.active_meta_tool_families`) is AND-composed with the
+  role / capability / surface gates and enforced at both `tools/list` and
+  `tools/call`, so an **unpaired** backplane's tool listing stays
+  byte-identical to a build that never carried the family. CLI verbs and REST
+  routes follow the static-surface discipline (#2109): always registered, gated
+  server-side inside the handler (`GET /api/v1/automation` answers 403
+  `automation_addon_not_active` while inactive), so the OpenAPI snapshot stays
+  deterministic. Narrow-waist discipline (CLAUDE.md postulate 5) holds — a
+  paired add-on's blueprint / workflow identifiers are data in results, never
+  tool names, and there is no per-blueprint / per-workflow tool anywhere. Docs:
+  `docs/codebase/addon-pairing.md` (paired-surface activation) +
+  `docs/codebase/mcp.md` (the four-gate scoping + the pairing-gated inventory
+  row).
+
 ### Added — dispatch flight recorder: security-review-first design decision (#3207)
 
 - Records the operator-ratified (2026-08-30/31) design for a per-dispatch

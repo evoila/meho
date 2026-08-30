@@ -60,6 +60,9 @@ __all__ = [
 #: the deliberately-unmapped set.
 TAG_FEATURE: Final[dict[str, str]] = {
     "addon-pairing": "addon_pairing",
+    # Paired-surface activation (#3029): the automation surface is part of the
+    # add-on pairing contract (Initiative #2900) and shares its maturity.
+    "automation": "addon_pairing",
     "agent-grants": "agent_runtime",
     "agent-principals": "agent_runtime",
     "agents": "agent_runtime",

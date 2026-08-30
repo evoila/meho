@@ -74,6 +74,19 @@ _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "delete_doc_collections",
 }
 
+#: The pairing-gated automation family (Task #3029) — gated on live add-on
+#: pairing state via ``required_addon_family`` rather than a static tenant
+#: capability. Absent from every session's default listing (working or
+#: operator) until a paired, contract-healthy add-on advertises the
+#: ``automation`` meta-tool family, so it is carried separately from the two
+#: default-surface sets and completes the registry partition.
+_AUTOMATION_GATED: frozenset[str] = frozenset({"meho_automation_list"})
+
+#: The automation family's advertised meta-tool family name — the value the
+#: ``required_addon_family`` gate matches against ``all_tools_for``'s
+#: ``active_addon_families`` argument.
+_AUTOMATION_FAMILY = "automation"
+
 #: The default working surface: the full, exact set every session lists
 #: (do-work + coordinate). Pinned so any drift — a new tool that forgets
 #: to classify, or a reclassification — fails here loudly (Initiative
@@ -223,11 +236,54 @@ def test_every_registered_tool_carries_a_surface() -> None:
 
 
 def test_surface_partition_is_exhaustive_and_disjoint() -> None:
-    """The pinned working / operator sets partition the whole registry."""
+    """The pinned working / operator / automation sets partition the whole registry.
+
+    The pairing-gated automation family (#3029) is on neither default surface —
+    it is absent until an add-on pairs — so it completes the partition as a
+    third disjoint set rather than joining the working listing.
+    """
     from meho_backplane.mcp import registry as mcp_registry
 
     assert _WORKING_SURFACE.isdisjoint(_OPERATOR_SURFACE)
-    assert set(mcp_registry._TOOLS) == _WORKING_SURFACE | _OPERATOR_SURFACE
+    assert _WORKING_SURFACE.isdisjoint(_AUTOMATION_GATED)
+    assert _OPERATOR_SURFACE.isdisjoint(_AUTOMATION_GATED)
+    assert set(mcp_registry._TOOLS) == _WORKING_SURFACE | _OPERATOR_SURFACE | _AUTOMATION_GATED
+
+
+def test_addon_family_gate_hides_automation_without_active_pairing() -> None:
+    """``all_tools_for`` omits the automation family unless its family is active.
+
+    The default call (no ``active_addon_families``) fails closed: the
+    pairing-gated tool is absent, so an elevated session with every capability
+    still does not see it — the byte-identical-unpaired guarantee at the filter
+    level.
+    """
+    op = _operator(
+        role=TenantRole.TENANT_ADMIN,
+        capabilities=frozenset({_DOCS_CAPABILITY}),
+        scopes=frozenset({MCP_ADMIN_SCOPE}),
+    )
+    names = {defn.name for defn in all_tools_for(op)}
+    assert names.isdisjoint(_AUTOMATION_GATED)
+
+
+def test_addon_family_gate_admits_automation_when_family_active() -> None:
+    """``all_tools_for`` includes the automation family when its family is active.
+
+    Passing the active family set (what the listing handler resolves from the
+    add-on capability plane) admits the pairing-gated tool, AND-composed with
+    the role / capability / surface gates like every other axis.
+    """
+    op = _operator(
+        role=TenantRole.TENANT_ADMIN,
+        capabilities=frozenset({_DOCS_CAPABILITY}),
+        scopes=frozenset({MCP_ADMIN_SCOPE}),
+    )
+    names = {
+        defn.name
+        for defn in all_tools_for(op, active_addon_families=frozenset({_AUTOMATION_FAMILY}))
+    }
+    assert names >= _AUTOMATION_GATED
 
 
 def test_surface_dropped_from_wire_shape() -> None:

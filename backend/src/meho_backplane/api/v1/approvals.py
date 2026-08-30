@@ -69,6 +69,7 @@ from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ParamsMismatchError,
+    PreviewBindingMissingError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
@@ -292,6 +293,13 @@ async def _capture_operator_decision(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_request_already_{exc.status}",
         ) from exc
+    except PreviewBindingMissingError as exc:
+        # #3197: a destructive row with no preview-hash binding cannot be
+        # approved (fail-closed re-verification of the mandatory binding).
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="preview_binding_missing",
+        ) from exc
     return request
 
 
@@ -447,6 +455,13 @@ async def _record_approval_decision(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="params_hash_mismatch",
+        ) from exc
+    except PreviewBindingMissingError as exc:
+        # #3197: destructive-tier re-verification — no preview-hash binding
+        # on the row, so the approval is refused fail-closed.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="preview_binding_missing",
         ) from exc
     return request
 

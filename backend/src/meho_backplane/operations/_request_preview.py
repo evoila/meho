@@ -46,7 +46,10 @@ requestBody unwrap all run identically).
 
 from __future__ import annotations
 
-from typing import Any
+import hashlib
+import json
+from collections.abc import Mapping
+from typing import Any, Final
 
 import structlog
 
@@ -63,9 +66,44 @@ from meho_backplane.operations._lookup import (
 from meho_backplane.operations._validate import InvalidOpSchemaError, validate_params
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
-__all__ = ["preview_dispatch"]
+__all__ = ["compute_preview_hash", "preview_dispatch"]
 
 _log = structlog.get_logger(__name__)
+
+#: The envelope keys that define the *resolved request* — the deterministic
+#: projection of ``(connector_id, op_id, target, params)`` a preview binds.
+#: Volatile / advisory fields (``status``, ``source_kind``) are excluded so
+#: the hash is stable across preview and the subsequent governed dispatch.
+_PREVIEW_HASH_KEYS: Final[tuple[str, ...]] = (
+    "connector_id",
+    "op_id",
+    "method",
+    "resolved_path",
+    "query",
+    "redacted_body",
+)
+
+
+def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
+    """Return a stable SHA-256 hex over a preview's canonicalised resolved envelope.
+
+    The preview-result-hash binding for the ``destructive`` tier (#3197,
+    decision requirement 2). Hashes only the :data:`_PREVIEW_HASH_KEYS`
+    projection of an ``status="ok"`` :func:`preview_dispatch` envelope — the
+    literal would-be request (``method`` / ``resolved_path`` / ``query`` /
+    ``redacted_body``) plus its ``connector_id`` / ``op_id`` identity — so two
+    previews of the identical ``(connector_id, op_id, target, params)`` yield
+    the identical hash, and the dispatcher can recompute it to detect a
+    param-swap between preview and the governed call.
+
+    Canonicalisation matches
+    :func:`~meho_backplane.operations._validate.compute_params_hash`
+    (``json.dumps(..., sort_keys=True, default=str, separators=(",", ":"))``)
+    so the hashing discipline is uniform across the two binding hashes.
+    """
+    source = {key: envelope.get(key) for key in _PREVIEW_HASH_KEYS}
+    canonical = json.dumps(source, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _invalid_op_schema_envelope(
@@ -320,10 +358,35 @@ async def _build_ingested_preview(
                 "exception_message": str(exc),
             },
         }
+    return _ok_ingested_envelope(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        descriptor=descriptor,
+        request=request,
+    )
+
+
+def _ok_ingested_envelope(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    request: Any,
+) -> dict[str, Any]:
+    """Assemble the ``status="ok"`` preview envelope for a resolved request.
+
+    Redacts the body through the connector-boundary pipeline, logs the
+    resolution, and stamps the preview-result-hash binding (#3197) —
+    :func:`compute_preview_hash` over the resolved-request projection, so a
+    caller can present it on the subsequent governed ``call_operation`` of a
+    ``destructive``-tier op. Only ``status="ok"`` previews carry the hash: a
+    non-resolvable request has no literal effect to bind.
+    """
     redacted_body = _redact_request_body(
         request.body, connector_id=connector_id, operator=operator, op_id=op_id
     )
-
     _log.info(
         "preview_dispatch",
         connector_id=connector_id,
@@ -333,8 +396,7 @@ async def _build_ingested_preview(
         has_body=request.body is not None,
         tenant_id=str(operator.tenant_id),
     )
-
-    return {
+    envelope: dict[str, Any] = {
         "status": "ok",
         "op_id": op_id,
         "connector_id": connector_id,
@@ -344,6 +406,8 @@ async def _build_ingested_preview(
         "query": request.query,
         "redacted_body": redacted_body,
     }
+    envelope["preview_hash"] = compute_preview_hash(envelope)
+    return envelope
 
 
 async def preview_dispatch(
@@ -384,8 +448,11 @@ async def preview_dispatch(
     * ``source_kind`` -- the descriptor's source kind (present whenever a
       descriptor resolved).
     * On ``status == "ok"``: ``method``, ``resolved_path``, ``query``
-      (object or ``null``), and ``redacted_body`` (the raw body after the
-      redaction pipeline; ``null`` when the op declares no body).
+      (object or ``null``), ``redacted_body`` (the raw body after the
+      redaction pipeline; ``null`` when the op declares no body), and
+      ``preview_hash`` (#3197) -- the stable
+      :func:`compute_preview_hash` binding a caller presents on the
+      subsequent governed ``call_operation`` of a ``destructive``-tier op.
     * On a non-ok status: ``error`` (``"<code>: <human-readable>"``) and,
       for structured failures, an ``extras`` object carrying the
       machine-readable ``error_code`` and any per-code detail.

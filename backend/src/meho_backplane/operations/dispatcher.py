@@ -281,6 +281,7 @@ from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_announce_required,
     result_awaiting_approval,
+    result_blast_radius_required,
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
@@ -295,6 +296,8 @@ from meho_backplane.operations._errors import (
     result_invalid_op_schema,
     result_invalid_params,
     result_no_connector,
+    result_preview_binding_required,
+    result_preview_hash_mismatch,
     result_target_required,
     result_unknown_op,
     wrap_ok_result,
@@ -312,10 +315,16 @@ from meho_backplane.operations._lookup import (
     parse_connector_id,
 )
 from meho_backplane.operations._preview import (
+    BLAST_RADIUS_KEY,
     PreviewContext,
+    blast_radius_missing_reason,
     build_permission_preflight,
     build_proposed_effect,
     describe_preview_provenance,
+)
+from meho_backplane.operations._request_preview import (
+    compute_preview_hash,
+    preview_dispatch,
 )
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
@@ -1994,6 +2003,17 @@ async def _build_proposed_effect(
         # ``op_class`` / ``preview`` / fail-soft-marker envelope built by
         # :func:`build_proposed_effect` itself unchanged.
         base["safety_level"] = descriptor.safety_level
+        # #3197: promote a destructive op's blast-radius block (object
+        # identity, enumerated child objects, irreversibility class) from the
+        # builder's ``preview`` sub-dict to the top level of the envelope, so
+        # the mandatory-block gate in :func:`_handle_needs_approval` and the
+        # console modal read it without reaching into ``preview``. Mirrors the
+        # top-level stamping of ``safety_level`` / ``op_class`` above;
+        # ``setdefault`` never overrides a block a builder chose to place at
+        # the top level itself. A non-destructive op simply never populates it.
+        preview_body = base.get("preview")
+        if isinstance(preview_body, dict) and preview_body.get(BLAST_RADIUS_KEY) is not None:
+            base.setdefault(BLAST_RADIUS_KEY, preview_body[BLAST_RADIUS_KEY])
         return base
     except Exception:
         import structlog as _structlog
@@ -2007,6 +2027,73 @@ async def _build_proposed_effect(
         return None
 
 
+async def _destructive_binding_refusal(
+    *,
+    op_id: str,
+    connector_id: str,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    preview_hash: str | None,
+    proposed_effect: dict[str, Any] | None,
+    duration_ms: float,
+) -> OperationResult | None:
+    """Fail-closed gate for a ``destructive``-tier park (#3197, decision reqs 2 + 3).
+
+    Enforced only when the parking op is ``safety_level='destructive'``.
+    Returns a ``denied`` :class:`OperationResult` when the park must be
+    refused, or ``None`` when it may proceed:
+
+    * **Requirement 2 — preview-result-hash binding.** The caller must
+      present a ``preview_hash`` (from a prior ``preview_operation`` of the
+      identical ``(connector_id, op_id, target, params)``). The dispatcher
+      recomputes the authoritative hash by resolving the same preview
+      server-side and comparing: a missing hash, an op with no resolvable
+      preview, or a mismatch (params swapped between preview and call) all
+      refuse. This makes the binding tamper-evident rather than a
+      best-effort echo.
+    * **Requirement 3 — mandatory blast-radius statement.** The
+      ``proposed_effect`` must carry a well-formed blast-radius block
+      (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`);
+      a destructive op cannot park with only the identifier-only default.
+
+    Fail-closed throughout: the op is neither executed nor parked when any
+    check fails.
+    """
+    # Requirement 2: the preview-result-hash binding.
+    if not preview_hash:
+        return result_preview_binding_required(
+            op_id,
+            "safety_level=destructive requires a preview_hash from a prior "
+            "preview_operation of the identical (connector_id, op_id, target, "
+            "params) — none was presented",
+            duration_ms,
+        )
+    authoritative = await preview_dispatch(
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        target=target,
+        params=params,
+    )
+    if authoritative.get("status") != "ok":
+        return result_preview_binding_required(
+            op_id,
+            "safety_level=destructive requires a resolvable preview to bind, "
+            f"but preview_operation returned status={authoritative.get('status')!r} "
+            "for this (connector_id, op_id, target, params)",
+            duration_ms,
+        )
+    if compute_preview_hash(authoritative) != preview_hash:
+        return result_preview_hash_mismatch(op_id, duration_ms)
+
+    # Requirement 3: the mandatory blast-radius statement.
+    reason = blast_radius_missing_reason(proposed_effect)
+    if reason is not None:
+        return result_blast_radius_required(op_id, reason, duration_ms)
+    return None
+
+
 async def _handle_needs_approval(
     *,
     op_id: str,
@@ -2017,6 +2104,7 @@ async def _handle_needs_approval(
     params: dict[str, Any],
     params_hash: str,
     duration_ms: float,
+    preview_hash: str | None = None,
 ) -> OperationResult:
     """Create a durable pending approval row and return an awaiting_approval result.
 
@@ -2024,6 +2112,13 @@ async def _handle_needs_approval(
     ``"needs_approval"``. Opens its own DB session (same pattern as
     :func:`audit_and_broadcast_safe`) so the pending row + request audit
     row commit atomically without coupling to any outer transaction.
+
+    For a ``destructive``-tier op (#3197) the park is gated first by
+    :func:`_destructive_binding_refusal`: it refuses (fail-closed, no row
+    written) unless the caller presented a matching ``preview_hash`` and the
+    ``proposed_effect`` carries a blast-radius statement. The verified
+    ``preview_hash`` is then persisted on the row for approve-time
+    re-verification.
 
     On success returns :func:`~meho_backplane.operations._errors.result_awaiting_approval`
     with the pending row's id in ``extras["approval_request_id"]``.
@@ -2067,6 +2162,24 @@ async def _handle_needs_approval(
         params=params,
     )
 
+    # #3197: the destructive tier refuses to park (fail-closed, no durable
+    # row) unless the caller presented a matching preview_hash and the
+    # blast-radius statement is present. Non-destructive ops skip this
+    # entirely and park exactly as before.
+    if descriptor.safety_level == "destructive":
+        refusal = await _destructive_binding_refusal(
+            op_id=op_id,
+            connector_id=connector_id,
+            operator=operator,
+            target=target,
+            params=params,
+            preview_hash=preview_hash,
+            proposed_effect=proposed_effect,
+            duration_ms=duration_ms,
+        )
+        if refusal is not None:
+            return refusal
+
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -2080,6 +2193,7 @@ async def _handle_needs_approval(
                 params_hash=params_hash,
                 run_id=run_id,
                 proposed_effect=proposed_effect,
+                preview_hash=preview_hash,
             )
             await session.commit()
         # Publish AFTER commit so a phantom event cannot outlive a failed
@@ -2122,12 +2236,23 @@ async def dispatch(
     target: Any,
     params: dict[str, Any],
     _approved: bool = False,
+    preview_hash: str | None = None,
 ) -> OperationResult:
     """Single entry point for every MEHO operation.
 
     See the module docstring for the full algorithm + error contract.
     The function never raises; every operator-visible failure mode
     returns a structured :class:`OperationResult`.
+
+    ``preview_hash`` is the caller-presented preview-result-hash binding
+    for the ``destructive`` tier (#3197): the hash a prior
+    ``preview_operation`` of the identical ``(connector_id, op_id, target,
+    params)`` returned. It is consulted **only** when the op is
+    ``safety_level='destructive'`` and the policy gate routes the call to
+    ``needs-approval`` — the park is refused fail-closed unless it matches
+    the server-recomputed preview hash (see :func:`_destructive_binding_refusal`).
+    ``None`` (the default) for every non-destructive dispatch and on the
+    ``_approved`` resume path (the binding was verified at park + approve).
 
     ``_approved`` is an **internal** flag set only by the approval-queue
     resume path (:mod:`meho_backplane.api.v1.approvals`) after a human
@@ -2247,6 +2372,7 @@ async def dispatch(
                     params=params,
                     params_hash=params_hash,
                     duration_ms=duration_ms,
+                    preview_hash=preview_hash,
                 )
             if verdict is not PermissionVerdict.AUTO_EXECUTE:
                 # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds

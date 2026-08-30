@@ -66,14 +66,17 @@
 -#}
 {% from "_icons.html" import icon %}
 {#- Mirror of the ops-launcher ``safety_badge`` mold (``operations/_results.html``):
-    ``safety_level`` is the closed ``safe`` / ``caution`` / ``dangerous`` enum
-    stamped on every parked envelope (#1855). Colour-by-severity so a reviewer
-    scanning the modal reads the policy gate before the label -- error for
-    dangerous, warning for caution, ghost for safe. Kept local (not imported)
-    so the modal stays self-contained and StrictUndefined-safe -- the launcher
-    partial references launcher-only context at its top level. -#}
+    ``safety_level`` is the closed ``safe`` / ``caution`` / ``dangerous`` /
+    ``destructive`` enum stamped on every parked envelope (#1855, +#3197 tier).
+    Colour-by-severity so a reviewer scanning the modal reads the policy gate
+    before the label -- error for destructive + dangerous, warning for caution,
+    ghost for safe. Kept local (not imported) so the modal stays self-contained
+    and StrictUndefined-safe -- the launcher partial references launcher-only
+    context at its top level. -#}
 {%- macro proposed_effect_safety_badge(level) -%}
-  {%- if level == "dangerous" -%}
+  {%- if level == "destructive" -%}
+    <span class="badge badge-error badge-sm font-semibold" title="Destructive — deletes objects; mandatory human approval, irreversible">{{ level }}</span>
+  {%- elif level == "dangerous" -%}
     <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ level }}</span>
   {%- elif level == "caution" -%}
     <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ level }}</span>
@@ -288,6 +291,63 @@
         {% endif %}
       {% endif %}
 
+      {#- Blast-radius statement (#3197) for the destructive tier. The
+          dispatcher refuses to park a destructive op unless its
+          ``proposed_effect`` carries this block (object identity, enumerated
+          child objects, irreversibility class), promoted to the top level by
+          ``_build_proposed_effect``. Render it prominently — this is what the
+          reviewer reads to see exactly what dies — as an error-tinted card
+          above the generic field table. All keys read via ``.get`` on the
+          real dict (StrictUndefined-safe). -#}
+      {% set blast = effect.get("blast_radius") %}
+      {% if blast is mapping and blast %}
+        <div class="mt-3 rounded-box border border-error/40 bg-error/5 p-3" aria-label="Blast radius">
+          <div class="flex items-center justify-between gap-3">
+            <h4 class="text-sm font-semibold text-error">Blast radius — what this destroys</h4>
+            {% if blast.get("irreversibility") %}
+              <span class="badge badge-error badge-sm font-mono" title="Irreversibility class">{{ blast.get("irreversibility") }}</span>
+            {% endif %}
+          </div>
+          {% if blast.get("object") %}
+            <dl class="mt-2 text-sm">
+              <div class="flex items-baseline justify-between gap-4">
+                <dt class="shrink-0 text-base-content/55">Object</dt>
+                <dd class="font-mono [overflow-wrap:anywhere]">
+                  {% set obj = blast.get("object") %}
+                  {% if obj is mapping or (obj is sequence and obj is not string) %}
+                    <pre class="whitespace-pre-wrap text-xs">{{ obj | tojson(indent=2) }}</pre>
+                  {% else %}
+                    {{ obj }}
+                  {% endif %}
+                </dd>
+              </div>
+            </dl>
+          {% endif %}
+          {% set children = blast.get("children") %}
+          <div class="mt-2 text-sm">
+            <p class="text-base-content/55">
+              Child objects also destroyed
+              {% if children is sequence and children is not string %}({{ children | length }}){% endif %}
+            </p>
+            {% if children is sequence and children is not string and children | length %}
+              <ul class="mt-1 list-disc space-y-0.5 pl-5 font-mono text-xs [overflow-wrap:anywhere]">
+                {% for child in children %}
+                  <li>
+                    {% if child is mapping or (child is sequence and child is not string) %}
+                      <pre class="whitespace-pre-wrap">{{ child | tojson(indent=2) }}</pre>
+                    {% else %}
+                      {{ child }}
+                    {% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="mt-1 text-xs opacity-80">None — only the object above is destroyed.</p>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+
       {#- The operation-specific fields: a bespoke ``preview`` when a builder
           computed one, else the generic redaction-safe ``params_echo``. Render
           the fields WITHIN that sub-dict as a table -- scalars inline, nested
@@ -340,15 +400,16 @@
         gated write actually executes, so surface what each decision does BEFORE
         the operator acts -- mirroring the ops Run modal's ``data-run-gate``
         alert (#1881) and the vault confirm gate (#1957). ``safety_level`` is the
-        closed ``safe``/``caution``/``dangerous`` enum already stamped on every
-        parked envelope (#1855) and rendered structurally above (#2447); reuse it
-        as the banner's severity source (error for dangerous, warning otherwise,
-        including when it is absent). No server change -- the value already rides
+        closed ``safe``/``caution``/``dangerous``/``destructive`` enum already
+        stamped on every parked envelope (#1855, +#3197 tier) and rendered
+        structurally above (#2447); reuse it as the banner's severity source
+        (error for destructive + dangerous, warning otherwise, including when it
+        is absent). No server change -- the value already rides
         ``proposed_effect``. -#}
     {% set safety = effect.get("safety_level") %}
     <div
       role="alert"
-      class="alert {{ 'alert-error' if safety == 'dangerous' else 'alert-warning' }} mt-5 items-start"
+      class="alert {{ 'alert-error' if safety in ('dangerous', 'destructive') else 'alert-warning' }} mt-5 items-start"
       data-approval-gate="confirm"
       data-safety-level="{{ safety if safety else '' }}"
     >

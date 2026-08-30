@@ -220,6 +220,32 @@ connector-related release-notes line.
   preview-hash binding (#3197) and the first governed delete op family
   (#3198) build on it.
 
+### Added — governed deletes: preview-result-hash binding + mandatory blast-radius on the approvals plane (evoila-bosnia/meho-internal#3183 / #3197)
+
+- The `destructive` tier now enforces requirements 2 and 3 of
+  `docs/decisions/governed-delete-operations.md`, both fail-closed at the
+  dispatcher park seam. **Preview-result-hash binding:** `preview_operation`
+  emits a stable `preview_hash` over the canonicalised resolved request;
+  the caller presents it on the subsequent `call_operation`
+  (`preview_hash` arg on `CallOperationBody` and the MCP `call_operation`
+  schema — a dispatch control, kept out of `params_hash` and the op
+  schema). A destructive op that reaches `needs-approval` refuses to park
+  unless the dispatcher's server-recomputed preview hash **matches** the
+  presented one — a missing hash, a non-resolvable preview, or a mismatch
+  (params swapped between preview and call) is `denied` fail-closed. The
+  verified hash is persisted on a new nullable `approval_request.preview_hash`
+  column (Alembic migration `0086`, distinct from the existing
+  `params_hash` swap-defence) and re-verified when the request is approved
+  (a destructive row missing the binding is a 422 on every approve
+  surface). **Mandatory blast-radius:** a destructive op cannot park with
+  only the identifier-only default — its `proposed_effect` must carry a
+  `blast_radius` block (object identity, enumerated child objects,
+  irreversibility class), promoted to the envelope top level and rendered
+  as a "what this destroys" card in the console approval modal; a missing
+  block refuses the park. No connector adopts the tier yet — this ships the
+  binding + blast-radius mechanism; the first governed delete op family
+  (#3198) builds on it.
+
 ### Changed — Audit + Broadcast console drawers resolve reference GUIDs to human-investigable substance (evoila-bosnia/meho-internal#236)
 
 - The operator console's **Audit row** and **Broadcast event** detail

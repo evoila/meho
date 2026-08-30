@@ -103,6 +103,7 @@ __all__ = [
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
     "ParamsMismatchError",
+    "PreviewBindingMissingError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
@@ -173,6 +174,31 @@ class ParamsMismatchError(ApprovalError):
         super().__init__(
             f"params hash mismatch on approval_request {request_id}; "
             "original params must be supplied unchanged"
+        )
+
+
+class PreviewBindingMissingError(ApprovalError):
+    """A ``destructive`` request is missing its preview-result-hash binding.
+
+    Raised by :func:`approve_request` (via :func:`_load_pending_for_approval`)
+    when a ``destructive``-tier request — identified by
+    ``proposed_effect.safety_level == "destructive"`` — carries no
+    ``preview_hash``. The dispatcher refuses to *park* a destructive op
+    without a verified binding (#3197, decision requirement 2), so a
+    well-formed pending row always has one; this is the fail-closed
+    re-verification at *approve* time, extending the existing
+    :class:`ParamsMismatchError` swap-defence to the preview binding. The
+    route layer maps it to 422. It fires only if a destructive row reached
+    the queue through some path that bypassed the dispatcher's park gate —
+    the approval is refused rather than clearing an unbound destructive op.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(
+            f"approval_request {request_id} is destructive-tier but carries no "
+            "preview_hash binding; approval refused (the preview-result-hash "
+            "binding is mandatory for the destructive tier, #3197)"
         )
 
 
@@ -371,6 +397,7 @@ async def create_pending_request(
     run_id: uuid.UUID | None = None,
     proposed_effect: dict[str, Any] | None = None,
     expires_at: datetime | None = None,
+    preview_hash: str | None = None,
 ) -> ApprovalRequest:
     """Insert a pending :class:`ApprovalRequest` row + one audit row.
 
@@ -403,6 +430,12 @@ async def create_pending_request(
             ``created_at + APPROVAL_DEFAULT_TTL``; an explicit value is
             honoured but capped at that ceiling. The row is never parked
             with a null deadline — the TTL sweep depends on it.
+        preview_hash: The preview-result-hash binding for the
+            ``destructive`` tier (#3197). Stored verbatim on the row and
+            re-verified at approve time. ``None`` for every non-destructive
+            request (the binding is a destructive-tier requirement only);
+            the dispatcher supplies the value it already verified against
+            the recomputed preview.
 
     Returns:
         The flushed :class:`ApprovalRequest` row.
@@ -461,6 +494,7 @@ async def create_pending_request(
         connector_id=connector_id,
         target_id=target_id,
         params_hash=params_hash,
+        preview_hash=preview_hash,
         params=params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
@@ -533,6 +567,10 @@ async def approve_request(
        request id alone and does not have the original params. The
        agent's REST path still supplies them so the swap defence applies
        on that branch.
+    6. If the row is ``destructive``-tier, it carries a ``preview_hash``
+       binding (else 422, :class:`PreviewBindingMissingError`). The
+       preview-result-hash re-verification (#3197, decision requirement 2)
+       — checked on every approve surface, independent of *params*.
 
     Then:
 
@@ -569,6 +607,8 @@ async def approve_request(
             break-glass is disabled (G11.7-T1 #1401).
         ParamsMismatchError: Hash of *params* != stored ``params_hash``
             (only raised when *params* is supplied).
+        PreviewBindingMissingError: The row is ``destructive``-tier but
+            carries no ``preview_hash`` binding (#3197).
     """
     request = await _load_pending_for_approval(
         session, request_id, operator=operator, params=params
@@ -1134,8 +1174,9 @@ async def _load_pending_for_approval(
     Runs the full approve precondition ladder in order so callers learn
     the most specific reason first: role gate → tenant-scoped load →
     pending guard → self-approval guard (G11.7-T1 #1401) → params-hash
-    check (only when *params* is supplied). Returns the validated
-    pending row; the caller flips status + writes the decision audit row.
+    check (only when *params* is supplied) → destructive preview-binding
+    re-verification (#3197). Returns the validated pending row; the caller
+    flips status + writes the decision audit row.
     """
     _check_reviewer_role(operator)
     request = await _load_for_tenant(session, request_id, operator.tenant_id)
@@ -1146,7 +1187,25 @@ async def _load_pending_for_approval(
         incoming_hash = compute_params_hash(params)
         if incoming_hash != request.params_hash:
             raise ParamsMismatchError(request_id)
+    _check_destructive_preview_binding(request)
     return request
+
+
+def _check_destructive_preview_binding(request: ApprovalRequest) -> None:
+    """Raise :class:`PreviewBindingMissingError` on an unbound destructive request.
+
+    The approve-time half of the preview-result-hash binding (#3197,
+    decision requirement 2). Extends the params-hash swap-defence: a
+    ``destructive``-tier request (``proposed_effect.safety_level ==
+    "destructive"``) must carry a ``preview_hash``. The dispatcher already
+    refuses to park one without a *verified* binding, so this is the
+    fail-closed re-verification at the decision point — an unbound
+    destructive row can never be approved into execution. Non-destructive
+    requests are unaffected (they legitimately carry no binding).
+    """
+    effect = request.proposed_effect or {}
+    if effect.get("safety_level") == "destructive" and not request.preview_hash:
+        raise PreviewBindingMissingError(request.id)
 
 
 async def _load_for_tenant(

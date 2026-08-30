@@ -489,6 +489,70 @@ def result_announce_required(op_id: str, remediation: str, duration_ms: float) -
     )
 
 
+def result_preview_binding_required(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """Destructive-tier park refused: no bindable preview was presented (#3197).
+
+    Decision requirement 2. A ``destructive`` op refuses to park unless a
+    ``preview_operation`` of the identical ``(connector_id, op_id, target,
+    params)`` was executed and its ``preview_hash`` is presented on the
+    call. Returned when the caller presented no hash, or the op's preview
+    is not resolvable (so there is no literal effect to bind). Fail-closed:
+    the op is neither executed nor parked. ``status`` is ``"denied"`` with a
+    distinct ``error_code`` so an agent can tell this from a policy denial
+    and self-remediate by previewing first.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: {reason}",
+        duration_ms=duration_ms,
+        extras={"error_code": "preview_binding_required", "reason": reason},
+    )
+
+
+def result_preview_hash_mismatch(op_id: str, duration_ms: float) -> OperationResult:
+    """Destructive-tier park refused: presented preview hash did not match (#3197).
+
+    Decision requirement 2, the tamper-evidence half. The dispatcher
+    recomputed the authoritative preview hash for the exact
+    ``(connector_id, op_id, target, params)`` being dispatched and it did
+    not equal the caller-presented ``preview_hash`` — the params were
+    swapped between preview and call, or a stale / forged hash was
+    supplied. Fail-closed: neither executed nor parked.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=(
+            "denied: preview_hash does not match the resolved request; the "
+            "previewed and dispatched (connector_id, op_id, target, params) "
+            "must be identical — re-run preview_operation and present its hash"
+        ),
+        duration_ms=duration_ms,
+        extras={"error_code": "preview_hash_mismatch"},
+    )
+
+
+def result_blast_radius_required(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """Destructive-tier park refused: no blast-radius statement on the payload (#3197).
+
+    Decision requirement 3. A ``destructive`` op cannot park with only the
+    identifier-only default: its ``proposed_effect`` must carry a
+    blast-radius block (object identity, enumerated child objects,
+    irreversibility class) so the reviewer reads what dies *in the queue*.
+    Returned when that block is absent or malformed. Fail-closed: the op is
+    neither executed nor parked. ``reason`` names the missing field so the
+    connector author can populate the op's preview builder.
+    """
+    return OperationResult(
+        status="denied",
+        op_id=op_id,
+        error=f"denied: destructive op requires a blast-radius statement — {reason}",
+        duration_ms=duration_ms,
+        extras={"error_code": "blast_radius_required", "reason": reason},
+    )
+
+
 def result_awaiting_approval(
     op_id: str,
     approval_request_id: uuid.UUID,

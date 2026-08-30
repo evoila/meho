@@ -5744,6 +5744,18 @@ class ApprovalRequest(Base):
       ``/approve`` path is re-hashed against this to detect substitution
       between request and approval.
 
+    * ``preview_hash`` -- Text nullable. The preview-result-hash binding
+      for the ``destructive`` tier (#3197, decision requirement 2). SHA-256
+      hex over the canonicalised *resolved preview envelope* of the
+      identical ``(connector_id, op_id, target, params)``
+      (:func:`~meho_backplane.operations._request_preview.compute_preview_hash`),
+      recorded at park time and re-verified when the request is approved.
+      Distinct from ``params_hash``: that hashes the request *params*; this
+      hashes the *preview result* the approver was shown ("exactly what
+      dies"). NULL for every non-``destructive`` request (the binding is a
+      destructive-tier requirement only) and for pre-0086 rows. Added by
+      migration ``0086``.
+
     * ``params`` -- JSON nullable (JSONB on PG). The original dispatch
       params, stored verbatim (#1503) so a parked **direct** operator op
       approved via ``/decide`` or MCP by-id — surfaces that hold only the
@@ -5860,6 +5872,13 @@ class ApprovalRequest(Base):
         nullable=True,
         default=None,
     )
+    # Preview-result-hash binding for the ``destructive`` tier (#3197).
+    # SHA-256 hex over the canonicalised resolved preview envelope of the
+    # identical (connector_id, op_id, target, params); stamped at park time
+    # and re-verified at approve time. Distinct from ``params_hash`` (which
+    # hashes params, not the preview result). NULL for every non-destructive
+    # request and for pre-0086 rows.
+    preview_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Proposed effect -- human-readable summary for the reviewer.
     proposed_effect: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,

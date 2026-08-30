@@ -61,6 +61,7 @@ from meho_backplane.agents import (
     stop_grant_expiry_sweeper,
 )
 from meho_backplane.api.openapi_maturity import inject_maturity_extensions
+from meho_backplane.api.v1.addon_capability import router as api_v1_addon_capability_router
 from meho_backplane.api.v1.addon_pairing import router as api_v1_addon_pairing_router
 from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
@@ -1079,6 +1080,11 @@ app.include_router(api_v1_service_grants_router)
 # sibling add-on product paired as a scoped Keycloak service principal over a
 # versioned integration contract (Initiative #2900 foundation).
 app.include_router(api_v1_addon_pairing_router)
+# #3026 -- add-on capability advertisement: a paired add-on declares its
+# surfaces (meta-tool / CLI verb families, console panels, event kinds)
+# against the negotiated contract; the backplane persists the declaration and
+# activates surfaces only while paired and contract-healthy (Initiative #2900).
+app.include_router(api_v1_addon_capability_router)
 # G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
 # create / update / delete / history). Reads gated to operator+;
 # writes gated to tenant_admin. Tenant-scoped via the JWT's

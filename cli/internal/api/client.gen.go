@@ -70,6 +70,14 @@ const (
 	CandidateHintConfidenceMedium CandidateHintConfidence = "medium"
 )
 
+// Defines values for CapabilityKind.
+const (
+	CapabilityKindCliVerbFamily  CapabilityKind = "cli_verb_family"
+	CapabilityKindConsolePanel   CapabilityKind = "console_panel"
+	CapabilityKindEventKind      CapabilityKind = "event_kind"
+	CapabilityKindMetaToolFamily CapabilityKind = "meta_tool_family"
+)
+
 // Defines values for ConfirmVerifyResponseAnswer.
 const (
 	ConfirmVerifyResponseAnswerEscalate ConfirmVerifyResponseAnswer = "escalate"
@@ -2815,6 +2823,70 @@ type CandidateHint struct {
 // CandidateHintConfidence defines model for CandidateHint.Confidence.
 type CandidateHintConfidence string
 
+// CapabilityDeclaration One advertised surface — a “(kind, name)“ pair plus an optional label.
+//
+// “name“ is the surface identifier within its kind (a meta-tool family
+// name, a CLI verb family, a console panel id, an event kind). “kind“
+// outside :class:`CapabilityKind` is a 422; a malformed “name“ (spaces,
+// control chars) is likewise rejected.
+type CapabilityDeclaration struct {
+	DisplayLabel *string `json:"display_label"`
+
+	// Kind The surface kinds a paired add-on may advertise under contract v1.
+	//
+	// A ``str`` enum so it serialises as its wire value and an unknown kind on
+	// the request path fails Pydantic validation with a 422 that names the
+	// offending value — the "rejected loudly" contract. The vocabulary is
+	// versioned with the integration contract: adding a kind is a coordinated
+	// change across this enum, the ``addon_capability.kind`` CHECK constraint,
+	// and :data:`meho_backplane.db.models.ADDON_CAPABILITY_KINDS`.
+	Kind CapabilityKind `json:"kind"`
+	Name string         `json:"name"`
+}
+
+// CapabilityDeclarationResponse The declared surface set for one add-on plus its live activation state.
+//
+// “active“ is derived, never stored: it is “True“ only while the owning
+// pairing is present **and** contract-healthy (re-evaluated live via
+// :func:`meho_backplane.operations.addon_pairing_contract.is_contract_compatible`),
+// so it flips with the pairing's health without any surface being written
+// twice. “declared_contract_version“ is the pairing's negotiated version
+// the declaration was advertised against.
+type CapabilityDeclarationResponse struct {
+	Active                  bool             `json:"active"`
+	Addon                   string           `json:"addon"`
+	Capabilities            []CapabilityRead `json:"capabilities"`
+	DeclaredContractVersion int              `json:"declared_contract_version"`
+}
+
+// CapabilityKind The surface kinds a paired add-on may advertise under contract v1.
+//
+// A “str“ enum so it serialises as its wire value and an unknown kind on
+// the request path fails Pydantic validation with a 422 that names the
+// offending value — the "rejected loudly" contract. The vocabulary is
+// versioned with the integration contract: adding a kind is a coordinated
+// change across this enum, the “addon_capability.kind“ CHECK constraint,
+// and :data:`meho_backplane.db.models.ADDON_CAPABILITY_KINDS`.
+type CapabilityKind string
+
+// CapabilityRead One persisted capability row, built from the ORM via “model_validate“.
+type CapabilityRead struct {
+	DeclaredContractVersion int                `json:"declared_contract_version"`
+	DisplayLabel            *string            `json:"display_label"`
+	Id                      openapi_types.UUID `json:"id"`
+
+	// Kind The surface kinds a paired add-on may advertise under contract v1.
+	//
+	// A ``str`` enum so it serialises as its wire value and an unknown kind on
+	// the request path fails Pydantic validation with a 422 that names the
+	// offending value — the "rejected loudly" contract. The vocabulary is
+	// versioned with the integration contract: adding a kind is a coordinated
+	// change across this enum, the ``addon_capability.kind`` CHECK constraint,
+	// and :data:`meho_backplane.db.models.ADDON_CAPABILITY_KINDS`.
+	Kind CapabilityKind `json:"kind"`
+	Name string         `json:"name"`
+}
+
 // CatalogListResponse Wire envelope for “GET /api/v1/connectors/catalog“.
 //
 // Wrapped in “catalog“ (not a bare list) so future paging fields can
@@ -3756,6 +3828,17 @@ type DecideResponseBodyDispatchResult1 = []interface{}
 // DecideResponseBody_DispatchResult defines model for DecideResponseBody.DispatchResult.
 type DecideResponseBody_DispatchResult struct {
 	union json.RawMessage
+}
+
+// DeclareCapabilitiesRequest Replace-all intake for the capability declaration (the full surface set).
+//
+// A declaration is the add-on's *complete* current surface set: persisting
+// it replaces any prior declaration wholesale, so a capability dropped from
+// the list is deactivated and leaves no dead surface. A “(kind, name)“
+// listed twice is a malformed declaration and is rejected loudly rather
+// than silently de-duplicated.
+type DeclareCapabilitiesRequest struct {
+	Capabilities []CapabilityDeclaration `json:"capabilities"`
 }
 
 // DeprecateTemplateResponse Response for “meho_runbook_deprecate_template“ -- the now-deprecated coordinates.
@@ -8483,6 +8566,16 @@ type ShowPairingApiV1AddonsPairingsNameGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams defines parameters for ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet.
+type ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams defines parameters for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut.
+type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams defines parameters for HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost.
 type HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -9808,6 +9901,9 @@ type VaultVersionsUiVaultVersionsGetParams struct {
 
 // PairAddonApiV1AddonsPairingsPostJSONRequestBody defines body for PairAddonApiV1AddonsPairingsPost for application/json ContentType.
 type PairAddonApiV1AddonsPairingsPostJSONRequestBody = PairAddonRequest
+
+// DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody defines body for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut for application/json ContentType.
+type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody = DeclareCapabilitiesRequest
 
 // RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody defines body for RegisterAgentPrincipalApiV1AgentPrincipalsPost for application/json ContentType.
 type RegisterAgentPrincipalApiV1AgentPrincipalsPostJSONRequestBody = AgentPrincipalCreate
@@ -11613,6 +11709,14 @@ type ClientInterface interface {
 	// ShowPairingApiV1AddonsPairingsNameGet request
 	ShowPairingApiV1AddonsPairingsNameGet(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet request
+	ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet(ctx context.Context, name string, params *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBody request with any body
+	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBody(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13121,6 +13225,42 @@ func (c *Client) UnpairAddonApiV1AddonsPairingsNameDelete(ctx context.Context, n
 
 func (c *Client) ShowPairingApiV1AddonsPairingsNameGet(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewShowPairingApiV1AddonsPairingsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet(ctx context.Context, name string, params *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBody(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19805,6 +19945,117 @@ func NewShowPairingApiV1AddonsPairingsNameGetRequest(server string, name string,
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetRequest generates requests for ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet
+func NewShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetRequest(server string, name string, params *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s/capabilities", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequest calls the generic DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut builder with application/json body
+func NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequest(server string, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequestWithBody generates requests for DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut with any type of body
+func NewDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutRequestWithBody(server string, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/addons/pairings/%s/capabilities", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -40499,6 +40750,14 @@ type ClientWithResponsesInterface interface {
 	// ShowPairingApiV1AddonsPairingsNameGetWithResponse request
 	ShowPairingApiV1AddonsPairingsNameGetWithResponse(ctx context.Context, name string, params *ShowPairingApiV1AddonsPairingsNameGetParams, reqEditors ...RequestEditorFn) (*ShowPairingApiV1AddonsPairingsNameGetResponse, error)
 
+	// ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetWithResponse request
+	ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetWithResponse(ctx context.Context, name string, params *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams, reqEditors ...RequestEditorFn) (*ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse, error)
+
+	// DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBodyWithResponse request with any body
+	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBodyWithResponse(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error)
+
+	DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithResponse(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error)
+
 	// HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request
 	HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error)
 
@@ -42062,6 +42321,52 @@ func (r ShowPairingApiV1AddonsPairingsNameGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ShowPairingApiV1AddonsPairingsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *CapabilityDeclarationResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *CapabilityDeclarationResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -50245,6 +50550,32 @@ func (c *ClientWithResponses) ShowPairingApiV1AddonsPairingsNameGetWithResponse(
 	return ParseShowPairingApiV1AddonsPairingsNameGetResponse(rsp)
 }
 
+// ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetWithResponse request returning *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse
+func (c *ClientWithResponses) ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetWithResponse(ctx context.Context, name string, params *ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetParams, reqEditors ...RequestEditorFn) (*ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse, error) {
+	rsp, err := c.ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse(rsp)
+}
+
+// DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBodyWithResponse request with arbitrary body returning *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse
+func (c *ClientWithResponses) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBodyWithResponse(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error) {
+	rsp, err := c.DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithResponse(ctx context.Context, name string, params *DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutParams, body DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutJSONRequestBody, reqEditors ...RequestEditorFn) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error) {
+	rsp, err := c.DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPut(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse(rsp)
+}
+
 // HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse request returning *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse
 func (c *ClientWithResponses) HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostWithResponse(ctx context.Context, name string, params *HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostParams, reqEditors ...RequestEditorFn) (*HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPostResponse, error) {
 	rsp, err := c.HeartbeatPairingApiV1AddonsPairingsNameHeartbeatPost(ctx, name, params, reqEditors...)
@@ -55060,6 +55391,72 @@ func ParseShowPairingApiV1AddonsPairingsNameGetResponse(rsp *http.Response) (*Sh
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PairedAddonRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse parses an HTTP response from a ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetWithResponse call
+func ParseShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse(rsp *http.Response) (*ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowCapabilitiesApiV1AddonsPairingsNameCapabilitiesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CapabilityDeclarationResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse parses an HTTP response from a DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutWithResponse call
+func ParseDeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse(rsp *http.Response) (*DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeclareCapabilitiesApiV1AddonsPairingsNameCapabilitiesPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CapabilityDeclarationResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

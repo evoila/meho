@@ -9963,6 +9963,120 @@
         }
       }
     },
+    "/api/v1/addons/pairings/{name}/capabilities": {
+      "put": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Declare Capabilities",
+        "description": "Declare an add-on's advertised surfaces (paired service principal only).\n\nThe paired add-on authenticates as its own **service** principal and\nreplaces its declaration wholesale. A non-service principal is 403; an\nunpaired add-on is 404; an unknown capability kind or a malformed /\nduplicate declaration is 422 (rejected by the request schema before this\nhandler runs). Audited via the audit middleware.",
+        "operationId": "declare_capabilities_api_v1_addons_pairings__name__capabilities_put",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclareCapabilitiesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityDeclarationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "Show Capabilities",
+        "description": "Return one add-on's declared surfaces + activation state (operator-gated).\n\nCross-tenant probes and unpaired add-ons return 404.",
+        "operationId": "show_capabilities_api_v1_addons_pairings__name__capabilities_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityDeclarationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conventions": {
       "get": {
         "tags": [
@@ -24141,6 +24255,112 @@
         "title": "CandidateHint",
         "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets import`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability."
       },
+      "CapabilityDeclaration": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/CapabilityKind"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:/-]+$",
+            "title": "Name"
+          },
+          "display_label": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Display Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "title": "CapabilityDeclaration",
+        "description": "One advertised surface \u2014 a ``(kind, name)`` pair plus an optional label.\n\n``name`` is the surface identifier within its kind (a meta-tool family\nname, a CLI verb family, a console panel id, an event kind). ``kind``\noutside :class:`CapabilityKind` is a 422; a malformed ``name`` (spaces,\ncontrol chars) is likewise rejected."
+      },
+      "CapabilityDeclarationResponse": {
+        "properties": {
+          "addon": {
+            "type": "string",
+            "title": "Addon"
+          },
+          "declared_contract_version": {
+            "type": "integer",
+            "title": "Declared Contract Version"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityRead"
+            },
+            "type": "array",
+            "title": "Capabilities"
+          }
+        },
+        "type": "object",
+        "required": [
+          "addon",
+          "declared_contract_version",
+          "active",
+          "capabilities"
+        ],
+        "title": "CapabilityDeclarationResponse",
+        "description": "The declared surface set for one add-on plus its live activation state.\n\n``active`` is derived, never stored: it is ``True`` only while the owning\npairing is present **and** contract-healthy (re-evaluated live via\n:func:`meho_backplane.operations.addon_pairing_contract.is_contract_compatible`),\nso it flips with the pairing's health without any surface being written\ntwice. ``declared_contract_version`` is the pairing's negotiated version\nthe declaration was advertised against."
+      },
+      "CapabilityKind": {
+        "type": "string",
+        "enum": [
+          "meta_tool_family",
+          "cli_verb_family",
+          "console_panel",
+          "event_kind"
+        ],
+        "title": "CapabilityKind",
+        "description": "The surface kinds a paired add-on may advertise under contract v1.\n\nA ``str`` enum so it serialises as its wire value and an unknown kind on\nthe request path fails Pydantic validation with a 422 that names the\noffending value \u2014 the \"rejected loudly\" contract. The vocabulary is\nversioned with the integration contract: adding a kind is a coordinated\nchange across this enum, the ``addon_capability.kind`` CHECK constraint,\nand :data:`meho_backplane.db.models.ADDON_CAPABILITY_KINDS`."
+      },
+      "CapabilityRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CapabilityKind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "display_label": {
+            "type": "string",
+            "nullable": true,
+            "title": "Display Label"
+          },
+          "declared_contract_version": {
+            "type": "integer",
+            "title": "Declared Contract Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "display_label",
+          "declared_contract_version"
+        ],
+        "title": "CapabilityRead",
+        "description": "One persisted capability row, built from the ORM via ``model_validate``."
+      },
       "CatalogListResponse": {
         "properties": {
           "catalog": {
@@ -25546,6 +25766,24 @@
         ],
         "title": "DecideResponseBody",
         "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection."
+      },
+      "DeclareCapabilitiesRequest": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityDeclaration"
+            },
+            "type": "array",
+            "title": "Capabilities"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "capabilities"
+        ],
+        "title": "DeclareCapabilitiesRequest",
+        "description": "Replace-all intake for the capability declaration (the full surface set).\n\nA declaration is the add-on's *complete* current surface set: persisting\nit replaces any prior declaration wholesale, so a capability dropped from\nthe list is deactivated and leaves no dead surface. A ``(kind, name)``\nlisted twice is a malformed declaration and is rejected loudly rather\nthan silently de-duplicated."
       },
       "DeprecateTemplateResponse": {
         "properties": {

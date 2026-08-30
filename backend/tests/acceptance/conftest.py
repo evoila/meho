@@ -311,6 +311,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # test errors at setup with ``cannot truncate a table referenced in a
     # foreign key constraint``.
     "addon_pairing",
+    # ``addon_capability.pairing_id`` is a ``REFERENCES addon_pairing(id)`` FK
+    # from migration ``0081`` (#3026 capability advertisement). PG rejects
+    # truncating ``addon_pairing`` unless every referencing table is listed in
+    # the same statement, so this must appear here. It carries no direct
+    # ``tenant`` FK, so the tenant-FK drift guard does not cover it — listed
+    # by hand.
+    "addon_capability",
     "targets",
     "tenant",
 )

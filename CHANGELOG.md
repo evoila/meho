@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — dispatch flight recorder: security-review-first design decision (#3207)
+
+- Records the operator-ratified (2026-08-30/31) design for a per-dispatch
+  **flight recorder** — ordered request/response spans attached to a
+  dispatch's `audit_log` row so an operator (and a paired add-on's run UI)
+  can see the actual vendor calls a connector made, the composite sub-steps,
+  and the JSONFlux reduction (input → kept fields → output → handle). **Design
+  only, no code**; this does **not** close #3207. The decision
+  (`docs/decisions/dispatch-flight-recorder.md`) fixes the security review
+  first (the #2901 posture): fail-closed redaction (header allowlist,
+  per-connector body-path scrub, hard-excluded credential/session/token op
+  families), caps (64 KB/span, 1 MB/trace, ~50 spans with poll-collapse),
+  short retention (14 d lab / 7 d default; the audit row stays the permanent
+  record), a best-effort failure invariant (the recorder can never fail or
+  slow a dispatch), and a dedicated Postgres trace store. Two operator
+  overrides are recorded verbatim: traces are **agent-readable** through the
+  existing narrow-waist `result_query` result-handle idiom — no new per-op
+  tool, no raw payload into agent context, conditional on the fail-closed
+  redaction and degrading any redaction-uncertain trace to operator-only
+  (postulates 5/6 intact); and typed connectors are **instrumented in v1
+  ("all of them")**, not a follow-up wave. Composes with the satellite
+  write-path (#2901 / #3187) and governed-delete (#3183 / #3195) decisions;
+  implementation seams are filed as sibling Tasks under #3207.
+
 ### Changed — Audit + Broadcast console drawers resolve reference GUIDs to human-investigable substance (evoila-bosnia/meho-internal#236)
 
 - The operator console's **Audit row** and **Broadcast event** detail

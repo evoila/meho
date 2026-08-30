@@ -264,6 +264,7 @@ from meho_backplane.connectors import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
@@ -710,7 +711,7 @@ async def _execute_and_audit(
         connector_id=connector_id,
     )
     try:
-        return await _execute_and_audit_inner(
+        result = await _execute_and_audit_inner(
             op_id=op_id,
             connector_id=connector_id,
             descriptor=descriptor,
@@ -724,7 +725,23 @@ async def _execute_and_audit(
             scrub_response=scrub_response,
         )
     finally:
+        # Persists the trace via record_trace on the recorder's best-effort
+        # path (owning root only); never raises (F7).
         await flight_recorder_capture.end_dispatch_capture(capture_handle)
+    # Agent read-surface live trigger (#3216, F5). Only the owning ROOT dispatch
+    # (whose OperationResult the agent sees) surfaces a trace handle; nested
+    # composite children never persist their own trace, so they never attach.
+    # ``attach_agent_trace_handle`` is best-effort (F7): it mints the handle
+    # behind the per-tenant gate + redaction-uncertainty degrade and returns the
+    # unmodified ``result`` on every no-handle / failure path, so the trigger can
+    # never fail, block, or alter the dispatch. Runs after the audit commit.
+    if capture_handle.owns and capture_handle.scope is not None:
+        result = await attach_agent_trace_handle(
+            result,
+            operator=operator,
+            audit_id=capture_handle.scope.audit_id,
+        )
+    return result
 
 
 async def _execute_and_audit_inner(

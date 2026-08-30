@@ -465,6 +465,11 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   FKs; must be listed alongside ``tenant`` and ``addon_pairing`` or PG
         #   rejects the per-test TRUNCATE with ``cannot truncate a table
         #   referenced in a foreign key constraint``.
+        # * ``dispatch_trace`` / ``dispatch_trace_span`` — migration 0085 (#3212
+        #   flight recorder): ``dispatch_trace.tenant_id`` is a real
+        #   ``REFERENCES tenant(id)`` FK and ``dispatch_trace_span`` a real
+        #   ``REFERENCES dispatch_trace(id) ON DELETE CASCADE`` FK; both must be
+        #   listed alongside ``tenant`` or PG rejects the per-test TRUNCATE.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
@@ -479,7 +484,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "broadcast_override, agent_definition, "
+                "dispatch_trace_span, dispatch_trace, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -552,7 +558,8 @@ async def pg_engine_empty_tenant(
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "broadcast_override, agent_definition, "
+                "dispatch_trace_span, dispatch_trace, tenant",
             ),
         )
         await conn.commit()

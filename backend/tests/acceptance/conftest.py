@@ -202,6 +202,15 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "approval_request",
     "audit_log",
     "broadcast_override",
+    # ``dispatch_trace.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0085`` (#3212 flight recorder), and ``dispatch_trace_span``
+    # carries a real FK ``dispatch_trace(id) ON DELETE CASCADE``. PG rejects
+    # truncating ``tenant`` (and ``dispatch_trace``) unless every referencing
+    # table is listed in the same statement, so both must appear here or every
+    # PG-backed acceptance test errors at setup with ``cannot truncate a table
+    # referenced in a foreign key constraint``.
+    "dispatch_trace",
+    "dispatch_trace_span",
     "documents",
     "endpoint_descriptor",
     # ``event_outbox.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from

@@ -90,6 +90,37 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: trace store + retention reaper + per-tenant capture config + kill switch (#3212)
+
+- Ships the storage + config substrate of the dispatch flight recorder
+  (F1/F4/F6 of `docs/decisions/dispatch-flight-recorder.md`), the foundation
+  the capture-seam and redaction tasks build on. **No capture or vendor-call
+  instrumentation here** — this task provides the schema, the capture-config
+  resolution, the retention job, and the internal persistence API.
+  - **Trace store (F6):** two new tables — a per-dispatch `dispatch_trace`
+    header and an ordered `dispatch_trace_span` child (`ON DELETE CASCADE`).
+    The trace is **referenced from** the dispatch's `audit_log` row via a
+    soft-FK `audit_id`, never embedded in it; `audit_log` stays slim /
+    append-only, the permanent record of account.
+  - **Per-tenant capture default (F1):** `tenant.flight_recorder_enabled`
+    (Boolean, OFF by default following the `announce_gate_enabled` precedent —
+    a lab-class tenant is one an operator flips ON), resolved by a cache-aware,
+    fail-open resolver.
+  - **Per-target override both directions (F1):** `targets.flight_recorder_capture`
+    tri-state (`NULL` inherit / `True` force-on / `False` force-off);
+    resolution precedence is per-target > per-tenant > global default.
+  - **Global kill switch (F1):** `FLIGHT_RECORDER_ENABLED` read fail-open
+    (kill = capture nothing, never fail a dispatch).
+  - **Retention reaper (F4):** 14 d lab-class / 7 d default, per-tenant
+    configurable via `tenant.flight_recorder_retention_days`; the window is
+    stamped onto `dispatch_trace.expires_at` at write time so the reaper is a
+    portable bounded `expires_at < now()` sweep. Expired traces (headers +
+    spans) are deleted; the `audit_log` row is never touched. New INTERNAL
+    audit path `flight_recorder.trace.prune`.
+  - Additive Alembic migration `0085`; internal write API
+    (`flight_recorder.record_trace`) is best-effort (F7 — never raises into a
+    dispatch). Under #3207.
+
 ### Added — dispatch flight recorder: security-review-first design decision (#3207)
 
 - Records the operator-ratified (2026-08-30/31) design for a per-dispatch

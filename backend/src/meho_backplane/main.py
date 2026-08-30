@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: single FastAPI app entrypoint — router wiring + one
+# lifespan that owns every background task in one place. Splitting is out of
+# scope for a feature task.
 
 """FastAPI application entrypoint.
 
@@ -141,6 +144,10 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.flight_recorder.reaper import (
+    start_flight_recorder_reaper,
+    stop_flight_recorder_reaper,
+)
 from meho_backplane.gateway.deadman import (
     start_gateway_deadman_sweeper,
     stop_gateway_deadman_sweeper,
@@ -473,6 +480,7 @@ class _BackgroundTasks:
     sensor_watchdog: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     operation_run_reaper: asyncio.Task[None] | None
+    flight_recorder_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
 
@@ -571,6 +579,13 @@ def _start_background_tasks() -> _BackgroundTasks:
     operation_run_reaper: asyncio.Task[None] | None = None
     if settings.operation_run_reaper_enabled:
         operation_run_reaper = start_operation_run_reaper()
+    # #3212 — dispatch flight-recorder retention reaper. Gated on
+    # FLIGHT_RECORDER_REAPER_ENABLED so operators with an external retention
+    # mechanism can disable the in-tree sweep. Deletes expired trace headers +
+    # spans (``expires_at < now()``); the ``audit_log`` row is never touched.
+    flight_recorder_reaper: asyncio.Task[None] | None = None
+    if settings.flight_recorder_reaper_enabled:
+        flight_recorder_reaper = start_flight_recorder_reaper()
     # G11.3-T3 #824 — event-outbox drain loop. Gated on
     # EVENT_DRAIN_ENABLED so operators using an external orchestrator
     # (or running the test path without the drain) can opt out.
@@ -598,6 +613,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         sensor_watchdog=sensor_watchdog,
         agent_run_reaper=agent_run_reaper,
         operation_run_reaper=operation_run_reaper,
+        flight_recorder_reaper=flight_recorder_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
     )
@@ -615,6 +631,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
+    if tasks.flight_recorder_reaper is not None:
+        await stop_flight_recorder_reaper(tasks.flight_recorder_reaper)
     if tasks.operation_run_reaper is not None:
         await stop_operation_run_reaper(tasks.operation_run_reaper)
     if tasks.agent_run_reaper is not None:

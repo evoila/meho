@@ -138,7 +138,7 @@ Routes (both under the `addon-pairing` tag):
   capability lifecycle path (`declare` / `list_declared` / `active_capabilities`).
 - `meho_backplane.db.models.AddonCapability` — table `addon_capability`;
   unique `(pairing_id, kind, name)`, `kind` CHECK, `pairing_id` FK with
-  `ON DELETE CASCADE`; migration `0080`.
+  `ON DELETE CASCADE`; migration `0081`.
 - `meho_backplane.api.v1.addon_capability` — the capability REST surface.
 - `meho_backplane.api.v1.health.PairingHealth` — the `/status` facet.
 - `meho_backplane.ui.routes.pairing` — the read-only `/ui/pairing` console

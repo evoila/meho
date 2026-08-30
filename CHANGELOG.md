@@ -151,7 +151,7 @@ connector-related release-notes line.
   `PUT /api/v1/addons/pairings/{name}/capabilities` (a human principal is 403);
   operators read the declaration + activation state over the matching `GET`.
   Capability advertisement is data, never an MCP tool name — the agent
-  meta-tool surface is unchanged. New migration `0080` (`addon_capability`).
+  meta-tool surface is unchanged. New migration `0081` (`addon_capability`).
   See `docs/codebase/addon-pairing.md`.
 
 ### Added — add-on pairing handshake + identity: pair once as a scoped service principal over a versioned contract (#3025)

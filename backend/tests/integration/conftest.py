@@ -449,7 +449,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   durable run handle) carries a real ``REFERENCES tenant(id)`` FK; must
         #   be listed here or PG rejects the per-test TRUNCATE of ``tenant`` with
         #   ``cannot truncate a table referenced in a foreign key constraint``.
-        # * ``addon_capability`` — migration 0080 (#3026 capability
+        # * ``addon_capability`` — migration 0081 (#3026 capability
         #   advertisement) has a ``REFERENCES addon_pairing(id)`` FK, so PG
         #   rejects truncating ``addon_pairing`` unless it is listed in the
         #   same statement (``cannot truncate a table referenced in a foreign

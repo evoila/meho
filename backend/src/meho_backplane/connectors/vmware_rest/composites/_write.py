@@ -625,6 +625,10 @@ _VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
 #   list, but still served by the pinned spec and the only shape that
 #   directly carries the vm -> destination-host migration pairs.
 _OP_REVERT_TO_SNAPSHOT_TASK = "POST:/VirtualMachineSnapshot/{moId}/RevertToSnapshot_Task"
+# The pre-9.0 vim destroy arm (#3198). ``VirtualMachine.Destroy_Task`` is the
+# core vim delete method (task-polled); the 9.0+ arm uses the synchronous REST
+# ``DELETE:/vcenter/vm/{vm}`` (:data:`_OP_DELETE_VM`) instead.
+_OP_DESTROY_VM_TASK = "POST:/VirtualMachine/{moId}/Destroy_Task"
 _OP_ENTER_MAINTENANCE_TASK = "POST:/HostSystem/{moId}/EnterMaintenanceMode_Task"
 _OP_EXIT_MAINTENANCE_TASK = "POST:/HostSystem/{moId}/ExitMaintenanceMode_Task"
 _OP_RECONFIGURE_DVS_TASK = "POST:/DistributedVirtualSwitch/{moId}/ReconfigureDvs_Task"
@@ -645,6 +649,7 @@ _MAINTENANCE_VIM_TIMEOUT: Final[int] = 0
 # task poll -- the 600s ``vm.disk.grow`` / ``vm.clone_from_template``
 # convention.
 _SNAPSHOT_REVERT_TASK_TIMEOUT_SECONDS = 600.0
+_VM_DESTROY_TASK_TIMEOUT_SECONDS = 600.0
 _MAINTENANCE_TASK_TIMEOUT_SECONDS = 600.0
 _DVS_RECONFIGURE_TASK_TIMEOUT_SECONDS = 600.0
 _HOST_APPLY_TASK_TIMEOUT_SECONDS = 600.0
@@ -659,6 +664,12 @@ _VIM_SUB_OPS_VM_SNAPSHOT_REVERT: tuple[str, ...] = (
     _OP_REVERT_TO_SNAPSHOT_TASK,
 )
 _VIM_SUB_OPS_VM_MIGRATE: tuple[str, ...] = (_OP_RETRIEVE_PROPERTIES,)
+#: vm.destroy's pre-9.0 vim arm (#3198): the ``Destroy_Task`` delete plus the
+#: best-effort snapshot ``RetrievePropertiesEx`` the blast-radius preview reads.
+_VIM_SUB_OPS_VM_DESTROY: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_DESTROY_VM_TASK,
+)
 _VIM_SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_ENTER_MAINTENANCE_TASK,
@@ -2800,6 +2811,188 @@ async def vm_snapshot_revert_composite(
         "status": "reverted",
         "snapshot_id": snapshot_moid,
         "candidates": [],
+        "guidance": None,
+    }
+
+
+# ===========================================================================
+# vm.destroy — the first governed destructive delete (#3198)
+# ===========================================================================
+
+
+def _vim_destroy_required(about_version: str | None) -> bool:
+    """``True`` when the live ``about.version`` major is a resolvable pre-9.0.
+
+    The #3198 destroy arm gate, mirroring :func:`_vim_create_required`
+    (#3099): a resolvable pre-9.0 major routes the destroy through the vim
+    ``VirtualMachine.Destroy_Task`` (task-polled) — the pyvmomi coverage the
+    dual-transport connector keeps for older vCenter, where REST lifecycle
+    coverage is partial (the versioned-connector posture). 9.0+ — and an
+    unresolved version — issue the synchronous REST ``DELETE:/vcenter/vm/{vm}``
+    unchanged.
+    """
+    major = about_version.split(".", 1)[0].strip() if about_version else ""
+    return major.isdigit() and int(major) < 9
+
+
+async def _read_vm_snapshots_best_effort(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm_moid: str,
+) -> list[dict[str, Any]]:
+    """Best-effort snapshot enumeration for the destroy blast radius (#3198).
+
+    Reads ``VirtualMachine.snapshot`` via the vim ``RetrievePropertiesEx``
+    (the pinned REST spec serves no snapshot resource, #2970) and flattens
+    the tree to ``[{snapshot, name, ...}]`` via :func:`_flatten_snapshot_tree`.
+    A transport fault, or an absent/empty snapshot tree, yields ``[]`` — the
+    enumeration is a reviewer convenience on the blast radius, never
+    load-bearing for the park, so it degrades to "no snapshots enumerated"
+    rather than sinking the whole preview.
+    """
+    try:
+        tree_result = await connector._post_vmomi_json(
+            target,
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=_build_single_prop_retrieve_params(
+                _VIRTUAL_MACHINE_MO_TYPE, vm_moid, _PROP_SNAPSHOT
+            ),
+        )
+    except httpx.HTTPError:
+        return []
+    snapshot_info = _extract_single_prop(tree_result, _PROP_SNAPSHOT)
+    root_list = snapshot_info.get("rootSnapshotList") if isinstance(snapshot_info, dict) else None
+    return _flatten_snapshot_tree(root_list)
+
+
+async def vm_destroy_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Permanently destroy (delete) a powered-off VM and all of its disks.
+
+    Op-id: ``vmware.composite.vm.destroy``. The FIRST governed destructive
+    delete (#3198) — ``safety_level="destructive"``, so it rides the hardest
+    gate MEHO has (decision ``docs/decisions/governed-delete-operations.md``):
+    mandatory human approval (no agent path, no standing grant, no
+    self-approval even under break-glass), a mandatory preview-hash binding,
+    and a mandatory blast-radius statement (built by
+    :func:`._write_preview._vm_destroy_preview`).
+
+    **Fail-closed on a running VM.** vSphere faults a destroy on a VM that is
+    not powered off, so the composite live-re-reads the power state and
+    refuses with ``status="not_powered_off"`` unless the VM is
+    ``POWERED_OFF``. It issues **no implicit power-off** — powering the VM
+    down is a separate, deliberate decision the operator makes through the
+    governed ``vmware.composite.vm.power`` op first. The re-read happens at
+    dispatch time (post-approval), so a VM powered on between park and
+    approval is still refused.
+
+    **Dual arm** (mirrors :func:`vm_create_composite`): a resolvable pre-9.0
+    ``about.version`` routes the destroy through the vim
+    ``VirtualMachine.Destroy_Task`` (task-polled via the governed
+    :func:`_write_vmomi_sub_op` seam, like ``vm.disk.grow`` #2893); 9.0+ (and
+    an unresolved version) issues the synchronous REST
+    ``DELETE:/vcenter/vm/{vm}`` (:func:`_write_sub_op`). A task fault raises
+    (the dispatcher wraps it ``connector_error``); a poll timeout returns
+    ``status="timeout"`` with the task id.
+    """
+    vm_moid = params["vm"]
+
+    # Fail-closed power-state re-read (post-approval): a running VM faults the
+    # destroy at the vendor, and the composite never powers it off implicitly.
+    info = await _read_vm_info(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid
+    )
+    if info is None:
+        return {
+            "status": "not_found",
+            "vm_id": None,
+            "power_state": None,
+            "arm": None,
+            "task_id": None,
+            "guidance": f"vm {vm_moid!r} not found or unreadable; nothing destroyed",
+        }
+    power_state = info.get("power_state")
+    if power_state != "POWERED_OFF":
+        return {
+            "status": "not_powered_off",
+            "vm_id": vm_moid,
+            "power_state": power_state,
+            "arm": None,
+            "task_id": None,
+            "guidance": (
+                f"refusing to destroy vm {vm_moid!r} in power state {power_state!r} "
+                "(vSphere faults a destroy on a VM that is not powered off); power "
+                "it off first via vmware.composite.vm.power — the destroy issues no "
+                "implicit power-off"
+            ),
+        }
+
+    about_version = await connector._about_version(target, operator)
+    if _vim_destroy_required(about_version):
+        gate, task_payload = await _write_vmomi_sub_op(
+            connector,
+            target,
+            operator,
+            op_id=_OP_DESTROY_VM_TASK,
+            vmomi_path=f"/{_VIRTUAL_MACHINE_MO_TYPE}/{vm_moid}/Destroy_Task",
+            body={},
+            params={"vm": vm_moid},
+        )
+        if gate is not None:
+            return gate
+        outcome = await poll_vim_task(
+            connector,
+            target,
+            operator,
+            task=_unwrap_value(task_payload),
+            timeout_seconds=_VM_DESTROY_TASK_TIMEOUT_SECONDS,
+        )
+        if outcome.state == TASK_STATE_ERROR:
+            raise RuntimeError(
+                f"vm.destroy: Destroy_Task on vm {vm_moid!r} faulted: "
+                f"{outcome.error_message or '<no fault reported>'}"
+            )
+        if outcome.timed_out:
+            return {
+                "status": "timeout",
+                "vm_id": vm_moid,
+                "power_state": power_state,
+                "arm": "vim",
+                "task_id": outcome.task,
+                "guidance": (
+                    f"Destroy_Task {outcome.task} did not reach a terminal state "
+                    f"within {int(_VM_DESTROY_TASK_TIMEOUT_SECONDS)}s; poll the task — "
+                    "the destroy may still complete in the background"
+                ),
+            }
+        return {
+            "status": "destroyed",
+            "vm_id": vm_moid,
+            "power_state": power_state,
+            "arm": "vim",
+            "task_id": outcome.task,
+            "guidance": None,
+        }
+
+    gate, _payload = await _write_sub_op(
+        connector, target, operator, _OP_DELETE_VM, {"vm": vm_moid}
+    )
+    if gate is not None:
+        return gate
+    return {
+        "status": "destroyed",
+        "vm_id": vm_moid,
+        "power_state": power_state,
+        "arm": "rest",
+        "task_id": None,
         "guidance": None,
     }
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 32 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 33 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -28,8 +28,8 @@ The 9 read composites (T5 / #508 + the 4 guest-ops reads
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 23 write
-composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) 23 of the 24
+write composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
 write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
@@ -41,7 +41,11 @@ OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and the
 three host-domain writes ``host.datastore_mount_nfs`` /
 ``host.disk_mark_flash`` / ``host.service_control`` / #3182) inherit
 the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
-at the call site; the helper would default to those values anyway).
+at the call site; the helper would default to those values anyway). The
+24th write composite, ``vm.destroy`` / #3198, is the first
+``safety_level="destructive"`` op (still ``requires_approval=True``) — the
+governed-delete tier (decision
+``docs/decisions/governed-delete-operations.md``).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -84,6 +88,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
     vm_customize_composite,
     vm_deploy_from_library_composite,
+    vm_destroy_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -142,6 +147,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CUSTOMIZE_RESPONSE_SCHEMA,
     VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
     VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
+    VM_DESTROY_PARAMETER_SCHEMA,
+    VM_DESTROY_RESPONSE_SCHEMA,
     VM_DEVICE_CDROM_PARAMETER_SCHEMA,
     VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
@@ -557,6 +564,35 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         group_key="vm",
         tags=["composite", "write", "vm", "snapshot"],
         safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.destroy",
+        handler=vm_destroy_composite,
+        summary="Permanently destroy (delete) a powered-off VM and all its disks.",
+        description=(
+            "The FIRST governed destructive delete (#3198), decision "
+            "docs/decisions/governed-delete-operations.md. Permanently "
+            "destroys a VM and all of its virtual disks. Marked "
+            "safety_level='destructive' — the hardest gate MEHO has: "
+            "mandatory human approval always (no agent path, no standing "
+            "grant, no self-approval even under break-glass), a mandatory "
+            "preview-hash binding, and a mandatory blast-radius statement "
+            "(object identity + enumerated disks/NICs/snapshots + "
+            "irreversibility class) the four-eyes approver reads before "
+            "deciding. Fail-closed on a running VM: a VM that is not "
+            "POWERED_OFF is refused with status='not_powered_off' and never "
+            "powered off implicitly. Dual arm (like vm.create): a resolvable "
+            "pre-9.0 vCenter routes through the vim VirtualMachine.Destroy_Task "
+            "(task-polled); 9.0+ (and unresolved) issues the synchronous REST "
+            "DELETE:/vcenter/vm/{vm}. Equivalent of 'govc vm.destroy' for "
+            "governed operator-facing dispatch."
+        ),
+        parameter_schema=VM_DESTROY_PARAMETER_SCHEMA,
+        response_schema=VM_DESTROY_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "destroy", "destructive"],
+        safety_level="destructive",
         requires_approval=True,
     ),
     _CompositeSpec(
@@ -1207,8 +1243,9 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 32 composites total -- 9 read (T5 / #508 + the 4 guest-ops
-    reads / #3100) + 23 write (T6 /
+    Scope: 33 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 24 write (T6 / #509 + the destructive-tier
+    ``vm.destroy`` / #3198,
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes

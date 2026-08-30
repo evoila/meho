@@ -25,7 +25,7 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 9 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 23 write composites inherit T4's
+  each. 23 of the 24 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -33,8 +33,10 @@ Conventions
   writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895,
   the #2891 hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
   ``vm.device.cdrom``, and the two GOSC composites
-  ``guest.customization_spec.create`` / ``vm.customize`` / #2892). The schema
-  text reflects which side of that line
+  ``guest.customization_spec.create`` / ``vm.customize`` / #2892). The 24th,
+  ``vm.destroy`` / #3198, is the first ``safety_level="destructive"``
+  composite (still ``requires_approval=True``) — the governed-delete tier.
+  The schema text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
 """
@@ -91,6 +93,8 @@ __all__ = [
     "VM_CREATE_RESPONSE_SCHEMA",
     "VM_CUSTOMIZE_PARAMETER_SCHEMA",
     "VM_CUSTOMIZE_RESPONSE_SCHEMA",
+    "VM_DESTROY_PARAMETER_SCHEMA",
+    "VM_DESTROY_RESPONSE_SCHEMA",
     "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
     "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
@@ -1012,6 +1016,30 @@ VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.vm.destroy`` parameter schema (#3198).
+#:
+#: The first governed destructive delete. A single required ``vm`` moid —
+#: the destroy takes no ``force`` flag: a powered-on VM is refused
+#: (``status='not_powered_off'``), never implicitly powered off, and the
+#: mandatory human approval is the confirmation, not a param.
+VM_DESTROY_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Target VM moid to permanently destroy. The VM must be "
+                "POWERED_OFF — a running VM is refused with "
+                "``status='not_powered_off'`` (no implicit power-off)."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+}
+
+
 #: ``vmware.composite.vm.migrate`` parameter schema.
 #:
 #: DRS-deferred relocation. No-recommendation path returns
@@ -1570,6 +1598,50 @@ VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
         "guidance": {
             "type": ["string", "null"],
             "description": ("Operator hint on ambiguous/not_found; ``null`` on successful revert."),
+        },
+    },
+    "required": ["status"],
+}
+
+
+#: ``vmware.composite.vm.destroy`` response schema (#3198).
+VM_DESTROY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["destroyed", "not_powered_off", "not_found", "timeout"],
+            "description": (
+                "``'destroyed'`` on a successful delete; ``'not_powered_off'`` "
+                "when the VM is not POWERED_OFF (refused fail-closed, no "
+                "implicit power-off); ``'not_found'`` when the VM cannot be "
+                "read; ``'timeout'`` when the vim Destroy_Task poll deadline "
+                "elapsed (the destroy may still complete in the background)."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": "The destroyed VM's moid; ``null`` on not_found.",
+        },
+        "power_state": {
+            "type": ["string", "null"],
+            "description": "The VM's power state at dispatch time (the fail-closed gate reads it).",
+        },
+        "arm": {
+            "type": ["string", "null"],
+            "enum": ["vim", "rest", None],
+            "description": (
+                "Which delete arm ran: ``'vim'`` (pre-9.0 Destroy_Task) or "
+                "``'rest'`` (9.0+ DELETE:/vcenter/vm/{vm}); ``null`` when refused."
+            ),
+        },
+        "task_id": {
+            "type": ["string", "null"],
+            "description": "The vim Destroy_Task moid on the vim arm; ``null`` on the REST arm.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Operator hint on refusal/timeout; ``null`` on a successful destroy.",
         },
     },
     "required": ["status"],

@@ -559,7 +559,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 32 composite rows the registrar upserts. Reaching a business status
+    the 33 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).

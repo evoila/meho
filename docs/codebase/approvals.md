@@ -614,6 +614,55 @@ reached as a composite subop is a separate governance seam (a follow-up,
 not this task). In practice an agent cannot reach it: the destructive tier
 is `DENY` for agent principals at `resolve_verdict`.
 
+## First governed delete: `vmware.composite.vm.destroy` (#3198)
+
+Requirement 1 of
+[`docs/decisions/governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+— one real delete family modeled into the tier end-to-end. The op is
+`vmware.composite.vm.destroy` (`safety_level="destructive"`,
+`requires_approval=True`; the dual-arm handler + blast-radius preview
+builder are documented in
+[`connectors-vmware-rest.md`](connectors-vmware-rest.md)). Wiring it in
+surfaced — and this task closed — three gaps in the tier's *human*-side
+enforcement that #3196/#3197 left, plus one machinery limitation:
+
+- **A composite/typed op is now previewable when it is `destructive`.**
+  `preview_dispatch` returns `unavailable` for non-ingested ops (they have
+  no single literal HTTP request), which would make the requirement-2 hash
+  binding impossible on the composite surface. The gate in
+  `_resolve_previewable_descriptor` now lets a `destructive` non-ingested op
+  through to `_build_composite_preview`, which binds the *logical request
+  tuple*: the redacted params ride the `redacted_body` slot, so
+  `compute_preview_hash` (unchanged) is param-sensitive while a `COMPOSITE`
+  sentinel `method` + the `op_id` as `resolved_path` name the op. Scoped to
+  `destructive` so every non-destructive typed/composite op keeps its
+  `unavailable` contract.
+- **The USER auto-execute hole.** `_non_agent_verdict` (`operations/_validate.py`)
+  previously parked a human only on `requires_approval`; the
+  `safety_level→park` mapping lived on the service-principal branch alone.
+  A USER dispatching a `destructive` op declared `requires_approval=False`
+  would therefore auto-execute, bypassing the whole gate. The verdict now
+  parks the `destructive` tier for **every** non-agent principal,
+  unconditionally — and no standing grant can pre-clear it
+  (`consult_and_record_grant` already refuses the tier).
+- **The self-approval break-glass hole.** `_check_self_approval`
+  (`operations/approval_queue.py`) honoured `APPROVAL_ALLOW_SELF_APPROVAL`
+  for every tier. It now refuses self-approval of a `destructive` row
+  *unconditionally* — the break-glass switch does not reach this tier
+  (decision requirement 1). A single-operator tenant uses the
+  agent-requester pattern, never self-approval.
+- **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
+  now rejects a `destructive` descriptor declared `requires_approval=False`
+  at registration time — an inconsistent row can't exist. Belt-and-suspenders
+  with the runtime park guarantee above.
+
+Conformance for the op — no agent path (agent verdict `DENY`), no standing
+grant (`ServicePrincipalGrant` refuses), no self-approval even under
+break-glass, no satellite mint (`MintRefusalCode.OP_NOT_SAFE`), dispatch
+refused without a matching hash, park refused without a blast-radius block,
+and the full preview→park→human-approve→audited-resume flow — is pinned in
+`tests/test_connectors_vmware_rest_vm_destroy.py`.
+
 ## Uniform op-identity envelope (#2681)
 
 The preview base varies by outcome — a bespoke `{op_class, preview}`, the

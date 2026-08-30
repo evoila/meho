@@ -26303,7 +26303,8 @@
             "enum": [
               "safe",
               "caution",
-              "dangerous"
+              "dangerous",
+              "destructive"
             ],
             "nullable": true,
             "title": "Safety Level"

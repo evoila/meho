@@ -223,9 +223,10 @@ const (
 
 // Defines values for EditOpBodySafetyLevel.
 const (
-	EditOpBodySafetyLevelCaution   EditOpBodySafetyLevel = "caution"
-	EditOpBodySafetyLevelDangerous EditOpBodySafetyLevel = "dangerous"
-	EditOpBodySafetyLevelSafe      EditOpBodySafetyLevel = "safe"
+	EditOpBodySafetyLevelCaution     EditOpBodySafetyLevel = "caution"
+	EditOpBodySafetyLevelDangerous   EditOpBodySafetyLevel = "dangerous"
+	EditOpBodySafetyLevelDestructive EditOpBodySafetyLevel = "destructive"
+	EditOpBodySafetyLevelSafe        EditOpBodySafetyLevel = "safe"
 )
 
 // Defines values for EditOpWarningCode.

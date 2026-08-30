@@ -4,7 +4,7 @@
 """Widen ``endpoint_descriptor.safety_level`` with the ``destructive`` tier.
 
 Revision ID: 0084
-Revises: 0079
+Revises: 0083
 Create Date: 2026-08-30
 
 Initiative #3183 (governed delete-shaped operations), Task #3196 — the
@@ -75,7 +75,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0084"
-down_revision: str | None = "0079"
+down_revision: str | None = "0083"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

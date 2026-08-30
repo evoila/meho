@@ -455,7 +455,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   same statement (``cannot truncate a table referenced in a foreign
         #   key constraint``). No direct ``tenant`` FK — the tenant-FK drift
         #   guard does not cover it, so it is listed by hand here.
-        # * ``addon_orchestration_run`` — migration 0080 (#3028 out-of-process
+        # * ``addon_orchestration_run`` — migration 0082 (#3028 out-of-process
         #   audit parent-linkage) carries a real ``REFERENCES tenant(id)`` FK;
         #   same rule — list it here or the per-test TRUNCATE of ``tenant``
         #   fails with ``cannot truncate a table referenced in a foreign key

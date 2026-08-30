@@ -59,7 +59,7 @@ audit row carrying only its own columns. No back-reference column is added to
   `{request_audit_id, agent_session_id}`. Unique index
   `addon_orchestration_run_client_work_ref_idx` on `(keycloak_client_id,
   work_ref)` is both the race-safe resolve-or-open key and the isolation
-  boundary. Migration `0080`.
+  boundary. Migration `0082`.
 - `operations/addon_orchestration.py` — the linkage service:
   - `resolve_or_open_orchestration_run(operator, work_ref)` → `OrchestrationRun
     | None`. Runs the pairing check, then a SELECT-first resolve-or-open

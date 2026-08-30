@@ -698,6 +698,130 @@ The implementation lives at
 `backend/src/meho_backplane/audit_query/policy_replay.py` and the
 policy-by-id lookup is `meho_backplane.redaction.resolver.find_policy_by_id`.
 
+## Flight-recorder fail-closed redaction (F2)
+
+Task [#3213](https://github.com/evoila/meho/issues/3213) implements **F2**
+of the dispatch flight recorder decision
+([`docs/decisions/dispatch-flight-recorder.md`](../decisions/dispatch-flight-recorder.md),
+Initiative [#3207](https://github.com/evoila/meho/issues/3207)). It is a
+**separate engine** from the connector-boundary redaction above, with a
+different job. The connector-boundary engine masks *content* (credential
+and infra-leak shapes) in a response before a caller or LLM sees it; the
+flight-recorder engine decides what a per-dispatch *trace* may persist at
+all, and it is **fail-closed on every axis**: where it cannot *prove* a
+datum secret-free it drops the datum and flags the trace uncertain.
+
+Why fail-closed is load-bearing: the operator override on F5 makes traces
+readable by agents *"as long as there are no secrets in there."* That
+condition is discharged only by this engine. A blocklist, a best-effort
+scrub, or a "record and hope" posture would fail open the first time a
+vendor invents a new auth header — so the engine never does any of those.
+
+It is a **pure library**:
+`backend/src/meho_backplane/redaction/flight_recorder/`. No capture wiring
+(that is [#3214](https://github.com/evoila/meho/issues/3214)), no storage
+(that is [#3212](https://github.com/evoila/meho/issues/3212)), no I/O, no
+clocks, no global mutable state.
+
+```text
+   captured span (headers + bodies + op context)
+                    │
+                    ▼
+   redact_span(...)  ──►  classify_body_exclusion(op_id)   [F2.3]
+        │                        │ excluded? → body never recorded
+        ├── redact_headers()     │ unplaceable? → uncertain
+        │     allowlist [F2.1]   ▼
+        ├── redact_body(paths)   per-connector body-path scrub [F2.2]
+        │     + credential-shape net (reuses the Tier-1 engine)
+        ▼
+   SpanRedaction(request/response headers+bodies, uncertain, reasons)
+        │  uncertain == True ⇒ caller degrades to operator-only (F5)
+```
+
+**F2.1 — header allowlist, not blocklist** (`headers.py`). Only the
+enumerated `HEADER_ALLOWLIST` names survive; every other header is
+stripped **unread** (the loop `continue`s on the name check before the
+value is ever touched). The allowlist holds only headers whose values are
+structurally non-secret — content metadata, protocol negotiation,
+caching, correlation/rate-limit — and every credential/cookie/token/
+signed-URL/client-identity header is absent by construction:
+
+| Recorded (allowlisted) | Stripped unread (never allowlisted) |
+| --- | --- |
+| `content-type`, `content-length`, `content-encoding`, `content-language`, `content-range` | `authorization`, `proxy-authorization`, `www-authenticate`, `proxy-authenticate` |
+| `accept*`, `connection`, `transfer-encoding`, `host`, `user-agent`, `server`, `via`, `allow` | `cookie`, `set-cookie` |
+| `cache-control`, `date`, `age`, `expires`, `etag`, `vary`, `if-*`, `range`, `retry-after` | every `x-*-token`, `x-api-key`, `x-csrf-token`, `x-xsrf-token`, `x-vault-token`, `x-amz-security-token` |
+| `x-request-id`, `x-correlation-id`, `traceparent`, `tracestate`, `x-ratelimit-*` | `location`, `content-location`, `referer` (signed URLs / tokens) |
+| `strict-transport-security`, `x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy` | `forwarded`, `x-forwarded-*`, `x-real-ip` (client identity / PII) |
+
+As defense-in-depth the value of every *surviving* header is still run
+through the credential-shape net (`_content.py`), so a `Bearer …` pasted
+into a `user-agent` is scrubbed too.
+
+**F2.2 — per-connector body-path redaction** (`bodies.py`). A connector
+declares dotted-path globs (`BodyPathRedactionConfig.paths`, glob grammar
+reused verbatim from `redaction.path_glob`) that are scrubbed from both
+request and response bodies; a glob landing on an interior node redacts
+the **whole subtree**. Underneath, the same credential-shape net runs
+over every surviving leaf, so a shaped secret at an *undeclared* nested
+path is still caught. JSON is the only structurally-redactable shape:
+a str/bytes body is parsed when the content-type is JSON or unknown;
+anything else fails closed (see F2 uncertainty).
+
+**F2.3 — hard-excluded op families** (`families.py`). Some op families
+carry secrets *as their body* — credential reads, session mints, token
+issuance, password resets, key material — so their bodies are **never
+recorded**, regardless of the path config. `classify_body_exclusion`
+matches broad, case-sensitive `fnmatchcase` globs
+(`SECRET_FAMILY_PATTERNS`, e.g. `*token*`, `*secret*`, `*credential*`,
+`*login*`, `*.auth.*`, `*:*/key`) plus descriptor tags
+(`SECRET_FAMILY_TAGS`) across both op-id shapes (`METHOD:/path` and dotted
+typed ops). Over-exclusion is deliberate — declining to record a benign
+body only loses debugging exhaust; under-exclusion leaks.
+
+| Family | Source | Records body? |
+| --- | --- | --- |
+| secret-bearing (credential / session-mint / token / password / key material) | `SECRET_FAMILY_PATTERNS` + `SECRET_FAMILY_TAGS` (seeded from the decision record) | never |
+| destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag | never |
+| everything else | — | yes (subject to F2.2) |
+
+The destructive family is **single-sourced** with the delete-shaped
+classifier at `operations/service_grants.py` (`_delete_shaped_reason_by_pattern`
+/ `_delete_shaped_reason_by_descriptor`) so the two lists cannot drift;
+`classify_body_exclusion` reads the same `Settings` tuple rather than
+re-declaring it. This honours the pending cross-ref amendment to
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)
+noted in the flight-recorder decision's "Interactions with sibling
+decisions" section — the destructive family joins the hard-exclusion set
+now; the reciprocal pointer back from that doc is the deferred edit. When
+the `destructive` safety tier ([#3196](https://github.com/evoila/meho/issues/3196))
+lands, the classifier already covers it via the tag it promotes.
+
+**F2 uncertainty (the F5 degrade)**. Any state the engine cannot *prove*
+fully redacted returns `uncertain=True`, which the caller must map to
+operator-only visibility. Uncertainty triggers:
+
+| Trigger | Outcome |
+| --- | --- |
+| headers not a mapping | no headers recorded, uncertain |
+| unparseable / binary / unknown non-JSON body | body omitted, uncertain |
+| malformed JSON | body omitted, uncertain |
+| truncated mid-token (`truncated=True`) | parsed prefix scrubbed, still uncertain (a split secret matches no shape) |
+| body-path config fault at match time | body omitted, uncertain |
+| unplaceable op family (missing/blank op id) | body omitted, uncertain |
+
+A *placed* family exclusion is **certain** (the omission is deliberate and
+safe, so the trace stays agent-readable with a blank body); only an
+*unplaceable* op is uncertain. Fail-closed composition: a span is
+uncertain if any one artefact is uncertain.
+
+Adversarial coverage lives in
+`backend/tests/test_flight_recorder_redaction.py` (106 cases): synthetic
+`PLACEHOLDER`-shaped secrets planted in unknown headers, allowlisted
+header values, declared and undeclared nested body paths, oversized bodies
+truncated mid-token, malformed JSON, and binary bodies — none survive, and
+uncertainty fires wherever proof is impossible.
+
 ## References
 
 - Parent goal: [#800](https://github.com/evoila/meho/issues/800)
@@ -718,3 +842,9 @@ policy-by-id lookup is `meho_backplane.redaction.resolver.find_policy_by_id`.
   `backend/src/meho_backplane/audit_query/replay.py`.
 - Microsoft Presidio (Tier-2; #1072):
   <https://github.com/microsoft/presidio>.
+- Flight-recorder redaction (F2; #3213): decision
+  [`docs/decisions/dispatch-flight-recorder.md`](../decisions/dispatch-flight-recorder.md),
+  Initiative [#3207](https://github.com/evoila/meho/issues/3207); library
+  `backend/src/meho_backplane/redaction/flight_recorder/`; single-sourced
+  destructive classifier `operations/service_grants.py`
+  (`Settings.service_grant_delete_shaped_patterns`).

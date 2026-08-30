@@ -2,7 +2,8 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  Event detail drawer fragment (Task #868 work item #4). Rendered by
+  Event detail drawer fragment (Task #868 work item #4; label
+  humanization #230; substance pass internal#236). Rendered by
   ``GET /ui/broadcast/event/{audit_id}`` and swapped into
   ``#event-drawer`` via HTMX ``hx-target`` (outerHTML) on a feed-row
   click.
@@ -18,15 +19,20 @@
   guards against). A Close button mirrors the same ``open = false`` for
   keyboard / explicit dismissal.
 
-  Sections:
-    1. Header -- op_id + op_class badge + close.
-    2. Operation -- operator, method/path, status, timing.
-    3. Identifiers -- request_id, audit_id, broadcast event_id.
-    4. Payload -- the full request payload JSON when the op is not
+  Sections (shared reference-resolution macros with the audit drawer):
+    1. Header       -- op_id + op_class badge + close.
+    2. What happened -- the plain-language op + target + outcome line.
+    3. Operation    -- principal, operation summary/group, target link,
+                       method/path, humanized status + timestamp.
+    4. Lineage      -- one-click "full audit row" cross-link + labelled
+                       parent / replay-session / run links.
+    5. Identifiers  -- the raw request_id / audit_id / broadcast event_id.
+    6. Payload      -- the full request payload JSON when the op is not
        aggregate-only; the 🔒 placeholder otherwise (work item #7 carried
        through to the drawer -- a sensitive op never leaks its payload
        on click).
 -#}
+{% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, lineage %}
 <aside
   id="event-drawer"
   class="card bg-base-100 border-base-300 border shadow-sm self-start"
@@ -55,26 +61,30 @@
       </button>
     </header>
 
+    {# ---------- What happened ---------- #}
+    {{ what_happened(references) }}
+
     {# ---------- Operation ---------- #}
     <section aria-label="Operation">
       <h3 class="text-sm font-semibold uppercase opacity-60">Operation</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
         <dt class="opacity-60">Operator</dt>
-        <dd class="font-mono break-all">{{ row.operator_sub }}</dd>
+        <dd>{{ principal_chip(references.principal) }}</dd>
+        <dt class="opacity-60">Operation</dt>
+        <dd>{{ operation_ref(references.operation) }}</dd>
+        {% if references.target.present %}
+          <dt class="opacity-60">Target</dt>
+          <dd>{{ target_ref(references.target) }}</dd>
+        {% endif %}
         <dt class="opacity-60">Method</dt>
         <dd>
           <span class="badge badge-outline badge-xs">{{ row.method }}</span>
           <span class="font-mono text-xs break-all">{{ row.path }}</span>
         </dd>
         <dt class="opacity-60">Status</dt>
-        <dd>{{ row.status_code }}</dd>
+        <dd>{{ status_badge(references.status) }}</dd>
         <dt class="opacity-60">Occurred</dt>
-        {# Console-standard timestamp: ``%Y-%m-%d %H:%M UTC`` for display,
-           full ISO retained in the ``<time datetime>`` for machines
-           (mirrors ``topology/_drawer.html``). #}
-        <dd>
-          <time datetime="{{ row.occurred_at.isoformat() }}">{{ row.occurred_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
-        </dd>
+        <dd>{{ timestamp(references.time) }}</dd>
         {% if row.duration_ms is not none %}
           <dt class="opacity-60">Duration (ms)</dt>
           <dd>{{ row.duration_ms }}</dd>
@@ -82,15 +92,18 @@
       </dl>
     </section>
 
-    {# ---------- Identifiers ---------- #}
+    {# ---------- Lineage (full audit row + labelled parent / replay / run) ---------- #}
+    {{ lineage(references, "broadcast") }}
+
+    {# ---------- Identifiers (raw ids, always reachable) ---------- #}
     <section aria-label="Identifiers">
       <h3 class="text-sm font-semibold uppercase opacity-60">Identifiers</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
         <dt class="opacity-60">Audit ID</dt>
-        <dd class="font-mono break-all">{{ row.id }}</dd>
+        <dd class="font-mono break-all">{{ references.audit_id }}</dd>
         <dt class="opacity-60">Request ID</dt>
         <dd class="font-mono break-all">
-          {% if row.request_id %}{{ row.request_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
+          {% if references.request_id %}{{ references.request_id }}{% else %}<span class="opacity-50">—</span>{% endif %}
         </dd>
         <dt class="opacity-60">Event ID</dt>
         <dd class="font-mono break-all">

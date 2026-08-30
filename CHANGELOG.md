@@ -90,6 +90,32 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — Audit + Broadcast console drawers resolve reference GUIDs to human-investigable substance (evoila-bosnia/meho-internal#236)
+
+- The operator console's **Audit row** and **Broadcast event** detail
+  drawers rendered their reference columns raw — `operator_sub` as an
+  OIDC sub, `target_id` / `parent_audit_id` / `agent_session_id` /
+  `run_id` as bare UUIDs, `op_id` as a machine handle — so a human saw
+  identifiers, not what happened. Both drawers now share one
+  reference-resolution helper + Jinja partial that turns each reference
+  into named, linked substance: `principal_sub` → display name (with a
+  **service** marker for a non-interactive agent/delegated principal),
+  `target_id` → target name linked to its detail page, `op_id` → the
+  operation's human summary + group, `parent_audit_id` → a labelled
+  lineage link (`parent: <op> on <target>`), `agent_session_id` → the
+  session-replay link (tenant-admin-gated), `run_id` → the originating
+  runbook run, and `work_ref` → the change ticket (linked out for the
+  `gh:owner/repo#N` shorthand). Each drawer gains a plain-language
+  "what happened" line, a status rendered with meaning (not just the
+  code), and a humanized timestamp (absolute + relative). The Broadcast
+  event drawer is now one click from its fully-resolved audit row
+  (`BroadcastEvent.audit_id`). Resolution is tenant-scoped and reads
+  only stores the backplane already has; a reference that can't be
+  resolved (deleted, cross-tenant, missing) degrades to the raw id with
+  an `unresolved` marker, and the raw id stays reachable everywhere.
+  Supersedes the label-humanization pass (internal#230) by folding it
+  into both drawers.
+
 ### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)
 
 - `vmware.composite.datastore.usage` enriched every datastore row with the

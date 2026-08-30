@@ -312,6 +312,22 @@ def test_body_path_runtime_fault_fails_closed(monkeypatch: pytest.MonkeyPatch) -
     _assert_no_secret(out.value, _SENTINEL)
 
 
+def test_deeply_nested_preparsed_body_fails_closed_without_raising() -> None:
+    """A pathologically deep pre-parsed body must not raise into the caller."""
+    node: Any = {"leaf": _BEARER}
+    for _ in range(6000):
+        node = {"n": node}
+    # Must not raise (F7 best-effort contract); fails closed to uncertain.
+    out = redact_body(node, content_type="application/json")
+    assert out.uncertain is True
+    assert out.value == BODY_OMITTED_MARKER
+    span = redact_span(
+        op_id="vmware.vm.list", response_body=node, response_content_type="application/json"
+    )
+    assert span.uncertain is True
+    _assert_no_secret(span, _SENTINEL)
+
+
 def test_empty_body_is_certain_none() -> None:
     for empty in (None, "", "   ", b""):
         out = redact_body(empty, content_type="application/json")
@@ -353,6 +369,76 @@ def test_secret_bearing_tag_excludes_body() -> None:
     result = classify_body_exclusion("acme.generic.op", tags=["session"])
     assert result.excluded is True
     assert result.family == "secret-bearing"
+
+
+# Real credential ops whose bodies ARE secrets -- these carry no op-id
+# substring the pattern net would catch and/or hyphenated tags the bare-word
+# set would miss, so they must be caught by the authoritative classify_op
+# delegation. This is the regression guard for the fail-open the adversarial
+# review found (vault.kv.read etc. leaking agent-visible).
+_REAL_CREDENTIAL_OPS = [
+    "vault.kv.read",
+    "vault.kv.list",
+    "vault.kv.put",
+    "vault.kv.patch",
+    "harbor.robot.create",
+    "vault.token.create",
+    "vault.auth.approle.generate_secret_id",
+    "vault.auth.userpass.write",
+    "k8s.secret.create",
+    "k8s.job.create",
+    "keycloak.user.create",
+    "keycloak.user.reset_password",
+    "sddc.credential.list",
+    "rke2.token.rotate",
+]
+
+
+@pytest.mark.parametrize("op_id", _REAL_CREDENTIAL_OPS)
+def test_real_credential_ops_never_record_body_via_classify_op(op_id: str) -> None:
+    """The single most important regression guard: real secret ops excluded."""
+    result = classify_body_exclusion(op_id)
+    assert result.excluded is True, f"{op_id} MUST be excluded (secret body)"
+    assert result.family == "secret-bearing"
+    assert result.uncertain is False
+
+
+def test_vault_kv_read_secret_body_never_reaches_agent_view() -> None:
+    """End-to-end: a vault.kv.read secret response is not agent-visible."""
+    span = redact_span(
+        op_id="vault.kv.read",
+        connector_id="vault-1.0",
+        method="GET",
+        tags=["read-only", "secret-read"],
+        response_body={"data": {"data": {"password": "PLACEHOLDER-vault-secret"}}},
+        response_content_type="application/json",
+    )
+    assert span.body_recorded is False
+    assert span.response_body == SECRET_FAMILY_OMITTED_MARKER
+    assert span.uncertain is False
+    _assert_no_secret(span, _SENTINEL)
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "secret-read",
+        "credential-read",
+        "credential-mint",
+        "credential-write",
+        "secret-write",
+        "auth-token",
+    ],
+)
+def test_hyphenated_secret_tags_are_matched(tag: str) -> None:
+    result = classify_body_exclusion("acme.generic.op", tags=[tag])
+    assert result.excluded is True
+    assert result.family == "secret-bearing"
+
+
+def test_read_only_tag_is_not_secret_bearing() -> None:
+    result = classify_body_exclusion("acme.thing.status", tags=["read-only"])
+    assert result.excluded is False
 
 
 @pytest.mark.parametrize(

@@ -756,7 +756,12 @@ signed-URL/client-identity header is absent by construction:
 
 As defense-in-depth the value of every *surviving* header is still run
 through the credential-shape net (`_content.py`), so a `Bearer …` pasted
-into a `user-agent` is scrubbed too.
+into a `user-agent` is scrubbed too. Residual assumption (accepted): an
+*opaque, non-shaped* secret placed in a surviving free-text header
+(`user-agent`, `server`, `via`) is not caught by the shape net — the
+allowlist admits these header *names* on the basis that their values are
+vendor-non-secret, the same structured-body caveat that applies to an
+undeclared, non-shaped body leaf.
 
 **F2.2 — per-connector body-path redaction** (`bodies.py`). A connector
 declares dotted-path globs (`BodyPathRedactionConfig.paths`, glob grammar
@@ -771,17 +776,28 @@ anything else fails closed (see F2 uncertainty).
 **F2.3 — hard-excluded op families** (`families.py`). Some op families
 carry secrets *as their body* — credential reads, session mints, token
 issuance, password resets, key material — so their bodies are **never
-recorded**, regardless of the path config. `classify_body_exclusion`
-matches broad, case-sensitive `fnmatchcase` globs
-(`SECRET_FAMILY_PATTERNS`, e.g. `*token*`, `*secret*`, `*credential*`,
-`*login*`, `*.auth.*`, `*:*/key`) plus descriptor tags
-(`SECRET_FAMILY_TAGS`) across both op-id shapes (`METHOD:/path` and dotted
-typed ops). Over-exclusion is deliberate — declining to record a benign
-body only loses debugging exhaust; under-exclusion leaks.
+recorded**, regardless of the path config. The **primary** check is
+single-sourced: `classify_body_exclusion` delegates to the authoritative
+`broadcast.events.classify_op`, and any op it calls `credential_read` /
+`credential_mint` / `credential_write` (its curated `_CREDENTIAL_*_OPS`
+allowlists — `vault.kv.read`, `harbor.robot.create`, `vault.kv.put`,
+`k8s.secret.create`, …) never records a body here either. Those ops carry
+structured secret bodies (`{"data": {"password": …}}`) whose opaque
+values have no in-leaf label the shape net could catch, so this
+delegation — not the pattern net — is what protects them, and the two
+planes cannot drift. On top of that, a **broadening net** covers generic
+(`METHOD:/path`) ops and hand-authored tags the typed classifier does not
+see: case-sensitive `fnmatchcase` globs (`SECRET_FAMILY_PATTERNS`, e.g.
+`*token*`, `*secret*`, `*login*`, `*.auth.*`, `*:*/key`) plus
+token-split descriptor tags (`SECRET_FAMILY_TAGS`, so hyphenated
+compounds like `secret-read` / `credential-mint` match). Over-exclusion
+is deliberate — declining to record a benign body only loses debugging
+exhaust; under-exclusion leaks.
 
 | Family | Source | Records body? |
 | --- | --- | --- |
-| secret-bearing (credential / session-mint / token / password / key material) | `SECRET_FAMILY_PATTERNS` + `SECRET_FAMILY_TAGS` (seeded from the decision record) | never |
+| secret-bearing (credential-read / -mint / -write) | **single-sourced** with `broadcast.events.classify_op` (`_CREDENTIAL_*_OPS`) | never |
+| secret-bearing (generic / tag-declared) | broadening `SECRET_FAMILY_PATTERNS` globs + token-split `SECRET_FAMILY_TAGS` | never |
 | destructive / delete-shaped | **single-sourced** with the grant guard's `Settings.service_grant_delete_shaped_patterns` + HTTP `DELETE` + `destructive` tag | never |
 | everything else | — | yes (subject to F2.2) |
 

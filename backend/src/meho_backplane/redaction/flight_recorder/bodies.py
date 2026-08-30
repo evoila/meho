@@ -170,13 +170,16 @@ def redact_body(
 
     try:
         path_redacted = _apply_path_redaction(parsed, paths)
-    except Exception as exc:  # any walk/glob fault fails closed (F2 uncertainty)
+        scrubbed, _fired = scrub_content(path_redacted)
+    except Exception as exc:  # any walk/glob/scrub fault fails closed (F2 uncertainty)
+        # Covers a RecursionError from an adversarially deep pre-parsed
+        # body handed straight in (bypassing the guarded JSON parse), so
+        # the engine never raises into its best-effort (F7) caller.
         return RedactionOutcome(
             value=BODY_OMITTED_MARKER,
             uncertain=True,
-            reasons=(f"body-path redaction failed ({type(exc).__name__}): dropped fail-closed",),
+            reasons=(f"body redaction failed ({type(exc).__name__}): dropped fail-closed",),
         )
-    scrubbed, _fired = scrub_content(path_redacted)
 
     if truncated:
         return RedactionOutcome(

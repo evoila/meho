@@ -10,6 +10,23 @@ the whole body is the secret. This module classifies an op and, when it
 belongs to such a family, tells the caller to **never record its body**,
 regardless of config.
 
+Single-sourced with the sensitivity classifier
+----------------------------------------------
+The **primary** secret-bearing check is not a bespoke list: it delegates
+to :func:`meho_backplane.broadcast.events.classify_op`, the authoritative
+op-sensitivity classifier the audit/broadcast plane already uses to
+collapse ``credential_read`` / ``credential_mint`` / ``credential_write``
+ops to aggregate-only. Any op that classifier calls secret-bearing (its
+curated ``_CREDENTIAL_*_OPS`` allowlists -- ``vault.kv.read``,
+``harbor.robot.create``, ``vault.kv.put``, ``k8s.secret.create``, ...)
+never records a body here either, and the two planes cannot drift.
+Structured secret bodies of those ops (``{"data": {"password": ...}}``)
+carry no in-leaf label the credential-shape net could catch, so this
+delegation -- not the pattern/tag nets below -- is what actually protects
+them. The pattern globs and tag tokens are a *broadening* net on top,
+covering generic (``METHOD:/path``) ops and hand-authored tags the typed
+classifier does not see.
+
 Single-sourced with the destructive classifier
 ----------------------------------------------
 Per the decision record and its pending cross-ref amendment to
@@ -51,6 +68,7 @@ the caller degrades the trace to operator-only.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from fnmatch import fnmatchcase
 from typing import Final
@@ -60,9 +78,18 @@ from pydantic import BaseModel, ConfigDict
 __all__ = [
     "SECRET_FAMILY_PATTERNS",
     "SECRET_FAMILY_TAGS",
+    "SECRET_OP_CLASSES",
     "BodyExclusion",
     "classify_body_exclusion",
 ]
+
+
+#: The op-sensitivity classes (from
+#: :func:`meho_backplane.broadcast.events.classify_op`) whose bodies are
+#: secret material. An op in any of these classes never records a body.
+SECRET_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"credential_read", "credential_mint", "credential_write"}
+)
 
 
 #: Case-sensitive globs matching credential / session-mint / token /
@@ -107,9 +134,13 @@ SECRET_FAMILY_PATTERNS: Final[tuple[str, ...]] = (
     "*:*/keys",
 )
 
-#: Descriptor tags that mark a secret-bearing family. Checked in addition
-#: to the op-id patterns so a hand-authored typed op can opt into the
-#: exclusion without matching a name glob.
+#: Secret-bearing tag *tokens*. A descriptor tag is treated as
+#: secret-bearing when any of its tokens (split on non-alphanumerics)
+#: is in this set -- so hyphenated compounds the codebase actually uses
+#: (``secret-read``, ``credential-mint``, ``credential-write``,
+#: ``secret-write``, ``auth-token``) match, not only bare words. Checked
+#: in addition to :func:`classify_op` and the op-id patterns so a
+#: hand-authored typed op can opt into the exclusion via a tag.
 SECRET_FAMILY_TAGS: Final[frozenset[str]] = frozenset(
     {
         "secret",
@@ -118,12 +149,49 @@ SECRET_FAMILY_TAGS: Final[frozenset[str]] = frozenset(
         "credentials",
         "session",
         "token",
+        "tokens",
         "auth",
         "authentication",
         "mint",
         "password",
+        "passwd",
+        "apikey",
+        "oauth",
+        "saml",
+        "openid",
+        "key",
+        "keys",
+        "privatekey",
+        "kubeconfig",
     }
 )
+
+
+def _tag_tokens(tag: str) -> set[str]:
+    """Split a tag into lowercase alphanumeric tokens.
+
+    ``"credential-read"`` -> ``{"credential", "read"}`` so a hyphenated
+    compound matches :data:`SECRET_FAMILY_TAGS` on its ``credential``
+    token; ``"read-only"`` -> ``{"read", "only"}`` matches nothing.
+    """
+    return {token for token in re.split(r"[^a-z0-9]+", tag.lower()) if token}
+
+
+def _classify_op_class(op_id: str) -> str | None:
+    """Return the sensitivity class from the authoritative classifier.
+
+    Delegates to :func:`meho_backplane.broadcast.events.classify_op`
+    (lazy import: it lives in a heavier module and keeps this library's
+    import graph a leaf). Returns ``None`` if the classifier is
+    unavailable or raises -- the pattern/tag nets below still apply, and
+    the caller's best-effort (F7) contract handles any propagated fault.
+    """
+    try:
+        from meho_backplane.broadcast.events import classify_op
+
+        return classify_op(op_id)
+    except Exception:  # pragma: no cover - classify_op is pure; defensive
+        return None
 
 
 class BodyExclusion(BaseModel):
@@ -177,17 +245,33 @@ def classify_body_exclusion(
 
     tag_set = {tag.strip().lower() for tag in tags if tag and tag.strip()}
 
-    # --- secret-bearing families (credential / session / token / …) ----
-    secret_tags = tag_set & SECRET_FAMILY_TAGS
-    if secret_tags:
+    # --- secret-bearing: authoritative classifier first (single source) -
+    op_class = _classify_op_class(op_id)
+    if op_class in SECRET_OP_CLASSES:
         return BodyExclusion(
             excluded=True,
             family="secret-bearing",
             reason=(
-                f"op {op_id!r} carries secret-bearing tag(s) "
-                f"{sorted(secret_tags)}; body never recorded"
+                f"op {op_id!r} classifies as {op_class!r} "
+                "(broadcast.events.classify_op); body never recorded"
             ),
         )
+
+    # --- secret-bearing: descriptor tag tokens -------------------------
+    matched_tag_tokens = {
+        token for tag in tag_set for token in _tag_tokens(tag) if token in SECRET_FAMILY_TAGS
+    }
+    if matched_tag_tokens:
+        return BodyExclusion(
+            excluded=True,
+            family="secret-bearing",
+            reason=(
+                f"op {op_id!r} carries secret-bearing tag token(s) "
+                f"{sorted(matched_tag_tokens)}; body never recorded"
+            ),
+        )
+
+    # --- secret-bearing: broadening op-id pattern net ------------------
     for pattern in secret_family_patterns:
         if fnmatchcase(op_id, pattern):
             return BodyExclusion(

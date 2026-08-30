@@ -27,7 +27,7 @@ from alembic import op
 # Merge-order ledger: final slot 0081 in the chain 0079→0080→0081→0082→0083;
 # down_revision re-points from "0079" to "0080" (#3201) at merge time (orchestrator ledger).
 revision: str = "0081"
-down_revision: str | None = "0079"
+down_revision: str | None = "0080"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

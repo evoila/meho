@@ -445,6 +445,10 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   carries a real ``REFERENCES tenant(id)`` FK; must be listed here or
         #   PG rejects the per-test TRUNCATE of ``tenant`` with ``cannot
         #   truncate a table referenced in a foreign key constraint``.
+        # * ``operation_run`` — migration 0080 (#3079 async governed dispatch —
+        #   durable run handle) carries a real ``REFERENCES tenant(id)`` FK; must
+        #   be listed here or PG rejects the per-test TRUNCATE of ``tenant`` with
+        #   ``cannot truncate a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
@@ -453,7 +457,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, addon_pairing, "
+                "service_principal_grant, addon_pairing, operation_run, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
@@ -511,9 +515,10 @@ async def pg_engine_empty_tenant(
         # Same single non-cascading TRUNCATE as ``pg_engine`` (see that
         # fixture for why every real ``REFERENCES tenant(id)`` table —
         # including ``agent_run`` from migration 0017,
-        # ``agent_principal`` from migration 0018, and ``sensor_results``
-        # (FK to ``sensor``) from migration 0071 — must be listed
-        # here). Deliberately no follow-up INSERT —
+        # ``agent_principal`` from migration 0018, ``sensor_results``
+        # (FK to ``sensor``) from migration 0071, and ``operation_run``
+        # from migration 0080 (#3079 async governed dispatch) — must be
+        # listed here). Deliberately no follow-up INSERT —
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
@@ -523,7 +528,7 @@ async def pg_engine_empty_tenant(
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
                 "event_outbox, event_source, gateway_command, "
-                "service_principal_grant, addon_pairing, "
+                "service_principal_grant, addon_pairing, operation_run, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "

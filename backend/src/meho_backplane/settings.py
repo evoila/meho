@@ -1276,6 +1276,18 @@ class Settings(BaseModel):
     agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # Async governed dispatch (#3079) -- the operation-run reaper reclaims
+    # a governed dispatch whose worker died mid-flight (pod restart, OOM,
+    # network partition). Same lease + tick shape as the agent-run reaper,
+    # but a single always-fail-into-audit policy: an orphaned governed op
+    # is never re-dispatched (it can wrap a non-idempotent vendor write),
+    # so it is driven to ``failed`` (an audited terminal state), never
+    # re-run. Gated on OPERATION_RUN_REAPER_ENABLED so operators running an
+    # external lease-reclaim mechanism can disable the in-tree reaper.
+    operation_run_reaper_enabled: bool = True
+    operation_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    operation_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
+    operation_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
     # Initiative #2415 (#2501) -- gateway runner dead-man switch. Same
     # opt-out shape as AGENT_RUN_REAPER_ENABLED, but default-on is what
     # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
@@ -2012,6 +2024,19 @@ def get_settings() -> Settings:
         ),
         agent_run_lease_ttl_seconds=int(
             os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
+        # Async governed dispatch (#3079) -- operation-run reaper knobs.
+        operation_run_reaper_enabled=parse_bool_env(
+            os.environ.get("OPERATION_RUN_REAPER_ENABLED", "true"),
+        ),
+        operation_run_reaper_tick_interval_seconds=int(
+            os.environ.get("OPERATION_RUN_REAPER_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        operation_run_reaper_max_per_tick=int(
+            os.environ.get("OPERATION_RUN_REAPER_MAX_PER_TICK", "50"),
+        ),
+        operation_run_lease_ttl_seconds=int(
+            os.environ.get("OPERATION_RUN_LEASE_TTL_SECONDS", "60"),
         ),
         gateway_deadman_enabled=parse_bool_env(
             os.environ.get("GATEWAY_DEADMAN_ENABLED", "true"),

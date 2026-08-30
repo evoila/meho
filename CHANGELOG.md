@@ -191,6 +191,35 @@ connector-related release-notes line.
   management-plane-lockdown Goal (evoila-bosnia/meho-internal#234). Implementation
   seams are filed as Tasks under #3183, unimplemented.
 
+### Added — Async governed dispatch: durable run handle (202 + poll) for long-running operations (#3079)
+
+- `POST /api/v1/operations/call` gains an opt-in **`async: true`** mode. Instead
+  of holding the request connection for the operation's full duration, it
+  creates a durable `operation_run` row, launches the governed dispatch on a
+  background task, and returns **HTTP 202 + a run handle** immediately. Sync
+  mode is the default and byte-identical to before. Motivated by a live
+  incident: an 83s vendor call whose 200 response was lost in transit took the
+  (successful) result envelope with it — the caller had to reconstruct the
+  outcome from audit + vendor-side evidence.
+- New handle surface **`GET /api/v1/operations/runs`** (list),
+  **`GET /api/v1/operations/runs/{handle}`** (poll), and
+  **`POST /api/v1/operations/runs/{handle}/cancel`** (cancel). A completed run
+  persists its full `OperationResult` envelope on the row, so a dropped
+  response is retrievable via the handle — the dropped-response class is
+  eliminated.
+- `POST /api/v1/approvals/{id}/approve` gains the same opt-in **`async: true`**:
+  the decision is still recorded + audited synchronously, but the resumed op is
+  dispatched on the background substrate and the route returns 202 + the run
+  handle instead of blocking for the resumed op's full duration.
+- The run substrate reuses the proven `agent_run` shape (durable row + lease /
+  heartbeat + reaper) with one deliberate difference: a governed op can wrap a
+  non-idempotent vendor write, so an orphaned run (worker died mid-flight) is
+  **never** re-dispatched — the `operation_run` reaper drives it to `failed`
+  (an audited terminal state). Audit stays per-operation and append-only: a run
+  is marked `succeeded` only after the dispatch's synchronous audit row commits.
+  New settings: `OPERATION_RUN_REAPER_ENABLED` (default on) + the tick / lease
+  knobs.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

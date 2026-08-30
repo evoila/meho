@@ -3705,6 +3705,243 @@ class AgentRun(Base):
     )
 
 
+class OperationRunStatus(StrEnum):
+    """Closed lifecycle status of an :class:`OperationRun`.
+
+    Async governed dispatch (#3079). A ``POST /api/v1/operations/call``
+    (or ``/approvals/{id}/approve``) submitted in async mode creates one
+    durable ``operation_run`` row whose ``status`` walks an explicit,
+    enforced state machine. The legal transitions live in
+    :data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;
+    the service rejects any edge not on that map so an illegal jump cannot
+    land in the DB.
+
+    Members:
+
+    * :attr:`PENDING` -- the row was created but the background task has
+      not started executing the dispatch yet (initial state on insert).
+    * :attr:`RUNNING` -- the background task is executing the governed
+      dispatch (target resolve + policy + connector call + audit).
+    * :attr:`SUCCEEDED` -- the dispatch **completed** and its full
+      :class:`~meho_backplane.connectors.schemas.OperationResult` envelope
+      is persisted on ``result`` (terminal). Note this is the *run*
+      completing, not the op succeeding: a dispatch that returned
+      ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a
+      ``succeeded`` **run** whose persisted envelope carries that
+      dispatch status. The dropped-response class the feature eliminates
+      is exactly this: the envelope is durable regardless of the caller's
+      connection.
+    * :attr:`FAILED` -- the background task itself did not complete: the
+      worker died mid-flight (lease lapsed, reaped by the operation-run
+      reaper) or the dispatch raised unexpectedly (terminal). Distinct
+      from a persisted error envelope on a ``succeeded`` run.
+    * :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal
+      run (terminal).
+
+    There is deliberately no ``awaiting_approval`` state (unlike
+    :class:`AgentRunStatus`): a governed dispatch runs to a terminal
+    envelope in one shot. A ``needs-approval`` dispatch parks its own
+    :class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose
+    envelope names the parked request.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class OperationRunOrigin(StrEnum):
+    """Closed enum of what created an :class:`OperationRun` (#3079).
+
+    Records the provenance of an async governed-dispatch run so the poll /
+    list surfaces and audit can answer "why does this run exist".
+
+    Members:
+
+    * :attr:`DIRECT` -- an operator submitted ``POST
+      /api/v1/operations/call`` with ``async=true``.
+    * :attr:`APPROVAL_RESUME` -- an operator approved a parked
+      ``needs-approval`` request in async mode; the resumed governed
+      dispatch runs on the background substrate. The parked request id is
+      carried on :attr:`OperationRun.approval_request_id`.
+    """
+
+    DIRECT = "direct"
+    APPROVAL_RESUME = "approval_resume"
+
+
+#: Closed enum of :attr:`OperationRun.status` -- kept in lock-step with
+#: :class:`OperationRunStatus`. The drift guard in
+#: :mod:`tests.test_operation_run_lifecycle` asserts the model enum and the
+#: live ``CHECK`` constraint agree.
+_OPERATION_RUN_STATUSES: tuple[str, ...] = tuple(s.value for s in OperationRunStatus)
+
+#: Closed enum of :attr:`OperationRun.origin` -- lock-step with
+#: :class:`OperationRunOrigin`.
+_OPERATION_RUN_ORIGINS: tuple[str, ...] = tuple(o.value for o in OperationRunOrigin)
+
+
+class OperationRun(Base):
+    """One row per async governed operation dispatch (#3079).
+
+    Async governed dispatch: a ``POST /api/v1/operations/call`` (or an
+    approval resume) submitted in async mode returns a durable handle (HTTP
+    202) instead of holding the connection for the operation's full
+    duration; execution proceeds on a background task tracked by this row,
+    and the caller polls / cancels via the handle. The motivating incident
+    (an 83s vendor call whose 200 was lost in transit) is closed because
+    the full :class:`~meho_backplane.connectors.schemas.OperationResult`
+    envelope is persisted on ``result`` and retrievable via the handle
+    after the submitting connection is gone.
+
+    This reuses the *shape* of :class:`AgentRun` (durable row + lease /
+    heartbeat + reaper) without its LLM-loop semantics. Two differences
+    are load-bearing:
+
+    * **No ``resume`` in-flight policy.** A governed op can wrap a
+      non-idempotent vendor write; auto-re-dispatching a half-executed
+      write on pod death would double-execute it. The
+      operation-run reaper therefore always drives an orphaned run to
+      ``failed`` (audited terminal state) -- never re-runs it. This is the
+      safe half of the #3079 acceptance criterion ("survives pod restart
+      via lease/reaper **or** terminates into an audited terminal state --
+      never silently lost").
+    * **Raw params are not persisted.** Only a ``params_hash`` is stored
+      (the same privacy posture ``audit_log`` takes): a persisted params
+      blob would be a new secret surface, and because the run never
+      resumes there is nothing that needs them re-hydrated. The running
+      task holds them in memory for the single dispatch.
+
+    Schema highlights (full column rationale in migration ``0080``):
+
+    * ``id`` -- UUID primary key; **the handle** the 202 hands back and
+      the poll / cancel routes resolve.
+    * ``tenant_id`` -- real FK to ``tenant.id`` (clean-slate substrate).
+    * ``identity_sub`` / ``identity_act`` -- the RFC 8693 delegation pair
+      captured from the submitting operator.
+    * ``origin`` -- :class:`OperationRunOrigin` (``direct`` /
+      ``approval_resume``), closed ``CHECK``.
+    * ``connector_id`` / ``op_id`` -- the dispatch coordinates, echoed on
+      the poll surface so an operator sees what a run executed.
+    * ``target_name`` -- the submitted target name (NULL for target-less
+      ops); the *name*, not the resolved id, mirroring the ``/call`` body.
+    * ``params_hash`` -- hex SHA-256 of the submitted params (secret-safe
+      correlation to the dispatch audit row's ``params_hash``); NULL for
+      a param-less op.
+    * ``approval_request_id`` -- soft-FK to ``approval_request.id`` for an
+      ``approval_resume`` run; NULL for a ``direct`` run.
+    * ``status`` -- :class:`OperationRunStatus`, closed ``CHECK``,
+      DEFAULT ``pending``.
+    * ``result`` -- portable JSON: the persisted ``OperationResult``
+      envelope (``model_dump(mode="json")``) once the run reaches
+      ``succeeded``; NULL otherwise.
+    * ``error`` -- Text: the run-crash / reaper reason on a ``failed``
+      run; NULL otherwise. Kept distinct from ``result`` so a crashed run
+      never masquerades as an op result.
+    * ``lease_owner`` / ``lease_expires_at`` -- the reaper lease, kept in
+      lock-step by the lifecycle service.
+    * ``created_at`` / ``started_at`` / ``ended_at`` -- lifecycle
+      timestamps.
+    """
+
+    __tablename__ = "operation_run"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    identity_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_act: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    target_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    params_hash: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Soft-FK to approval_request.id -- set on an approval_resume run.
+    approval_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=OperationRunStatus.PENDING.value,
+    )
+    result: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "operation_run_tenant_created_at_idx",
+            "tenant_id",
+            "created_at",
+            postgresql_using="btree",
+        ),
+        Index(
+            "operation_run_status_idx",
+            "status",
+            postgresql_using="btree",
+        ),
+        Index(
+            "operation_run_approval_request_id_idx",
+            "approval_request_id",
+            postgresql_using="btree",
+        ),
+        # The reaper's claim query is
+        # ``WHERE status='running' AND lease_expires_at < now()``. The full
+        # index drives it on SQLite; the partial index on PG keeps it
+        # narrow (only ``running`` rows carry a lease).
+        Index(
+            "operation_run_lease_expires_at_idx",
+            "lease_expires_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'running'"),
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _OPERATION_RUN_STATUSES),
+            name="ck_operation_run_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("origin", _OPERATION_RUN_ORIGINS),
+            name="ck_operation_run_origin",
+        ),
+    )
+
+
 class AgentPrincipal(Base):
     """A MEHO-managed agent principal — a Keycloak client tagged ``kind=agent``.
 

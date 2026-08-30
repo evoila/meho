@@ -411,13 +411,27 @@ class CallOperationBody(BaseModel):
     tracker API call (Goal #1651 ships the field only).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     connector_id: str = Field(min_length=1)
     op_id: str = Field(min_length=1)
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
     work_ref: str | None = Field(default=None, min_length=1)
+    async_: bool = Field(
+        default=False,
+        alias="async",
+        description=(
+            "Async governed dispatch (#3079). When true, ``/call`` returns a "
+            "durable run handle (HTTP 202) immediately instead of holding the "
+            "connection for the op's full duration; execution proceeds "
+            "server-side and the caller polls / cancels via "
+            "``/api/v1/operations/runs/{handle}``. The completed "
+            "``OperationResult`` envelope is persisted on the run, so a "
+            "dropped response never loses the outcome. Default false — sync "
+            "mode is byte-identical to the pre-#3079 behaviour."
+        ),
+    )
 
 
 class PreviewOperationBody(BaseModel):

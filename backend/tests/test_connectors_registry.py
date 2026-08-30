@@ -362,6 +362,16 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL, since this test pins no env).
                     gateway_deadman_enabled=False,
+                    # #3079 async governed dispatch added an operation_run
+                    # reaper to the lifespan, gated on
+                    # OPERATION_RUN_REAPER_ENABLED (default on). Pin it off — a
+                    # bare MagicMock attribute is truthy, so without this the
+                    # gate reads True and the real start_operation_run_reaper is
+                    # called, whose task-creation yield lets the unconditionally
+                    # started topology refresh scheduler run one loop iteration,
+                    # which hits the real get_settings() -> KeyError on
+                    # KEYCLOAK_ISSUER_URL (this test pins no env).
+                    operation_run_reaper_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -418,6 +428,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # #2501 gateway dead-man sweeper — same defensive patch.
                 start_gateway_deadman_sweeper=MagicMock(),
                 stop_gateway_deadman_sweeper=AsyncMock(),
+                # #3079 async governed dispatch operation_run reaper — same
+                # defensive patch (the gate above is pinned off) so a future
+                # default flip can't smuggle the real reaper (and the topology
+                # scheduler yield it triggers) back into this env-free test.
+                start_operation_run_reaper=MagicMock(),
+                stop_operation_run_reaper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -494,6 +510,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # real sweeper and KeyError on KEYCLOAK_ISSUER_URL (this
                     # env-free test pins no env). Same shape as the sibling.
                     gateway_deadman_enabled=False,
+                    # #3079 async governed dispatch operation_run reaper — pin
+                    # off; a bare MagicMock attribute is truthy, which would
+                    # start the real reaper whose task-creation yield lets the
+                    # unconditional topology refresh scheduler run one loop and
+                    # KeyError on KEYCLOAK_ISSUER_URL. Same shape as the sibling.
+                    operation_run_reaper_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -546,6 +568,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # #2501 gateway dead-man sweeper — same defensive patch.
                 start_gateway_deadman_sweeper=MagicMock(),
                 stop_gateway_deadman_sweeper=AsyncMock(),
+                # #3079 async governed dispatch operation_run reaper — same
+                # defensive patch (the gate above is pinned off) so a future
+                # default flip can't smuggle the real reaper (and the topology
+                # scheduler yield it triggers) back into this env-free test.
+                start_operation_run_reaper=MagicMock(),
+                stop_operation_run_reaper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

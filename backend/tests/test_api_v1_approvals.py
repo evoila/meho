@@ -47,9 +47,11 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from httpx import ASGITransport
 
 import meho_backplane.audit as _audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -360,3 +362,91 @@ def test_self_approval_forbidden_detail_carries_break_glass_hint(
     detail = response.json()["detail"]
     assert detail.startswith("self_approval_forbidden"), detail
     assert "APPROVAL_ALLOW_SELF_APPROVAL" in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# #3079 — async governed dispatch: approve with `async: true` returns 202 +
+# the durable run handle instead of blocking for the resumed op.
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunService:
+    """Records approval-resume submits, returns a fixed handle (no task launch)."""
+
+    def __init__(self, run_id: uuid.UUID) -> None:
+        self.run_id = run_id
+        self.resumed: list[uuid.UUID] = []
+
+    async def submit_approval_resume(
+        self, operator: Any, request: Any, *, params: Any
+    ) -> uuid.UUID:
+        self.resumed.append(request.id)
+        return self.run_id
+
+
+@pytest.mark.asyncio
+async def test_approve_async_returns_202_and_run_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`POST /approve` with `async: true` records the decision, returns 202 + handle.
+
+    Driven over an httpx ``ASGITransport`` so the seed + request share one
+    event loop. The background substrate is faked (the value under test is
+    the route wiring: decision committed synchronously, resume handed off,
+    202 + `{run_id, status: pending, async: true}` returned) — mirrors the
+    async `/call` route test for the same contract.
+    """
+    from meho_backplane.api.v1 import approvals as approvals_module
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    params = {"disk_gb": 40}
+    requester = Operator(
+        sub="op-requester",
+        name="Requester",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.USER,
+    )
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vmware-rest-9.0",
+            op_id="vm.create",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
+        request_id = request.id
+
+    fixed = uuid.uuid4()
+    fake = _FakeRunService(fixed)
+    monkeypatch.setattr(approvals_module, "get_operation_run_service", lambda: fake)
+
+    key = make_rsa_keypair("kid-approve-async")
+    # A different principal approves (self-approval is forbidden by default).
+    headers = {
+        "Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR, sub='op-approver')}"
+    }
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.post(
+                f"/api/v1/approvals/{request_id}/approve",
+                json={"params": params, "async": True},
+                headers=headers,
+            )
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {"run_id": str(fixed), "status": "pending", "async": True}
+    # The decision was handed to the background substrate for this request.
+    assert fake.resumed == [request_id]

@@ -3151,6 +3151,201 @@
         }
       }
     },
+    "/api/v1/operations/runs": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "List Operation Runs",
+        "description": "List the operator's tenant's async operation runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?status=running`` narrows to one lifecycle state. Returns\n``created_at DESC``.",
+        "operationId": "list_operation_runs_api_v1_operations_runs_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/OperationRunStatus",
+              "nullable": true,
+              "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state.",
+              "title": "Status"
+            },
+            "description": "Filter by lifecycle status (pending / running / succeeded / failed / cancelled). Omit for every state."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "description": "Max runs per page (1..500).",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Max runs per page (1..500)."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Rows to skip for paging.",
+              "default": 0,
+              "title": "Offset"
+            },
+            "description": "Rows to skip for paging."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OperationRunSummaryResponse"
+                  },
+                  "title": "Response List Operation Runs Api V1 Operations Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/operations/runs/{handle}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Get Operation Run Status",
+        "description": "Poll an async operation run's durable state by handle (the run id).\n\nReads the durable ``operation_run`` row, so it works after the request\nthat submitted the run has returned \u2014 the dropped-response-class fix: the\nfull result envelope is retrievable here even if the submit response was\nlost in transit. An unknown / cross-tenant handle is 404.",
+        "operationId": "get_operation_run_status_api_v1_operations_runs__handle__get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationRunStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/operations/runs/{handle}/cancel": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Cancel Operation Run",
+        "description": "Cancel a non-terminal async operation run by handle (the run id).\n\nRecords the durable cancel intent through the shared\n:func:`~meho_backplane.operations.operation_run.cancel_run` service path.\nThe in-flight task is not torn down synchronously: it loses its lease and\nits result is discarded when it finalises against the now-terminal row\n(best-effort cancel \u2014 a governed op already dispatched to the vendor may\ncomplete, but its own synchronous audit row is the durable record).\n\nAn unknown / cross-tenant handle is 404 (existence is not leaked across\ntenants). An already-terminal run is 409, not a 500. A ``read_only``\noperator is rejected by the route's role gate; the service's own role\ncheck is a defence-in-depth backstop mapped to 403.",
+        "operationId": "cancel_operation_run_api_v1_operations_runs__handle__cancel_post",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationRunSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/operations/groups": {
       "get": {
         "tags": [
@@ -3378,7 +3573,7 @@
           "operations"
         ],
         "summary": "Post Call",
-        "description": "Invoke :func:`~meho_backplane.operations.dispatch` for an op id.\n\nDelegates to :func:`call_operation`. The dispatcher contract is\n\"always return a structured result\"; errors land in the result\nenvelope (``status='error'`` + ``extras.error_code``) rather than\nHTTP 4xx. The route returns 200 on a structured-error envelope so\ncallers see the dispatcher's error_code in ``extras``.\n\nTarget-failure contract (#136, completed by #2110 Option A): **every**\ntarget-failure mode returns HTTP 200 + the dispatcher envelope \u2014 a\nmissing / empty / ``name``-less target is\n``extras.error_code=\"target_required\"``, a ``target`` of a wrong JSON\ntype (e.g. ``target: 12345``) is\n``extras.error_code=\"target_invalid_type\"`` (carrying\n``extras.received_type``), a supplied name that resolves to no live\ntarget is ``extras.error_code=\"no_target\"``, and a name matching more\nthan one target (alias collision) is\n``extras.error_code=\"ambiguous_target\"`` \u2014 the resolution codes carry\nthe candidate ``matches``. No target-failure mode returns a 4xx: a\nconsumer's error handling is a single switch on ``extras.error_code``.",
+        "description": "Invoke :func:`~meho_backplane.operations.dispatch` for an op id.\n\nDelegates to :func:`call_operation`. The dispatcher contract is\n\"always return a structured result\"; errors land in the result\nenvelope (``status='error'`` + ``extras.error_code``) rather than\nHTTP 4xx. The route returns 200 on a structured-error envelope so\ncallers see the dispatcher's error_code in ``extras``.\n\nAsync governed dispatch (#3079): when the body carries ``async: true``\nthe route does **not** dispatch inline. It creates a durable\n``operation_run`` row, launches the governed dispatch on a background\ntask, and returns HTTP 202 + the run handle immediately \u2014\n``{\"run_id\", \"status\": \"pending\", \"async\": true}``. The caller polls /\ncancels via ``/api/v1/operations/runs/{handle}``; the completed\n``OperationResult`` envelope is persisted on the run, so a dropped\nresponse never loses the outcome (the motivating incident: an 83s\nvendor call whose 200 was lost in transit). Default (``async`` absent /\nfalse) is byte-identical to the pre-#3079 synchronous path below.\n\nTarget-failure contract (#136, completed by #2110 Option A): **every**\ntarget-failure mode returns HTTP 200 + the dispatcher envelope \u2014 a\nmissing / empty / ``name``-less target is\n``extras.error_code=\"target_required\"``, a ``target`` of a wrong JSON\ntype (e.g. ``target: 12345``) is\n``extras.error_code=\"target_invalid_type\"`` (carrying\n``extras.received_type``), a supplied name that resolves to no live\ntarget is ``extras.error_code=\"no_target\"``, and a name matching more\nthan one target (alias collision) is\n``extras.error_code=\"ambiguous_target\"`` \u2014 the resolution codes carry\nthe candidate ``matches``. No target-failure mode returns a 4xx: a\nconsumer's error handling is a single switch on ``extras.error_code``.",
         "operationId": "post_call_api_v1_operations_call_post",
         "parameters": [
           {
@@ -9098,7 +9293,7 @@
           "approvals"
         ],
         "summary": "Approve Approval Request",
-        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully.\n* 403 \u2014 operator lacks ``operator`` role, **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
+        "description": "Approve a pending request and re-dispatch the original operation.\n\nThe ``params`` body must be the original params unchanged; the service\nre-hashes them and rejects with 422 on a mismatch. On a successful\napproval the original dispatch is re-executed and the result returned.\n\nAsync governed dispatch (#3079): with ``async: true`` the decision is\nstill recorded + audited synchronously, but the resumed op is dispatched\non a background task and the route returns HTTP 202 + a durable run\nhandle (``{\"run_id\", \"status\": \"pending\", \"async\": true}``) instead of\nblocking for the resumed op's full duration. The resume runs through the\nsame exactly-one-resumer claim + policy bypass + audit path the inline\nresume uses. Default (``async`` absent / false) is byte-identical to the\npre-#3079 inline resume below.\n\nHTTP status codes:\n\n* 200 \u2014 approved + re-dispatched successfully (sync).\n* 202 \u2014 approved; resume launched in the background (``async: true``).\n* 403 \u2014 operator lacks ``operator`` role, **or** the approver is the\n  requester and self-approval break-glass is disabled (G11.7-T1 #1401).\n* 404 \u2014 request not found (or belongs to another tenant).\n* 409 \u2014 request is already decided.\n* 422 \u2014 params hash mismatch.",
         "operationId": "approve_approval_request_api_v1_approvals__request_id__approve_post",
         "parameters": [
           {
@@ -21300,6 +21495,12 @@
             "title": "Reason",
             "description": "Optional human-readable approval reason (recorded in the audit row).",
             "default": ""
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Async governed dispatch (#3079). When true, the decision is still recorded synchronously, but the resumed op is dispatched on a background task and the route returns HTTP 202 + a durable run handle immediately instead of blocking for the resumed op's full duration. Poll / cancel via ``/api/v1/operations/runs/{handle}``. Default false \u2014 the response is byte-identical to the pre-#3079 inline resume.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -23883,6 +24084,12 @@
             "minLength": 1,
             "nullable": true,
             "title": "Work Ref"
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Async governed dispatch (#3079). When true, ``/call`` returns a durable run handle (HTTP 202) immediately instead of holding the connection for the op's full duration; execution proceeds server-side and the caller polls / cancels via ``/api/v1/operations/runs/{handle}``. The completed ``OperationResult`` envelope is persisted on the run, so a dropped response never loses the outcome. Default false \u2014 sync mode is byte-identical to the pre-#3079 behaviour.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -27639,6 +27846,165 @@
         ],
         "title": "OperationDescriptor",
         "description": "Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.\n\nReturned by :func:`describe_descriptor` (and the\n``GET /api/v1/operations/{descriptor_id}`` route). ``embedding`` is\ndeliberately omitted \u2014 it's a 384-dim float vector that adds wire\nbulk with no operator value at the descriptor-inspection layer.\n``llm_instructions`` IS included; the route is gated on\n``tenant_admin`` so the per-op agent prompt stays out of read-only\noperators' hands."
+      },
+      "OperationRunStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "title": "OperationRunStatus",
+        "description": "Closed lifecycle status of an :class:`OperationRun`.\n\nAsync governed dispatch (#3079). A ``POST /api/v1/operations/call``\n(or ``/approvals/{id}/approve``) submitted in async mode creates one\ndurable ``operation_run`` row whose ``status`` walks an explicit,\nenforced state machine. The legal transitions live in\n:data:`meho_backplane.operations.operation_run.ALLOWED_TRANSITIONS`;\nthe service rejects any edge not on that map so an illegal jump cannot\nland in the DB.\n\nMembers:\n\n* :attr:`PENDING` -- the row was created but the background task has\n  not started executing the dispatch yet (initial state on insert).\n* :attr:`RUNNING` -- the background task is executing the governed\n  dispatch (target resolve + policy + connector call + audit).\n* :attr:`SUCCEEDED` -- the dispatch **completed** and its full\n  :class:`~meho_backplane.connectors.schemas.OperationResult` envelope\n  is persisted on ``result`` (terminal). Note this is the *run*\n  completing, not the op succeeding: a dispatch that returned\n  ``status='error'`` / ``'denied'`` / ``'needs-approval'`` is a\n  ``succeeded`` **run** whose persisted envelope carries that\n  dispatch status. The dropped-response class the feature eliminates\n  is exactly this: the envelope is durable regardless of the caller's\n  connection.\n* :attr:`FAILED` -- the background task itself did not complete: the\n  worker died mid-flight (lease lapsed, reaped by the operation-run\n  reaper) or the dispatch raised unexpectedly (terminal). Distinct\n  from a persisted error envelope on a ``succeeded`` run.\n* :attr:`CANCELLED` -- an authorized operator cancelled a non-terminal\n  run (terminal).\n\nThere is deliberately no ``awaiting_approval`` state (unlike\n:class:`AgentRunStatus`): a governed dispatch runs to a terminal\nenvelope in one shot. A ``needs-approval`` dispatch parks its own\n:class:`ApprovalRequest` and is recorded as a ``succeeded`` run whose\nenvelope names the parked request."
+      },
+      "OperationRunStatusResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OperationRunStatus"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Approval Request Id"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "origin",
+          "connector_id",
+          "op_id",
+          "target_name",
+          "approval_request_id",
+          "result",
+          "error",
+          "created_at",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "OperationRunStatusResponse",
+        "description": "Poll response for ``GET /operations/runs/{handle}``.\n\n``result`` carries the full persisted ``OperationResult`` envelope once\nthe run reaches ``succeeded`` (the dropped-response-class fix); ``error``\ncarries the run-crash / reaper reason on a ``failed`` run. Both are\n``None`` while the run is still ``pending`` / ``running``."
+      },
+      "OperationRunSummaryResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OperationRunStatus"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Approval Request Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Started At"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Ended At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "origin",
+          "connector_id",
+          "op_id",
+          "target_name",
+          "approval_request_id",
+          "created_at",
+          "started_at",
+          "ended_at"
+        ],
+        "title": "OperationRunSummaryResponse",
+        "description": "One row of the operation-run list (``GET /operations/runs``).\n\nA scannable index row: identity, lifecycle state, dispatch coordinates,\ntimestamps. The full ``result`` envelope is omitted \u2014 a caller wanting a\nrun's result polls ``GET /operations/runs/{handle}``."
       },
       "OperatorIdentity": {
         "properties": {

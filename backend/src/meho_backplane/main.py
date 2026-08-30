@@ -95,6 +95,7 @@ from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
+from meho_backplane.api.v1.operation_runs import router as api_v1_operation_runs_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
@@ -168,6 +169,10 @@ from meho_backplane.operations.ingest import (
     validate_shipped_artifacts,
 )
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
+from meho_backplane.operations.operation_run_reaper import (
+    start_operation_run_reaper,
+    stop_operation_run_reaper,
+)
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
@@ -466,6 +471,7 @@ class _BackgroundTasks:
     sensor_runner: asyncio.Task[None] | None
     sensor_watchdog: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
+    operation_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
 
@@ -555,6 +561,15 @@ def _start_background_tasks() -> _BackgroundTasks:
     agent_run_reaper: asyncio.Task[None] | None = None
     if settings.agent_run_reaper_enabled:
         agent_run_reaper = start_agent_run_reaper()
+    # #3079 — async governed dispatch reaper. Gated on
+    # OPERATION_RUN_REAPER_ENABLED so operators running an external
+    # lease-reclaim mechanism can disable the in-tree reaper. Reclaims a
+    # governed dispatch whose worker died mid-flight, driving it to
+    # ``failed`` (never re-dispatched — a governed op can wrap a
+    # non-idempotent vendor write).
+    operation_run_reaper: asyncio.Task[None] | None = None
+    if settings.operation_run_reaper_enabled:
+        operation_run_reaper = start_operation_run_reaper()
     # G11.3-T3 #824 — event-outbox drain loop. Gated on
     # EVENT_DRAIN_ENABLED so operators using an external orchestrator
     # (or running the test path without the drain) can opt out.
@@ -581,6 +596,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         sensor_runner=sensor_runner,
         sensor_watchdog=sensor_watchdog,
         agent_run_reaper=agent_run_reaper,
+        operation_run_reaper=operation_run_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
     )
@@ -598,6 +614,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
+    if tasks.operation_run_reaper is not None:
+        await stop_operation_run_reaper(tasks.operation_run_reaper)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.sensor_watchdog is not None:
@@ -839,6 +857,11 @@ app.include_router(api_v1_topology_router)
 # from the JWT's tenant_id claim so cross-tenant subscription is
 # impossible by construction.
 app.include_router(api_v1_feed_router)
+# #3079 -- async governed dispatch handle surface at
+# /api/v1/operations/runs*. Registered BEFORE the operations router so the
+# literal ``/runs`` list route wins over that router's ``/{descriptor_id}``
+# catch-all (the same ordering agent_runs uses against the agents router).
+app.include_router(api_v1_operation_runs_router)
 # G0.6-T8 (#399) -- operation meta-tool surface at /api/v1/operations/*.
 # Four routes mirroring the three MCP meta-tools (list_operation_groups /
 # search_operations / call_operation) plus a tenant-admin-gated descriptor

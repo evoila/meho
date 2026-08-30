@@ -73,8 +73,9 @@ writes are the separate follow-up #1452).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import structlog
 
@@ -87,9 +88,11 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "BLAST_RADIUS_KEY",
     "PREVIEW_REASON_CREDENTIAL_REDACTED",
     "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
+    "blast_radius_missing_reason",
     "build_permission_preflight",
     "build_proposed_effect",
     "describe_preview_provenance",
@@ -514,6 +517,50 @@ def describe_preview_provenance(
     if classify_op(op_id) in _SENSITIVE_CLASSES:
         return False, PREVIEW_REASON_CREDENTIAL_REDACTED
     return False, PREVIEW_REASON_NOT_POPULATED
+
+
+#: Top-level ``proposed_effect`` key carrying the mandatory blast-radius
+#: statement for the ``destructive`` tier (#3197, decision requirement 3).
+#: A destructive op's preview builder returns it inside its preview dict;
+#: :func:`~meho_backplane.operations.dispatcher._build_proposed_effect`
+#: promotes it to the top level (alongside ``safety_level`` / ``op_class``)
+#: so the reviewer surface and the mandatory-block gate read it without
+#: reaching into ``preview``.
+BLAST_RADIUS_KEY: Final[str] = "blast_radius"
+
+
+def blast_radius_missing_reason(proposed_effect: Mapping[str, Any] | None) -> str | None:
+    """Return ``None`` when a valid blast-radius block is present, else why not.
+
+    The mandatory-block gate for the ``destructive`` tier (#3197, decision
+    requirement 3). A destructive op cannot park with only the
+    identifier-only default: its ``proposed_effect`` must carry a
+    :data:`BLAST_RADIUS_KEY` block naming the three things the approver
+    reads before deciding —
+
+    * ``object`` -- the identity of what is destroyed (truthy);
+    * ``children`` -- the enumerated child objects that go with it (a list;
+      empty is valid — "no children", explicitly enumerated, is a
+      statement, not an omission);
+    * ``irreversibility`` -- the irreversibility class (a non-empty string).
+
+    Returns a human-readable reason naming the first missing / malformed
+    field so the dispatcher's refuse-to-park result is actionable; ``None``
+    means the block is well-formed and the park may proceed.
+    """
+    if not proposed_effect:
+        return "proposed_effect is empty (no blast-radius statement)"
+    block = proposed_effect.get(BLAST_RADIUS_KEY)
+    if not isinstance(block, Mapping):
+        return f"proposed_effect.{BLAST_RADIUS_KEY} block is absent"
+    if not block.get("object"):
+        return f"{BLAST_RADIUS_KEY}.object (object identity) is missing"
+    if not isinstance(block.get("children"), list):
+        return f"{BLAST_RADIUS_KEY}.children (enumerated child objects) must be a list"
+    irreversibility = block.get("irreversibility")
+    if not isinstance(irreversibility, str) or not irreversibility:
+        return f"{BLAST_RADIUS_KEY}.irreversibility (irreversibility class) is missing"
+    return None
 
 
 async def build_permission_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

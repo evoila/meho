@@ -2781,10 +2781,13 @@ type BudgetStatus struct {
 // tracker API call (Goal #1651 ships the field only).
 type CallOperationBody struct {
 	// Async Async governed dispatch (#3079). When true, ``/call`` returns a durable run handle (HTTP 202) immediately instead of holding the connection for the op's full duration; execution proceeds server-side and the caller polls / cancels via ``/api/v1/operations/runs/{handle}``. The completed ``OperationResult`` envelope is persisted on the run, so a dropped response never loses the outcome. Default false — sync mode is byte-identical to the pre-#3079 behaviour.
-	Async       *bool                     `json:"async,omitempty"`
-	ConnectorId string                    `json:"connector_id"`
-	OpId        string                    `json:"op_id"`
-	Params      *map[string]interface{}   `json:"params,omitempty"`
+	Async       *bool                   `json:"async,omitempty"`
+	ConnectorId string                  `json:"connector_id"`
+	OpId        string                  `json:"op_id"`
+	Params      *map[string]interface{} `json:"params,omitempty"`
+
+	// PreviewHash Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op — the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197.
+	PreviewHash *string                   `json:"preview_hash"`
 	Target      *CallOperationBody_Target `json:"target"`
 	WorkRef     *string                   `json:"work_ref"`
 }

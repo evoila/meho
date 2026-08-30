@@ -513,6 +513,22 @@ register_mcp_tool(
                         "never sent to the tracker."
                     ),
                 },
+                "preview_hash": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Preview-result-hash binding for a destructive-tier "
+                        "delete (#3197). REQUIRED when the op is "
+                        "`safety_level='destructive'`: first call "
+                        "`preview_operation` with the identical `connector_id` "
+                        "/ `op_id` / `target` / `params`, take the `preview_hash` "
+                        "it returns, and pass it here. The dispatcher recomputes "
+                        "the preview server-side and refuses to queue the "
+                        "approval (fail-closed) unless the hashes match — so "
+                        "the human approver sees exactly what will be destroyed. "
+                        "Ignored for every non-destructive op."
+                    ),
+                },
             },
             "required": ["connector_id", "op_id"],
             "additionalProperties": False,
@@ -687,6 +703,15 @@ register_mcp_tool(
                         "The would-be JSON request body after the "
                         "connector-boundary redaction pipeline; null when "
                         "the op declares no body (status=ok)."
+                    ),
+                },
+                "preview_hash": {
+                    "type": "string",
+                    "description": (
+                        "Preview-result-hash binding (#3197, status=ok): a "
+                        "stable SHA-256 over the resolved request. Present it "
+                        "as `call_operation`'s `preview_hash` arg to govern a "
+                        "destructive-tier delete."
                     ),
                 },
                 "error": {"type": ["string", "null"]},

@@ -24275,6 +24275,13 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "preview_hash": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "Preview Hash",
+            "description": "Preview-result-hash binding for the destructive tier (#3197). The hash a prior preview_operation of the identical (connector_id, op_id, target, params) returned. REQUIRED for a safety_level='destructive' op \u2014 the dispatcher refuses to park the approval fail-closed unless it matches the server-recomputed preview hash. Ignored for every non-destructive op. None default keeps a bare call_operation byte-identical to pre-#3197."
+          },
           "async": {
             "type": "boolean",
             "title": "Async",

@@ -106,6 +106,7 @@ from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    PreviewBindingMissingError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
@@ -728,5 +729,16 @@ async def _commit_decision(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This request was already {exc.status}.",
+        ) from exc
+    except PreviewBindingMissingError as exc:
+        # #3197: a destructive row missing its preview-hash binding cannot be
+        # approved (fail-closed re-verification of the mandatory binding).
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "This destructive request is missing its preview-result-hash "
+                "binding and cannot be approved. Re-file it via a fresh "
+                "preview + call."
+            ),
         ) from exc
     return request

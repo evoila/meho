@@ -543,6 +543,77 @@ top. The only path that does **not** carry it is the bare identifier
 default the caller stores when `_build_proposed_effect` returns `None`
 (connector-resolution / hook fault) — that degraded path is unchanged.
 
+## Destructive tier: preview-hash binding + mandatory blast-radius (#3197)
+
+The `destructive` safety tier (the fourth `safety_level`, #3196 —
+`safe < caution < dangerous < destructive`) adds two fail-closed
+requirements on top of the standard park, both landing at the dispatcher
+seam. They implement requirements 2 and 3 of
+[`docs/decisions/governed-delete-operations.md`](../decisions/governed-delete-operations.md).
+Neither applies to any lower tier; a `safe` / `caution` / `dangerous` op
+parks exactly as before.
+
+**Requirement 2 — preview-result-hash binding.** `preview_operation`
+(`operations/_request_preview.py::preview_dispatch`) now emits a
+`preview_hash` on its `status="ok"` envelope:
+`compute_preview_hash` takes a stable SHA-256 over the canonicalised
+*resolved request* projection (`connector_id` / `op_id` / `method` /
+`resolved_path` / `query` / `redacted_body`) — the literal would-be
+request, the same canonicalisation discipline as `compute_params_hash`.
+An agent/operator previews the destructive op, then presents that hash on
+the subsequent `call_operation` (top-level `preview_hash` arg on
+`CallOperationBody` / the MCP tool schema, a MEHO dispatch control like
+`work_ref` — never a connector op param, so it stays out of `params_hash`
+and the op's `parameter_schema`).
+
+When such an op reaches `needs-approval`, `_handle_needs_approval` calls
+`_destructive_binding_refusal` **before** it writes any row:
+
+- no `preview_hash` presented → `denied` / `preview_binding_required`;
+- the dispatcher **recomputes** the authoritative hash by resolving the
+  same preview server-side (`preview_dispatch` — read-only, no egress) and
+  comparing. A non-resolvable preview → `preview_binding_required`; a
+  mismatch (params swapped between preview and call, or a forged/stale
+  hash) → `preview_hash_mismatch`.
+
+The verified hash is persisted on `ApprovalRequest.preview_hash` (nullable
+`Text`, migration `0086`) — **distinct** from `params_hash` (that hashes
+the request *params*; this hashes the *preview result* the approver was
+shown). At approve time `_load_pending_for_approval` re-verifies it
+(`_check_destructive_preview_binding`): a `destructive` row
+(`proposed_effect.safety_level == "destructive"`) with no `preview_hash`
+raises `PreviewBindingMissingError` → HTTP 422 on every approve surface
+(REST `/approve`, `/decide`, the console). This extends the existing
+`params_hash` swap-defence to the preview binding. The resume path
+(`dispatch(..., _approved=True)`) skips the policy gate, so the binding is
+enforced once at park and once at approve, never re-checked on execution.
+
+**Requirement 3 — mandatory blast-radius statement.** A destructive op
+cannot park with only the identifier-only default: its `proposed_effect`
+must carry a top-level `blast_radius` block — `object` (object identity),
+`children` (the enumerated child objects, a list; empty is a valid
+explicit statement), and `irreversibility` (the irreversibility class).
+A destructive op's preview builder returns the block inside its `preview`
+dict; `dispatcher._build_proposed_effect` **promotes** it to the top level
+(mirroring the `safety_level` / `op_class` stamping) so the mandatory-block
+gate and the console modal read it without reaching into `preview`.
+`blast_radius_missing_reason` (`operations/_preview.py`) validates it; a
+missing/malformed block → `_handle_needs_approval` refuses the park with
+`denied` / `blast_radius_required` (naming the missing field) rather than
+falling back to the identifier-only default. So a `destructive` op that
+registers no blast-radius preview builder is un-parkable by construction —
+fail-closed. The console modal (`ui/templates/approvals/_modal.html`)
+renders the block as an error-tinted "what this destroys" card above the
+generic field table.
+
+**Scope note.** The gate lives on the top-level dispatch park path
+(`_handle_needs_approval`). The composite-subop park path
+(`operations/composite.py::enforce_subop_policy`) parks via its own
+`create_pending_request` call and is **not** gated here — a destructive op
+reached as a composite subop is a separate governance seam (a follow-up,
+not this task). In practice an agent cannot reach it: the destructive tier
+is `DENY` for agent principals at `resolve_verdict`.
+
 ## Uniform op-identity envelope (#2681)
 
 The preview base varies by outcome — a bespoke `{op_class, preview}`, the

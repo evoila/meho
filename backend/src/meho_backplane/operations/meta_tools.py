@@ -423,6 +423,19 @@ class CallOperationBody(BaseModel):
     target: _TargetArg = None
     params: dict[str, Any] = Field(default_factory=dict)
     work_ref: str | None = Field(default=None, min_length=1)
+    preview_hash: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Preview-result-hash binding for the destructive tier (#3197). "
+            "The hash a prior preview_operation of the identical "
+            "(connector_id, op_id, target, params) returned. REQUIRED for a "
+            "safety_level='destructive' op — the dispatcher refuses to park "
+            "the approval fail-closed unless it matches the server-recomputed "
+            "preview hash. Ignored for every non-destructive op. None default "
+            "keeps a bare call_operation byte-identical to pre-#3197."
+        ),
+    )
     async_: bool = Field(
         default=False,
         alias="async",
@@ -1092,6 +1105,12 @@ async def _call_operation_impl(
                 target=resolved_target,
                 params=params,
                 _approved=approved,
+                # #3197: the destructive-tier preview-result-hash binding.
+                # A MEHO dispatch control (like ``work_ref`` above), not a
+                # connector op param — threaded top-level, never into
+                # ``params``, so it stays out of ``params_hash`` and the op's
+                # parameter_schema. ``None`` for a non-destructive call.
+                preview_hash=arguments.get("preview_hash"),
             )
     finally:
         if work_ref_token is not None:

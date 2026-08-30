@@ -77,9 +77,13 @@ real hardware is the #3047 follow-up (see "Auth" below).
   type (the modern impl reads the same target fields as the legacy). The
   loader is injectable on construction
   (`FleetLcmConnector(credentials_loader=...)`) for unit / integration tests.
-- **`load_credentials_from_vault`** (`session.py`) — the shared
-  operator-context KV-v2 read, re-exported. Returns the `{username, password}`
-  pair (the shared basic-creds read).
+- **`load_credentials_from_vault`** (`session.py`) — the fleet-lcm default
+  loader (#3047). An operator-context KV-v2 read (via the shared
+  `load_vault_secret_data`) that surfaces the required `{username, password}`
+  pair **plus an optional `token`** when the operator has staged one — the
+  Bearer token-provisioning seam. Mirrors the proxmox / github
+  field-discriminator loaders (pick the upstream credential protocol by
+  inspecting which fields the secret carries, not via `auth_model`).
 - Canonical constants (`__init__.py`): `FLEET_LCM_PRODUCT`,
   `FLEET_LCM_VERSION`, `FLEET_LCM_IMPL_ID`, `FLEET_LCM_CONNECTOR_ID`.
 
@@ -113,13 +117,19 @@ Per the pinned spec's `securitySchemes`, the global scheme is `bearerToken`
    returns `Authorization: Basic <b64>` off the username/password pair (the
    spec's `basicAuth` alternative), reusing the shared `basic_auth_header`.
 
-**Bearer is a documented seam, not live-verified.** The default Vault loader
-surfaces only the username/password pair, so the live default is the Basic
-alternative (the appliance accepts `basicAuth` per the spec). The Bearer
-*header shape* is unit-tested via an injected loader returning a `"token"`; the
-Bearer-token **provisioning** — a fleet-lcm loader surfacing a Vault-stored
-token, or a POST-`basicAuth` → mint-`bearerToken` session flow — is the
-live-verify follow-up gated on a stood-up appliance.
+**The token-provisioning seam has landed; the live mint + verify has not
+(#3047).** The default `load_credentials_from_vault` now surfaces a
+Vault-staged `token`, so an operator opts a target into Bearer by adding a
+`token` field to its secret — no `auth_model` change. This is unit-tested end
+to end through the **real** default loader against an in-process Vault fake
+(`test_connectors_fleet_lcm_credread.py`: Basic when no token, Bearer when a
+token is staged, whitespace-strip, fail-closed on a missing pair) as well as
+via injected loaders (`test_connectors_fleet_lcm_auth.py`). What remains a
+seam is the **live** alternative provisioning path — a `POST`-`basicAuth` →
+mint-`bearerToken` exchange against the appliance's token endpoint — and the
+**live Bearer verification** against real hardware; both are gated on a
+reachable Fleet LCM appliance (#1002 / #995). Until then a target with no
+staged token authenticates with the Basic alternative.
 
 ### Fingerprint / probe
 
@@ -205,17 +215,20 @@ from is tautological.)
 
 ## Known issues / follow-ups
 
-- **Bearer auth not live-verified.** See "Auth" — the header shape ships and is
-  unit-tested (dispatch through the Bearer seam against a respx mock); token
-  provisioning + live dispatch against a real appliance are the #3047 follow-up
-  gated on reachable hardware. Until then the live default is the Basic
-  alternative the appliance also accepts.
+- **Live Bearer not verified; the token-provisioning seam has landed.** See
+  "Auth" — the default loader now surfaces a Vault-staged `token` (Bearer
+  opt-in), unit-tested through the real loader against a Vault fake. What
+  remains the #3047 follow-up, gated on reachable hardware (#1002 / #995), is
+  the **live** `basicAuth` → mint-`bearerToken` exchange and the live Bearer
+  handshake against a real appliance. Until then a target with no staged token
+  authenticates with the Basic alternative.
 - **Read core only; ingested breadth + writes are a follow-up.** The 13-op
   typed read core dispatches on a fresh boot. The wider 51-op `/v1/*` surface
   (as `source_kind="ingested"` breadth) and the component / upgrade / task
   writes are enabled operationally through the generic review flow
   (`meho connector ingest` of `fleet-lcm-openapi.yaml` → `ReviewService.enable_reads`),
-  not shipped here.
+  not shipped here — see the operator runbook
+  [`docs/cross-repo/fleet-lcm-onboarding.md`](../cross-repo/fleet-lcm-onboarding.md).
 
 ## References
 
@@ -228,6 +241,12 @@ from is tautological.)
   (dispatch + registration) and
   [`test_connectors_fleet_lcm_spec_reconcile.py`](../../backend/tests/test_connectors_fleet_lcm_spec_reconcile.py)
   (13-path reconcile lane).
+- Auth tests:
+  [`test_connectors_fleet_lcm_auth.py`](../../backend/tests/test_connectors_fleet_lcm_auth.py)
+  (injected-loader header shapes) and
+  [`test_connectors_fleet_lcm_credread.py`](../../backend/tests/test_connectors_fleet_lcm_credread.py)
+  (the real default loader's Bearer/Basic paths through a Vault fake).
+- Operator runbook: [`fleet-lcm-onboarding.md`](../cross-repo/fleet-lcm-onboarding.md).
 - Legacy impl: [`connectors-vcf-fleet.md`](connectors-vcf-fleet.md)
 - Spec provenance: `vmware/vcf-api-specs@c3f3b52c` (Apache-2.0); shelf
   `docs/fleet-lcm-9.0/MANIFEST.md`.

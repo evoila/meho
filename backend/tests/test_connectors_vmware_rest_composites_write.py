@@ -1164,6 +1164,20 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
             "nestedHVEnabled": True,
             "deviceChange": [
                 {
+                    # #3117: the always-folded SCSI controller leads the
+                    # deviceChange even when no disks were requested, so a
+                    # fresh vim-arm VM has a controller for the governed
+                    # REST disk-add.
+                    "_typeName": "VirtualDeviceConfigSpec",
+                    "operation": "add",
+                    "device": {
+                        "_typeName": "VirtualLsiLogicSASController",
+                        "key": -100,
+                        "busNumber": 0,
+                        "sharedBus": "noSharing",
+                    },
+                },
+                {
                     "_typeName": "VirtualDeviceConfigSpec",
                     "operation": "add",
                     "device": {
@@ -1178,7 +1192,7 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
                             },
                         },
                     },
-                }
+                },
             ],
         },
         "pool": {
@@ -1207,6 +1221,7 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
         "cpu_count": 8,
         "memory_mib": 16384,
         "nics": ["dvportgroup-1015"],
+        "disks": [],
         "nested_hv": True,
     }
 
@@ -1456,6 +1471,17 @@ async def test_vm_create_pre9_standard_portgroup_nic_uses_network_backing(
     create_body = conn.vmomi_calls[0][1]
     assert create_body["config"]["deviceChange"] == [
         {
+            # Always-folded SCSI controller (#3117) leads the list.
+            "_typeName": "VirtualDeviceConfigSpec",
+            "operation": "add",
+            "device": {
+                "_typeName": "VirtualLsiLogicSASController",
+                "key": -100,
+                "busNumber": 0,
+                "sharedBus": "noSharing",
+            },
+        },
+        {
             "_typeName": "VirtualDeviceConfigSpec",
             "operation": "add",
             "device": {
@@ -1466,7 +1492,7 @@ async def test_vm_create_pre9_standard_portgroup_nic_uses_network_backing(
                     "deviceName": "VM Network",
                 },
             },
-        }
+        },
     ]
     assert out["status"] == "created"
     assert out["steps_succeeded"] == ["folder_lookup", "create", "nic_attach"]
@@ -1499,6 +1525,199 @@ async def test_vm_create_pre9_opaque_network_nic_fails_closed(gate: _GateRecorde
     assert "OPAQUE_NETWORK" in out["rollback_reason"]
     assert gate.calls == []  # the CreateVM_Task write was never gated / issued
     assert conn.vmomi_calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_folds_disks_and_controller(gate: _GateRecorder) -> None:
+    """Pre-9.0: requested disks fold as VirtualDisk fileOperation-create adds (#3117).
+
+    The always-folded SCSI controller leads the deviceChange, then one
+    ``VirtualDisk`` per disk (``fileOperation: create``) bound to it —
+    negative keys, SCSI unit numbers, and byte capacities. The create is
+    atomic, so ``disk_attach`` rides the steps ledger and the approval
+    names the storage.
+    """
+    conn = _pre9_conn(
+        rest={"/api/vcenter/datastore/datastore-11": {"name": "datastore1"}},
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-77"),
+            "Task": _task_info_result(
+                "task-77", "success", result={"type": "VirtualMachine", "value": "vm-88"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "folder-7",
+            "name": "esx-nested-01",
+            "guest_os": "VMKERNEL_8",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "disks": [{"capacity_gb": 10}, {"capacity_gb": 20}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    create_body = conn.vmomi_calls[0][1]
+    assert create_body["config"]["deviceChange"] == [
+        {
+            "_typeName": "VirtualDeviceConfigSpec",
+            "operation": "add",
+            "device": {
+                "_typeName": "VirtualLsiLogicSASController",
+                "key": -100,
+                "busNumber": 0,
+                "sharedBus": "noSharing",
+            },
+        },
+        {
+            "_typeName": "VirtualDeviceConfigSpec",
+            "operation": "add",
+            "fileOperation": "create",
+            "device": {
+                "_typeName": "VirtualDisk",
+                "key": -200,
+                "controllerKey": -100,
+                "unitNumber": 0,
+                "capacityInBytes": 10 * 1024**3,
+                "backing": {
+                    "_typeName": "VirtualDiskFlatVer2BackingInfo",
+                    "fileName": "",
+                    "diskMode": "persistent",
+                    "thinProvisioned": True,
+                },
+            },
+        },
+        {
+            "_typeName": "VirtualDeviceConfigSpec",
+            "operation": "add",
+            "fileOperation": "create",
+            "device": {
+                "_typeName": "VirtualDisk",
+                "key": -201,
+                "controllerKey": -100,
+                "unitNumber": 1,
+                "capacityInBytes": 20 * 1024**3,
+                "backing": {
+                    "_typeName": "VirtualDiskFlatVer2BackingInfo",
+                    "fileName": "",
+                    "diskMode": "persistent",
+                    "thinProvisioned": True,
+                },
+            },
+        },
+    ]
+    assert gate.calls[0]["params"]["disks"] == [10, 20]
+    assert out["status"] == "created"
+    assert out["steps_succeeded"] == ["create", "disk_attach"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_pre9_no_disks_still_folds_controller(gate: _GateRecorder) -> None:
+    """Pre-9.0 minimum ask (#3117): a no-disks create still gets a SCSI controller.
+
+    ``CreateVM_Task`` adds no controller of its own, so a fresh vim-arm VM
+    must carry the folded one or the documented governed disk-add
+    (``POST .../hardware/disk``) 500s for lack of a slot. No ``disk_attach``
+    step (none were requested).
+    """
+    conn = _pre9_conn(
+        rest={"/api/vcenter/datastore/datastore-11": {"name": "datastore1"}},
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-9"),
+            "Task": _task_info_result(
+                "task-9", "success", result={"type": "VirtualMachine", "value": "vm-88"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "folder-7",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.vmomi_calls[0][1]["config"]["deviceChange"] == [
+        {
+            "_typeName": "VirtualDeviceConfigSpec",
+            "operation": "add",
+            "device": {
+                "_typeName": "VirtualLsiLogicSASController",
+                "key": -100,
+                "busNumber": 0,
+                "sharedBus": "noSharing",
+            },
+        }
+    ]
+    assert out["steps_succeeded"] == ["create"]
+    assert gate.calls[0]["params"]["disks"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("about_version", [None, "9.0.0.24755230"])
+async def test_vm_create_rest_arm_threads_disks_into_createspec(
+    gate: _GateRecorder, about_version: str | None
+) -> None:
+    """9.0+/unresolved: disks thread into the CreateSpec as SCSI new_vmdk (#3117).
+
+    vCenter fabricates the controller for CreateSpec disks, so the REST arm
+    needs no explicit controller — the flat ``Disk.CreateSpec`` carries the
+    byte-sized ``new_vmdk``. ``disk_attach`` rides the ledger.
+    """
+    conn = _UnifiedRecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-99"},
+        },
+        about_version=about_version,
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "datastore": "datastore-11",
+            "disks": [{"capacity_gb": 100}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.vmomi_calls == []
+    assert conn.calls[1]["body"]["disks"] == [
+        {"type": "SCSI", "new_vmdk": {"capacity": 100 * 1024**3}}
+    ]
+    assert out["steps_succeeded"] == ["folder_lookup", "create", "disk_attach"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_invalid_disk_capacity_fails_closed(gate: _GateRecorder) -> None:
+    """A non-positive ``capacity_gb`` refuses before any create (#3117)."""
+    conn = _UnifiedRecordingConnector(
+        {"/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}]},
+        about_version=None,
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "disks": [{"capacity_gb": 0}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "disk_spec"
+    assert conn.calls == []
+    assert gate.calls == []
 
 
 @pytest.mark.asyncio

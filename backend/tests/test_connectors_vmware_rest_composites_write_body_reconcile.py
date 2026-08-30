@@ -201,6 +201,8 @@ from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
 _EMITTED_VIM_TYPE_NAMES: set[str] = {
     MOREF_TYPE_NAME,
     _write._VIRTUAL_DISK_TYPE,
+    _write._VIRTUAL_LSILOGIC_SAS_CONTROLLER_TYPE,
+    _write._VIRTUAL_DISK_FLAT_BACKING_TYPE,
     _write._VIRTUAL_VMXNET3_TYPE,
     _write._DV_PORT_BACKING_TYPE,
     _write._STANDARD_NETWORK_BACKING_TYPE,

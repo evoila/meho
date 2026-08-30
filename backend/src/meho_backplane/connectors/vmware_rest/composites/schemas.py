@@ -608,9 +608,11 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 #: into the CreateSpec ``placement`` alongside the resolved folder moid.
 #: On pre-9.0 vCenter (live ``about.version`` major < 9, #3099) the
 #: create rides vim ``Folder.CreateVM_Task`` instead — the bare REST
-#: create is vendor-defective on 8.0.x — with NICs and ``nested_hv``
-#: folded into the one ConfigSpec; ``resource_pool`` and ``datastore``
-#: are required on that arm. The target folder is spelled as either a
+#: create is vendor-defective on 8.0.x — with an always-folded SCSI
+#: controller (#3117), disks, NICs and ``nested_hv`` folded into the one
+#: ConfigSpec; ``resource_pool`` and ``datastore`` are required on that
+#: arm. The optional ``disks`` list (#3117) lands data disks in the same
+#: create on both arms. The target folder is spelled as either a
 #: display name (``folder_name``, resolved with #3115's
 #: datacenter-scoped, fail-loud-on-ambiguity lookup) or an explicit
 #: ``folder`` moid pin that skips the lookup.
@@ -752,6 +754,40 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "adds (distributed or standard portgroup backing; "
                 "``OPAQUE_NETWORK`` has no vim expression there and "
                 "fails closed)."
+            ),
+        },
+        "disks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "capacity_gb": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Disk capacity in GiB (converted to bytes for the vendor spec)."
+                        ),
+                    },
+                },
+                "required": ["capacity_gb"],
+                "additionalProperties": False,
+            },
+            "default": [],
+            "description": (
+                "Optional data disks to create with the VM (#3117). On the "
+                "REST arm each entry threads into the CreateSpec ``disks`` "
+                "as a SCSI ``new_vmdk`` sized in bytes (vCenter fabricates "
+                "the controller). On the pre-9.0 vim arm (#3099) — where "
+                "``CreateVM_Task`` builds the VM verbatim and adds no "
+                "controller — the arm ALWAYS folds a "
+                "``VirtualLsiLogicSASController`` (so a fresh VM has a "
+                "controller for the governed disk-add "
+                "``POST:/vcenter/vm/{vm}/hardware/disk`` even when this "
+                "list is empty) plus one ``VirtualDisk`` "
+                "``fileOperation: create`` per entry, bound to it. "
+                "Thin-vs-thick follows the datastore default. Empty list "
+                "keeps the REST create body byte-identical to a pre-#3117 "
+                "call."
             ),
         },
         "nested_hv": {
@@ -1319,19 +1355,22 @@ VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": (
                 "Per-step success ledger: ``folder_lookup``, "
-                "``create``, ``nic_attach``, ``nested_hv``, ``power_on``. "
-                "``folder_lookup`` is omitted when the request pinned "
-                "the folder moid via the ``folder`` param (#3115 — no "
-                "lookup ran)."
+                "``create``, ``disk_attach``, ``nic_attach``, "
+                "``nested_hv``, ``power_on``. ``disk_attach`` (#3117) is "
+                "present when the request carried ``disks`` (folded into "
+                "the create on both arms). ``folder_lookup`` is omitted "
+                "when the request pinned the folder moid via the "
+                "``folder`` param (#3115 — no lookup ran)."
             ),
         },
         "failed_step": {
             "type": ["string", "null"],
             "description": (
                 "Name of the first failing step on rollback; ``null`` "
-                "when ``status='created'``. The pre-9.0 vim arm (#3099) "
-                "adds fail-closed resolution steps: "
-                "``guest_id_mapping``, ``placement_params``, "
+                "when ``status='created'``. Both arms fail closed on an "
+                "invalid ``disks`` entry with ``disk_spec`` (#3117). The "
+                "pre-9.0 vim arm (#3099) adds fail-closed resolution "
+                "steps: ``guest_id_mapping``, ``placement_params``, "
                 "``datastore_lookup``, ``network_lookup``."
             ),
         },

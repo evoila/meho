@@ -25,7 +25,7 @@ helpers, never the mutating sub-ops.
 ``cluster.patch``         ``{cluster, resolved, total_resolved}``
 ``vm.create``             echo: name, guest_os, sizing, placement pins
                           (folder_name, folder, resource_pool, datastore,
-                          host), networks, VHV, power-on
+                          host), networks, disks_gb, VHV, power-on
 ``vm.clone``              echo: source_vm, target_name, library_item
 ``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
                           resource_pool, datastore, host, power_on,
@@ -305,6 +305,12 @@ async def _vm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         return None
     nics = ctx.params.get("nics") or []
     networks = [nic.get("network") for nic in nics if isinstance(nic, dict) and nic.get("network")]
+    disks = ctx.params.get("disks") or []
+    disk_capacities_gb = [
+        disk.get("capacity_gb")
+        for disk in disks
+        if isinstance(disk, dict) and "capacity_gb" in disk
+    ]
     return {
         "name": name,
         "guest_os": guest_os,
@@ -316,6 +322,7 @@ async def _vm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "cpu_count": int(ctx.params.get("cpu_count", 1)),
         "memory_mib": int(ctx.params.get("memory_mib", 1024)),
         "networks": networks,
+        "disks_gb": disk_capacities_gb,
         "nested_hv": bool(ctx.params.get("nested_hv", False)),
         "power_on_after_create": bool(ctx.params.get("power_on_after_create", False)),
     }

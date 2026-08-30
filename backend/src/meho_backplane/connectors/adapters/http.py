@@ -80,6 +80,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.base import Connector
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
@@ -225,6 +226,23 @@ def _retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return 500 <= exc.response.status_code < 600
     return False
+
+
+def _post_body_content_type(
+    json_body: dict[str, Any] | None, data_body: dict[str, Any] | None
+) -> str | None:
+    """Content-type of the non-idempotent body actually sent (#3214).
+
+    ``json=`` serialises ``application/json``; ``data=`` serialises the
+    form-encoded shape OAuth2 token grants / session-login POSTs use. Returned
+    so the flight-recorder redaction engine can decide parseability (a
+    form-encoded body it cannot structurally redact fails closed).
+    """
+    if json_body is not None:
+        return "application/json"
+    if data_body is not None:
+        return "application/x-www-form-urlencoded"
+    return None
 
 
 def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
@@ -690,6 +708,13 @@ class HttpConnector(Connector):
         headers = await self.auth_headers(target, operator)
         if extra_headers:
             headers = {**headers, **extra_headers}
+        # Flight-recorder vendor-call span (#3214). ``span_start`` is a single
+        # contextvar read that returns ``None`` when capture is off, so an
+        # un-recorded dispatch pays nothing; ``record_vendor_call`` is
+        # best-effort (F7) and redacts headers/bodies at capture (#3213). The
+        # span is recorded before ``raise_for_status`` so a vendor 4xx/5xx is
+        # captured too.
+        _fr_start = flight_recorder_capture.span_start()
         resp = await client.request(
             method,
             path,
@@ -697,6 +722,14 @@ class HttpConnector(Connector):
             json=json,
             headers=headers,
             extensions=self._request_extensions(target),
+        )
+        flight_recorder_capture.record_vendor_call(
+            _fr_start,
+            method=method,
+            request_headers=headers,
+            response=resp,
+            request_body=json,
+            request_content_type="application/json" if json is not None else None,
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)
@@ -784,6 +817,11 @@ class HttpConnector(Connector):
         headers = await self.auth_headers(target, operator)
         if extra_headers:
             headers = {**headers, **extra_headers}
+        # Flight-recorder vendor-call span (#3214) -- see ``_request_json``.
+        # The request body is whichever of ``json`` / ``data`` was sent, with
+        # its matching content-type; a hard-excluded (login / token / DELETE)
+        # op has its body dropped by the redaction engine's family rules.
+        _fr_start = flight_recorder_capture.span_start()
         resp = await client.request(
             verb,
             path,
@@ -793,6 +831,14 @@ class HttpConnector(Connector):
             headers=headers,
             extensions=self._request_extensions(target),
             timeout=timeout,
+        )
+        flight_recorder_capture.record_vendor_call(
+            _fr_start,
+            method=verb,
+            request_headers=headers,
+            response=resp,
+            request_body=json if json is not None else data,
+            request_content_type=_post_body_content_type(json, data),
         )
         resp.raise_for_status()
         return json_payload_or_empty(resp)

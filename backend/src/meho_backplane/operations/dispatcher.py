@@ -264,6 +264,7 @@ from meho_backplane.connectors import (
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
@@ -695,6 +696,58 @@ async def _execute_and_audit(
     redactor stays deterministic across policy revisions.
     """
     audit_id = uuid.uuid4()
+    # Flight-recorder capture seam (#3214). Opened once at the root dispatch
+    # (F1 should_capture, fail-open) and joined by nested composite children so
+    # every sub-step span lands under the one parent trace. Best-effort (F7):
+    # begin/end never raise, and the trace is persisted in the ``finally`` after
+    # the audit row has committed, so a recorder failure can never fail, block,
+    # or materially slow the dispatch.
+    capture_handle = await flight_recorder_capture.begin_dispatch_capture(
+        audit_id=audit_id,
+        operator=operator,
+        target=target,
+        descriptor=descriptor,
+        connector_id=connector_id,
+    )
+    try:
+        return await _execute_and_audit_inner(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            connector_instance=connector_instance,
+            operator=operator,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            audit_id=audit_id,
+            started=started,
+            scrub_response=scrub_response,
+        )
+    finally:
+        await flight_recorder_capture.end_dispatch_capture(capture_handle)
+
+
+async def _execute_and_audit_inner(
+    *,
+    op_id: str,
+    connector_id: str,
+    descriptor: EndpointDescriptor,
+    connector_instance: Connector | None,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    started: float,
+    scrub_response: bool = False,
+) -> OperationResult:
+    """The redact -> reduce -> audit success/error body of :func:`_execute_and_audit`.
+
+    Extracted so :func:`_execute_and_audit` stays a thin wrapper that owns only
+    the flight-recorder capture scope (open before the branch runs, persist in
+    ``finally`` after the audit commits). ``audit_id`` is minted by the caller
+    so the trace and the audit row share one id.
+    """
     branch_result = await _run_branch_with_error_handling(
         op_id=op_id,
         descriptor=descriptor,

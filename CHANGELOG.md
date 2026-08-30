@@ -90,6 +90,37 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: capture seam + caps + best-effort invariant (#3214)
+
+- Ships the **capture seam** plus the **F3 caps** and **F7 failure invariant**
+  of the flight-recorder decision (`docs/decisions/dispatch-flight-recorder.md`),
+  composing the storage substrate (#3212) and the fail-closed redaction engine
+  (#3213) into span production on the **existing** single dispatch path — no
+  parallel execution path. Three span sources are instrumented:
+  **generic-connector vendor-call spans** (wrapped around the shared httpx seam
+  on `HttpConnector._request_json` / `_post_json`, capturing method, URL,
+  status, duration, and **redacted, capped** headers/bodies — the URL is
+  stripped to its request line so query/userinfo secrets never leak);
+  **composite sub-step spans** (a child dispatch re-enters `dispatch()` and
+  joins the **one** parent trace via a shared capture scope — no second trace,
+  no new machinery); and the **JSONFlux reduction span** (input rows → kept
+  fields → output size → handle id). Every header and body is **redacted at
+  capture** through the #3213 engine before a byte reaches a span, and the trace
+  inherits the OR of every span's redaction-uncertainty verdict (the F5
+  operator-only degrade). **F3 caps** are enforced at capture time — 64 KB per
+  span body (oversize truncates with a marker, which forces redaction
+  uncertainty), 1 MB per trace, ~50 spans per dispatch with the overflow
+  collapsing into counted per-kind span groups — and oversize **truncates,
+  never errors**. **F7** is a hard invariant: capture is best-effort and can
+  never fail, block, or materially slow a dispatch — every entry point swallows
+  its own errors, the disabled path is a single contextvar read, and the trace
+  is persisted after the audit row commits on the store's own best-effort path;
+  a test proves a forced recorder failure leaves the dispatch result
+  byte-identical and the audit row committed. Respects the F1 capture-enablement
+  config + global kill switch (captures nothing when disabled). Operator/agent
+  read surfaces (#3215/#3216) and typed-connector span instrumentation (#3217)
+  remain sibling tasks; does **not** close #3207.
+
 ### Added — first governed delete: `vmware.composite.vm.destroy` on the destructive tier + conformance (evoila-bosnia/meho-internal#3183 / #3198)
 
 - Models the **first real delete family** into the `destructive` safety
@@ -145,6 +176,7 @@ connector-related release-notes line.
   own lineage) in `docs/decisions/addon-contract-trust-model.md`: no
   code-change defects, two pre-tracked hardening follow-ups noted, no new
   issues filed. Tests and docs only — no backplane behavior change.
+
 
 ### Added — flight recorder: fail-closed redaction engine (#3213)
 

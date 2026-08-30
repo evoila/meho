@@ -113,7 +113,7 @@ connector-related release-notes line.
   malformed JSON, truncated mid-token, path-config fault, unplaceable op
   family — returns an explicit uncertain verdict callers map to the F5
   operator-only degrade). No capture wiring (#3214) and no storage (#3212):
-  this is the engine alone, with 106 adversarial tests planting synthetic
+  this is the engine alone, with 129 adversarial tests planting synthetic
   secrets in every vector (unknown headers, allowlisted header values,
   nested body paths, oversized bodies truncated mid-secret, malformed JSON,
   binary bodies) — none survive. Does **not** close #3207.
@@ -148,35 +148,6 @@ connector-related release-notes line.
   - Additive Alembic migration `0085`; internal write API
     (`flight_recorder.record_trace`) is best-effort (F7 — never raises into a
     dispatch). Under #3207.
-=======
-### Added — flight recorder: fail-closed redaction engine (#3213)
-
-- Ships **F2** of the flight-recorder decision
-  (`docs/decisions/dispatch-flight-recorder.md`) as a **pure library**
-  (`meho_backplane.redaction.flight_recorder`) — the load-bearing security
-  control that makes agent-readable traces (F5) admissible at all: a trace
-  never contains a secret. Four fail-closed guarantees: a **header
-  allowlist** (only enumerated known-safe headers survive; every
-  `Authorization` / `Cookie` / `Set-Cookie` / `X-*-Token` / CSRF / session /
-  signed-URL header is stripped **unread** — a blocklist is rejected because
-  it fails open on unknown vendor fields); **per-connector body-path
-  redaction** (declarative dotted-path globs scrubbed from request and
-  response bodies, with the Tier-1 credential-shape engine reused underneath
-  as defense-in-depth); **hard-excluded op families** (credential /
-  session-mint / token op families never record bodies regardless of config,
-  **single-sourced** with the destructive / delete-shaped classifier at
-  `operations/service_grants.py` so the two lists cannot drift — the
-  governed-delete destructive family is included now per the pending
-  cross-ref amendment); and **redaction-uncertainty signalling** (any state
-  the engine cannot *prove* fully redacted — unparseable/binary body,
-  malformed JSON, truncated mid-token, path-config fault, unplaceable op
-  family — returns an explicit uncertain verdict callers map to the F5
-  operator-only degrade). No capture wiring (#3214) and no storage (#3212):
-  this is the engine alone, with 106 adversarial tests planting synthetic
-  secrets in every vector (unknown headers, allowlisted header values,
-  nested body paths, oversized bodies truncated mid-secret, malformed JSON,
-  binary bodies) — none survive. Does **not** close #3207.
->>>>>>> f14d487c (feat(redaction): flight-recorder fail-closed redaction engine (F2) (#3213))
 
 ### Added — dispatch flight recorder: security-review-first design decision (#3207)
 

@@ -832,7 +832,7 @@ safe, so the trace stays agent-readable with a blank body); only an
 uncertain if any one artefact is uncertain.
 
 Adversarial coverage lives in
-`backend/tests/test_flight_recorder_redaction.py` (106 cases): synthetic
+`backend/tests/test_flight_recorder_redaction.py` (129 cases): synthetic
 `PLACEHOLDER`-shaped secrets planted in unknown headers, allowlisted
 header values, declared and undeclared nested body paths, oversized bodies
 truncated mid-token, malformed JSON, and binary bodies — none survive, and

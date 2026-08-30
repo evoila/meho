@@ -213,7 +213,8 @@ class IngestedRequest:
             applied, exactly as the wire call receives it.
         query: The query-string params bucket (``loc=="query"``), or
             ``None`` when empty -- the same value passed as httpx's
-            ``params=`` on the GET path.
+            ``params=`` on both the idempotent (``_request_json``) and the
+            non-idempotent (``_post_json``) transport paths (#3092).
         body: The raw, unwrapped JSON request body (``loc=="body"``), or
             ``None`` when the op declares no body param -- the same value
             passed as httpx's ``json=``.
@@ -369,8 +370,8 @@ async def dispatch_ingested(
     declares as safe-to-retry. POST / PUT / DELETE / PATCH route through
     :meth:`HttpConnector._post_json` (the same client pool, no retry),
     each carrying its *actual* declared verb -- a PUT/PATCH/DELETE is no
-    longer silently downgraded to a POST. Header-located params are
-    forwarded to both transport seams as ``extra_headers``.
+    longer silently downgraded to a POST. Query- / header-located params ride
+    ``params=`` / ``extra_headers`` on both transport seams (#3092).
     The connector instance MUST be an :class:`HttpConnector` -- the
     dispatcher type-checks via ``hasattr(connector, "_request_json")``
     rather than an :func:`isinstance` import to avoid a circular
@@ -432,10 +433,11 @@ async def dispatch_ingested(
         )
     # Non-idempotent verb -- POST / PUT / PATCH / DELETE. Routes through
     # ``_post_json`` (no retry), forwarding the *actual* declared verb so a
-    # PUT/PATCH/DELETE reaches the wire with its real method rather than a
-    # hardcoded POST. The connector owns the auth header injection + the
-    # per-target client pool; header-located params ride along as
-    # ``extra_headers``.
+    # PUT/PATCH/DELETE reaches the wire with its real method, not a hardcoded
+    # POST. All four buckets reach the wire: path vars are baked into
+    # ``request.path``; query params ride ``params=`` (mirroring the idempotent
+    # branch -- previously dropped here, #3092); header params ride
+    # ``extra_headers``; the body rides ``json``.
     post_json = getattr(connector, "_post_json", None)
     if post_json is None:
         raise RuntimeError(
@@ -447,6 +449,7 @@ async def dispatch_ingested(
         request.path,
         operator=operator,
         verb=request.method,
+        params=request.query,
         json=request.body,
         extra_headers=request.headers,
     )

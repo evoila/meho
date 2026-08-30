@@ -205,11 +205,12 @@ class _RecordingHttpConnector(HttpConnector):
         *,
         operator: Operator,
         verb: str = "POST",
+        params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        self.calls.append({"verb": "POST", "path": path, "json": json})
+        self.calls.append({"verb": "POST", "path": path, "params": params, "json": json})
         return {"sent": True}
 
     async def _request_json(

@@ -1630,6 +1630,126 @@ async def test_dispatch_ingested_honors_verb_and_forwards_header_param(
     assert len(captured_events) == 1
 
 
+class _QueryParamRoundTripHttpConnector(_RoundTripHttpConnector):
+    """Neutral synthetic connector for the query-on-non-idempotent regression.
+
+    Reuses :class:`_RoundTripHttpConnector`'s real httpx transport +
+    ``auth_headers`` / ABC overrides; only the vendor identity differs so the
+    descriptor's ``(product, version, impl_id)`` resolves to this class
+    without shadowing the gh-rest fixtures above.
+    """
+
+    product = "acme"
+    version = "1.0"
+    impl_id = "acme-rest"
+    supported_version_range = ">=1.0,<2.0"
+
+
+def _acme_thing_action_descriptor(embedding: Any) -> Any:
+    """Build an ``POST:/things/{thing_id}/actions`` ingested descriptor.
+
+    Models the latent class #3092 names: a non-idempotent op whose spec
+    declares an ``in: query`` parameter (``action``) that is NOT baked into
+    the path literal, alongside a path param and the requestBody container.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    return EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        op_id="POST:/things/{thing_id}/actions",
+        source_kind="ingested",
+        method="POST",
+        path="/things/{thing_id}/actions",
+        handler_ref=None,
+        summary="Run an action on a thing",
+        description="Run a named action on a thing.",
+        tags=[],
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "thing_id": {"type": "string", "x-meho-param-loc": "path"},
+                "action": {"type": "string", "x-meho-param-loc": "query"},
+                "body": {"type": "object", "x-meho-param-loc": "body"},
+            },
+            "required": ["thing_id", "action", "body"],
+        },
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="caution",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=embedding,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_ingested_post_forwards_query_param(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """An ingested POST forwards an ``in: query`` param (not in the path) to the wire.
+
+    Regression for #3092: ``dispatch_ingested`` routed non-idempotent verbs
+    through ``_post_json``, which had no ``params=`` seam, so a query-located
+    param not baked into the path literal was silently dropped at the wire
+    (idempotent verbs were unaffected -- ``_request_json`` already passed
+    ``params=``). Drives the real httpx transport via respx and asserts the
+    outbound request carries the query string.
+    """
+    import json as _json
+
+    import respx
+
+    register_connector_v2(
+        product="acme",
+        version="1.0",
+        impl_id="acme-rest",
+        cls=_QueryParamRoundTripHttpConnector,
+    )
+
+    session.add(_acme_thing_action_descriptor(stub_embedding_service.encode_one.return_value))
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="acme", version="1.0", host="api.acme.test", port=443)
+
+    with respx.mock(base_url="https://api.acme.test", assert_all_called=True) as mock:
+        route = mock.post("/things/widget-1/actions").respond(200, json={"status": "queued"})
+        result = await dispatch(
+            operator=operator,
+            connector_id="acme-rest-1.0",
+            op_id="POST:/things/{thing_id}/actions",
+            target=target,
+            params={"thing_id": "widget-1", "action": "start", "body": {"force": True}},
+        )
+
+    assert route.called
+    sent = route.calls.last.request
+    # The path param substitutes into the URL literal ...
+    assert sent.url.path == "/things/widget-1/actions"
+    # ... and the query-located param reaches the wire as the query string --
+    # the #3092 regression: previously dropped on the non-idempotent path.
+    assert sent.url.params["action"] == "start"
+    # The body param's value still rides unwrapped alongside the query string.
+    assert _json.loads(sent.content) == {"force": True}
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["status"] == "queued"
+    assert len(captured_events) == 1
+
+
 def test_unwrap_body_returns_value_not_wrapper() -> None:
     """`_unwrap_body` yields the body param's value (unwrapped), or None when empty.
 

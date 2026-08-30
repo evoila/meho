@@ -50,7 +50,7 @@ The load-bearing problem is attribution: a produced row (an
 Keycloak service-account **`sub`** (a UUID), while the pairing row stores
 the OAuth `clientId` (`addon:<name>`). They do not join.
 
-`AddonPairing.service_account_sub` (migration `0082`) closes the gap. At
+`AddonPairing.service_account_sub` (migration `0083`) closes the gap. At
 pair time the backplane already provisions the add-on's confidential
 Keycloak client; it now also fetches that client's service-account **user
 id** (`KeycloakAdminClient.get_service_account_user_id` →
@@ -65,14 +65,14 @@ exactly the `sub` the add-on's `client_credentials` tokens carry, so:
 
 Capturing it at provisioning time — the one point the backplane controls
 the identity — means attribution is never inferred from an unverified
-token. A pairing created before `0082` has `service_account_sub = NULL`; a
+token. A pairing created before `0083` has `service_account_sub = NULL`; a
 `NULL` never matches a real `sub`, so it fails closed until the add-on
 re-pairs.
 
 ## Key types
 
 - `meho_backplane.db.models.AddonStepEvent` — table `addon_step_event`
-  (migration `0082`). `seq` (`BIGSERIAL` cursor), `id` (stable UUID event
+  (migration `0083`). `seq` (`BIGSERIAL` cursor), `id` (stable UUID event
   id), `tenant_id` FK, `pairing_id` FK (`ON DELETE CASCADE`), `event_kind`,
   `work_ref`, `audit_id` (convention-only reference to `audit_log.id`, same
   as `BroadcastEvent.audit_id`), `payload`, `created_at`. Index

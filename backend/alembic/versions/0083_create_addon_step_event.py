@@ -33,7 +33,7 @@ column (migration-compat contract):
 Revision numbering: this branch was cut from head ``0079``, so
 ``down_revision`` points at ``0079`` and the chain is linear here.
 Sibling wave-2 PRs claimed ``0080`` and ``0081``; this migration is filed
-as ``0082`` so it does not collide on the filename. When those siblings
+as ``0083`` so it does not collide on the filename. When those siblings
 land first, ``down_revision`` must be re-pointed to the then-current head
 (``0081``) at merge time — an additive re-point, no DDL change.
 """
@@ -45,10 +45,10 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0082"
+revision: str = "0083"
 # Cut from head 0079 (siblings claimed 0080/0081); re-point to the current
 # head at merge time if those land first.
-down_revision: str | None = "0079"
+down_revision: str | None = "0082"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

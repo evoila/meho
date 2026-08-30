@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0082_create_addon_step_event``.
+"""Behavioural tests for Alembic migration ``0083_create_addon_step_event``.
 
 #3027 step-event push contract. Two additive changes: the
 ``addon_pairing.service_account_sub`` column (the identity join key) and the
@@ -9,7 +9,7 @@
 FKs + resume and stable-id indexes).
 
 Idempotency pinning: every forward / round-trip step targets this
-migration's own revision (``0082``) and its ``down_revision`` (``0079``),
+migration's own revision (``0083``) and its ``down_revision`` (``0082``),
 never ``head`` — so a future head migration cannot make ``upgrade("head")``
 re-run this DDL on a schema that already has it. SQLite is the test driver;
 the migration uses only generic DDL so PG parity holds.
@@ -30,8 +30,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0082"
-_DOWN_REVISION = "0079"
+_REVISION = "0083"
+_DOWN_REVISION = "0082"
 _TABLE = "addon_step_event"
 _EXPECTED_COLUMNS = {
     "seq",
@@ -56,7 +56,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0082.db"
+    db_path = tmp_path / "migration_0083.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -106,14 +106,14 @@ def _table_names(sync_url: str) -> set[str]:
 
 
 def test_upgrade_adds_service_account_sub_column(alembic_cfg: tuple[Config, str]) -> None:
-    """``upgrade 0082`` adds the pairing identity join column."""
+    """``upgrade 0083`` adds the pairing identity join column."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
     assert "service_account_sub" in _columns(sync_url, "addon_pairing")
 
 
 def test_upgrade_creates_step_event_table(alembic_cfg: tuple[Config, str]) -> None:
-    """``upgrade 0082`` creates the durable step-event log with its full shape."""
+    """``upgrade 0083`` creates the durable step-event log with its full shape."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
 
@@ -122,7 +122,7 @@ def test_upgrade_creates_step_event_table(alembic_cfg: tuple[Config, str]) -> No
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade 0079`` drops the table + column; ``upgrade 0082`` restores them."""
+    """``downgrade 0082`` drops the table + column; ``upgrade 0083`` restores them."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
     assert _TABLE in _table_names(sync_url)

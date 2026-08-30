@@ -9963,6 +9963,82 @@
         }
       }
     },
+    "/api/v1/addons/pairings/{name}/events": {
+      "get": {
+        "tags": [
+          "addon-pairing"
+        ],
+        "summary": "List Step Events",
+        "description": "Durable, resumable step-event subscription for the paired add-on (#3027).\n\nThe add-on authenticates as its own **service** principal (a non-service\nprincipal is 403) and reads the step events (approval outcomes, dispatch\ncompletions) that belong to **its own** work. Scoping is cryptographic:\nthe caller is bound to a pairing by its token ``sub`` (which is the\npairing's ``service_account_sub``), and ``{name}`` must be that same\npairing \u2014 a service principal can never read another add-on's log. A\ncaller whose ``sub`` binds to no pairing, or whose bound pairing is not\n``{name}``, gets 404 (indistinguishable from a missing pairing).\n\nResume: ``after`` is the last ``seq`` the add-on saw (``0`` reads from\nthe start of the retained log); the response's ``next_cursor`` is the\n``seq`` to pass as ``after`` on the next poll, so an add-on never misses\na committed event across its own restarts.",
+        "operationId": "list_step_events_api_v1_addons_pairings__name__events_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "After"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepEventListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/addons/pairings/{name}/capabilities": {
       "put": {
         "tags": [
@@ -31207,6 +31283,78 @@
         ],
         "title": "StepBodyVerify",
         "description": "The verify surface as exposed at *run* time -- substituted-and-frozen.\n\nSame discriminator (``type``) as the template-side\n:class:`~meho_backplane.runbooks.schemas.Verify` union, but every\n``${run.target}`` / ``${run.params.X}`` substitution in\n:attr:`op_id` / :attr:`params` / :attr:`expect` has already been\nresolved by the engine (#1301). This shape is what the operator /\nagent reads to know *what they will be asked* once the step's\naction is performed -- the prompt text (for ``confirm``) or the\nop-call shape and expected result (for ``operation_call``).\n\nFields are nullable by ``type`` (``prompt`` populated only on\n``confirm``; ``op_id`` / ``params`` / ``expect`` populated only on\n``operation_call``). A flat shape with optional fields is used\nrather than a discriminated sub-union because :class:`StepBody`\nalready discriminates at the parent level on ``StepBody.type``;\nnesting a second discriminated union here would force two parse\npaths for one logical decision and complicates JSON-Schema\ngeneration."
+      },
+      "StepEventListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StepEventRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "StepEventListResponse",
+        "description": "A page of step events plus the cursor to resume past it.\n\n``next_cursor`` is the ``seq`` of the last returned event (as a string\nso the wire cursor is opaque and dialect-agnostic); ``None`` when the\npage is empty. The add-on passes it back as ``after`` to read strictly\nforward on the next poll / reconnect."
+      },
+      "StepEventRead": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "event_kind": {
+            "type": "string",
+            "title": "Event Kind"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "id",
+          "event_kind",
+          "work_ref",
+          "audit_id",
+          "payload",
+          "created_at"
+        ],
+        "title": "StepEventRead",
+        "description": "One step event as delivered to a subscribed add-on."
       },
       "StepPosition": {
         "properties": {

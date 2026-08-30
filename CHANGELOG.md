@@ -149,7 +149,7 @@ connector-related release-notes line.
   its own events and one add-on can never read another's — even when their
   events share a `work_ref`. Pairing now captures the add-on's
   service-account `sub` at pair time (`AddonPairing.service_account_sub`)
-  as the identity join key. New migration `0082` (`addon_step_event` +
+  as the identity join key. New migration `0083` (`addon_step_event` +
   `service_account_sub`). See `docs/codebase/addon-step-events.md`.
 
 ### Fixed — `datastore.usage` scopes VM placement per datastore off vim, not an ignorable filter (#2975 / PR #3184)

@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — add-on pairing contract proof plane: reference double, unpaired conformance, versioned-contract docs + trust-model review (#3030)
+
+- Closes Initiative #2900's proof-plane DoD. Adds a reference add-on **test
+  double** (`tests/addon_reference_double.py`) that pairs, advertises a
+  meta-tool family, produces and consumes step events for its own `work_ref`s,
+  and drives a single audit-replay subtree — exercising all four contract
+  planes (pairing #3025, capability advertisement #3026, step-event push
+  #3027, audit parent-linkage #3028) end to end in CI with no external
+  process, on the real services (only Keycloak is stubbed). The double is a
+  harness, never a shipped connector or add-on, and the meta-tool family it
+  advertises is **data** (an `addon_capability` row), never a tool name
+  (postulate 5). Adds the **unpaired byte-identical conformance** test: a
+  paired add-on advertising a meta-tool family grows no `tools/list` surface,
+  and a full pair→advertise→produce/consume→orchestrate→unpair lifecycle
+  returns the wire surface byte-identical to a baseline **captured live at
+  test start** (robust to the working surface growing later, e.g. #3029).
+  Documents the **versioned contract** and its version-skew behavior — both
+  drift directions, at pair time and live — in
+  `docs/codebase/addon-contract.md`, and records the **trust-model security
+  review** (principal scoping, capability caps, event-subscription scoping to
+  own lineage) in `docs/decisions/addon-contract-trust-model.md`: no
+  code-change defects, two pre-tracked hardening follow-ups noted, no new
+  issues filed. Tests and docs only — no backplane behavior change.
+
 ### Added — flight recorder: fail-closed redaction engine (#3213)
 
 - Ships **F2** of the flight-recorder decision

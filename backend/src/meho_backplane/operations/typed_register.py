@@ -493,7 +493,7 @@ type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResu
 # invalid values at the Python boundary rather than at commit time
 # (where the IntegrityError message names the constraint, not the
 # field that produced it).
-_VALID_SAFETY_LEVELS: frozenset[str] = frozenset({"safe", "caution", "dangerous"})
+_VALID_SAFETY_LEVELS: frozenset[str] = frozenset({"safe", "caution", "dangerous", "destructive"})
 
 
 class HandlerRefError(ValueError):
@@ -942,7 +942,7 @@ async def register_typed_operation(
     response_schema: dict[str, Any] | None = None,
     group_key: str | None = None,
     tags: list[str] | None = None,
-    safety_level: Literal["safe", "caution", "dangerous"] = "safe",
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "safe",
     requires_approval: bool = False,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,
@@ -1179,7 +1179,7 @@ async def register_composite_operation(
     response_schema: dict[str, Any] | None = None,
     group_key: str | None = None,
     tags: list[str] | None = None,
-    safety_level: Literal["safe", "caution", "dangerous"] = "dangerous",
+    safety_level: Literal["safe", "caution", "dangerous", "destructive"] = "dangerous",
     requires_approval: bool = True,
     llm_instructions: dict[str, Any] | None = None,
     custom_description: str | None = None,

@@ -155,9 +155,14 @@ async def _claim() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("level", ["caution", "dangerous"])
+@pytest.mark.parametrize("level", ["caution", "dangerous", "destructive"])
 async def test_mint_refuses_non_safe_op(monkeypatch: pytest.MonkeyPatch, level: str) -> None:
-    """A non-'safe' op is refused before the policy gate — no rows written."""
+    """A non-'safe' op is refused before the policy gate — no rows written.
+
+    The ``destructive`` tier (#3183) is transitively excluded from every
+    satellite by this same safe-only wall: a delete is never minted to a
+    runner, agreeing with the satellite write-path decision (#2901 / #3187).
+    """
     await _seed_tenant()
     _patch_lookup(monkeypatch, _descriptor(safety_level=level))
 

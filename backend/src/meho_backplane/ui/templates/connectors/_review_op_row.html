@@ -99,7 +99,7 @@
           data-control="safety_level"
           onchange="this.form.requestSubmit()"
         >
-          {% for level in ["safe", "caution", "dangerous"] %}
+          {% for level in ["safe", "caution", "dangerous", "destructive"] %}
             <option value="{{ level }}" {{ "selected" if op.safety_level == level else "" }}>
               {{ level }}
             </option>

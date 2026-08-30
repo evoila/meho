@@ -458,3 +458,37 @@ def test_is_mutating(method: str | None, safety_level: str, expected: bool) -> N
 def test_service_safety_gate_reason(method: str, safety_level: str, gated: bool) -> None:
     reason = _service_safety_gate_reason(_descriptor(method=method, safety_level=safety_level))
     assert (reason is not None) is gated
+
+
+@pytest.mark.parametrize("method", ["DELETE", "POST", None])
+def test_service_safety_gate_reason_destructive_parks_always(method: str | None) -> None:
+    """The ``destructive`` tier (#3183) parks a service principal always,
+    regardless of HTTP method, and names the mandatory-human-approval
+    contract in its reason string."""
+    reason = _service_safety_gate_reason(_descriptor(method=method, safety_level="destructive"))
+    assert reason is not None
+    assert "destructive" in reason
+    assert "never satisfiable by a standing grant" in reason
+
+
+@pytest.mark.asyncio
+async def test_service_principal_destructive_parks_and_grant_never_satisfies() -> None:
+    """A ``destructive`` op parks for a service principal **even with a live
+    matching grant** — the tier is non-grantable (#3183), so
+    ``consult_and_record_grant`` refuses it before any lookup and no
+    grant-use audit row is written.
+    """
+    grant_id = await _seed_grant()
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="destructive",
+        requires_approval=False,
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    # The live grant did NOT clear the gate — no auto-approval was recorded.
+    assert not await _grant_use_rows(grant_id)

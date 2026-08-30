@@ -111,7 +111,7 @@ READ_HTTP_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 #: same set is enforced by the DB CHECK constraint; the Python-side
 #: validator catches bad input before the round-trip.
 VALID_SAFETY_LEVELS: Final[frozenset[str]] = frozenset(
-    {"safe", "caution", "dangerous"},
+    {"safe", "caution", "dangerous", "destructive"},
 )
 
 

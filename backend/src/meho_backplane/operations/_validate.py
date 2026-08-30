@@ -166,12 +166,22 @@ def _service_safety_gate_reason(descriptor: EndpointDescriptor) -> str | None:
 
     Resolution of #3152 as its option 1: the non-agent gate now consults
     ``safety_level`` for a service principal on a ``requires_approval=False``
-    op. A ``dangerous`` op parks always; a mutating ``caution`` op parks;
-    ``safe`` (and any non-mutating) op is unchanged (auto-executes). A
-    standing grant is the sanctioned path to run either unattended.
+    op. A ``destructive`` op parks always and is never grant-satisfiable
+    (#3183); a ``dangerous`` op parks always; a mutating ``caution`` op
+    parks; ``safe`` (and any non-mutating) op is unchanged (auto-executes).
+    A standing grant is the sanctioned path to run a ``dangerous`` /
+    ``caution`` op unattended — but never a ``destructive`` one (the grant
+    lookup in :func:`~meho_backplane.operations.service_grants.consult_and_record_grant`
+    refuses the tier before matching a row).
 
     Returns the park reason, or ``None`` when the op stays auto-execute.
     """
+    if descriptor.safety_level == "destructive":
+        return (
+            "safety_level=destructive; service-principal deletes park always "
+            "(routed to the approval queue) and are never satisfiable by a "
+            "standing grant — mandatory human approval (#3183)"
+        )
     if descriptor.safety_level == "dangerous":
         return (
             "safety_level=dangerous; service-principal mutations park "

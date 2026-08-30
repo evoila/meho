@@ -623,7 +623,7 @@ class ReviewService:
         *,
         tenant_id: UUID | None,
         custom_description: str | _UnsetType | None = _UNSET,
-        safety_level: Literal["safe", "caution", "dangerous"] | None = None,
+        safety_level: Literal["safe", "caution", "dangerous", "destructive"] | None = None,
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
         llm_instructions: dict[str, object] | None = None,

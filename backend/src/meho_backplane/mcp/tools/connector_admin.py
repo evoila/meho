@@ -582,7 +582,7 @@ register_mcp_tool(
                 "custom_description": {"type": ["string", "null"]},
                 "safety_level": {
                     "type": ["string", "null"],
-                    "enum": ["safe", "caution", "dangerous", None],
+                    "enum": ["safe", "caution", "dangerous", "destructive", None],
                 },
                 "requires_approval": {"type": ["boolean", "null"]},
                 "is_enabled": {"type": ["boolean", "null"]},

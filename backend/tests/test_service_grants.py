@@ -158,6 +158,36 @@ async def test_create_refuses_destructive_tagged_descriptor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_refuses_destructive_tier_descriptor() -> None:
+    """An op whose descriptor is in the ``destructive`` safety tier (#3183) is
+    refused at grant creation, even without a delete-shaped name or the
+    ``destructive`` tag — the tier itself is the authoritative signal.
+    """
+    async with get_sessionmaker()() as s:
+        s.add(
+            EndpointDescriptor(
+                tenant_id=_TENANT_ID,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.sys.rekey",
+                source_kind="typed",
+                method="POST",
+                safety_level="destructive",
+                tags=["write"],
+                is_enabled=True,
+            )
+        )
+        await s.commit()
+
+    svc = ServicePrincipalGrantService()
+    payload = _payload(op_id="vault.sys.rekey", connector_id="vault-1.x")
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(_TENANT_ID, _CREATOR, payload)
+    assert "destructive" in str(exc.value)
+
+
+@pytest.mark.asyncio
 async def test_create_refuses_past_and_naive_expiry() -> None:
     """A past or timezone-naive ``expires_at`` is refused."""
     svc = ServicePrincipalGrantService()

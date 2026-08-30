@@ -369,7 +369,7 @@ register_mcp_tool(
                             "group_key": {"type": ["string", "null"]},
                             "safety_level": {
                                 "type": "string",
-                                "enum": ["safe", "caution", "dangerous"],
+                                "enum": ["safe", "caution", "dangerous", "destructive"],
                             },
                             "requires_approval": {"type": "boolean"},
                             "fused_score": {"type": "number"},

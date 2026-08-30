@@ -23,9 +23,9 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* The 5 read composites are read-only -- the registration call site
+* The 9 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 18 write composites inherit T4's
+  each. The 23 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template
@@ -59,6 +59,16 @@ __all__ = [
     "FOLDER_CREATE_RESPONSE_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
+    "GUEST_ENV_READ_PARAMETER_SCHEMA",
+    "GUEST_ENV_READ_RESPONSE_SCHEMA",
+    "GUEST_FILE_READ_PARAMETER_SCHEMA",
+    "GUEST_FILE_READ_RESPONSE_SCHEMA",
+    "GUEST_FILE_WRITE_PARAMETER_SCHEMA",
+    "GUEST_FILE_WRITE_RESPONSE_SCHEMA",
+    "GUEST_NET_SHOW_PARAMETER_SCHEMA",
+    "GUEST_NET_SHOW_RESPONSE_SCHEMA",
+    "GUEST_PROCESS_LIST_PARAMETER_SCHEMA",
+    "GUEST_PROCESS_LIST_RESPONSE_SCHEMA",
     "HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA",
     "HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA",
     "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
@@ -3172,4 +3182,348 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
         "guidance": {"type": ["string", "null"]},
     },
     "required": ["status", "host", "service", "policy_updated"],
+}
+
+
+# ===========================================================================
+# Guest-operations channel (vmware.composite.vm.guest.*, #3100)
+# ===========================================================================
+#
+# Guest OS credentials are NEVER a parameter of these ops: they resolve
+# from the target's Vault ``secret_ref`` (the ``guest_username`` /
+# ``guest_password`` fields). The reads are ``safe``; ``guest.file.write``
+# is the single ``dangerous`` / ``requires_approval`` write.
+
+
+#: ``vmware.composite.vm.guest.process.list`` parameter schema.
+GUEST_PROCESS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Managed-object ID of the VM whose guest processes to list (e.g. 'vm-42')."
+            ),
+        },
+        "max_processes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 200,
+            "description": (
+                "Cap on the number of processes returned. Applied client-side "
+                "after ListProcessesInGuest returns so a busy guest never floods "
+                "the agent surface; the response ``count`` detects truncation."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton. The "
+                "GuestProcessManager MoRef is resolved off it at call time. "
+                "Override only if a deployment names the singleton differently."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.env.read`` parameter schema.
+GUEST_ENV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Managed-object ID of the VM whose guest environment to read.",
+        },
+        "names": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": (
+                "Specific environment-variable names to read. Omit to read the "
+                "guest user's entire environment (ReadEnvironmentVariableInGuest "
+                "returns every variable when the name list is empty)."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton (see process.list)."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.net.show`` parameter schema.
+#:
+#: Reads Tools-reported guest network state off the VM object -- no guest
+#: credentials, nothing runs inside the guest.
+GUEST_NET_SHOW_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Managed-object ID of the VM whose Tools-reported guest network "
+                "state (per-NIC IPs, routes, DNS, gateways) to read."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.file.read`` parameter schema.
+GUEST_FILE_READ_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Managed-object ID of the VM whose guest file to read.",
+        },
+        "guest_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute path of the file inside the guest OS (e.g. "
+                "'/etc/os-release'). The guest user must be able to read it."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton (see process.list)."
+            ),
+        },
+    },
+    "required": ["vm", "guest_path"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.file.write`` parameter schema (the one write).
+GUEST_FILE_WRITE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Managed-object ID of the VM to write a file into.",
+        },
+        "guest_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute destination path inside the guest OS (e.g. "
+                "'/etc/systemd/network/10-mtu.conf'). The guest user must be "
+                "able to write it."
+            ),
+        },
+        "content": {
+            "type": "string",
+            "description": (
+                "UTF-8 text content to write. Never a credential -- guest "
+                "credentials resolve from the target's secret_ref, not params."
+            ),
+        },
+        "overwrite": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Whether to overwrite an existing file at ``guest_path``. When "
+                "false, the write fails if the file already exists (vSphere "
+                "InitiateFileTransferToGuest semantics)."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton (see process.list)."
+            ),
+        },
+    },
+    "required": ["vm", "guest_path", "content"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.process.list`` response schema.
+GUEST_PROCESS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the processes were listed for."},
+        "process_manager_moid": {
+            "type": "string",
+            "description": (
+                "Resolved GuestProcessManager MoId the ListProcessesInGuest call targeted."
+            ),
+        },
+        "processes": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "GuestProcessInfo entries (name / pid / owner / cmdLine / "
+                "startTime / endTime / exitCode), capped to ``max_processes``. "
+                "Set-shaped: the dispatcher returns a JSONFlux result handle "
+                "when the list is over threshold."
+            ),
+        },
+        "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Post-cap length of ``processes`` -- detects truncation.",
+        },
+        "max_processes_applied": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Effective ``max_processes`` cap applied to the response.",
+        },
+    },
+    "required": ["vm", "process_manager_moid", "processes", "count"],
+}
+
+
+#: ``vmware.composite.vm.guest.env.read`` response schema.
+GUEST_ENV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the environment was read from."},
+        "process_manager_moid": {
+            "type": "string",
+            "description": "Resolved GuestProcessManager MoId the call targeted.",
+        },
+        "variables": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Guest environment as ``NAME=value`` strings (whole environment "
+                "when ``names`` was omitted, else the requested names). "
+                "Set-shaped -- JSONFlux-wrapped over threshold."
+            ),
+        },
+        "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of variables returned.",
+        },
+    },
+    "required": ["vm", "process_manager_moid", "variables", "count"],
+}
+
+
+#: ``vmware.composite.vm.guest.net.show`` response schema.
+GUEST_NET_SHOW_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the guest network state was read for."},
+        "nics": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "GuestNicInfo entries from ``guest.net`` -- per-NIC MAC, "
+                "connected state, and IP addresses as Tools reports them."
+            ),
+        },
+        "ip_stacks": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "GuestStackInfo entries from ``guest.ipStack`` -- routing table, "
+                "DNS config, and default gateways as Tools reports them."
+            ),
+        },
+    },
+    "required": ["vm", "nics", "ip_stacks"],
+}
+
+
+#: ``vmware.composite.vm.guest.file.read`` response schema.
+GUEST_FILE_READ_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the file read was initiated on."},
+        "file_manager_moid": {
+            "type": "string",
+            "description": (
+                "Resolved GuestFileManager MoId the InitiateFileTransferFromGuest call targeted."
+            ),
+        },
+        "guest_path": {"type": "string", "description": "Absolute guest path read."},
+        "url": {
+            "type": ["string", "null"],
+            "description": (
+                "One-time guest-transfer URL from InitiateFileTransferFromGuest. "
+                "Inline byte retrieval is a deferred follow-up (see the design "
+                "note); this increment returns the transfer handle."
+            ),
+        },
+        "size_bytes": {
+            "type": ["integer", "null"],
+            "description": "File size in bytes as reported by the guest file manager.",
+        },
+        "attributes": {
+            "description": "GuestFileAttributes for the file (POSIX / Windows metadata).",
+        },
+        "content_fetch": {
+            "type": "string",
+            "enum": ["deferred"],
+            "description": (
+                "Marks that inline content retrieval is not performed in this increment."
+            ),
+        },
+    },
+    "required": ["vm", "file_manager_moid", "guest_path"],
+}
+
+
+#: ``vmware.composite.vm.guest.file.write`` response schema.
+GUEST_FILE_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["written"],
+            "description": (
+                "``'written'`` -- the transfer URL was minted and the bytes were "
+                "PUT to the guest. (A parked / denied approval returns the "
+                "governance OperationResult verbatim, not this envelope.)"
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the file was written to."},
+        "file_manager_moid": {
+            "type": "string",
+            "description": (
+                "Resolved GuestFileManager MoId the InitiateFileTransferToGuest call targeted."
+            ),
+        },
+        "guest_path": {"type": "string", "description": "Absolute guest path written."},
+        "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of UTF-8 content bytes written.",
+        },
+        "overwrite": {
+            "type": "boolean",
+            "description": "Whether an existing file was allowed to be overwritten.",
+        },
+    },
+    "required": ["status", "vm", "guest_path", "size_bytes", "overwrite"],
 }

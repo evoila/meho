@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 24 composites land before
+``endpoint_descriptor`` upserts for the 32 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -24,19 +24,24 @@ Schema 2020-12 parameter + response contracts.
 
 Scope:
 
-* 5 read composites (G3.1-T5 / #508) --
+* 9 read composites (G3.1-T5 / #508 + the 4 guest-ops reads
+  ``vm.guest.process.list`` / ``env.read`` / ``net.show`` /
+  ``file.read`` / #3100) --
   ``safety_level="safe"`` + ``requires_approval=False`` overrides.
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 19 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
+* 23 write composites (G3.1-T6 / #509, the guest-ops write
+  ``vm.guest.file.write`` / #3100, single-VM ``vm.power`` /
   #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
   folder-template ``vm.clone_from_template`` / #2894, the vim
   cluster / inventory writes ``cluster.drs_rule.create`` +
   ``folder.create`` / #2895, the #2891 post-clone hardware
   reconfigure trio ``vm.resize`` / ``vm.nic.repoint`` /
-  ``vm.device.cdrom``, the two GOSC composites / #2892, and the OVF/OVA
-  content-library deploy ``vm.deploy_from_library`` / #2909) -- inherit
+  ``vm.device.cdrom``, the two GOSC composites / #2892, the OVF/OVA
+  content-library deploy ``vm.deploy_from_library`` / #2909, and the
+  three host-domain writes ``host.datastore_mount_nfs`` /
+  ``host.disk_mark_flash`` / ``host.service_control`` / #3182) -- inherit
   T4's ``safety_level="dangerous"`` +
   ``requires_approval=True`` defaults.
   They cover every state-mutating workflow Goal #214 names as
@@ -58,6 +63,13 @@ Scope:
   ``govc library.deploy``) (#2909).
 """
 
+from meho_backplane.connectors.vmware_rest.composites._guest import (
+    guest_env_read_composite,
+    guest_file_read_composite,
+    guest_file_write_composite,
+    guest_net_show_composite,
+    guest_process_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
     disk_mark_flash_composite,
@@ -118,6 +130,11 @@ __all__ = [
     "event_tail_composite",
     "folder_create_composite",
     "guest_customization_spec_create_composite",
+    "guest_env_read_composite",
+    "guest_file_read_composite",
+    "guest_file_write_composite",
+    "guest_net_show_composite",
+    "guest_process_list_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "network_portgroup_audit_composite",

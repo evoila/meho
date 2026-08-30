@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 27 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 32 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -21,20 +21,25 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 5 read composites (T5 / #508) pass
+The 9 read composites (T5 / #508 + the 4 guest-ops reads
+``vm.guest.process.list`` / ``vm.guest.env.read`` / ``vm.guest.net.show``
+/ ``vm.guest.file.read`` / #3100) pass
 ``safety_level="safe"`` + ``requires_approval=False`` -- overrides of
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 19 write
-composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 23 write
+composites (T6 / #509, single-VM ``vm.power`` / #2301, the guest-ops
+write ``vm.guest.file.write`` / #3100, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
 ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
 hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
 ``vm.device.cdrom``, the two GOSC composites
-``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
-OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909) inherit
+``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
+OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and the
+three host-domain writes ``host.datastore_mount_nfs`` /
+``host.disk_mark_flash`` / ``host.service_control`` / #3182) inherit
 the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
 at the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -48,6 +53,13 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._guest import (
+    guest_env_read_composite,
+    guest_file_read_composite,
+    guest_file_write_composite,
+    guest_net_show_composite,
+    guest_process_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
     disk_mark_flash_composite,
@@ -96,6 +108,16 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     FOLDER_CREATE_RESPONSE_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
+    GUEST_ENV_READ_PARAMETER_SCHEMA,
+    GUEST_ENV_READ_RESPONSE_SCHEMA,
+    GUEST_FILE_READ_PARAMETER_SCHEMA,
+    GUEST_FILE_READ_RESPONSE_SCHEMA,
+    GUEST_FILE_WRITE_PARAMETER_SCHEMA,
+    GUEST_FILE_WRITE_RESPONSE_SCHEMA,
+    GUEST_NET_SHOW_PARAMETER_SCHEMA,
+    GUEST_NET_SHOW_RESPONSE_SCHEMA,
+    GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
+    GUEST_PROCESS_LIST_RESPONSE_SCHEMA,
     HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA,
     HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
@@ -266,6 +288,24 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "GOSC specs can carry admin / sysprep credentials; those never "
         "reach a reviewer surface (the create op is credential-class)."
     ),
+    "guest_ops": (
+        "Use for the governed guest-operations channel -- reaching INSIDE a "
+        "running VM's guest OS via VMware Tools (vim GuestOperationsManager), "
+        "the governed replacement for out-of-band 'govc guest.run'. Reads "
+        "(safe): list guest processes (process.list -- exec status), read "
+        "guest environment variables (env.read), show Tools-reported guest "
+        "network state (net.show -- per-NIC IPs / routes / DNS, needs NO guest "
+        "credentials), and initiate a guest file read (file.read -- returns the "
+        "transfer handle: size + attributes + one-time URL). Write (dangerous / "
+        "approval-required): place a file into the guest (file.write). Guest OS "
+        "credentials resolve from the target's Vault secret_ref (guest_username "
+        "/ guest_password) and are NEVER a parameter. The right group for "
+        "'what's running in this appliance?', 'read /etc/os-release from the "
+        "guest', 'what does the guest think its network is?', or 'drop this "
+        "config file into the guest'. Requires VMware Tools in the guest. "
+        "Running an arbitrary in-guest command (freeform program exec) is a "
+        "deferred tier -- not in this group yet."
+    ),
 }
 
 
@@ -299,6 +339,10 @@ class _CompositeSpec(NamedTuple):
     tags: list[str]
     safety_level: Literal["safe", "caution", "dangerous", "destructive"]
     requires_approval: bool
+    # Optional per-op agent-facing usage instructions. Defaults to
+    # ``None`` so the existing rows (whose ``description`` already carries
+    # the guidance) are unchanged; the guest-ops family (#3100) sets it.
+    llm_instructions: dict[str, Any] | None = None
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
@@ -966,6 +1010,187 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # Guest-operations channel (#3100) -- 4 safe reads + 1 dangerous write.
+    # Guest OS credentials resolve from the target's secret_ref, never
+    # from params.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.process.list",
+        handler=guest_process_list_composite,
+        summary="List processes running in a VM's guest OS via VMware Tools.",
+        description=(
+            "Lists the guest OS processes (name / pid / owner / cmdLine / "
+            "startTime / exitCode) via the vim GuestProcessManager "
+            "ListProcessesInGuest, authenticating with the guest credential "
+            "resolved from the target's secret_ref. The exec-status shape: "
+            "'what is running / did that service start / what exit code'. "
+            "Governed replacement for 'govc guest.ps'. Read-only -- never "
+            "mutates guest state. Requires VMware Tools in the guest."
+        ),
+        parameter_schema=GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
+        response_schema=GUEST_PROCESS_LIST_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "read-only", "guest", "vi-json", "tools"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Inspect what is running inside a VM's guest OS -- verifying a "
+                "service started, checking a process's exit code, triaging a "
+                "first-boot appliance. Not for host/VM-level process state (that "
+                "is the ESXi/vCenter surface), only in-guest processes."
+            ),
+            "preconditions": (
+                "VMware Tools running in the guest; the target's Vault secret "
+                "carries guest_username / guest_password. No credential goes in "
+                "params."
+            ),
+            "result_shape": (
+                "{vm, process_manager_moid, processes[], count, "
+                "max_processes_applied}; the process list is JSONFlux-wrapped "
+                "into a result handle when large -- drill in with result_query."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.env.read",
+        handler=guest_env_read_composite,
+        summary="Read environment variables from a VM's guest OS via VMware Tools.",
+        description=(
+            "Reads the guest user's environment variables (as NAME=value "
+            "strings) via the vim GuestProcessManager "
+            "ReadEnvironmentVariableInGuest, authenticating with the guest "
+            "credential from the target's secret_ref. Omit 'names' for the whole "
+            "environment, or pass specific names. Read-only. Requires VMware "
+            "Tools in the guest."
+        ),
+        parameter_schema=GUEST_ENV_READ_PARAMETER_SCHEMA,
+        response_schema=GUEST_ENV_READ_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "read-only", "guest", "vi-json", "tools"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Read the guest OS environment of a running VM -- confirming a "
+                "PATH, a proxy variable, or a first-boot configuration value the "
+                "guest exports."
+            ),
+            "preconditions": (
+                "VMware Tools running; guest credential in the target's "
+                "secret_ref (guest_username / guest_password). Never in params."
+            ),
+            "result_shape": (
+                "{vm, process_manager_moid, variables[], count}; variables is "
+                "JSONFlux-wrapped when large."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.net.show",
+        handler=guest_net_show_composite,
+        summary="Show Tools-reported guest network state (no guest credentials).",
+        description=(
+            "Reads the VM's Tools-reported guest network state -- per-NIC IPs / "
+            "MAC / connected (guest.net, GuestNicInfo) and routes / DNS / "
+            "gateways (guest.ipStack, GuestStackInfo) -- via RetrievePropertiesEx. "
+            "This is reported state on the VM object, so it needs NO in-guest "
+            "authentication and runs nothing inside the guest: the 'read ip "
+            "addr / routes' diagnosis without a guest login. Read-only."
+        ),
+        parameter_schema=GUEST_NET_SHOW_PARAMETER_SCHEMA,
+        response_schema=GUEST_NET_SHOW_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "read-only", "guest", "vi-json", "networking"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "See what network configuration a guest actually has (addresses, "
+                "routes, DNS, gateways) as VMware Tools reports it -- e.g. "
+                "diagnosing why an appliance is unreachable. The only guest read "
+                "that needs no guest credentials."
+            ),
+            "preconditions": "VMware Tools running in the guest (reports the state).",
+            "result_shape": "{vm, nics[], ip_stacks[]}.",
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.file.read",
+        handler=guest_file_read_composite,
+        summary="Initiate a guest file read; returns size + attributes + transfer URL.",
+        description=(
+            "Initiates a guest file read via the vim GuestFileManager "
+            "InitiateFileTransferFromGuest, authenticating with the guest "
+            "credential from the target's secret_ref, and returns the "
+            "FileTransferInformation (file size, POSIX/Windows attributes, and a "
+            "one-time transfer URL) for guest_path. Inline byte retrieval is a "
+            "deferred follow-up; this increment returns the transfer handle so "
+            "existence + size + attributes are known without MEHO proxying the "
+            "bytes. Read-only. Requires VMware Tools in the guest."
+        ),
+        parameter_schema=GUEST_FILE_READ_PARAMETER_SCHEMA,
+        response_schema=GUEST_FILE_READ_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "read-only", "guest", "vi-json", "file"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Confirm a file's existence / size / attributes in a guest OS, "
+                "or obtain a one-time transfer URL for it. Inline content bytes "
+                "are not returned in this increment."
+            ),
+            "preconditions": (
+                "VMware Tools running; guest credential in the target's "
+                "secret_ref. Guest user must be able to read guest_path."
+            ),
+            "result_shape": (
+                "{vm, file_manager_moid, guest_path, url, size_bytes, "
+                "attributes, content_fetch='deferred'}."
+            ),
+        },
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.file.write",
+        handler=guest_file_write_composite,
+        summary="Write a file into a VM's guest OS (dangerous / approval-required).",
+        description=(
+            "Writes UTF-8 content to guest_path inside a VM's guest OS via the "
+            "vim GuestFileManager InitiateFileTransferToGuest (which mints a "
+            "one-time PUT URL) followed by a direct PUT of the bytes -- the vim "
+            "API's two-step design. Authenticates with the guest credential from "
+            "the target's secret_ref (never in params). The single WRITE of the "
+            "guest-ops channel: dangerous / approval-required, gated through the "
+            "standard approvals plane -- a parked / denied approval mints no URL "
+            "and PUTs no bytes. The park's proposed_effect echoes path + byte "
+            "size + overwrite only, never the content. Requires VMware Tools."
+        ),
+        parameter_schema=GUEST_FILE_WRITE_PARAMETER_SCHEMA,
+        response_schema=GUEST_FILE_WRITE_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "write", "guest", "vi-json", "file"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Place a config/repair file into a running guest OS (e.g. an "
+                "MTU/network drop-in) without out-of-band scp. Approval-gated -- "
+                "expect the call to park for a human decision unless a standing "
+                "grant auto-executes it."
+            ),
+            "preconditions": (
+                "VMware Tools running; guest credential in the target's "
+                "secret_ref. Guest user must be able to write guest_path."
+            ),
+            "result_shape": (
+                "On execute: {status='written', vm, file_manager_moid, "
+                "guest_path, size_bytes, overwrite}. On gate: the approval "
+                "OperationResult verbatim (awaiting_approval / denied)."
+            ),
+        },
+    ),
 )
 
 
@@ -982,7 +1207,8 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 27 composites total -- 5 read (T5 / #508) + 22 write (T6 /
+    Scope: 32 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 23 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
@@ -1021,5 +1247,6 @@ async def register_vmware_composite_operations(
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,
+            llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )

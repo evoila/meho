@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: single Base.metadata ORM module — Alembic autogenerate
+# reads target_metadata = Base.metadata from this one file; splitting it forks
+# the schema graph. Splitting is out of scope for a feature task.
 
 """SQLAlchemy 2.x ORM models for the backplane database.
 
@@ -288,6 +291,8 @@ __all__ = [
     "Base",
     "BroadcastOverride",
     "BudgetWindowKind",
+    "DispatchTrace",
+    "DispatchTraceSpan",
     "Document",
     "EndpointDescriptor",
     "EventOutbox",
@@ -706,6 +711,40 @@ class Tenant(Base):
         default=False,
         server_default=sa.false(),
     )
+    # Per-tenant dispatch flight-recorder capture default (#3212, F1 of
+    # ``docs/decisions/dispatch-flight-recorder.md``). Boolean NOT NULL
+    # DEFAULT ``false`` -- OFF by default, following the
+    # ``announce_gate_enabled`` precedent exactly (there is no "lab-class"
+    # marker in the schema; a lab-class tenant is one an operator flips this
+    # flag ON for at seeding / tenant administration). Read per-dispatch by
+    # the cache-aware, fail-open resolver in
+    # :mod:`meho_backplane.flight_recorder.config`; a per-target override
+    # (:attr:`Target.flight_recorder_capture`) takes precedence, and the
+    # global :attr:`~meho_backplane.settings.Settings.flight_recorder_enabled`
+    # kill switch overrides everything. ``server_default=false`` in migration
+    # ``0085`` backfills pre-#3212 rows so the ``NOT NULL`` add-column is safe
+    # on a populated table. No index -- read by primary-key lookup on a cache
+    # miss, never a filter predicate.
+    flight_recorder_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
+    # Per-tenant flight-recorder trace retention override in days (#3212, F4).
+    # NULL -> use the global default
+    # (:attr:`~meho_backplane.settings.Settings.flight_recorder_retention_days_default`,
+    # 7 days); a lab-class tenant is configured with ``14`` at seeding. The
+    # window is resolved at trace-write time and stamped onto
+    # :attr:`DispatchTrace.expires_at`, so the retention reaper is a portable
+    # ``WHERE expires_at < now()`` sweep and a later config change re-windows
+    # only newly-written traces (debugging exhaust, not a record of account).
+    # Nullable so the add-column is safe on a populated table.
+    flight_recorder_retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -1044,6 +1083,22 @@ class Target(Base):
     # ranges. Soft-FK to ``Connector.impl_id`` (no real FK in v0.2 — the
     # registry is in-process). Added by migration ``0009``.
     preferred_impl_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-target dispatch flight-recorder capture override (#3212, F1 of
+    # ``docs/decisions/dispatch-flight-recorder.md``). Tri-state:
+    # ``NULL`` -> inherit the tenant default (:attr:`Tenant.flight_recorder_enabled`);
+    # ``True`` -> force capture ON for this target regardless of the tenant
+    # default; ``False`` -> force capture OFF. This is the "per-target override
+    # in both directions" F1 requires. A first-class typed column (not a key in
+    # :attr:`extras`) because the tri-state is a machine-read policy field, and
+    # resolution precedence (per-target > per-tenant > global default) is
+    # documented on :mod:`meho_backplane.flight_recorder.config`, mirroring the
+    # :class:`BroadcastOverride` precedence shape. Nullable so the add-column is
+    # safe on a populated table.
+    flight_recorder_capture: Mapped[bool | None] = mapped_column(
+        sa.Boolean(),
+        nullable=True,
+        default=None,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -7774,6 +7829,202 @@ class CheckDashboardSensor(Base):
         Index(
             "check_dashboard_sensors_sensor_idx",
             "sensor_id",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class DispatchTrace(Base):
+    """Per-dispatch flight-recorder trace header (#3212, F6).
+
+    The durable-but-short-lived debugging exhaust for one governed
+    dispatch: a header row here plus its ordered :class:`DispatchTraceSpan`
+    children capture the vendor call(s) a connector made, the composite
+    sub-steps, and the JSONFlux reduction. Decision of record:
+    ``docs/decisions/dispatch-flight-recorder.md``.
+
+    The trace is **referenced from** the dispatch's ``audit_log`` row, never
+    embedded in it: :attr:`AuditLog` stays slim and append-only (the
+    permanent record of account), and the trace is a side channel the
+    retention reaper (:mod:`meho_backplane.flight_recorder.reaper`) deletes
+    on its own cadence without ever touching the audit row. The linkage
+    points from the trace to the audit row via :attr:`audit_id` -- the same
+    downstream-of-audit direction as :attr:`BroadcastEvent.audit_id` /
+    :attr:`AddonStepEvent.audit_id` / :attr:`GraphNodeHistory.audit_id`.
+
+    Schema decisions for :class:`DispatchTrace`:
+
+    * ``id`` -- UUID primary key. Portable :class:`Uuid` (``UUID`` on PG,
+      ``CHAR(32)`` on SQLite). No ``gen_random_uuid()`` server default -- the
+      write API (:func:`meho_backplane.flight_recorder.store.record_trace`)
+      always supplies ``id`` via ``default=uuid.uuid4`` on insert, matching the
+      ``addon_step_event`` (``0083``) precedent.
+    * ``audit_id`` -- UUID NOT NULL. **Soft-FK** to :attr:`AuditLog.id`
+      (no DB-level ``REFERENCES``): the trace is downstream of the audit
+      write, and the audit row's own retention is independent of the
+      trace's, so a real FK would couple the two lifecycles the decision
+      deliberately keeps separate. Unique index
+      ``dispatch_trace_audit_id_idx`` -- one trace header per dispatch.
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
+      FK. Same brand-new-substrate rationale as :class:`Document` /
+      :class:`BroadcastOverride` / :class:`AddonStepEvent`: a trace is only
+      ever written for a tenant that opted capture in, so the id always
+      resolves and the FK makes the ownership invariant unbreakable.
+    * ``created_at`` -- ``timestamptz`` NOT NULL. Capture time. PG-side
+      ``now()`` server default; the ORM also declares
+      ``default=lambda: datetime.now(UTC)`` for the SQLite dev/test path.
+    * ``expires_at`` -- ``timestamptz`` NOT NULL. The retention deadline,
+      stamped at write time as ``created_at + resolved_retention_days`` (F4;
+      the per-tenant window resolved by
+      :mod:`meho_backplane.flight_recorder.config`). The reaper is a
+      portable ``WHERE expires_at < now()`` sweep, so the per-tenant window
+      math lives in the resolver (unit-tested) and the reaper stays a plain
+      bounded delete. Indexed (``dispatch_trace_expires_at_idx``) so the
+      sweep rides a btree scan.
+    * ``redaction_uncertain`` -- Boolean NOT NULL DEFAULT ``false``. The F5
+      redaction-uncertainty degrade flag: set by the capture/redaction seam
+      (#3213 / #3214) when a header, body path, or op family could not be
+      proven fully redacted. The agent-read surface (a sibling task)
+      withholds any trace with this flag set from the agent handle, keeping
+      it operator-only. Stored here (a header-level attribute) so the seam
+      that writes it needs no further migration.
+
+    The model deliberately ships with no helper methods: the write path is
+    :func:`meho_backplane.flight_recorder.store.record_trace`, the retention
+    path is the reaper, and the read paths are sibling tasks.
+    """
+
+    __tablename__ = "dispatch_trace"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK to audit_log.id -- see class docstring. No DB REFERENCES.
+    audit_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        nullable=False,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    redaction_uncertain: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+        server_default=sa.false(),
+    )
+
+    __table_args__ = (
+        # One trace header per dispatch: unique on the soft-FK to audit_log.
+        Index(
+            "dispatch_trace_audit_id_idx",
+            "audit_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # Drives the retention reaper's ``WHERE expires_at < now()`` sweep.
+        Index(
+            "dispatch_trace_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class DispatchTraceSpan(Base):
+    """One ordered span within a :class:`DispatchTrace` (#3212, F6).
+
+    A span is a single captured step of a dispatch -- a vendor HTTP call, a
+    composite sub-step, the JSONFlux reduction, or a typed-handler
+    interaction. Spans are ordered within their trace by :attr:`seq` and
+    hang off the header via a real ``REFERENCES dispatch_trace(id)
+    ON DELETE CASCADE`` FK, so the retention reaper deletes a header's spans
+    with it (and an explicit span-first delete in the reaper keeps the sweep
+    correct even where the SQLite ``foreign_keys`` pragma is off).
+
+    The span's redacted, capped payload -- method, URL, redacted headers,
+    the redacted/capped body, the JSONFlux input/kept/output sizes, the
+    result-handle id -- lives in the free-form :attr:`attributes` JSON. This
+    task (#3212) owns the container shape; the capture seam (#3214) and the
+    redaction engine (#3213) own what goes into it. The frequently-queried
+    axes (:attr:`status`, :attr:`duration_ms`) are hoisted to typed columns.
+
+    Schema decisions for :class:`DispatchTraceSpan`:
+
+    * ``id`` -- UUID primary key (portable :class:`Uuid`, ORM-supplied
+      ``default=uuid.uuid4``; no ``gen_random_uuid()`` server default, matching
+      the ``0083`` precedent).
+    * ``trace_id`` -- UUID NOT NULL, real ``REFERENCES dispatch_trace(id)
+      ON DELETE CASCADE`` FK. Cascade so header retention takes the spans.
+    * ``seq`` -- Integer NOT NULL. 0-based ordering within the trace.
+      Composite index ``dispatch_trace_span_trace_seq_idx`` on
+      ``(trace_id, seq)`` drives the ordered read and the index PG wants
+      behind the ``trace_id`` FK's cascade.
+    * ``span_kind`` -- Text NOT NULL. One of ``vendor_call`` /
+      ``composite_step`` / ``jsonflux_reduction`` / ``typed`` / ``opaque``
+      (the decision's enumerated span kinds). Text (no DB ``CHECK``) so a
+      new kind lands without a migration; the seam validates.
+    * ``name`` -- Text NOT NULL. Human label (``"GET /rest/vm"``,
+      ``"jsonflux.reduce"``, a composite sub-step name).
+    * ``started_at`` -- ``timestamptz`` NOT NULL. Span start time.
+    * ``duration_ms`` -- ``numeric(10,2)`` nullable. Same shape as
+      :attr:`AuditLog.duration_ms`.
+    * ``status`` -- Text nullable. HTTP status code (as text) or
+      ``"ok"``/``"error"`` for non-HTTP spans.
+    * ``attributes`` -- portable JSON (JSONB on PG) NOT NULL DEFAULT ``{}``.
+      The redacted, capped span detail; inner shape owned by the seam.
+    """
+
+    __tablename__ = "dispatch_trace_span"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    trace_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("dispatch_trace.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    span_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    duration_ms: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
+    )
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attributes: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+
+    __table_args__ = (
+        # Ordered read within a trace + the index PG wants behind the
+        # ``trace_id`` FK's cascade.
+        Index(
+            "dispatch_trace_span_trace_seq_idx",
+            "trace_id",
+            "seq",
             postgresql_using="btree",
         ),
     )

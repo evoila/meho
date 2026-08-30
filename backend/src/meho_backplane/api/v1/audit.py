@@ -123,7 +123,11 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.api.v1.audit_models import AuditQueryRequest, AuditReplayResult
+from meho_backplane.api.v1.audit_models import (
+    AuditQueryRequest,
+    AuditReplayResult,
+    AuditTraceResult,
+)
 from meho_backplane.audit_query import (
     AuditEntry,
     AuditQueryFilters,
@@ -140,6 +144,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.flight_recorder import load_trace
 
 __all__ = ["router"]
 
@@ -171,6 +176,12 @@ _AUDIT_QUERY_OP_ID: Final[str] = "meho.audit.query"
 #: ``op_class="audit_query"`` so the broadcast event stays aggregate-
 #: only (no ``ReplayNode`` tree in the SSE / Slack payload).
 _AUDIT_REPLAY_OP_ID: Final[str] = "meho_audit_replay"
+
+#: op_id the flight-recorder trace route (#3215) emits. Distinct from the
+#: query / replay op_ids so operators can tell trace-read usage apart in
+#: ``audit_log``; shares ``op_class="audit_query"`` so the read stays
+#: aggregate-only on the broadcast feed (it reveals the investigation target).
+_AUDIT_TRACE_OP_ID: Final[str] = "meho_audit_trace"
 
 #: Hard cap on the number of anchor rows a single replay may carry. A
 #: session above this returns 413 from the route's count-first guard
@@ -393,6 +404,57 @@ async def show(
     if not result.rows:
         raise HTTPException(status_code=404, detail="audit row not found")
     return result.rows[0]
+
+
+@router.get("/{audit_id}/trace", response_model=AuditTraceResult)
+async def trace(
+    audit_id: uuid.UUID,
+    operator: Operator = _require_operator,
+) -> AuditTraceResult:
+    """Fetch the flight-recorder trace for one dispatch, scoped to the tenant.
+
+    The **operator read surface** of the dispatch flight recorder
+    (``docs/decisions/dispatch-flight-recorder.md``): the ordered, already
+    redacted+capped spans a governed dispatch produced. Read-only — it renders
+    what the capture/redaction seams (#3213/#3214) stored and never
+    re-processes, un-redacts, or writes.
+
+    Operator plane keeps **full** access, independent of the agent gate: unlike
+    the agent read (a sibling task) this serves redaction-uncertain traces too,
+    surfacing ``trace.redaction_uncertain`` so an operator sees when a trace was
+    withheld from agents. Paired add-ons consume this same route with their
+    operator principal — no separate add-on surface.
+
+    Absence has two levels. A missing / cross-tenant **audit row** is a 404
+    (never 403), matching :func:`show`: the existence check runs through the
+    tenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and
+    existence never leaks. An audit row that exists but carries **no trace** is
+    a 200 with ``trace_present=False`` — capture is a best-effort opt-in
+    (F1/F7), so "no trace" is a normal observable state, not an error.
+
+    Tenant isolation is enforced twice: the existence check is tenant-scoped,
+    and :func:`~meho_backplane.flight_recorder.load_trace` additionally filters
+    the trace header on ``tenant_id`` as defence in depth.
+    """
+    _bind_audit_overrides(_AUDIT_TRACE_OP_ID)
+    # Audit-existence gate first: 404 (never 403) on a missing / cross-tenant
+    # row, exactly as ``show`` does — so a probing operator cannot distinguish
+    # "no such dispatch" from "dispatch in another tenant".
+    audit = await _dispatch(
+        AuditQueryFilters(audit_id=audit_id, limit=1), tenant_id=operator.tenant_id
+    )
+    if not audit.rows:
+        raise HTTPException(status_code=404, detail="audit row not found")
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        view = await load_trace(session, audit_id=audit_id, tenant_id=operator.tenant_id)
+
+    return AuditTraceResult(
+        audit_id=audit_id,
+        trace_present=view is not None,
+        trace=view,
+    )
 
 
 async def _count_session_rows(

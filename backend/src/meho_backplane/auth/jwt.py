@@ -693,6 +693,31 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     return isinstance(username, str) and username.startswith(prefix)
 
 
+def _extract_client_id(claims: Any, settings: Settings) -> str | None:
+    """Recover the OAuth ``clientId`` of a service-account (client-credentials) token.
+
+    Keycloak names a client's service-account user
+    ``service-account-<clientId>`` and stamps it on the username claim (the
+    same #3178 marker :func:`_is_service_account_token` keys on). Stripping the
+    configured prefix recovers the ``clientId``, which for a paired add-on
+    equals ``addon_pairing.keycloak_client_id`` — the seam the #3028 add-on
+    parent-linkage matches a dispatch's principal against.
+
+    Returns ``None`` for any token that is not a prefix-marked service account
+    (interactive users, agent / runner clients whose username lacks the marker,
+    or a realm with the marker disabled by an empty prefix). Reuses the exact
+    settings :func:`_is_service_account_token` uses so the derived value stays
+    consistent with the ``service`` classification.
+    """
+    prefix = settings.jwt_service_account_username_prefix
+    if not prefix:
+        return None
+    username = claims.get(settings.jwt_service_account_username_claim)
+    if isinstance(username, str) and username.startswith(prefix):
+        return username[len(prefix) :] or None
+    return None
+
+
 def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
     """Extract ``principal_kind`` from *claims*.
 
@@ -995,6 +1020,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
     principal_kind = _extract_principal_kind(claims, settings)
+    client_id = _extract_client_id(claims, settings)
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
@@ -1018,6 +1044,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             tenant_id=tenant_id,
             tenant_role=tenant_role,
             principal_kind=principal_kind,
+            client_id=client_id,
             capabilities=capabilities,
             scopes=scopes,
             platform_admin=platform_admin,

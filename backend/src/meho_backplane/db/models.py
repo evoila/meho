@@ -4298,6 +4298,90 @@ class AddonPairing(Base):
     )
 
 
+class AddonOrchestrationRun(Base):
+    """One out-of-process orchestration run's audit-linkage anchor (#3028).
+
+    Initiative #2900 scope item 4. #2086 gave *in-process* dispatches a single
+    replay subtree by re-binding ``parent_audit_id`` / ``agent_session_id``
+    before a resumed dispatch. A paired add-on orchestrating from *outside* the
+    backplane has no in-process parent audit row to hang its per-step
+    dispatches off, so this row synthesises one: a stable ``session_id`` (the
+    replay anchor every dispatch of the run carries) and the ``anchor_audit_id``
+    of the orchestration-root ``audit_log`` row written when the run is first
+    opened. Each subsequent ``call_operation`` for the same ``work_ref`` binds
+    those two values, so its DISPATCH row nests under the one subtree that
+    ``/audit/sessions/{session_id}/replay`` reconstructs.
+
+    The row is the out-of-process analogue of ``ApprovalRequest``'s
+    ``{request_audit_id, agent_session_id}`` durable-linkage copies: resolve
+    once (open + write the anchor), then re-bind on every later dispatch.
+
+    Schema decisions
+    ----------------
+
+    * ``keycloak_client_id`` -- Text NOT NULL. The paired principal's OAuth
+      clientId, equal to :attr:`AddonPairing.keycloak_client_id`. The linkage
+      key: a run belongs to exactly one paired principal.
+    * ``work_ref`` -- Text NOT NULL. The external change-ticket ref the run
+      groups under. Together with ``keycloak_client_id`` it uniquely names a
+      run (``addon_orchestration_run_client_work_ref_idx``), which is both the
+      race-safe resolve-or-open key and the isolation boundary: a *different*
+      paired principal presenting the same work_ref string resolves its own
+      row, never another add-on's subtree.
+    * ``session_id`` -- UUID NOT NULL. Synthesised replay anchor; the
+      ``agent_session_id`` stamped on the anchor row and every dispatch of the
+      run.
+    * ``anchor_audit_id`` -- UUID NOT NULL. Id of the orchestration-root
+      ``audit_log`` row; the ``parent_audit_id`` each dispatch back-links to.
+    * ``opened_by_sub`` -- Text NOT NULL. The service-account ``sub`` that
+      first opened the run (audit provenance; distinct from the pairing's
+      human ``owner_sub``).
+    * ``tenant_id`` -- UUID NOT NULL, FK to ``tenant.id`` (the ``NO ACTION``
+      soft-FK discipline used across the chassis).
+
+    Indexes
+    -------
+
+    * ``addon_orchestration_run_client_work_ref_idx`` -- unique on
+      ``(keycloak_client_id, work_ref)``. Globally unique (a Keycloak clientId
+      is not namespaced by tenant), so it is not a composite with
+      ``tenant_id``.
+    """
+
+    __tablename__ = "addon_orchestration_run"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    work_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    anchor_audit_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    opened_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "addon_orchestration_run_client_work_ref_idx",
+            "keycloak_client_id",
+            "work_ref",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
 #: The capability-surface kinds a paired add-on may advertise under the v1
 #: integration contract (#3026). Mirrors
 #: :class:`meho_backplane.operations.addon_capability_schemas.CapabilityKind`

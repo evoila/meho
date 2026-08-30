@@ -197,6 +197,14 @@ class Operator(BaseModel):
     tenant_id: UUID
     tenant_role: TenantRole
     principal_kind: PrincipalKind = PrincipalKind.USER
+    #: The OAuth ``clientId`` of a client-credentials (service-account) token,
+    #: recovered from the ``service-account-<clientId>`` username marker
+    #: (#3178). Populated for :attr:`PrincipalKind.SERVICE` principals; ``None``
+    #: for interactive users and any token without the marker. Used by the
+    #: add-on parent-linkage seam (#3028) to match a paired add-on's dispatch
+    #: to its ``addon_pairing.keycloak_client_id`` — linkage is accepted only
+    #: from a paired principal for its own work_refs.
+    client_id: str | None = None
     capabilities: frozenset[str] = frozenset()
     scopes: frozenset[str] = frozenset()
     platform_admin: bool = False

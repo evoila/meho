@@ -318,6 +318,10 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # ``tenant`` FK, so the tenant-FK drift guard does not cover it — listed
     # by hand.
     "addon_capability",
+    # ``addon_orchestration_run`` (#3028) carries ``tenant`` + ``addon_pairing``
+    # FKs from migration ``0082``; listed so the per-test TRUNCATE of both
+    # parents does not error.
+    "addon_orchestration_run",
     "targets",
     "tenant",
 )

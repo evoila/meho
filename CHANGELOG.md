@@ -155,6 +155,25 @@ connector-related release-notes line.
   add-on identifier is data, never a tool name. New migration `0079`
   (`addon_pairing`). See `docs/codebase/addon-pairing.md`.
 
+### Added — satellite write-path threat model + scoped-hybrid design decision (#2901)
+
+- Design-only, no code. The security-review-first deliverable for the satellite
+  write path lands as a threat model + design
+  (`docs/research/2901-satellite-write-path.md`, per-asset T1–T8 with `file:line`
+  grounding) and an operator determination
+  (`docs/decisions/satellite-write-path.md`). The ratified path is a **scoped
+  hybrid** — satellite writes for enumerated low-risk op-classes on per-runner
+  enrollment allowlists, staged rollout, delete-shaped operations never minted to
+  a satellite — over a per-customer full-backplane install. The write tier is
+  gated by four composed mechanisms: signed single-use expiring work items
+  verified at the edge (write-tier-only reversal of the #2500 bare-UUID token),
+  per-work-item short-lived response-wrapped Vault credentials (closes the
+  empty-JWT edge-credential gap), a per-runner allowlist as the blast-radius
+  bound, and a consciously-recorded v0.1-spec §6 exception (tamper-evident
+  store-and-forward effect audit + a security alarm on minted writes unreported
+  past expiry). Push-only stands (#2877); implementation seams are filed as
+  Tasks under #2901, unimplemented.
+
 ### Added — REST + CLI parity for `result_query`: read JSONFlux handles back off MCP (#3179 / PR #3181)
 
 - `POST /api/v1/operations/call` can *mint* a reduced result handle for any

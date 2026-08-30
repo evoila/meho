@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: single Settings model + one from_env constructor — the
+# env-var contract is deliberately one flat file so the mapping is auditable in
+# one place. Splitting is out of scope for a feature task.
 
 """Runtime configuration sourced from environment variables.
 
@@ -1288,6 +1291,32 @@ class Settings(BaseModel):
     operation_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     operation_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     operation_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # Dispatch flight recorder (#3212, F1/F4/F6 of
+    # ``docs/decisions/dispatch-flight-recorder.md``).
+    #
+    # ``flight_recorder_enabled`` is the **global kill switch** (F1). Read
+    # fail-open by :mod:`meho_backplane.flight_recorder.config`: ``False`` =
+    # capture nothing anywhere (overrides every per-tenant / per-target
+    # setting), and the resolver never fails a dispatch on it. Default ``True``
+    # so the per-tenant default (OFF except lab-class) governs in normal
+    # operation; an operator flips this to ``False`` to hard-stop all capture.
+    flight_recorder_enabled: bool = True
+    # Global default trace retention window in days (F4). Overridden per-tenant
+    # by ``tenant.flight_recorder_retention_days`` (14 for lab-class). Resolved
+    # at trace-write time and stamped onto ``dispatch_trace.expires_at``.
+    flight_recorder_retention_days_default: int = Field(default=7, ge=1, le=365)
+    # Retention reaper knobs (F4). Same opt-out shape as the other in-tree
+    # reapers: ``FLIGHT_RECORDER_REAPER_ENABLED=false`` lets an operator with
+    # an external retention mechanism skip starting the loop. The sweep is a
+    # bounded ``DELETE ... WHERE expires_at < now()`` on an indexed column, so
+    # an hourly cadence is ample for a 7-14 day window. ``max_per_tick`` is
+    # capped at 10000: the reaper materializes up to that many trace ids into an
+    # ``IN (...)`` delete, so the ceiling stays well under PostgreSQL's ~65535
+    # bind-parameter limit (a self-catching-up sweep handles higher volume
+    # across successive ticks).
+    flight_recorder_reaper_enabled: bool = True
+    flight_recorder_reaper_tick_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    flight_recorder_reaper_max_per_tick: int = Field(default=500, ge=1, le=10000)
     # Initiative #2415 (#2501) -- gateway runner dead-man switch. Same
     # opt-out shape as AGENT_RUN_REAPER_ENABLED, but default-on is what
     # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
@@ -2037,6 +2066,22 @@ def get_settings() -> Settings:
         ),
         operation_run_lease_ttl_seconds=int(
             os.environ.get("OPERATION_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
+        # Dispatch flight recorder (#3212, F1/F4/F6).
+        flight_recorder_enabled=parse_bool_env(
+            os.environ.get("FLIGHT_RECORDER_ENABLED", "true"),
+        ),
+        flight_recorder_retention_days_default=int(
+            os.environ.get("FLIGHT_RECORDER_RETENTION_DAYS_DEFAULT", "7"),
+        ),
+        flight_recorder_reaper_enabled=parse_bool_env(
+            os.environ.get("FLIGHT_RECORDER_REAPER_ENABLED", "true"),
+        ),
+        flight_recorder_reaper_tick_interval_seconds=int(
+            os.environ.get("FLIGHT_RECORDER_REAPER_TICK_INTERVAL_SECONDS", "3600"),
+        ),
+        flight_recorder_reaper_max_per_tick=int(
+            os.environ.get("FLIGHT_RECORDER_REAPER_MAX_PER_TICK", "500"),
         ),
         gateway_deadman_enabled=parse_bool_env(
             os.environ.get("GATEWAY_DEADMAN_ENABLED", "true"),

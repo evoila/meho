@@ -372,6 +372,14 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # which hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL (this test pins no env).
                     operation_run_reaper_enabled=False,
+                    # #3212 flight recorder added a trace-retention reaper to
+                    # the lifespan, gated on FLIGHT_RECORDER_REAPER_ENABLED
+                    # (default on). Pin it off — a bare MagicMock attribute is
+                    # truthy, so without this the gate reads True and the real
+                    # start_flight_recorder_reaper runs _reap_loop, which hits
+                    # the real get_settings() -> KeyError on KEYCLOAK_ISSUER_URL
+                    # (this test pins no env).
+                    flight_recorder_reaper_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -516,6 +524,14 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # unconditional topology refresh scheduler run one loop and
                     # KeyError on KEYCLOAK_ISSUER_URL. Same shape as the sibling.
                     operation_run_reaper_enabled=False,
+                    # #3212 flight recorder added a trace-retention reaper to
+                    # the lifespan, gated on FLIGHT_RECORDER_REAPER_ENABLED
+                    # (default on). Pin it off — a bare MagicMock attribute is
+                    # truthy, so without this the gate reads True and the real
+                    # start_flight_recorder_reaper runs _reap_loop, which hits
+                    # the real get_settings() -> KeyError on KEYCLOAK_ISSUER_URL
+                    # (this test pins no env).
+                    flight_recorder_reaper_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),

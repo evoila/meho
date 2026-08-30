@@ -4,7 +4,7 @@
 """Add ``approval_request.preview_hash`` for the destructive-tier preview binding.
 
 Revision ID: 0086
-Revises: 0084
+Revises: 0085
 Create Date: 2026-08-30
 
 Task #3197 under Initiative #3183 (governed deletes), decision
@@ -40,15 +40,12 @@ is nullable for the same "pre-existing rows have no value" reason.
 Migration-chain note (single linear head)
 ------------------------------------------
 
-Numbered ``0086`` with ``down_revision = "0084"`` — the head on
-``origin/main`` at branch time. A concurrent PR (#3219, flight-recorder
-trace store) holds ``0085``; this revision deliberately skips to ``0086``
-to avoid a duplicate-revision-id collision with it. If ``0085`` lands
-first, the orchestrator re-points this ``down_revision`` to the
-then-current head at merge so the chain stays a single linear head (the
-``Python (database migrations)`` CI gate). No data dependency on the
-skipped number — Alembic orders by the ``revision``/``down_revision``
-graph, not by filename.
+Numbered ``0086`` with ``down_revision = "0085"`` — the head on
+``origin/main`` (``0085_create_dispatch_trace_store``, the flight-recorder
+trace store that landed while this task was in flight). The chain is a
+single linear head ``0084 -> 0085 -> 0086``, which the ``Python (database
+migrations)`` CI gate requires. This column and the trace-store table are
+independent; the linear ordering is purely the head discipline.
 
 Reversibility contract
 ----------------------
@@ -65,7 +62,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0086"
-down_revision: str | None = "0084"
+down_revision: str | None = "0085"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

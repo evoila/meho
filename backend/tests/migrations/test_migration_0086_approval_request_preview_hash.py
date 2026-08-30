@@ -14,11 +14,9 @@ absent after ``downgrade``, and the pair round-trips idempotently. SQLite
 is the test driver; the migration uses only generic ``ADD COLUMN`` /
 ``DROP COLUMN`` DDL, so PostgreSQL parity holds.
 
-The ``down_revision`` is pinned to ``0084`` (the head on ``origin/main`` at
-branch time); the orchestrator re-points it to the then-current head at
-merge if a concurrent migration (e.g. ``0085``) lands first. This test
-targets the literal revision ids so it stays correct under that re-point
-only if the ids move in lockstep — which the orchestrator's re-point does.
+The ``down_revision`` is ``0085`` (``0085_create_dispatch_trace_store``,
+the head on ``origin/main``): the chain is the single linear head
+``0084 -> 0085 -> 0086``. This test targets the literal revision ids.
 """
 
 from __future__ import annotations
@@ -37,7 +35,7 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
 _REVISION = "0086"
-_DOWN_REVISION = "0084"
+_DOWN_REVISION = "0085"
 _TABLE = "approval_request"
 _COLUMN = "preview_hash"
 

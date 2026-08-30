@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 23 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 27 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -59,10 +59,16 @@ __all__ = [
     "FOLDER_CREATE_RESPONSE_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
     "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
+    "HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA",
+    "HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA",
     "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
     "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
+    "HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA",
+    "HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
     "HOST_EVACUATE_RESPONSE_SCHEMA",
+    "HOST_SERVICE_CONTROL_PARAMETER_SCHEMA",
+    "HOST_SERVICE_CONTROL_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
@@ -2828,4 +2834,303 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm_id", "powered_on", "issues"],
+}
+
+
+# ===========================================================================
+# Host-domain write composites (#3182) -- dangerous / requires approval
+# ===========================================================================
+
+
+#: ``vmware.composite.host.datastore_mount_nfs`` parameter schema.
+#:
+#: Mount an NFS export as a datastore on a host via the **synchronous** vim
+#: ``HostDatastoreSystem.CreateNasDatastore`` (builds a ``HostNasVolumeSpec``).
+#: The host is selected by display name or moref; ``access_mode`` /
+#: ``nfs_type`` map to the pinned spec's ``HostMountMode_enum`` /
+#: ``HostNasVolumeSpec.type``.
+HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Host display name or moref (e.g. 'esxi-01.lab' or 'host-15'). "
+                "Resolved via ``GET:/vcenter/host`` — a display-name lookup first, "
+                "falling back to a moref match; an ambiguous name is refused with "
+                "``status='ambiguous_host'`` before any write."
+            ),
+        },
+        "nfs_server": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Hostname or IP of the NFS v3 server exporting the share "
+                "(``HostNasVolumeSpec.remoteHost``)."
+            ),
+        },
+        "remote_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exported remote path on the NFS server (``remotePath``).",
+        },
+        "datastore_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Local datastore name the mount is created under "
+                "(``HostNasVolumeSpec.localPath``). A name already in use on the "
+                "host faults vendor-side (``DuplicateName``)."
+            ),
+        },
+        "access_mode": {
+            "type": "string",
+            "enum": ["readWrite", "readOnly"],
+            "default": "readWrite",
+            "description": (
+                "Datastore access mode (``HostMountMode_enum``). ``readOnly`` is "
+                "for ISO / template stores a VM cannot power on from."
+            ),
+        },
+        "nfs_type": {
+            "type": "string",
+            "enum": ["NFS", "NFS41"],
+            "default": "NFS",
+            "description": (
+                "NAS volume type (``HostNasVolumeSpec.type``). ``NFS`` is v3; "
+                "``NFS41`` is v4.1. CIFS is deliberately out of scope (credential-"
+                "bearing)."
+            ),
+        },
+    },
+    "required": ["host", "nfs_server", "remote_path", "datastore_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.disk_mark_flash`` parameter schema.
+#:
+#: Present one or more host disks as flash (SSD) or non-flash (HDD) via vim
+#: ``HostStorageSystem.MarkAsSsd_Task`` / ``MarkAsNonSsd_Task`` (task-polled).
+#: Nested labs surface virtual disks as HDD; vSAN-ready bring-up validation
+#: needs them flash-marked. Disks are named by ``scsiDiskUuid``.
+HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host display name or moref (see host.datastore_mount_nfs).",
+        },
+        "disk_uuids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "SCSI disk UUIDs (``ScsiLun.uuid``) to mark. One "
+                "``MarkAs{Ssd,NonSsd}_Task`` is issued per disk and polled to a "
+                "terminal state; per-disk outcomes are captured independently "
+                "(a fault on one disk does not abort the rest)."
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["flash", "non_flash"],
+            "default": "flash",
+            "description": (
+                "``'flash'`` marks each disk as SSD (``MarkAsSsd_Task``); "
+                "``'non_flash'`` is the inverse (``MarkAsNonSsd_Task``) — the same "
+                "op keyed on this param, not a second op."
+            ),
+        },
+    },
+    "required": ["host", "disk_uuids"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.service_control`` parameter schema.
+#:
+#: Start / stop / restart a host service and optionally set its startup
+#: policy via vim ``HostServiceSystem`` (synchronous). **Bounded to a
+#: curated server-side allowlist**: an out-of-list ``service`` is refused
+#: (``status='service_not_allowed'``) before any write — never passed
+#: through to the host.
+HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host display name or moref (see host.datastore_mount_nfs).",
+        },
+        "service": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Host service key (``HostService.key``). Enforced server-side "
+                "against a curated allowlist (``TSM-SSH`` / ``TSM`` / ``ntpd`` / "
+                "``ptpd``); any other name is refused with "
+                "``status='service_not_allowed'`` before any resolution or write."
+            ),
+        },
+        "action": {
+            "type": "string",
+            "enum": ["start", "stop", "restart"],
+            "description": (
+                "Lifecycle transition: ``StartService`` / ``StopService`` / "
+                "``RestartService``. Applied before any policy update."
+            ),
+        },
+        "policy": {
+            "type": "string",
+            "enum": ["on", "automatic", "off"],
+            "description": (
+                "Optional startup policy (``HostServicePolicy_enum``): ``on`` "
+                "(start at host boot), ``automatic`` (start iff a firewall port is "
+                "open), ``off`` (do not start). When supplied, "
+                "``UpdateServicePolicy`` runs after the action."
+            ),
+        },
+    },
+    "required": ["host", "service", "action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.datastore_mount_nfs`` response schema.
+HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["mounted", "host_not_found", "ambiguous_host", "config_manager_unreadable"],
+            "description": (
+                "``'mounted'`` — the datastore was created; the refusal statuses "
+                "are reached before any write (host name/moref did not resolve "
+                "uniquely, or the host's HostDatastoreSystem was unreadable)."
+            ),
+        },
+        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "datastore": {
+            "type": ["string", "null"],
+            "description": "New datastore moid; ``null`` on any non-``mounted`` status.",
+        },
+        "summary": {
+            "type": ["object", "null"],
+            "description": (
+                "Datastore summary on success — datastore moid, name, and the "
+                "resolved mount coordinates; ``null`` on refusal."
+            ),
+        },
+        "candidate_hosts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Matched host moids on ``ambiguous_host``.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "host", "datastore"],
+}
+
+
+#: ``vmware.composite.host.disk_mark_flash`` response schema.
+HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "marked",
+                "partial",
+                "host_not_found",
+                "ambiguous_host",
+                "config_manager_unreadable",
+            ],
+            "description": (
+                "``'marked'`` — every disk reached SSD/HDD state; ``'partial'`` — "
+                "at least one disk faulted / timed out / errored (see per-disk "
+                "``results``); the refusal statuses are reached before any write."
+            ),
+        },
+        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "mode": {"type": "string", "enum": ["flash", "non_flash"]},
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "disk_uuid": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["marked", "faulted", "timeout", "error"],
+                    },
+                    "task": {"type": ["string", "null"]},
+                    "error": {"type": ["string", "null"]},
+                },
+                "required": ["disk_uuid", "status"],
+            },
+            "description": "One row per disk in ``disk_uuids`` (empty on a pre-write refusal).",
+        },
+        "summary": {
+            "type": ["object", "null"],
+            "properties": {
+                "marked": {"type": "integer", "minimum": 0},
+                "failed": {"type": "integer", "minimum": 0},
+            },
+            "description": "Aggregate counts across ``results``; ``null`` on refusal.",
+        },
+        "candidate_hosts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Matched host moids on ``ambiguous_host``.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "host", "mode", "results"],
+}
+
+
+#: ``vmware.composite.host.service_control`` response schema.
+HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "applied",
+                "service_not_allowed",
+                "host_not_found",
+                "ambiguous_host",
+                "config_manager_unreadable",
+            ],
+            "description": (
+                "``'applied'`` — the action (and optional policy update) ran; "
+                "``'service_not_allowed'`` — the service is outside the curated "
+                "allowlist (refused before any resolution or write); the remaining "
+                "refusals are reached before any write."
+            ),
+        },
+        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "service": {"type": "string"},
+        "action": {"type": ["string", "null"], "enum": ["start", "stop", "restart", None]},
+        "policy": {"type": ["string", "null"], "enum": ["on", "automatic", "off", None]},
+        "policy_updated": {
+            "type": "boolean",
+            "description": "Whether ``UpdateServicePolicy`` ran (``policy`` was supplied).",
+        },
+        "allowed_services": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The curated allowlist, echoed on ``service_not_allowed``.",
+        },
+        "candidate_hosts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Matched host moids on ``ambiguous_host``.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "host", "service", "policy_updated"],
 }

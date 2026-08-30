@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 24 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 27 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -48,6 +48,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._host import (
+    datastore_mount_nfs_composite,
+    disk_mark_flash_composite,
+    service_control_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -91,10 +96,16 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     FOLDER_CREATE_RESPONSE_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
     GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
+    HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA,
+    HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
+    HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA,
+    HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
+    HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
+    HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
@@ -221,15 +232,23 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "parameters."
     ),
     "host": (
-        "Use for host-lifecycle write "
+        "Use for host-lifecycle and host-domain write "
         "composites. Write (dangerous / "
         "approval-required): evacuate "
         "every VM off a host (recursive composite call into "
         "vm.migrate) then enter maintenance, or detach a host from a "
         "DVS after migrating its VM NICs off; the host_evacuate "
         "composite is the first production composite that calls "
-        "another composite. The right group for 'safely take this "
-        "host offline' workflows. Pair with 'networking' for the "
+        "another composite. Plus the host-domain writes (#3182), each "
+        "vCenter-mediated through the governed VI-JSON seam: mount an "
+        "NFS export as a datastore on a host "
+        "(datastore_mount_nfs), mark host disks as flash/HDD for "
+        "vSAN-ready validation (disk_mark_flash), or start/stop/restart "
+        "a bounded host service and set its policy (service_control, "
+        "allowlist-enforced — never an arbitrary service name). The "
+        "host is selected by display name or moref. The right group for "
+        "'safely take this host offline' and host bring-up / prep "
+        "workflows. Pair with 'networking' for the "
         "DVS-audit prerequisite to host_detach_from_vds, and with "
         "'cluster' / 'vm' for the pre-flight reads."
     ),
@@ -869,6 +888,84 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # Host-domain write composites (#3182) -- dangerous / requires approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.host.datastore_mount_nfs",
+        handler=datastore_mount_nfs_composite,
+        summary="Mount an NFS export as a datastore on a host via CreateNasDatastore.",
+        description=(
+            "Mounts an NFS v3/v4.1 export as a datastore on one host via the "
+            "synchronous vim HostDatastoreSystem.CreateNasDatastore — the pinned "
+            "vcenter.yaml serves no host NAS-mount REST path, so vim is the sole "
+            "governed path (#3182). Resolves the host by display name or moref "
+            "(GET:/vcenter/host), then reads the host's "
+            "HostSystem.configManager.datastoreSystem MoRef and mounts the method "
+            "on it, building a HostNasVolumeSpec from nfs_server / remote_path / "
+            "datastore_name / access_mode / nfs_type. The 200 body is the new "
+            "Datastore MoRef directly (no task poll), so the composite returns "
+            "status='mounted' with the datastore moid + a mount summary. A host "
+            "that does not resolve uniquely refuses before any write "
+            "(status='host_not_found' / 'ambiguous_host'). Nested-VCF hosts mount "
+            "a base-layer NFS export as principal storage this way."
+        ),
+        parameter_schema=HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA,
+        response_schema=HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "storage", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.disk_mark_flash",
+        handler=disk_mark_flash_composite,
+        summary="Mark host disks as flash (SSD) or non-flash (HDD) via MarkAs*_Task.",
+        description=(
+            "Marks one or more host disks as flash (SSD) or non-flash (HDD) via vim "
+            "HostStorageSystem.MarkAsSsd_Task (mode='flash') / MarkAsNonSsd_Task "
+            "(mode='non_flash') — the inverse is the same op keyed on the mode "
+            "param, not a second op (#3182). Nested labs present virtual disks as "
+            "HDD; vSAN-ready bring-up validation needs cache/capacity disks "
+            "flash-marked. Resolves the host by display name or moref, reads its "
+            "HostSystem.configManager.storageSystem MoRef, then per scsiDiskUuid "
+            "issues the mark task through the governed vmomi seam and polls it to a "
+            "terminal state. Set-shaped: one results row per disk (a per-disk fault "
+            "/ timeout / transport error is captured, not aborted), aggregated into "
+            "summary counts. Equivalent of 'govc host.storage.mark -ssd'."
+        ),
+        parameter_schema=HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA,
+        response_schema=HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "storage", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.service_control",
+        handler=service_control_composite,
+        summary="Start/stop/restart a bounded host service + optionally set its policy.",
+        description=(
+            "Starts / stops / restarts a host service and optionally sets its "
+            "startup policy via vim HostServiceSystem (synchronous StartService / "
+            "StopService / RestartService + UpdateServicePolicy) — e.g. enabling "
+            "host SSH (TSM-SSH) for a diagnostic / upgrade arc, then disabling it, "
+            "leaving an audit row each time (#3182). Bounded to a curated "
+            "server-side allowlist (TSM-SSH / TSM / ntpd / ptpd): an out-of-list "
+            "service is refused with status='service_not_allowed' before any host "
+            "resolution or write, never passed through (the no-arbitrary-exec "
+            "posture). Resolves the host by display name or moref, reads its "
+            "HostSystem.configManager.serviceSystem MoRef, applies the action "
+            "through the governed vmomi seam, then (when policy is supplied) "
+            "UpdateServicePolicy. Equivalent of 'govc host.service'."
+        ),
+        parameter_schema=HOST_SERVICE_CONTROL_PARAMETER_SCHEMA,
+        response_schema=HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "service", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
 )
 
 
@@ -885,15 +982,17 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 24 composites total -- 5 read (T5 / #508) + 19 write (T6 /
+    Scope: 27 composites total -- 5 read (T5 / #508) + 22 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
     ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
     hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
     ``vm.device.cdrom``, the two GOSC composites
-    ``guest.customization_spec.create`` / ``vm.customize`` / #2892, and the
-    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909). (The
+    ``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
+    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and
+    the three host-domain writes ``host.datastore_mount_nfs`` /
+    ``host.disk_mark_flash`` / ``host.service_control`` / #3182). (The
     former ``host.network_uplinks`` / ``host.vsan_health`` reads were
     re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +

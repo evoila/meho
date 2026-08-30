@@ -821,7 +821,79 @@ async def _vm_customize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
-#: op_id → builder for the 19 write composites. Module-level so the
+async def _host_datastore_mount_nfs_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``host.datastore_mount_nfs`` — echo the mount coordinates (no I/O).
+
+    The params fully name the blast radius: which host, which NFS export,
+    the local datastore name, and the access mode. Host resolution
+    (name→moref) and the config-manager read stay the handler's job, so no
+    live read is issued and the preview cannot drift from the approved
+    dispatch. Declines on malformed params.
+    """
+    host = ctx.params.get("host")
+    nfs_server = ctx.params.get("nfs_server")
+    remote_path = ctx.params.get("remote_path")
+    datastore_name = ctx.params.get("datastore_name")
+    if not all(isinstance(v, str) for v in (host, nfs_server, remote_path, datastore_name)):
+        return None
+    return {
+        "host": host,
+        "nfs_server": nfs_server,
+        "remote_path": remote_path,
+        "datastore_name": datastore_name,
+        "access_mode": (
+            ctx.params.get("access_mode")
+            if isinstance(ctx.params.get("access_mode"), str)
+            else "readWrite"
+        ),
+        "nfs_type": (
+            ctx.params.get("nfs_type") if isinstance(ctx.params.get("nfs_type"), str) else "NFS"
+        ),
+    }
+
+
+async def _host_disk_mark_flash_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``host.disk_mark_flash`` — echo host + mode + the disk set (no I/O).
+
+    The disk UUID list is the blast radius; it is capped to
+    :data:`_PREVIEW_RESOLVED_CAP` with ``total_disks`` carrying the true
+    count so a large batch does not balloon the durable row. Declines when
+    ``disk_uuids`` is not a non-empty list.
+    """
+    host = ctx.params.get("host")
+    disk_uuids = ctx.params.get("disk_uuids")
+    if not isinstance(host, str) or not isinstance(disk_uuids, list) or not disk_uuids:
+        return None
+    uuids = [uuid for uuid in disk_uuids if isinstance(uuid, str)]
+    return {
+        "host": host,
+        "mode": ctx.params.get("mode") if isinstance(ctx.params.get("mode"), str) else "flash",
+        "disk_uuids": uuids[:_PREVIEW_RESOLVED_CAP],
+        "total_disks": len(uuids),
+    }
+
+
+async def _host_service_control_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``host.service_control`` — echo host + service + action + policy (no I/O).
+
+    The params fully name the change (which service, which transition,
+    optional startup policy); the allowlist check and host resolution stay
+    the handler's job. Declines on malformed params.
+    """
+    host = ctx.params.get("host")
+    service = ctx.params.get("service")
+    action = ctx.params.get("action")
+    if not all(isinstance(v, str) for v in (host, service, action)):
+        return None
+    return {
+        "host": host,
+        "service": service,
+        "action": action,
+        "policy": ctx.params.get("policy") if isinstance(ctx.params.get("policy"), str) else None,
+    }
+
+
+#: op_id → builder for the 22 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
@@ -843,11 +915,14 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.folder.create": _folder_create_preview,
     "vmware.composite.guest.customization_spec.create": _guest_customization_spec_create_preview,
     "vmware.composite.vm.customize": _vm_customize_preview,
+    "vmware.composite.host.datastore_mount_nfs": _host_datastore_mount_nfs_preview,
+    "vmware.composite.host.disk_mark_flash": _host_disk_mark_flash_preview,
+    "vmware.composite.host.service_control": _host_service_control_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 19 write-composite park-time preview builders. Import-time.
+    """Wire the 22 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

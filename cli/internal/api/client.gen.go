@@ -1484,6 +1484,48 @@ type AuditReplayResult struct {
 	TenantId                 openapi_types.UUID `json:"tenant_id"`
 }
 
+// AuditTraceResult 200 body for “GET /api/v1/audit/{audit_id}/trace“ (#3215).
+//
+// The operator read surface of the dispatch flight recorder
+// (“docs/decisions/dispatch-flight-recorder.md“). Wraps the tenant-scoped
+// :class:`~meho_backplane.flight_recorder.TraceView` with the echoed
+// “audit_id“ and a “trace_present“ discriminator, the same REST-envelope
+// layering :class:`AuditReplayResult` follows over the substrate's
+// :class:`ReplayNode`.
+//
+// Two-level absence semantics -- distinct on purpose:
+//
+//   - The **audit row** being missing or in another tenant is a 404 from the
+//     route, matching “GET /show/{audit_id}“: existence never leaks across
+//     the tenant boundary.
+//   - The audit row existing but carrying **no captured trace** is *not* a 404 --
+//     it is a 200 with “trace_present=False“ and “trace=None“. Capture is a
+//     per-tenant/per-target opt-in and best-effort (F1/F7), so "no trace" is a
+//     normal state an operator must be able to observe, not an error. The
+//     console pane renders a "no trace captured" empty state for this case.
+//
+// “trace.redaction_uncertain“ surfaces the F5 degrade flag so an operator
+// (and a paired add-on reading over this route with its operator principal)
+// can see when a trace was withheld from the agent handle. The operator plane
+// keeps **full** access regardless of that flag.
+//
+// Frozen like the models it carries.
+type AuditTraceResult struct {
+	AuditId openapi_types.UUID `json:"audit_id"`
+
+	// Trace A dispatch trace header plus its ordered spans, tenant-scoped.
+	//
+	// Returned by :func:`load_trace` when a trace exists for the ``(audit_id,
+	// tenant_id)`` pair. :attr:`redaction_uncertain` is the F5 degrade flag read
+	// straight off the header: ``True`` means the capture/redaction seam could not
+	// prove the trace fully redacted, so it was withheld from the agent handle and
+	// is readable on the operator plane alone. The operator surface surfaces the
+	// flag rather than acting on it -- an operator sees everything, and sees which
+	// traces the agent could not.
+	Trace        *TraceView `json:"trace,omitempty"`
+	TracePresent bool       `json:"trace_present"`
+}
+
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
 // Field names match the CLI's expected JSON keys (“keycloak_issuer“,
@@ -8302,6 +8344,43 @@ type TopologyTimelineResult struct {
 	Rows       []TopologyTimelineEntry `json:"rows"`
 }
 
+// TraceSpanView One ordered span of a dispatch trace, safe to serve to the operator.
+//
+// Mirrors :class:`~meho_backplane.db.models.DispatchTraceSpan` field-for-field
+// -- the frequently-queried axes (:attr:`status`, :attr:`duration_ms`) are
+// typed columns, and the redacted/capped span detail (method, URL, redacted
+// headers, the redacted body + truncation marker, JSONFlux input/kept/output
+// sizes, the result-handle id) rides the free-form :attr:`attributes` mapping.
+// The read surface renders these as stored -- it never re-processes them.
+type TraceSpanView struct {
+	Attributes map[string]interface{} `json:"attributes"`
+	DurationMs *string                `json:"duration_ms"`
+	Name       string                 `json:"name"`
+	Seq        int                    `json:"seq"`
+	SpanKind   string                 `json:"span_kind"`
+	StartedAt  time.Time              `json:"started_at"`
+	Status     *string                `json:"status"`
+}
+
+// TraceView A dispatch trace header plus its ordered spans, tenant-scoped.
+//
+// Returned by :func:`load_trace` when a trace exists for the “(audit_id,
+// tenant_id)“ pair. :attr:`redaction_uncertain` is the F5 degrade flag read
+// straight off the header: “True“ means the capture/redaction seam could not
+// prove the trace fully redacted, so it was withheld from the agent handle and
+// is readable on the operator plane alone. The operator surface surfaces the
+// flag rather than acting on it -- an operator sees everything, and sees which
+// traces the agent could not.
+type TraceView struct {
+	AuditId            openapi_types.UUID `json:"audit_id"`
+	CreatedAt          time.Time          `json:"created_at"`
+	ExpiresAt          time.Time          `json:"expires_at"`
+	RedactionUncertain bool               `json:"redaction_uncertain"`
+	Spans              []TraceSpanView    `json:"spans"`
+	TenantId           openapi_types.UUID `json:"tenant_id"`
+	TraceId            openapi_types.UUID `json:"trace_id"`
+}
+
 // UISessionContext Per-request session identity exposed on “request.state“.
 //
 // Frozen so a route handler that stashes the context on a logger
@@ -8846,6 +8925,11 @@ type ShowApiV1AuditShowAuditIdGetParams struct {
 type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// TraceApiV1AuditAuditIdTraceGetParams defines parameters for TraceApiV1AuditAuditIdTraceGet.
+type TraceApiV1AuditAuditIdTraceGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -11917,6 +12001,9 @@ type ClientInterface interface {
 	// WhoTouchedApiV1AuditWhoTouchedTargetGet request
 	WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// TraceApiV1AuditAuditIdTraceGet request
+	TraceApiV1AuditAuditIdTraceGet(ctx context.Context, auditId openapi_types.UUID, params *TraceApiV1AuditAuditIdTraceGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// AuthConfigApiV1AuthConfigGet request
 	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -13896,6 +13983,18 @@ func (c *Client) ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId opena
 
 func (c *Client) WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewWhoTouchedApiV1AuditWhoTouchedTargetGetRequest(c.Server, target, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) TraceApiV1AuditAuditIdTraceGet(ctx context.Context, auditId openapi_types.UUID, params *TraceApiV1AuditAuditIdTraceGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewTraceApiV1AuditAuditIdTraceGetRequest(c.Server, auditId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -22414,6 +22513,55 @@ func NewWhoTouchedApiV1AuditWhoTouchedTargetGetRequest(server string, target str
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewTraceApiV1AuditAuditIdTraceGetRequest generates requests for TraceApiV1AuditAuditIdTraceGet
+func NewTraceApiV1AuditAuditIdTraceGetRequest(server string, auditId openapi_types.UUID, params *TraceApiV1AuditAuditIdTraceGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "audit_id", runtime.ParamLocationPath, auditId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/%s/trace", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -41159,6 +41307,9 @@ type ClientWithResponsesInterface interface {
 	// WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request
 	WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error)
 
+	// TraceApiV1AuditAuditIdTraceGetWithResponse request
+	TraceApiV1AuditAuditIdTraceGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *TraceApiV1AuditAuditIdTraceGetParams, reqEditors ...RequestEditorFn) (*TraceApiV1AuditAuditIdTraceGetResponse, error)
+
 	// AuthConfigApiV1AuthConfigGetWithResponse request
 	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
 
@@ -43430,6 +43581,29 @@ func (r WhoTouchedApiV1AuditWhoTouchedTargetGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r WhoTouchedApiV1AuditWhoTouchedTargetGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type TraceApiV1AuditAuditIdTraceGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditTraceResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r TraceApiV1AuditAuditIdTraceGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r TraceApiV1AuditAuditIdTraceGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -51329,6 +51503,15 @@ func (c *ClientWithResponses) WhoTouchedApiV1AuditWhoTouchedTargetGetWithRespons
 	return ParseWhoTouchedApiV1AuditWhoTouchedTargetGetResponse(rsp)
 }
 
+// TraceApiV1AuditAuditIdTraceGetWithResponse request returning *TraceApiV1AuditAuditIdTraceGetResponse
+func (c *ClientWithResponses) TraceApiV1AuditAuditIdTraceGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *TraceApiV1AuditAuditIdTraceGetParams, reqEditors ...RequestEditorFn) (*TraceApiV1AuditAuditIdTraceGetResponse, error) {
+	rsp, err := c.TraceApiV1AuditAuditIdTraceGet(ctx, auditId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTraceApiV1AuditAuditIdTraceGetResponse(rsp)
+}
+
 // AuthConfigApiV1AuthConfigGetWithResponse request returning *AuthConfigApiV1AuthConfigGetResponse
 func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error) {
 	rsp, err := c.AuthConfigApiV1AuthConfigGet(ctx, reqEditors...)
@@ -56936,6 +57119,39 @@ func ParseWhoTouchedApiV1AuditWhoTouchedTargetGetResponse(rsp *http.Response) (*
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseTraceApiV1AuditAuditIdTraceGetResponse parses an HTTP response from a TraceApiV1AuditAuditIdTraceGetWithResponse call
+func ParseTraceApiV1AuditAuditIdTraceGetResponse(rsp *http.Response) (*TraceApiV1AuditAuditIdTraceGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &TraceApiV1AuditAuditIdTraceGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditTraceResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

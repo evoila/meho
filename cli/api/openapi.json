@@ -6340,6 +6340,60 @@
         }
       }
     },
+    "/api/v1/audit/{audit_id}/trace": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Trace",
+        "description": "Fetch the flight-recorder trace for one dispatch, scoped to the tenant.\n\nThe **operator read surface** of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``): the ordered, already\nredacted+capped spans a governed dispatch produced. Read-only \u2014 it renders\nwhat the capture/redaction seams (#3213/#3214) stored and never\nre-processes, un-redacts, or writes.\n\nOperator plane keeps **full** access, independent of the agent gate: unlike\nthe agent read (a sibling task) this serves redaction-uncertain traces too,\nsurfacing ``trace.redaction_uncertain`` so an operator sees when a trace was\nwithheld from agents. Paired add-ons consume this same route with their\noperator principal \u2014 no separate add-on surface.\n\nAbsence has two levels. A missing / cross-tenant **audit row** is a 404\n(never 403), matching :func:`show`: the existence check runs through the\ntenant-scoped substrate, so a foreign ``audit_id`` yields zero rows and\nexistence never leaks. An audit row that exists but carries **no trace** is\na 200 with ``trace_present=False`` \u2014 capture is a best-effort opt-in\n(F1/F7), so \"no trace\" is a normal observable state, not an error.\n\nTenant isolation is enforced twice: the existence check is tenant-scoped,\nand :func:`~meho_backplane.flight_recorder.load_trace` additionally filters\nthe trace header on ``tenant_id`` as defence in depth.",
+        "operationId": "trace_api_v1_audit__audit_id__trace_get",
+        "parameters": [
+          {
+            "name": "audit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Audit Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditTraceResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit/sessions/{session_id}/replay": {
       "get": {
         "tags": [
@@ -22245,6 +22299,30 @@
         "title": "AuditReplayResult",
         "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\n``excluded_null_session_count`` (#2700) is the tenant-scoped tally\nof ``method=MCP`` audit rows whose ``agent_session_id`` is NULL \u2014\ncalls from clients that never negotiated a session via the\n``initialize`` handshake. Such rows can never anchor or be walked by\n*any* session replay, so a ``row_count=0`` response with a non-zero\n``excluded_null_session_count`` tells an investigator the empty\nforest is not the same as an empty history: there is un-negotiated\nMCP traffic this forensic surface structurally cannot see. It is a\ntenant-wide count, independent of ``session_id`` (the un-negotiated\nrows belong to no session), and mirrors the honest\n``when_negotiated`` capture label the deploy's ``/status`` reports.\n\nFrozen like the substrate models it carries."
       },
+      "AuditTraceResult": {
+        "properties": {
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Audit Id"
+          },
+          "trace_present": {
+            "type": "boolean",
+            "title": "Trace Present"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/TraceView",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "audit_id",
+          "trace_present"
+        ],
+        "title": "AuditTraceResult",
+        "description": "200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).\n\nThe operator read surface of the dispatch flight recorder\n(``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped\n:class:`~meho_backplane.flight_recorder.TraceView` with the echoed\n``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope\nlayering :class:`AuditReplayResult` follows over the substrate's\n:class:`ReplayNode`.\n\nTwo-level absence semantics -- distinct on purpose:\n\n* The **audit row** being missing or in another tenant is a 404 from the\n  route, matching ``GET /show/{audit_id}``: existence never leaks across\n  the tenant boundary.\n* The audit row existing but carrying **no captured trace** is *not* a 404 --\n  it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a\n  per-tenant/per-target opt-in and best-effort (F1/F7), so \"no trace\" is a\n  normal state an operator must be able to observe, not an error. The\n  console pane renders a \"no trace captured\" empty state for this case.\n\n``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator\n(and a paired add-on reading over this route with its operator principal)\ncan see when a trace was withheld from the agent handle. The operator plane\nkeeps **full** access regardless of that flag.\n\nFrozen like the models it carries."
+      },
       "AuthConfigResponse": {
         "properties": {
           "keycloak_issuer": {
@@ -32761,6 +32839,107 @@
         ],
         "title": "TopologyTimelineResult",
         "description": "Page of timeline rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows\nwere available (the query reached the end of the matching set).\nConsumers iterate by re-issuing the same filter with\n``cursor = next_cursor`` until ``next_cursor`` is None.\n\nThe cursor is opaque (base64-encoded JSON over ``(valid_from,\nhistory_id, source)``) -- consumers treat it as a token. Stability\nunder concurrent inserts: a new history row landing in the window\nbetween page N and page N+1 is naturally placed by the keyset\ncompare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)\nand either appears on a later page (if it falls below the cursor)\nor never (if it lands above the cursor). No row is duplicated or\nskipped by the act of paging."
+      },
+      "TraceSpanView": {
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "span_kind": {
+            "type": "string",
+            "title": "Span Kind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "status": {
+            "type": "string",
+            "nullable": true,
+            "title": "Status"
+          },
+          "attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seq",
+          "span_kind",
+          "name",
+          "started_at",
+          "duration_ms",
+          "status",
+          "attributes"
+        ],
+        "title": "TraceSpanView",
+        "description": "One ordered span of a dispatch trace, safe to serve to the operator.\n\nMirrors :class:`~meho_backplane.db.models.DispatchTraceSpan` field-for-field\n-- the frequently-queried axes (:attr:`status`, :attr:`duration_ms`) are\ntyped columns, and the redacted/capped span detail (method, URL, redacted\nheaders, the redacted body + truncation marker, JSONFlux input/kept/output\nsizes, the result-handle id) rides the free-form :attr:`attributes` mapping.\nThe read surface renders these as stored -- it never re-processes them."
+      },
+      "TraceView": {
+        "properties": {
+          "trace_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Trace Id"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Audit Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "redaction_uncertain": {
+            "type": "boolean",
+            "title": "Redaction Uncertain"
+          },
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/TraceSpanView"
+            },
+            "type": "array",
+            "title": "Spans"
+          }
+        },
+        "type": "object",
+        "required": [
+          "trace_id",
+          "audit_id",
+          "tenant_id",
+          "created_at",
+          "expires_at",
+          "redaction_uncertain",
+          "spans"
+        ],
+        "title": "TraceView",
+        "description": "A dispatch trace header plus its ordered spans, tenant-scoped.\n\nReturned by :func:`load_trace` when a trace exists for the ``(audit_id,\ntenant_id)`` pair. :attr:`redaction_uncertain` is the F5 degrade flag read\nstraight off the header: ``True`` means the capture/redaction seam could not\nprove the trace fully redacted, so it was withheld from the agent handle and\nis readable on the operator plane alone. The operator surface surfaces the\nflag rather than acting on it -- an operator sees everything, and sees which\ntraces the agent could not."
       },
       "UISessionContext": {
         "properties": {

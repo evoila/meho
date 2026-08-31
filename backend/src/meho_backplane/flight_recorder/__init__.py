@@ -21,7 +21,9 @@ This package owns:
 
 Explicitly **not** in this package (sibling Tasks under #3207): span
 production / the capture seam (#3214), the fail-closed redaction engine
-(#3213), and the operator + agent read surfaces.
+(#3213), and the agent read surface. The **operator** read
+(:mod:`meho_backplane.flight_recorder.read`) does live here (#3215) -- it is the
+tenant-scoped trace read the REST route and the console pane both share.
 """
 
 from meho_backplane.flight_recorder.config import (
@@ -30,11 +32,15 @@ from meho_backplane.flight_recorder.config import (
     resolve_retention_days,
     should_capture,
 )
+from meho_backplane.flight_recorder.read import TraceSpanView, TraceView, load_trace
 from meho_backplane.flight_recorder.store import SpanInput, record_trace
 
 __all__ = [
     "SpanInput",
+    "TraceSpanView",
+    "TraceView",
     "compute_expires_at",
+    "load_trace",
     "record_trace",
     "reset_flight_recorder_config_cache_for_testing",
     "resolve_retention_days",

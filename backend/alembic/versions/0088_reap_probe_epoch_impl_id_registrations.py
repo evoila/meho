@@ -73,8 +73,13 @@ The predicate is dialect-branched. PostgreSQL uses a POSIX regex
 (``impl_id ~ '-probe-[0-9]{9,}$'``). SQLite — which has no regex operator
 without a registered function — expresses the identical set as a ``GLOB``
 requiring a ``-probe-`` segment followed by at least nine digits, ANDed
-with "the string ends in a digit" (``NOT GLOB '*[^0-9]'``) so the epoch
-must run to the end exactly as the PG ``$`` anchor demands. No UUID bind
+with "no non-digit follows the ``-probe-`` segment"
+(``NOT GLOB '*-probe-*[^0-9]*'``) so the digit run reaches the end exactly
+as the PG ``$`` anchor demands. That second clause is chosen over the
+looser "ends in a digit" so the two branches agree on every realistic
+(single-``-probe-``) impl_id and, where they cannot (a contrived
+multi-``-probe-`` string), the SQLite branch under-reaps rather than
+over-reaps — the safe direction for a destructive DELETE. No UUID bind
 params are threaded (the predicate keys only on the ``Text`` ``impl_id`` /
 ``source_kind`` columns), so the ``docs/codebase/migrations.md`` UUID-hex
 gotcha does not apply.
@@ -119,7 +124,7 @@ def _probe_epoch_impl_id_predicate(dialect_name: str) -> sa.sql.elements.TextCla
         return sa.text("impl_id ~ '-probe-[0-9]{9,}$'")
     return sa.text(
         "impl_id GLOB '*-probe-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*' "
-        "AND impl_id NOT GLOB '*[^0-9]'"
+        "AND impl_id NOT GLOB '*-probe-*[^0-9]*'"
     )
 
 

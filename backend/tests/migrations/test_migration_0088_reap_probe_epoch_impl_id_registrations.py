@@ -373,6 +373,36 @@ def test_short_probe_tail_preserved(
     )
 
 
+def test_probe_epoch_not_at_tail_preserved(
+    alembic_cfg: tuple[Config, str],
+) -> None:
+    """An epoch that is not the impl_id tail is not the accretion shape.
+
+    ``fleet-rest-probe-123456789-extra`` carries a 9-digit run after
+    ``-probe-`` but the epoch does not reach the end of the string, so the
+    ``-probe-[0-9]{9,}$`` predicate must not match it. Pins that the SQLite
+    branch (``NOT GLOB '*-probe-*[^0-9]*'``) agrees with the PG ``$`` anchor
+    and does not over-reap -- the safe direction for a destructive DELETE.
+    """
+    cfg, sync_url = alembic_cfg
+    command.upgrade(cfg, _DOWN_REVISION)
+
+    non_tail_descriptor = _insert_descriptor_row(
+        sync_url,
+        tenant_id=None,
+        product="fleet",
+        impl_id="fleet-rest-probe-123456789-extra",
+        op_id="GET:/api/probe",
+        version=_STABLE_VERSION,
+    )
+
+    command.upgrade(cfg, _THIS_REVISION)
+
+    assert _row_exists(sync_url, "endpoint_descriptor", non_tail_descriptor), (
+        "an epoch not at the impl_id tail is not the accretion shape and must survive"
+    )
+
+
 def test_tenant_scoped_probe_epoch_rows_reaped(
     alembic_cfg: tuple[Config, str],
 ) -> None:

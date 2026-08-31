@@ -17,7 +17,9 @@ fingerprint, and the probe. G3.7-T2 (#847) adds the 7 read ops
 acceptance suite + onboarding doc. #2849 adds `pfsense.dhcp.leases`. #3090
 adds the first two write ops (`pfsense.gateway.add`,
 `pfsense.route.static.add`) via the `pfSsh.php playback` config-mutation
-idiom.
+idiom. #3232 adds the first two **governed destructive deletes**
+(`pfsense.nat.delete`, `pfsense.alias.delete`) — `safety_level="destructive"`
+on the governed-delete tier (`docs/decisions/governed-delete-operations.md`).
 
 Source: `backend/src/meho_backplane/connectors/pfsense/`.
 
@@ -28,8 +30,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   Inherits the per-target asyncssh connection pool and `aclose()` from the
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
   `probe`, `execute`, `about`, the read-op bound-method shims (the 7 T2 ops
-  plus `dhcp_leases`, #2849), and the write-op bound-method shims (`gateway_add`,
-  `route_static_add`, #3090).
+  plus `dhcp_leases`, #2849), the write-op bound-method shims (`gateway_add`,
+  `route_static_add`, #3090), and the destructive-delete bound-method shims
+  (`nat_delete`, `alias_delete`, #3232).
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
   `ssh_private_key` in the target's **Vault secret** (`target.secret_ref` is a
@@ -42,10 +45,24 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (11 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (13 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
-  `ops_write` module.
+  `ops_write` module; #3232 appends the two destructive deletes via the
+  `ops_delete` module.
+
+- **Destructive-delete handlers** (`ops_delete.py`, #3232) — the connector's
+  first `safety_level="destructive"` ops. Config parsers
+  (`parse_nat_port_forwards_xml` / `parse_aliases_xml`), the fail-closed
+  reference scan (`find_alias_references` — nested aliases + filter / NAT
+  port-forward / outbound / 1:1 rules), the delete-by-identity `pfSsh.php
+  playback` fragment builders (`_build_nat_delete_playback` /
+  `_build_alias_delete_playback`, each persisting only on a single removal),
+  the handlers (`pfsense_nat_delete` / `pfsense_alias_delete`), the mandatory
+  blast-radius preview builders (`_nat_delete_preview` / `_alias_delete_preview`,
+  registered at import via `register_pfsense_delete_preview_builders`), and the
+  `DELETE_OPS` tuple. Both fold into the existing single-source delete-shaped
+  classifier (`*.delete` glob + `destructive` tag) with no new pattern list.
 
 - **Write op handlers** (`ops_write.py`, #3090) — input validators
   (`_validate_gateway_name` / `_validate_interface` / `_validate_gateway_ip` /
@@ -170,7 +187,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (11 ops)
+## Op surface (13 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
@@ -185,11 +202,22 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` | `safe` |
 | `pfsense.gateway.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `gateway_item` + `write_config()`) | `routing` | `caution` |
 | `pfsense.route.static.add` | `cat /cf/conf/config.xml` guard + `pfSsh.php playback` fragment (append `staticroutes/route` + `write_config()` + `system_routing_configure()`) | `routing` | `caution` |
+| `pfsense.nat.delete` | `cat /cf/conf/config.xml` guard (match one `<nat><rule>` by `<tracker>`) + `pfSsh.php playback` fragment (delete-by-tracker + `write_config()` + `filter_configure()`) + read-back verify | `nat` | `destructive` |
+| `pfsense.alias.delete` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + fail-closed reference scan) + `pfSsh.php playback` fragment (delete-by-name + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 
 The 9 read / identity ops are `safety_level="safe"`; the 2 write ops (#3090)
-are `safety_level="caution"`. All 11 are `requires_approval=False` — the same
-posture `bind9.record.add` / `windns.record.add` carry for an additive,
-recoverable, idempotent config write.
+are `safety_level="caution"` / `requires_approval=False` — the same posture
+`bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
+idempotent config write. The 2 delete ops (#3232) are
+`safety_level="destructive"` / `requires_approval=True` — the governed-delete
+tier: mandatory human approval (no agent path, no standing grant, no
+self-approval even under break-glass, no satellite mint), a #3197 preview-hash
+binding, and a mandatory blast-radius statement naming the exact rule / alias.
+Each deletes exactly one object by stable identity (`<tracker>` for a NAT rule,
+exact name for an alias — never by position or description), refuses fail-closed
+on a missing (`not_found`) / duplicated (`ambiguous`) identity or (for an alias)
+a live reference (`referenced`, naming every referrer), and read-back-verifies
+that the object is gone and the count dropped by exactly one.
 
 `pfsense.firewall.state` and `pfsense.dhcp.leases` both return `{rows, total}`
 and are the JSONFlux reduction candidates: connection-state tables and busy

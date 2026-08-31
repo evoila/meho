@@ -123,22 +123,27 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     ``pfsense.interface.list``, ``pfsense.gateway.list``,
     ``pfsense.config.show``, and ``pfsense.dhcp.leases`` (#2849)) +
     ``WRITE_OPS`` (``pfsense.gateway.add`` and
-    ``pfsense.route.static.add``, #3090). Eleven ops total.
+    ``pfsense.route.static.add``, #3090) + ``DELETE_OPS`` (the governed
+    destructive deletes ``pfsense.nat.delete`` and
+    ``pfsense.alias.delete``, #3232). Thirteen ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
     :class:`PfSenseOp` + ``_PFSENSE_ABOUT_OP``, then imports the read
-    ops from :mod:`meho_backplane.connectors.pfsense.ops_read` and the
-    write ops from :mod:`meho_backplane.connectors.pfsense.ops_write`.
-    The arrangement keeps the canary op co-located with the dataclass
-    while the larger read / write surfaces live in their own modules
-    next to their parsers. Mirrors
+    ops from :mod:`meho_backplane.connectors.pfsense.ops_read`, the
+    write ops from :mod:`meho_backplane.connectors.pfsense.ops_write`,
+    and the destructive deletes from
+    :mod:`meho_backplane.connectors.pfsense.ops_delete`. The arrangement
+    keeps the canary op co-located with the dataclass while the larger
+    read / write / delete surfaces live in their own modules next to
+    their parsers. Mirrors
     :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
     """
+    from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
 
-    return (_PFSENSE_ABOUT_OP, *READ_OPS, *WRITE_OPS)
+    return (_PFSENSE_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DELETE_OPS)
 
 
 #: The ops :class:`PfSenseConnector` registers at lifespan startup.
@@ -148,10 +153,11 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: ``pfsense.interface.list``, ``pfsense.gateway.list``,
 #: ``pfsense.config.show``); #2849 adds ``pfsense.dhcp.leases``; #3090
 #: adds the first write ops (``pfsense.gateway.add``,
-#: ``pfsense.route.static.add``) -- 11 ops total. The shape of each
-#: follow-on PR is "import a new module-level tuple and splat it
-#: into :data:`PFSENSE_OPS` via :func:`_pfsense_ops`" -- the
-#: registration walk in
+#: ``pfsense.route.static.add``); #3232 adds the first governed
+#: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``)
+#: -- 13 ops total. The shape of each follow-on PR is "import a new
+#: module-level tuple and splat it into :data:`PFSENSE_OPS` via
+#: :func:`_pfsense_ops`" -- the registration walk in
 #: :meth:`PfSenseConnector.register_operations` does not need to
 #: change.
 PFSENSE_OPS: tuple[PfSenseOp, ...] = _pfsense_ops()

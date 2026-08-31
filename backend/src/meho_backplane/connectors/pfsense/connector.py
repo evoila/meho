@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: connector aggregator module -- the PfSenseConnector class
+# (auth/fingerprint/probe/execute) plus one thin bound-method shim per typed op
+# and the group when_to_use table the registration walk reads must co-locate with
+# the class definition; splitting the shim surface out is a separate refactor.
 
 """PfSenseConnector -- typed SSH-transport connector for pfSense 2.7.
 
@@ -165,8 +169,24 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     "nat": (
         "Use for pfSense NAT operations: reading the active NAT ruleset "
-        "(``pfsense.nat.rules``). Call when the operator wants to audit "
-        "port-forwarding, outbound NAT, or 1:1 NAT rules."
+        "(``pfsense.nat.rules``) or permanently deleting one port-forward "
+        "NAT rule (``pfsense.nat.delete``). Call ``pfsense.nat.rules`` to "
+        "audit port-forwarding, outbound NAT, or 1:1 NAT rules. Call "
+        "``pfsense.nat.delete`` to retire ONE port-forward rule by its "
+        "stable tracker id -- a GOVERNED DESTRUCTIVE delete "
+        "(safety_level=destructive, mandatory human approval, preview-hash "
+        "binding, blast-radius statement); it deletes exactly one rule and "
+        "refuses fail-closed on an ambiguous or missing tracker."
+    ),
+    "alias": (
+        "Use for pfSense firewall-alias lifecycle: permanently deleting one "
+        "alias (``pfsense.alias.delete``). Call ``pfsense.alias.delete`` to "
+        "retire ONE alias by exact name -- a GOVERNED DESTRUCTIVE delete "
+        "(safety_level=destructive, mandatory human approval, preview-hash "
+        "binding, blast-radius statement). It refuses fail-closed when the "
+        "alias is still referenced by any filter rule, NAT rule, or other "
+        "alias, naming every referrer. Read the current config first with "
+        "``pfsense.config.show``."
     ),
     "network": (
         "Use for pfSense network-interface operations: listing all "
@@ -659,6 +679,45 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_route_static_add(self, target, params, operator)
+
+    async def nat_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.nat.delete`` (#3232).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_nat_delete`.
+        Governed destructive delete of one port-forward NAT rule by stable
+        tracker id (``safety_level=destructive`` / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_delete import (
+            pfsense_nat_delete as _pfsense_nat_delete,
+        )
+
+        return await _pfsense_nat_delete(self, target, params, operator)
+
+    async def alias_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.alias.delete`` (#3232).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_alias_delete`.
+        Governed destructive delete of one firewall alias by exact name,
+        fail-closed on any live reference (``safety_level=destructive`` /
+        ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_delete import (
+            pfsense_alias_delete as _pfsense_alias_delete,
+        )
+
+        return await _pfsense_alias_delete(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

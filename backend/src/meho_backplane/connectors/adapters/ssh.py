@@ -71,6 +71,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 )
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import FingerprintResult
+from meho_backplane.flight_recorder import typed as flight_recorder_typed
 
 logger = structlog.get_logger()
 
@@ -79,6 +80,55 @@ logger = structlog.get_logger()
 type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
+
+
+def _ssh_output(result: Any) -> str | None:
+    """Combine an ``SSHCompletedProcess``'s stdout + stderr, never raising (F7).
+
+    The value is handed to the flight recorder's redaction engine as plain
+    text and dropped fail-closed there; this helper only assembles it and
+    must not propagate any attribute-access fault into the dispatch path.
+    """
+    try:
+        chunks: list[str] = []
+        for attr in ("stdout", "stderr"):
+            value = getattr(result, attr, None)
+            if value:
+                chunks.append(value if isinstance(value, str) else str(value))
+        return "\n".join(chunks) if chunks else None
+    except Exception:
+        return None
+
+
+def _record_ssh_span(
+    start: flight_recorder_typed.TypedSpanStart | None,
+    *,
+    cmd: str,
+    result: Any,
+) -> None:
+    """Record one SSH command as a ``typed`` span, best-effort (F7).
+
+    Extracts the exit status + output *inside* this guarded function so the
+    call site never touches an attribute that could raise into the dispatch
+    (the same discipline the vendor-call seam uses). ``record_typed_call``
+    passes the command + output through the fail-closed redaction engine.
+    """
+    if start is None:
+        return
+    try:
+        exit_status = getattr(result, "exit_status", None)
+        flight_recorder_typed.record_typed_call(
+            start,
+            kind="typed",
+            status=str(exit_status) if exit_status is not None else "ok",
+            request_body=cmd,
+            response_body=_ssh_output(result),
+            request_content_type="text/plain",
+            response_content_type="text/plain",
+            extra={"transport": "ssh", "exit_status": exit_status},
+        )
+    except Exception:
+        logger.warning("flight_recorder_ssh_span_failed", exc_info=True)
 
 
 class ConnectorUnreachableError(RuntimeError):
@@ -237,7 +287,18 @@ class SshConnector(Connector):
         Raises :exc:`asyncio.TimeoutError` when *timeout* is exceeded.
         """
         conn = await self._connect(target, operator)
+        # Flight-recorder typed span (#3217, F8) -- the shared SSH-transport
+        # seam, so every SSH-based typed connector (bind9 / holodeck / pfsense
+        # / rke2 / windows_dns) records one span per command with no
+        # per-connector edit. ``typed_span_start`` is one contextvar read
+        # (``None`` when capture is off, so the seam pays nothing). The
+        # command + output are handed to the fail-closed redaction engine as
+        # plain text: it cannot prove a free-text shell blob secret-free, so it
+        # omits both and degrades the trace to operator-only (F5) -- an SSH
+        # command / its output never reaches a span un-redacted.
+        _fr_start = flight_recorder_typed.typed_span_start(f"ssh {getattr(target, 'name', '?')}")
         result = await asyncio.wait_for(conn.run(cmd, check=False), timeout=timeout)
+        _record_ssh_span(_fr_start, cmd=cmd, result=result)
         logger.info(
             "ssh_command_executed",
             target=target.name,

@@ -141,6 +141,43 @@ connector-related release-notes line.
   the satellite gate by default everywhere, so delete-shaped work never rides
   a runner (#3225's conformance stays green).
 
+### Added — satellite write path: signed work items + approval-bound minting (#3189)
+
+- Lands **mechanism 1** of the satellite write-path composed gate (Initiative
+  #2901, design `docs/research/2901-satellite-write-path.md` §3): the caution
+  (`remote-write`) tier is now authorised by a **committed, single-use,
+  param-bound approval** plus a **real Ed25519 signature** over the canonical
+  work item, verified offline at the DB-free edge.
+- **Approval-bound minting.** `mint_gateway_command` routes a `REMOTE_WRITE` op
+  to `_mint_remote_write`, which mints **only** against a committed, un-consumed
+  `ApprovalRequest` for the identical `(op, target, params_hash)` — the human
+  approval decision **is** the authorization, so the live policy gate is
+  bypassed for this tier (the mould of `approve_request`'s `_approved=True`
+  re-dispatch). The binding is **param-bound** (the `params_hash` swap defence,
+  #1503 / #3197) and **single-use** (the approval's one-way `resumed_at` latch,
+  claimed atomically in the mint session). No approval →
+  `REMOTE_WRITE_GATE_UNSATISFIED`; unprovisioned signing key →
+  `REMOTE_WRITE_SIGNING_UNAVAILABLE` (both fail-closed).
+- **Signed capability (write-tier-only #2500 reversal).** The centre signs the
+  canonical payload (`op_id` + `params_hash` + `target_scope` + `expires_at`)
+  with its Ed25519 **signing (private) key** and stamps the signature on the
+  `gateway_command` row (new `signature` column, **migration 0088**). New
+  edge-safe module `runner/work_item_signing.py` (stdlib + `cryptography`,
+  no DB import); the runner holds only the **verification (public) key**,
+  provisioned at enrollment, so a compromised runner cannot forge a capability.
+  The DB consume latch is **retained unchanged** for at-most-once acceptance.
+- **Edge verification.** `_screen_item` (`runner/executor.py`) verifies the
+  signature + freshness + target scope on every `REMOTE_WRITE` item **before**
+  any handler import — an unsigned, tampered, out-of-scope, or expired item
+  fails closed. New settings: `SATELLITE_WRITE_SIGNING_KEY` (central) /
+  `SATELLITE_WRITE_VERIFY_KEY` (runner).
+- The per-runner **allowlist** (mechanism 2, #3190) remains a fail-closed seam
+  (`evaluate_remote_write_gate`, untouched): a remote-write op mints only when
+  the op-class is on the runner's allowlist **and** this approval binding
+  authorises it. Until #3190 wires the allowlist at the mint (the marked
+  composition point in `_mint_remote_write`), the edge allowlist re-check keeps
+  the tier closed end-to-end.
+
 ### Added — flight recorder: typed-connector spans across every typed family (#3217)
 
 - Extends the flight recorder (`docs/decisions/dispatch-flight-recorder.md`, **F8

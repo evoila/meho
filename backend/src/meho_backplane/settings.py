@@ -1332,6 +1332,25 @@ class Settings(BaseModel):
     gateway_deadman_enabled: bool = True
     gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)
+    # Initiative #2901 (#3189) -- satellite write-path work-item signing keys.
+    # Asymmetric Ed25519 (mechanism 1, design §3): the central instance holds
+    # the SIGNING (private) key and stamps a signature on every remote-write
+    # capability at mint; the runner holds only the VERIFICATION (public) key,
+    # provisioned at enrollment, and verifies the signature offline before
+    # executing. Split fields so each deployment populates only the key its
+    # role needs (private on central, public on the runner) -- a compromised
+    # runner never holds the signing secret. Both are base64-encoded raw
+    # 32-byte Ed25519 keys; default ``""`` is fail-closed -- remote-write
+    # mints (central) and remote-write executions (edge) are refused until the
+    # respective key is provisioned. Production renders these from a
+    # Vault-managed secret into the pod env (same chain as DATABASE_URL);
+    # generate a pair with ``python -c 'import base64; from
+    # cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey;
+    # k=Ed25519PrivateKey.generate();
+    # print(base64.b64encode(k.private_bytes_raw()).decode());
+    # print(base64.b64encode(k.public_key().public_bytes_raw()).decode())'``.
+    satellite_write_signing_key: str = ""
+    satellite_write_verify_key: str = ""
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -2092,6 +2111,8 @@ def get_settings() -> Settings:
         gateway_runner_stale_after_multiplier=int(
             os.environ.get("GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER", "3"),
         ),
+        satellite_write_signing_key=os.environ.get("SATELLITE_WRITE_SIGNING_KEY", "").strip(),
+        satellite_write_verify_key=os.environ.get("SATELLITE_WRITE_VERIFY_KEY", "").strip(),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),

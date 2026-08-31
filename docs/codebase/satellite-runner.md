@@ -163,18 +163,58 @@ through):
   `remote-write` work rides the one-shot capability-mint path, not this
   document.
 - **Edge executor** — `_screen_item` (`runner/executor.py`): re-screens the
-  delivered item independently, refusing `EXCLUDED` outright and re-checking
-  `REMOTE_WRITE` through the same gate seam (mechanism 2's "checked at mint
-  *and* re-checked at the edge").
+  delivered item independently, refusing `EXCLUDED` outright, verifying a
+  `REMOTE_WRITE` item's signature (mechanism 1, below) and re-checking it
+  through the allowlist gate seam (mechanism 2's "checked at mint *and*
+  re-checked at the edge").
 
-**The composed gate is a seam.** `evaluate_remote_write_gate` is fail-closed
-by construction: a `remote-write` op mints only when its op-class is on the
-runner's enrollment allowlist **and** policy `AUTO_EXECUTE` (idempotent
-subset) or a committed `ApprovalRequest` (caution subset) authorises it —
-the four-mechanism composition of design §3. That allowlist + approval +
-work-item-signing machinery is filed as sibling tasks (#3189-#3193); until it
-lands there is no way to authorise a remote-write capability, so the seam
-refuses every remote-write op at both the mint and the edge.
+### Mechanism 1 — signed work items + approval-bound minting (#3189)
+
+The caution (`remote-write`) tier is authorised by a **composition** of
+mechanisms; #3189 lands the first: a real Ed25519 signature over the canonical
+work item, plus approval-bound minting.
+
+- **Approval-bound minting.** `mint_gateway_command` routes a `REMOTE_WRITE`
+  op to `_mint_remote_write`, which mints **only** against a committed,
+  un-consumed `ApprovalRequest` for the identical `(op, target, params_hash)`
+  (`find_remote_write_approval` / `consume_remote_write_approval` in
+  `operations/approval_queue.py`). The human approval decision **is** the
+  authorization, so the live policy gate is bypassed for this tier — the exact
+  mould of `approve_request`'s `_approved=True` re-dispatch. The binding is
+  **param-bound** (the `params_hash` predicate is the #1503 / #3197 swap
+  defence) and **single-use** (the approval's one-way `resumed_at` latch,
+  claimed in the mint session so it is consumed iff the mint commits). No
+  approval → `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
+- **Signed capability.** On a bound mint the centre signs the canonical
+  payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
+  Ed25519 **signing (private) key** and stamps the base64 signature on the
+  `gateway_command` row (`signature` column, migration `0088`). This is the
+  deliberate, **write-tier-only** reversal of #2500: for a `safe` read an
+  edge-verifiable signature bought nothing, but for a write it is the offline
+  integrity + freshness + target-scope check against transit tampering (T2)
+  and the non-repudiation anchor the effect audit references. Asymmetric on
+  purpose (`runner/work_item_signing.py`, stdlib + `cryptography` only, no DB
+  import): the runner holds only the **verification (public) key**, provisioned
+  at enrollment, so a compromised runner cannot forge a capability. No signing
+  key → `MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE` (fail-closed). The
+  DB consume latch (`consume_command`) is **retained unchanged** for
+  at-most-once acceptance — the signature does not replace central state.
+- **Edge verification.** `_verify_remote_write_signature` (`runner/executor.py`)
+  reconstructs the canonical payload from the delivered item, verifies the
+  signature with the provisioned public key (integrity + target-scope), then
+  refuses a stale item on the separate `expires_at` freshness check. An
+  unsigned, tampered, out-of-scope, expired, or unverifiable-key item all fail
+  closed **before** any handler import.
+
+**The allowlist gate is still a seam.** `evaluate_remote_write_gate` remains
+fail-closed by construction — mechanism 2 (the per-runner enrollment
+allowlist, #3190) is not yet wired, so it refuses at the edge. A remote-write
+op mints only when its op-class is on the runner's allowlist **and** the #3189
+approval binding authorises it — the composition of design §3. The mint's
+allowlist check is the marked composition point in `_mint_remote_write`; until
+#3190 wires it there, the edge allowlist re-check keeps the tier closed
+end-to-end. Credential brokering (#3191) and revocation hardening (#3192) are
+the remaining sibling mechanisms.
 
 **Composition with #3183.** The destructive tier is `EXCLUDED` by this ladder
 everywhere, so delete-shaped work stays central-or-break-glass and never

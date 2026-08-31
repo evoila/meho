@@ -18,9 +18,11 @@ owned by #2500):
   :mod:`~meho_backplane.runner.satellite_tier` ladder (the same source of
   truth the central mint and the assignment materialiser use). An
   ``EXCLUDED`` (``dangerous`` / ``destructive``) item is refused outright;
-  a ``REMOTE_WRITE`` (``caution``) item is re-screened through the composed
-  gate and fails closed until the runner is authorised for the tier; only a
-  ``SAFE`` item proceeds.
+  a ``REMOTE_WRITE`` (``caution``) item has its centre-issued Ed25519
+  signature verified offline (integrity + freshness + target scope, #3189)
+  and is then re-screened through the allowlist gate, failing closed at
+  every step until the runner is authorised for the tier; only a ``SAFE``
+  item proceeds.
 * **connector-tree-only** — a ``handler_ref`` that does not resolve inside
   ``meho_backplane.connectors.*`` is refused. The lexical prefix is
   checked *before* import (an import has module-load side effects) and the
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -52,6 +55,13 @@ from meho_backplane.runner.satellite_tier import (
 )
 from meho_backplane.runner.spool import ExecutedCommandStore
 from meho_backplane.runner.wire import RunnerResult, RunnerWorkItem
+from meho_backplane.runner.work_item_signing import (
+    TARGETLESS_SCOPE,
+    SigningKeyUnavailableError,
+    load_verify_key,
+    params_digest,
+    verify_remote_write_item,
+)
 
 __all__ = ["execute_command_once", "execute_work_item"]
 
@@ -93,15 +103,74 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
             "ops are never dispatched to a runner"
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
-        # A remote-write item still fails closed at the edge if the runner is
-        # not authorised for the tier (mechanism 2's edge re-check). The
-        # allowlist/signature machinery is a sibling task; until it exists the
-        # gate refuses every remote-write item.
+        # Mechanism 1 edge check (#3189): verify the centre's signature +
+        # freshness + target scope offline, before any allowlist re-check or
+        # import. A bad / expired / out-of-scope (or unsigned) item fails
+        # closed here.
+        signature_refusal = _verify_remote_write_signature(item)
+        if signature_refusal is not None:
+            return signature_refusal
+        # Mechanism 2 edge re-check (#3190): the per-runner allowlist. Still
+        # fail-closed until #3190 wires it, so a validly-signed remote-write
+        # item does not execute at the edge until the allowlist is provisioned
+        # — the tier stays closed end-to-end.
         decision = evaluate_remote_write_gate(op_id=item.op_id)
         if not decision.permitted:
             return decision.reason
     if not item.handler_ref.startswith(_CONNECTOR_MODULE_PREFIX):
         return f"handler_ref {item.handler_ref!r} is outside {_CONNECTOR_MODULE_PREFIX}*"
+    return None
+
+
+def _verify_remote_write_signature(item: RunnerWorkItem) -> str | None:
+    """Verify a remote-write item's signature, or a fail-closed refusal reason.
+
+    Mechanism 1's edge half (#3189): the DB-free runner independently verifies
+    the centre's Ed25519 signature over the canonical work-item payload
+    (integrity over ``op_id`` + ``params_hash``, the ``target_scope`` binding)
+    and the ``expires_at`` freshness bound, using the verification (public) key
+    provisioned at enrollment. Every refusal reason names ``remote-write`` so
+    the tier is legible in the refusal log.
+
+    The order is integrity/scope first, then freshness: a tampered op/params or
+    a re-pointed target breaks the signature (caught first); a genuine but
+    stale capability has a valid signature but is refused by the ``expires_at``
+    check. An unsigned item, a missing freshness bound, or an unprovisioned
+    verification key all fail closed.
+    """
+    from meho_backplane.settings import get_settings
+
+    prefix = f"remote-write op {item.op_id!r} refused"
+    if not item.signature:
+        return (
+            f"{prefix}: work item is unsigned; the caution tier requires "
+            "a centrally-signed capability"
+        )
+    if item.expires_at is None:
+        return f"{prefix}: signed work item carries no expires_at freshness bound"
+    try:
+        verify_key = load_verify_key(get_settings().satellite_write_verify_key)
+    except SigningKeyUnavailableError as exc:
+        return f"{prefix}: {exc}"
+
+    target_scope = (
+        str(item.target_descriptor.id) if item.target_descriptor is not None else TARGETLESS_SCOPE
+    )
+    verified = verify_remote_write_item(
+        verify_key,
+        item.signature,
+        op_id=item.op_id,
+        params_hash=params_digest(item.params),
+        target_scope=target_scope,
+        expires_at=item.expires_at,
+    )
+    if not verified:
+        return (
+            f"{prefix}: signature verification failed "
+            "(tampered op/params, out-of-scope target, or wrong key)"
+        )
+    if datetime.now(UTC) >= item.expires_at:
+        return f"{prefix}: signed capability expired at {item.expires_at.isoformat()}"
     return None
 
 

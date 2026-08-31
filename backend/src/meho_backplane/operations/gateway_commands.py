@@ -83,10 +83,19 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.approval_queue import (
+    consume_remote_write_approval,
+    find_remote_write_approval,
+)
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
-    evaluate_remote_write_gate,
+)
+from meho_backplane.runner.work_item_signing import (
+    TARGETLESS_SCOPE,
+    SigningKeyUnavailableError,
+    load_signing_key,
+    sign_remote_write_item,
 )
 
 __all__ = [
@@ -144,9 +153,13 @@ class MintRefusalCode(StrEnum):
     :attr:`~meho_backplane.runner.satellite_tier.SatelliteMintTier.EXCLUDED`
     tier (``dangerous`` / ``destructive`` — never minted to a satellite);
     ``REMOTE_WRITE_GATE_UNSATISFIED`` is the fail-closed refusal of the
-    additive ``remote-write`` tier while its composed gate is unprovisioned
-    (#3188); ``POLICY_DENIED`` / ``NEEDS_APPROVAL`` are the policy-gate
-    verdicts that are not ``AUTO_EXECUTE``.
+    additive ``remote-write`` tier when no committed, single-use approval
+    binds the mint (mechanism 1, #3189 — and, once #3190 lands, when the
+    op-class is off the runner's allowlist); ``REMOTE_WRITE_SIGNING_UNAVAILABLE``
+    refuses a remote-write mint that cannot be signed because the central
+    signing key is not provisioned (#3189); ``POLICY_DENIED`` /
+    ``NEEDS_APPROVAL`` are the policy-gate verdicts that are not
+    ``AUTO_EXECUTE``.
     """
 
     DESCRIPTOR_UNKNOWN = "descriptor_unknown"
@@ -154,6 +167,7 @@ class MintRefusalCode(StrEnum):
     INVALID_OP_SCHEMA = "invalid_op_schema"
     OP_NOT_SAFE = "op_not_safe"
     REMOTE_WRITE_GATE_UNSATISFIED = "remote_write_gate_unsatisfied"
+    REMOTE_WRITE_SIGNING_UNAVAILABLE = "remote_write_signing_unavailable"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -182,6 +196,25 @@ class MintResult:
 def _refused(code: MintRefusalCode, reason: str) -> MintResult:
     """Build a fail-closed refusal result (no rows written)."""
     return MintResult(refusal_code=code, refusal_reason=reason)
+
+
+def _refuse_remote_write(
+    code: MintRefusalCode,
+    reason: str,
+    *,
+    op_id: str,
+    operator: Operator,
+    runner_id: str,
+) -> MintResult:
+    """Log + build a fail-closed ``remote-write`` mint refusal (no rows written)."""
+    structlog.get_logger(__name__).warning(
+        "gateway_command_mint_refused_remote_write",
+        reason=code.value,
+        op_id=op_id,
+        operator_sub=operator.sub,
+        runner_id=runner_id,
+    )
+    return _refused(code, reason)
 
 
 def _refuse_unvalidatable_params(
@@ -307,11 +340,16 @@ async def mint_gateway_command(
        generalised, checked **before** the policy gate (so a refused op never
        reaches it and is never parked): ``EXCLUDED`` (``dangerous`` /
        ``destructive``) → :attr:`MintRefusalCode.OP_NOT_SAFE`, never minted
-       (composes with #3183); ``REMOTE_WRITE`` (``caution``) → the composed
-       gate, fail-closed until the siblings wire it →
-       :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`; ``SAFE`` falls
-       through to the policy gate, semantics unchanged.
-    4. ``policy_gate`` — any verdict other than ``AUTO_EXECUTE`` refuses
+       (composes with #3183); ``REMOTE_WRITE`` (``caution``) →
+       :func:`_mint_remote_write` (mechanism 1, #3189): mints **only** against
+       a committed, single-use, param-bound ``ApprovalRequest`` — bypassing
+       the live policy gate, since the human approval decision is the
+       authorization — and stamps an Ed25519 **signature** on the capability;
+       no approval → :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`,
+       unprovisioned signing key → :attr:`MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE`.
+       ``SAFE`` falls through to the policy gate, semantics unchanged.
+    4. ``policy_gate`` (``SAFE`` tier only) — any verdict other than
+       ``AUTO_EXECUTE`` refuses
        (``DENY`` → :attr:`MintRefusalCode.POLICY_DENIED`, ``NEEDS_APPROVAL``
        → :attr:`MintRefusalCode.NEEDS_APPROVAL`); the defensive
        ``is not AUTO_EXECUTE`` branch denies any unexpected verdict.
@@ -399,22 +437,25 @@ async def mint_gateway_command(
             "dangerous/destructive ops are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
-        # The additive write tier, separate from the untouched `safe` wall.
-        # Its composed gate (per-runner allowlist + approval/policy binding)
-        # is wired by sibling tasks (#3189-#3193); until then it is fail-closed.
-        gate = evaluate_remote_write_gate(op_id=op_id, runner_id=runner_id)
-        if not gate.permitted:
-            structlog.get_logger(__name__).warning(
-                "gateway_command_mint_refused_remote_write",
-                reason=MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED.value,
-                op_id=op_id,
-                safety_level=descriptor.safety_level,
-                operator_sub=operator.sub,
-                runner_id=runner_id,
-            )
-            return _refused(MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED, gate.reason)
+        # The additive write tier (mechanism 1, #3189): a caution op mints
+        # only against a committed, single-use, param-bound approval, and the
+        # minted capability is signed for offline edge verification. Delegated
+        # so the safe path below stays the untouched Step-4 policy gate.
+        return await _mint_remote_write(
+            session,
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            runner_id=runner_id,
+            target_descriptor=target_descriptor,
+            expires_at=expires_at,
+            started=started,
+        )
 
-    # --- Step 4: policy gate (only AUTO_EXECUTE mints) -------------------
+    # --- Step 4: policy gate (only AUTO_EXECUTE mints the SAFE tier) ------
     verdict, gate_reason = await policy_gate(
         operator=operator, descriptor=descriptor, target=target
     )
@@ -436,7 +477,147 @@ async def mint_gateway_command(
             gate_reason or f"policy gate returned {verdict.value!r}, not auto-execute",
         )
 
-    # --- Mint: synchronous audit row + bound command row -----------------
+    # --- Mint the SAFE-tier capability (unsigned; #2500 authorization) ----
+    return await _finalize_mint(
+        session,
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        runner_id=runner_id,
+        target_descriptor=target_descriptor,
+        expires_at=expires_at,
+        started=started,
+    )
+
+
+async def _mint_remote_write(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    runner_id: str,
+    target_descriptor: dict[str, Any] | None,
+    expires_at: datetime | None,
+    started: float,
+) -> MintResult:
+    """Mint a signed remote-write capability against a committed approval (#3189).
+
+    Mechanism 1 of the composed write-path gate: the caution tier mints
+    **only** against a committed, single-use, param-bound ``ApprovalRequest``
+    for the identical ``(op, target, params_hash)`` — the human approval
+    decision is the authorization (policy gate bypassed for this tier, the
+    mould of ``approve_request``'s ``_approved=True`` re-dispatch). On a win
+    the capability is **signed** for offline edge verification.
+
+    **Composition point for #3190** (mechanism 2, the per-runner allowlist):
+    the allowlist check slots in below, ANDed with this approval binding.
+    Until #3190 wires it at the mint, the edge allowlist re-check
+    (``executor._screen_item`` → ``evaluate_remote_write_gate``, still
+    fail-closed) keeps the tier closed end-to-end.
+
+    Order matters: the approval is located read-only and the signing key
+    checked **before** the single-use latch is claimed, so a fail-closed
+    refusal never consumes an approval (the "a refusal writes no rows"
+    invariant holds).
+    """
+    from meho_backplane.settings import get_settings
+
+    raw_target_id = getattr(target, "id", None) if target is not None else None
+    target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
+
+    # #3190 allowlist check composes here, ANDed with the approval binding.
+    approval = await find_remote_write_approval(
+        session,
+        tenant_id=operator.tenant_id,
+        op_id=op_id,
+        target_id=target_id,
+        params_hash=params_hash,
+    )
+    if approval is None:
+        return _refuse_remote_write(
+            MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
+            f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
+            "binding for this (op, target, params); the caution tier mints only "
+            "against a human-approved ApprovalRequest (mechanism 1)",
+            op_id=op_id,
+            operator=operator,
+            runner_id=runner_id,
+        )
+
+    try:
+        signing_key = load_signing_key(get_settings().satellite_write_signing_key)
+    except SigningKeyUnavailableError as exc:
+        return _refuse_remote_write(
+            MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE,
+            f"remote-write op {op_id!r} refused: {exc}",
+            op_id=op_id,
+            operator=operator,
+            runner_id=runner_id,
+        )
+
+    # Claim the single-use latch only now the mint is certain to proceed. A
+    # racing mint that already claimed this approval loses (touches zero rows),
+    # so an approval binds at most one capability.
+    if not await consume_remote_write_approval(session, approval):
+        return _refuse_remote_write(
+            MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
+            f"remote-write op {op_id!r} refused: the binding approval "
+            f"{approval.id} was already consumed by a concurrent mint",
+            op_id=op_id,
+            operator=operator,
+            runner_id=runner_id,
+        )
+
+    return await _finalize_mint(
+        session,
+        operator=operator,
+        connector_id=connector_id,
+        op_id=op_id,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        runner_id=runner_id,
+        target_descriptor=target_descriptor,
+        expires_at=expires_at,
+        started=started,
+        signing_key=signing_key,
+        approval_request_id=approval.id,
+    )
+
+
+async def _finalize_mint(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    runner_id: str,
+    target_descriptor: dict[str, Any] | None,
+    expires_at: datetime | None,
+    started: float,
+    signing_key: Any | None = None,
+    approval_request_id: uuid.UUID | None = None,
+) -> MintResult:
+    """Enqueue the bound command, optionally sign it, and write the mint audit row.
+
+    Shared tail of both mint paths (safe and remote-write). When *signing_key*
+    is supplied (the remote-write tier), the capability is signed over its
+    canonical payload — computed against the row's *bounded* ``expires_at``,
+    so the signed freshness bound matches what the runner will verify — and
+    the signature is stamped on the command row (migration 0088). The mint
+    audit payload records ``approval_request_id`` / ``signed`` for the
+    remote-write lineage; the safe path leaves both unset (unchanged shape).
+    """
     mint_audit_id = uuid.uuid4()
     command = await enqueue_command(
         session,
@@ -450,6 +631,30 @@ async def mint_gateway_command(
         expires_at=expires_at,
         mint_audit_id=mint_audit_id,
     )
+    signed = False
+    if signing_key is not None:
+        command.signature = sign_remote_write_item(
+            signing_key,
+            op_id=op_id,
+            params_hash=params_hash,
+            target_scope=_target_scope(target),
+            expires_at=command.expires_at,
+        )
+        await session.flush()
+        signed = True
+
+    payload: dict[str, Any] = {
+        "command_id": str(command.id),
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "runner_id": runner_id,
+        "params_hash": params_hash,
+        "result_status": "minted",
+    }
+    if approval_request_id is not None:
+        payload["approval_request_id"] = str(approval_request_id)
+    if signed:
+        payload["signed"] = True
     await _write_gateway_audit_row(
         session,
         audit_id=mint_audit_id,
@@ -458,14 +663,7 @@ async def mint_gateway_command(
         status_code=_MINT_AUDIT_STATUS,
         duration_ms=(time.monotonic() - started) * 1000,
         target_id=getattr(target, "id", None) if target is not None else None,
-        payload={
-            "command_id": str(command.id),
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "runner_id": runner_id,
-            "params_hash": params_hash,
-            "result_status": "minted",
-        },
+        payload=payload,
     )
     structlog.get_logger(__name__).info(
         "gateway_command_minted",
@@ -475,8 +673,20 @@ async def mint_gateway_command(
         runner_id=runner_id,
         tenant_id=str(operator.tenant_id),
         expires_at=command.expires_at.isoformat(),
+        signed=signed,
     )
     return MintResult(command=command, mint_audit_id=mint_audit_id)
+
+
+def _target_scope(target: Any) -> str:
+    """The canonical ``target_scope`` the signature binds — target id or targetless.
+
+    Mirrors the edge's reconstruction (``str(target_descriptor.id)`` or
+    :data:`~meho_backplane.runner.work_item_signing.TARGETLESS_SCOPE`), so the
+    scope the centre signs and the scope the runner verifies agree.
+    """
+    raw_target_id = getattr(target, "id", None) if target is not None else None
+    return str(raw_target_id) if isinstance(raw_target_id, uuid.UUID) else TARGETLESS_SCOPE
 
 
 async def consume_command(

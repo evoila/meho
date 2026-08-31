@@ -13,13 +13,26 @@ error result rather than a raised tick error.
 from __future__ import annotations
 
 import asyncio
+import base64
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from meho_backplane.auth.operator import TenantRole
-from meho_backplane.runner.executor import execute_work_item
-from meho_backplane.runner.wire import RunnerPrincipal, RunnerWorkItem
+from meho_backplane.runner.executor import _verify_remote_write_signature, execute_work_item
+from meho_backplane.runner.wire import (
+    ResolvedTargetDescriptor,
+    RunnerPrincipal,
+    RunnerWorkItem,
+)
+from meho_backplane.runner.work_item_signing import (
+    TARGETLESS_SCOPE,
+    params_digest,
+    sign_remote_write_item,
+)
+from meho_backplane.settings import get_settings
 
 _ALLOWLIST_ENV = "MEHO_NETDIAG_PROBE_ALLOWLIST"
 _NET_TCP_CHECK_REF = "meho_backplane.connectors.net.ops.net_tcp_check"
@@ -130,3 +143,140 @@ async def test_handler_exception_becomes_structured_error(
     assert result.status == "error"
     assert result.result is None
     assert "KeyError" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Remote-write signature verification at the edge (#3189, mechanism 1)
+# ---------------------------------------------------------------------------
+
+
+def _provision_verify_key(monkeypatch: pytest.MonkeyPatch) -> Ed25519PrivateKey:
+    """Generate a keypair, provision the runner's verify key, return the signer."""
+    key = Ed25519PrivateKey.generate()
+    verify_b64 = base64.b64encode(key.public_key().public_bytes_raw()).decode("ascii")
+    monkeypatch.setenv("SATELLITE_WRITE_VERIFY_KEY", verify_b64)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    return key
+
+
+def _target_descriptor(target_id: uuid.UUID) -> ResolvedTargetDescriptor:
+    return ResolvedTargetDescriptor(
+        id=target_id,
+        tenant_id=uuid.uuid4(),
+        name="vc-a",
+        product="vmware",
+        host="vc-a.example",
+    )
+
+
+def _signed_rw_item(
+    signing_key: Ed25519PrivateKey,
+    *,
+    expires_at: datetime,
+    target_descriptor: ResolvedTargetDescriptor | None = None,
+    op_id: str = "vmware.vm.tag_set",
+    params: dict[str, object] | None = None,
+) -> RunnerWorkItem:
+    params = params if params is not None else {"tag": "prod"}
+    target_scope = str(target_descriptor.id) if target_descriptor is not None else TARGETLESS_SCOPE
+    signature = sign_remote_write_item(
+        signing_key,
+        op_id=op_id,
+        params_hash=params_digest(params),
+        target_scope=target_scope,
+        expires_at=expires_at,
+    )
+    return RunnerWorkItem(
+        check_ref="chk-rw",
+        op_id=op_id,
+        product="vmware",
+        version="9.0",
+        impl_id="rest",
+        handler_ref="meho_backplane.connectors.vmware.ops.vm_tag_set",
+        params=params,
+        safety_level="caution",
+        principal=_principal(),
+        target_descriptor=target_descriptor,
+        signature=signature,
+        expires_at=expires_at,
+    )
+
+
+def test_verify_passes_for_a_validly_signed_fresh_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    # The signature half passes; the remaining edge refusal (the still-fail-closed
+    # allowlist gate, #3190) is a *different* mechanism, asserted separately below.
+    assert _verify_remote_write_signature(item) is None
+
+
+def test_unsigned_remote_write_item_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _provision_verify_key(monkeypatch)
+    item = _tcp_check_item(host="127.0.0.1", port=9, safety_level="caution", check_ref="chk-rw")
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "unsigned" in refusal and "remote-write" in refusal
+
+
+def test_missing_freshness_bound_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    item = item.model_copy(update={"expires_at": None})
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "expires_at" in refusal
+
+
+def test_tampered_params_break_the_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    item = item.model_copy(update={"params": {"tag": "attacker"}})
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "signature verification failed" in refusal
+
+
+def test_out_of_scope_target_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    signed_for = _target_descriptor(uuid.uuid4())
+    item = _signed_rw_item(
+        signing_key,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        target_descriptor=signed_for,
+    )
+    # Re-point the delivered item at a *different* target than the one signed.
+    item = item.model_copy(update={"target_descriptor": _target_descriptor(uuid.uuid4())})
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "signature verification failed" in refusal
+
+
+def test_expired_but_validly_signed_item_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    # A cryptographically valid signature over a past deadline — the separate
+    # freshness check must still refuse it.
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "expired" in refusal
+
+
+def test_refused_when_no_verify_key_provisioned(monkeypatch: pytest.MonkeyPatch) -> None:
+    signing_key = _provision_verify_key(monkeypatch)
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    monkeypatch.setenv("SATELLITE_WRITE_VERIFY_KEY", "")
+    get_settings.cache_clear()
+    refusal = _verify_remote_write_signature(item)
+    assert refusal is not None and "remote-write" in refusal
+
+
+async def test_tampered_signed_item_is_refused_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Through the real execute_work_item path: a tampered signed caution item is
+    # refused before the handler is ever resolved.
+    signing_key = _provision_verify_key(monkeypatch)
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+    item = item.model_copy(update={"params": {"tag": "attacker"}})
+
+    result = await execute_work_item(item)
+
+    assert result.status == "refused"
+    assert result.result is None
+    assert "remote-write" in (result.error or "")

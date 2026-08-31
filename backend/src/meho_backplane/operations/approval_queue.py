@@ -108,8 +108,10 @@ __all__ = [
     "UnauthorizedApprovalError",
     "approve_request",
     "claim_resume",
+    "consume_remote_write_approval",
     "create_pending_request",
     "expire_stale_requests",
+    "find_remote_write_approval",
     "get_request",
     "list_pending",
     "publish_approval_event",
@@ -776,6 +778,99 @@ async def claim_resume(
         won = cast(CursorResult[Any], raw_result).rowcount == 1
         await session.commit()
     return won
+
+
+async def find_remote_write_approval(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    op_id: str,
+    target_id: uuid.UUID | None,
+    params_hash: str,
+) -> ApprovalRequest | None:
+    """Find the committed approval that authorises a remote-write mint (read-only).
+
+    Mechanism 1 of the satellite write-path composed gate (#3189, design §3):
+    the ``remote-write`` (caution) tier mints a capability **only** against a
+    committed :class:`ApprovalRequest` for the *identical*
+    ``(tenant, op, target, params_hash)`` -- the human approval decision is the
+    mint's authorization, exactly as :func:`resume_dispatch_after_approval`
+    re-dispatches an approved op with the policy gate bypassed
+    (``dispatch(..., _approved=True)``). The ``params_hash`` predicate is the
+    swap defence (#1503 / #3197): a mint whose params differ from the approved
+    ones matches no row and is refused.
+
+    Read-only: it never mutates a row, so the mint can refuse fail-closed (no
+    approval, or -- later -- the signing key is unavailable) **without**
+    consuming an approval. The single-use consumption is a separate atomic
+    step, :func:`consume_remote_write_approval`, run only once the mint is
+    certain to proceed. Returns the newest matching un-consumed
+    (``resumed_at IS NULL``) approval, or ``None``.
+    """
+    target_clause = (
+        ApprovalRequest.target_id == target_id
+        if target_id is not None
+        else ApprovalRequest.target_id.is_(None)
+    )
+    stmt = (
+        select(ApprovalRequest)
+        .where(
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.op_id == op_id,
+            ApprovalRequest.params_hash == params_hash,
+            ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value,
+            ApprovalRequest.resumed_at.is_(None),
+            target_clause,
+        )
+        .order_by(ApprovalRequest.decided_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
+async def consume_remote_write_approval(
+    session: AsyncSession,
+    request: ApprovalRequest,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Atomically claim a remote-write approval as single-use, in the mint session.
+
+    Wins the same one-way ``resumed_at`` conditional-``UPDATE`` latch the
+    re-dispatch path uses (:func:`claim_resume`) and the command consume path
+    mirrors (``consume_command``), but run **in the caller's mint session**
+    (flushed, not committed on its own) so the approval is consumed **iff** the
+    mint commits: a rolled-back mint frees the approval, and two concurrent
+    mints cannot both bind the same approval (the loser touches zero rows and
+    gets ``False``). A caution op destined for a runner is executed by the
+    mint, so the mint is the sole consumer of ``resumed_at`` -- there is no
+    competing direct re-dispatch for a runner-targeted op.
+
+    Returns ``True`` when this caller set ``resumed_at`` (owns the single mint),
+    ``False`` when a racing mint already claimed it.
+    """
+    stamp = now or _now()
+    claimed = await session.execute(
+        update(ApprovalRequest)
+        .where(
+            ApprovalRequest.id == request.id,
+            ApprovalRequest.resumed_at.is_(None),
+        )
+        .values(resumed_at=stamp)
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    if cast(CursorResult[Any], claimed).rowcount != 1:
+        return False
+    request.resumed_at = stamp
+    _log.info(
+        "remote_write_approval_bound",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        tenant_id=str(request.tenant_id),
+    )
+    return True
 
 
 async def resume_dispatch_after_approval(

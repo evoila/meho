@@ -6249,6 +6249,18 @@ class GatewayCommand(Base):
         nullable=True,
         default=None,
     )
+    # Signed remote-write capability (#3189, migration 0088). Base64 Ed25519
+    # signature over the canonical work-item payload (op_id + params_hash +
+    # target_scope + expires_at), stamped by ``mint_gateway_command`` for a
+    # ``remote-write`` (caution) mint only and verified offline at the edge
+    # (``runner.executor._screen_item``). NULL for every ``safe`` row -- the
+    # read path keeps the opaque-UUID PK + consume latch as its authorization
+    # (#2500), reversed only for the write tier.
+    signature: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(

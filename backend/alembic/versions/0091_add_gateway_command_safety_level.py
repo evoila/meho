@@ -4,7 +4,7 @@
 """Add ``gateway_command.safety_level`` for write-capable-runner revocation (#3192).
 
 Revision ID: 0091
-Revises: 0087
+Revises: 0088
 Create Date: 2026-08-31
 
 Initiative #2901 (satellite write path), Task #3192 — revocation hardening
@@ -24,18 +24,15 @@ One column on ``gateway_command``:
   "bind at mint, check at delivery without a re-lookup" discipline as the
   ``params_hash`` / ``expires_at`` capability columns (``0061``).
 
-Serialized order (house Alembic rule): this extends the current head
-``0087`` (#3216's ``tenant.flight_recorder_agent_readable``) at author time.
-The **number 0091** is chosen to sit clear of the concurrent racers under
-this same #2901 initiative: sibling #3230 already claims ``0088``
-(``reap_probe_epoch_impl_id_registrations``), and ``0089`` / ``0090`` are
-reserved for #3189 / #3191; 0091 is the next free number after those, so
+Serialized order (house Alembic rule): #3230's ``0088``
+(``reap_probe_epoch_impl_id_registrations``) landed on main first, so this
+now chains **``0088``** (main's current single head), not the ``0087`` it was
+authored against — keeping ``0087 -> 0088 -> 0091`` linear (no branched
+heads). The **number 0091** sits clear of the concurrent racers under this
+same #2901 initiative (``0089`` / ``0090`` reserved for #3189 / #3191), so
 there is no duplicate-revision-id clash. Only the ``down_revision`` pointer
-to the real current head is load-bearing, never the number — if a sibling
-migration lands on main first (e.g. #3230's ``0088`` chaining ``0087``),
-re-point this ``down_revision`` to the new head before merge so ``0087``
-keeps a single child (no branched heads). The orchestrator re-points at
-merge if the race lands differently.
+to the real current head is load-bearing, never the number — if the race
+shifts again the orchestrator re-points before merge.
 
 NOT NULL ADD COLUMN on an empty clean-slate table
 -------------------------------------------------
@@ -66,7 +63,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0091"
-down_revision: str | None = "0087"
+down_revision: str | None = "0088"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

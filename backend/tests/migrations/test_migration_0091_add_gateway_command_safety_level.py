@@ -8,12 +8,12 @@ Adds the ``safety_level`` column to ``gateway_command`` so the delivery path
 can tier-scope the write-capable-runner revocation refusal.
 
 Asserts the column lands after ``upgrade 0091``, round-trips (downgrade to
-``0087`` drops it, re-upgrade re-adds it), and that the NOT NULL ADD COLUMN
+``0088`` drops it, re-upgrade re-adds it), and that the NOT NULL ADD COLUMN
 lands on the empty clean-slate table via its ``'safe'`` server default.
 
 **Idempotency pinning (0049/0050/0055 footgun).** Every forward / round-trip
 step targets this migration's **own** revision (``0091``) and its
-``down_revision`` (``0087``), never ``head`` — so a future head migration
+``down_revision`` (``0088``), never ``head`` — so a future head migration
 cannot make ``upgrade("head")`` re-run this ``add_column`` on a schema that
 already has it. SQLite is the test driver and the migration uses only
 generic DDL, so PG parity holds.
@@ -35,7 +35,7 @@ from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
 _REVISION = "0091"
-_DOWN_REVISION = "0087"
+_DOWN_REVISION = "0088"
 _TABLE = "gateway_command"
 _COLUMN = "safety_level"
 
@@ -84,7 +84,7 @@ def test_upgrade_adds_safety_level_column(alembic_cfg: tuple[Config, str]) -> No
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade "0087"`` drops the column; ``upgrade "0091"`` re-adds it.
+    """``downgrade "0088"`` drops the column; ``upgrade "0091"`` re-adds it.
 
     Pinned to this migration's own revision on both legs (never ``head``) so
     a future head migration cannot break the round-trip.

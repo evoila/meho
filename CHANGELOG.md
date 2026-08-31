@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — satellite write path: `remote-write` safety tier + tiered mint gate (#3188)
+
+- Extends the gateway's binary safe-wall into a **satellite-mint tier
+  ladder** — the foundation seam of the ratified scoped-hybrid write path
+  (Initiative #2901, `docs/decisions/satellite-write-path.md`). A single
+  source of truth (`runner/satellite_tier.py`) classifies the existing
+  `safe < caution < dangerous < destructive` `safety_level` enum (#3196)
+  into three tiers: `safe` → `SAFE` (mints on `AUTO_EXECUTE`, **unchanged**);
+  `caution` → `REMOTE_WRITE` (the additive, separately-gated write tier);
+  `dangerous`/`destructive` → `EXCLUDED` (**never** minted to a satellite).
+  It is a runtime classification, **not** a new `safety_level` value, so
+  there is **no migration**.
+- **Three-layer mirror, each fail-closed independently** (defence in depth):
+  the central mint (`mint_gateway_command` — `EXCLUDED` keeps
+  `MintRefusalCode.OP_NOT_SAFE`; `REMOTE_WRITE` refuses with the new
+  `REMOTE_WRITE_GATE_UNSATISFIED`), the assignment materialiser
+  (`assignment_service` — only `SAFE`-tier ops are authorable into the
+  recurring assignment), and the edge executor (`_screen_item` — re-screens
+  the delivered item against the same ladder).
+- The `remote-write` **composed gate** (`evaluate_remote_write_gate`) is a
+  fail-closed **seam**: a remote-write op mints only under a per-runner
+  allowlist + approval/policy binding, wired by the sibling tasks
+  (#3189-#3193). Until then it refuses every remote-write op at both the mint
+  and the edge. Composes with #3183: the `destructive` tier is excluded by
+  the satellite gate by default everywhere, so delete-shaped work never rides
+  a runner (#3225's conformance stays green).
+
 ### Added — flight recorder: typed-connector spans across every typed family (#3217)
 
 - Extends the flight recorder (`docs/decisions/dispatch-flight-recorder.md`, **F8

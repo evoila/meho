@@ -46,7 +46,7 @@ from meho_backplane.auth.keycloak_admin import (
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.auth.runner_principals import NAME_MAX_LENGTH
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import RunnerPrincipal, Tenant
+from meho_backplane.db.models import AuditLog, RunnerPrincipal, Tenant
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -226,6 +226,57 @@ async def test_full_lifecycle_round_trip(client: TestClient) -> None:
     rows = await _fetch_principals(_TENANT_A)
     assert len(rows) == 1
     assert rows[0].revoked is True
+
+
+@pytest.mark.asyncio
+async def test_revoke_writes_audit_trail(client: TestClient) -> None:
+    """Revoking a runner leaves a tamper-evident audit row (#3192, mechanism 4).
+
+    Revocation is the write-path kill switch; the audit row proving a runner's
+    write capability was withdrawn is distinct from the liveness dead-man flip.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-rev-audit")
+    tok = _token(key)
+    factory = _mock_kc_ok()
+
+    with (
+        patch(
+            "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {tok}"}
+
+        created = client.post(
+            "/api/v1/runner-principals",
+            json={"name": "edge-runner"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+
+        revoked = client.delete("/api/v1/runner-principals/edge-runner/revoke", headers=headers)
+        assert revoked.status_code == 200, revoked.text
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        audit_rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.path == "runner.principal.revoked")
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(audit_rows) == 1
+    row = audit_rows[0]
+    assert row.method == "INTERNAL"
+    assert row.tenant_id == _TENANT_A
+    assert row.payload["runner"] == "edge-runner"
 
 
 @pytest.mark.asyncio

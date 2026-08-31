@@ -34,6 +34,7 @@ from meho_backplane.db.models import (
     GatewayCommand,
     GatewayCommandStatus,
     PermissionVerdict,
+    RunnerPrincipal,
     Tenant,
 )
 from meho_backplane.gateway.queue import (
@@ -127,7 +128,9 @@ async def _count(model: type) -> int:
         return (await session.execute(select(func.count()).select_from(model))).scalar_one()
 
 
-async def _enqueue(*, params: dict[str, object] | None = None) -> uuid.UUID:
+async def _enqueue(
+    *, params: dict[str, object] | None = None, safety_level: str = "safe"
+) -> uuid.UUID:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         command = await enqueue_command(
@@ -137,10 +140,34 @@ async def _enqueue(*, params: dict[str, object] | None = None) -> uuid.UUID:
             op_id=_OP_ID,
             params=params if params is not None else dict(_PARAMS),
             enqueued_by_sub="enq-sub",
+            safety_level=safety_level,
         )
         command_id = command.id
         await session.commit()
         return command_id
+
+
+async def _seed_runner_principal(*, revoked: bool, name: str = _RUNNER) -> None:
+    """Seed a runner principal row so the mint-time revocation lookup resolves.
+
+    The mint's ``_runner_is_revoked`` reads ``revoked`` off the unique
+    ``(tenant_id, name)`` row; without a row it is treated as not-revoked.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            RunnerPrincipal(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT,
+                name=name,
+                keycloak_client_id=f"runner:{name}",
+                keycloak_internal_id=f"kc-{name}",
+                owner_sub="owner-sub",
+                created_by_sub="creator-sub",
+                revoked=revoked,
+            )
+        )
+        await session.commit()
 
 
 async def _claim() -> None:
@@ -559,3 +586,126 @@ async def test_result_audit_links_to_mint_row(monkeypatch: pytest.MonkeyPatch) -
         assert command.status == GatewayCommandStatus.SUCCEEDED.value
         assert command.consumed_at is not None
         assert command.result == {"reachable": True}
+
+
+# ---------------------------------------------------------------------------
+# Revocation hardening for write-capable runners (#3192, the Stage-3 gate)
+# ---------------------------------------------------------------------------
+
+
+async def test_mint_refuses_remote_write_for_revoked_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revoked runner gets no new remote-write mint — RUNNER_REVOKED, no rows.
+
+    The write-tier revocation check fires *before* the composed gate, so a
+    revoked runner reads the specific ``RUNNER_REVOKED`` refusal rather than
+    the generic gate-unsatisfied one, and no command / approval row is written.
+    """
+    await _seed_tenant()
+    await _seed_runner_principal(revoked=True)
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+
+    async def _gate_must_not_run(**_kwargs: object) -> tuple[PermissionVerdict, str | None]:
+        raise AssertionError("policy_gate must not be consulted for a revoked-runner refusal")
+
+    monkeypatch.setattr(gc, "policy_gate", _gate_must_not_run)
+
+    sessionmaker = get_sessionmaker()
+    with capture_logs() as logs:
+        async with sessionmaker() as session:
+            result = await mint_gateway_command(
+                session,
+                operator=_operator(),
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_ID,
+                target=None,
+                params=dict(_PARAMS),
+                runner_id=_RUNNER,
+            )
+            await session.commit()
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.RUNNER_REVOKED
+    assert _RUNNER in (result.refusal_reason or "")
+    assert await _count(GatewayCommand) == 0
+    assert await _count(ApprovalRequest) == 0
+    assert any(entry["event"] == "gateway_command_mint_refused_runner_revoked" for entry in logs)
+
+
+async def test_mint_allows_safe_op_for_revoked_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``safe`` (read) op still mints for a revoked runner — read path unchanged.
+
+    The revocation check is scoped to the ``remote-write`` tier: a ``safe``
+    mint never reaches it, so the read path's coarse kill switch is untouched
+    and an already-authored read capability still mints.
+    """
+    await _seed_tenant()
+    await _seed_runner_principal(revoked=True)
+    _patch_lookup(monkeypatch, _descriptor(safety_level="safe"))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=None,
+            params=dict(_PARAMS),
+            runner_id=_RUNNER,
+        )
+        command_safety = result.command.safety_level if result.command else None
+        await session.commit()
+
+    assert result.minted
+    assert command_safety == "safe"
+    assert await _count(GatewayCommand) == 1
+
+
+async def test_revoked_runner_delivery_skips_remote_write_keeps_safe() -> None:
+    """A revoked runner's already-minted remote-write is not delivered; its safe is.
+
+    The materialisation (claim) half of the Stage-3 gate: a queued
+    ``remote-write`` command minted before revocation is never handed to a
+    revoked runner (it stays ``pending``, expiring under its TTL), while a
+    queued ``safe`` command still delivers — the read path is unaffected.
+    """
+    await _seed_tenant()
+    # A remote-write command enqueued first (older), a safe command second.
+    write_cmd = await _enqueue(safety_level="caution")
+    safe_cmd = await _enqueue(safety_level="safe")
+
+    sessionmaker = get_sessionmaker()
+
+    # A revoked runner claims the safe command, skipping the older remote-write.
+    async with sessionmaker() as session:
+        row = await claim_next_command(
+            session, tenant_id=_TENANT, runner_id=_RUNNER, runner_revoked=True
+        )
+        await session.commit()
+    assert row is not None and row.id == safe_cmd
+
+    # The remote-write command was never delivered — it stays pending.
+    async with sessionmaker() as session:
+        write_row = await session.get(GatewayCommand, write_cmd)
+        assert write_row is not None
+        assert write_row.status == GatewayCommandStatus.PENDING.value
+
+    # A revoked runner with only remote-write work claims nothing.
+    async with sessionmaker() as session:
+        assert (
+            await claim_next_command(
+                session, tenant_id=_TENANT, runner_id=_RUNNER, runner_revoked=True
+            )
+            is None
+        )
+
+    # A non-revoked runner would deliver that same remote-write row — proving
+    # the exclusion is the revocation flag, not a stuck row.
+    async with sessionmaker() as session:
+        row = await claim_next_command(
+            session, tenant_id=_TENANT, runner_id=_RUNNER, runner_revoked=False
+        )
+        await session.commit()
+    assert row is not None and row.id == write_cmd

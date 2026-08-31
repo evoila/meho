@@ -12,10 +12,16 @@ from __future__ import annotations
 import pytest
 
 from meho_backplane.runner.satellite_tier import (
+    REMOTE_WRITE_SAFETY_LEVELS,
     SatelliteMintTier,
     classify_satellite_tier,
     evaluate_remote_write_gate,
 )
+
+# Every ``safety_level`` value the classifier recognises (the closed
+# ``safe < caution < dangerous < destructive`` enum, #3196), used to prove
+# REMOTE_WRITE_SAFETY_LEVELS stays in lock-step with classify_satellite_tier.
+_ALL_SAFETY_LEVELS = ("safe", "caution", "dangerous", "destructive")
 
 
 @pytest.mark.parametrize(
@@ -54,3 +60,19 @@ def test_remote_write_gate_reason_omits_runner_when_absent() -> None:
 
     assert decision.permitted is False
     assert "for runner" not in decision.reason
+
+
+def test_remote_write_safety_levels_match_classifier() -> None:
+    # Drift guard (#3192): REMOTE_WRITE_SAFETY_LEVELS is the SQL-expressible
+    # twin of classify_satellite_tier, used to tier-scope the revocation
+    # delivery filter. A level whose classification is REMOTE_WRITE must be in
+    # the set, and no other level may be — else a revoked runner's delivery
+    # filter refuses the wrong tier.
+    classifier_remote_write = {
+        level
+        for level in _ALL_SAFETY_LEVELS
+        if classify_satellite_tier(level) is SatelliteMintTier.REMOTE_WRITE
+    }
+    assert classifier_remote_write == REMOTE_WRITE_SAFETY_LEVELS
+    # Concretely, only ``caution`` today.
+    assert frozenset({"caution"}) == REMOTE_WRITE_SAFETY_LEVELS

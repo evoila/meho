@@ -28,10 +28,32 @@ and never captures more than it can prove it should):
   :func:`compute_expires_at` onto the header at write time so the reaper is a
   plain ``expires_at < now()`` sweep and this window math is unit-testable.
 
+* :func:`should_expose_to_agent` -- may an **agent** read this tenant's
+  traces (F5, #3216)? The operator override on F5 makes traces agent-readable
+  through the narrow-waist result-handle idiom, but only through this
+  per-tenant gate, and **independent of the operator plane's full access**.
+  Resolution, fail-open to ``False`` (doubt reduces agent exposure):
+
+  1. **Global kill switch** -- ``settings.flight_recorder_enabled``. ``False``
+     = no capture and no agent exposure anywhere.
+  2. **Per-tenant explicit override** --
+     ``tenant.flight_recorder_agent_readable`` when set: ``True`` force on,
+     ``False`` force off (operator plane unaffected).
+  3. **Inherit the capture default** -- when the override is ``NULL``, follow
+     ``tenant.flight_recorder_enabled`` (the F1 lab-on posture): a lab-class
+     tenant with capture ON exposes traces to agents by default.
+
+  This governs only the **agent** surface; the operator read plane keeps full
+  access regardless. The redaction-uncertainty degrade (a withheld trace) is
+  enforced separately at mint time
+  (:func:`meho_backplane.flight_recorder.agent_read.materialize_agent_trace_handle`),
+  not here -- this resolver is the per-tenant policy, that is the per-trace
+  degrade.
+
 Cache discipline mirrors :mod:`meho_backplane.broadcast.announce_gate`: a 60s
 per-key TTL cache keeps the policy off the DB on the per-dispatch path; only a
-miss awaits a one-row SELECT. One combined tenant cache serves both questions
-(both read the same ``tenant`` row).
+miss awaits a one-row SELECT. One combined tenant cache serves all three
+questions (all read the same ``tenant`` row).
 """
 
 from __future__ import annotations
@@ -53,6 +75,7 @@ __all__ = [
     "reset_flight_recorder_config_cache_for_testing",
     "resolve_retention_days",
     "should_capture",
+    "should_expose_to_agent",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -60,10 +83,11 @@ _log = structlog.get_logger(__name__)
 #: Per-key TTL for both caches, mirroring the announce-gate resolver.
 _CACHE_TTL_SECONDS: Final[float] = 60.0
 
-#: Per-tenant policy cache. Value = ((enabled, retention_days_override),
-#: monotonic_expires_at). A hit is a pure dict lookup; a miss awaits the
-#: one-row SELECT that reads both policy fields at once.
-_TENANT_CACHE: dict[UUID, tuple[tuple[bool, int | None], float]] = {}
+#: Per-tenant policy cache. Value = ((enabled, retention_days_override,
+#: agent_readable_override), monotonic_expires_at). A hit is a pure dict
+#: lookup; a miss awaits the one-row SELECT that reads all three policy fields
+#: at once (capture default F1, retention override F4, agent-read override F5).
+_TENANT_CACHE: dict[UUID, tuple[tuple[bool, int | None, bool | None], float]] = {}
 
 #: Per-target override cache. Value = (override_tri_state, monotonic_expires_at)
 #: where the tri-state is ``True`` / ``False`` / ``None`` (inherit).
@@ -86,13 +110,14 @@ def compute_expires_at(created_at: datetime, retention_days: int) -> datetime:
     return created_at + timedelta(days=retention_days)
 
 
-async def _resolve_tenant_policy(tenant_id: UUID) -> tuple[bool, int | None]:
-    """Return ``(capture_enabled, retention_days_override)`` for *tenant_id*.
+async def _resolve_tenant_policy(tenant_id: UUID) -> tuple[bool, int | None, bool | None]:
+    """Return ``(capture_enabled, retention_days_override, agent_readable_override)``.
 
-    Cache-aware; a miss reads both policy columns in one SELECT. An unknown
-    tenant resolves to ``(False, None)`` (capture OFF, default retention) and
-    is cached so a nonexistent id does not re-query every dispatch. DB errors
-    propagate to the fail-open handlers in the public callers.
+    Cache-aware; a miss reads all three policy columns in one SELECT. An
+    unknown tenant resolves to ``(False, None, None)`` (capture OFF, default
+    retention, agent-read inherits = OFF) and is cached so a nonexistent id
+    does not re-query every dispatch. DB errors propagate to the fail-open
+    handlers in the public callers.
     """
     now = time.monotonic()
     cached = _TENANT_CACHE.get(tenant_id)
@@ -105,10 +130,13 @@ async def _resolve_tenant_policy(tenant_id: UUID) -> tuple[bool, int | None]:
                 select(
                     Tenant.flight_recorder_enabled,
                     Tenant.flight_recorder_retention_days,
+                    Tenant.flight_recorder_agent_readable,
                 ).where(Tenant.id == tenant_id)
             )
         ).one_or_none()
-    policy: tuple[bool, int | None] = (False, None) if row is None else (bool(row[0]), row[1])
+    policy: tuple[bool, int | None, bool | None] = (
+        (False, None, None) if row is None else (bool(row[0]), row[1], row[2])
+    )
     _TENANT_CACHE[tenant_id] = (policy, now + _CACHE_TTL_SECONDS)
     return policy
 
@@ -152,7 +180,7 @@ async def should_capture(*, tenant_id: UUID, target_id: UUID | None = None) -> b
             override = await _resolve_target_override(target_id)
             if override is not None:
                 return override
-        enabled, _ = await _resolve_tenant_policy(tenant_id)
+        enabled, _, _ = await _resolve_tenant_policy(tenant_id)
         return enabled
     except Exception:
         _log.warning(
@@ -171,8 +199,40 @@ async def resolve_retention_days(tenant_id: UUID) -> int:
     """
     default = get_settings().flight_recorder_retention_days_default
     try:
-        _, override = await _resolve_tenant_policy(tenant_id)
+        _, override, _ = await _resolve_tenant_policy(tenant_id)
     except Exception:
         _log.warning("flight_recorder_retention_resolution_failed", tenant_id=str(tenant_id))
         return default
     return override if override is not None else default
+
+
+async def should_expose_to_agent(*, tenant_id: UUID) -> bool:
+    """Whether an **agent** may read this tenant's flight-recorder traces (F5).
+
+    The operator override on F5 makes traces agent-readable through the
+    narrow-waist result-handle idiom, gated per tenant and **independent of
+    the operator plane's full access**. Precedence: global kill switch >
+    per-tenant explicit override > inherit the capture default (the F1 lab-on
+    posture). Fail-open to ``False`` (no agent exposure) on any error -- a
+    resolution failure must never fail a read, and the safe default on doubt
+    is *less* agent exposure, not more.
+
+    This is the per-tenant *policy* gate only. The per-trace
+    redaction-uncertainty degrade (a doubtful trace withheld from the agent
+    handle entirely) is enforced separately at mint time in
+    :func:`meho_backplane.flight_recorder.agent_read.materialize_agent_trace_handle`.
+    """
+    if not get_settings().flight_recorder_enabled:
+        # Global kill switch -- no capture and no agent exposure anywhere.
+        return False
+    try:
+        enabled, _, agent_readable = await _resolve_tenant_policy(tenant_id)
+    except Exception:
+        _log.warning("flight_recorder_agent_read_resolution_failed", tenant_id=str(tenant_id))
+        return False
+    if agent_readable is not None:
+        # Explicit per-tenant override, both directions -- and independent of
+        # the operator plane, which keeps full access regardless of this flag.
+        return agent_readable
+    # Inherit the capture default: "follows the F1 default (lab-on)".
+    return enabled

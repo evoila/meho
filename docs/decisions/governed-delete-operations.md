@@ -231,3 +231,51 @@ render path.
   evoila-bosnia/meho-internal#234.
 - v0.1-spec §7 (approval is a human decision) — the human-only line this tier
   reuses.
+
+## Amendment (2026-08-31) — dispatch flight recorder cross-reference
+
+Added once the dispatch flight recorder's fail-closed redaction engine landed
+([docs/decisions/dispatch-flight-recorder.md](dispatch-flight-recorder.md),
+Initiative [#3207](https://github.com/evoila/meho/issues/3207); redaction #3213,
+capture #3214). It discharges the reciprocal cross-reference that decision
+flagged as a deliberate follow-up ("Interactions with sibling decisions" →
+"Governed delete-shaped operations"). It records only what the merged code does
+today.
+
+**The destructive / delete-shaped family is a hard body-exclusion in the flight
+recorder, single-sourced with this decision's classifier.** The recorder's
+redaction engine classifies every captured span for body exclusion in
+`redaction/flight_recorder/families.py` (`classify_body_exclusion`). It does
+**not** re-declare the delete-shaped patterns: it reads them from the **same
+single source** the grant guard uses — `Settings.service_grant_delete_shaped_patterns`,
+the `_delete_shaped_reason_by_pattern` seam at `operations/service_grants.py`
+this decision reuses (References → "Delete-shaped classifier reused") — and
+applies the same descriptor signals: an HTTP `DELETE` method and the
+`destructive` tag the safety tier (#3196) promotes. An op the classifier places
+into the `destructive` family has its request **and** response bodies **never
+recorded** (`redact_span` sets `body_recorded=False` and emits the omission
+marker, `redaction/flight_recorder/span.py`). Because both classifiers draw on
+one source, the flight recorder's exclusion set and this decision's `destructive`
+tier cannot drift.
+
+**A destroy dispatch's trace carries metadata spans, never the excluded bodies.**
+For a body-excluded destructive op the span still records method, URL, status,
+duration, and allowlisted (non-secret) headers — only the bodies are dropped. The
+exclusion is a **deliberate, certain** omission (`BodyExclusion.uncertain=False`
+for a placed family), not a redaction-uncertainty, so a destroy trace is **not**
+forced operator-only on that account; it stays agent-readable through the
+narrow-waist result-handle idiom (F5), subject to the per-tenant gate, exactly as
+any other trace. The operator-only degrade is reserved for the *unplaceable* op
+(a missing / blank op id), not for a cleanly-excluded destructive one. Each span
+is classified against the op that *made* the call, so within a delete composite
+only the destructive / delete-shaped spans are body-excluded; sibling non-
+destructive sub-steps follow ordinary per-connector redaction.
+
+**The flight recorder records execution, not the approval gate.** A `destructive`
+op reaches the central dispatch path — where the capture scope is opened
+(`operations/dispatcher.py:706`) — only after this decision's mandatory human
+approval clears it (requirement 1), bound to its preview-result hash and
+blast-radius statement (requirements 2–3). Those gates live on the approvals
+plane and the audit row, not in the trace; the flight recorder neither duplicates
+nor bypasses them — it captures the post-approval vendor traffic of the executed
+destroy, with the destructive / delete-shaped spans' bodies excluded as above.

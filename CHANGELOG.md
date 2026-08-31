@@ -90,6 +90,40 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: cross-ref amendments to the satellite write-path + governed-delete decision docs (#3207)
+
+- Discharges the reciprocal cross-references the flight-recorder decision
+  (`docs/decisions/dispatch-flight-recorder.md`) flagged as a deliberate
+  follow-up, now that its caps / redaction / capture landed (#3212–#3217). A
+  dated `## Amendment (2026-08-31)` section is added to each sibling decision
+  doc; docs-only, no code, and **#3207 stays open** (the consumer-proof Task
+  #3218 remains).
+- **`docs/decisions/satellite-write-path.md`** — records that
+  **satellite-executed dispatches are not traced today**: the capture scope is
+  opened only inside the central dispatcher's `_execute_and_audit`
+  (`operations/dispatcher.py:706`), and a runner executes off-net through
+  `runner/executor.py`, which bypasses `dispatcher.dispatch` — so the shared
+  httpx/SSH recorder seams stay inert (no active scope) and the runner has no
+  trace store. Neither the central mint nor the runner's tier-ladder screen
+  (#3188) opens a capture scope; today only `safe`-tier ops execute on a runner
+  (the additive `remote-write` tier is fail-closed until #3189-#3193 wire it),
+  and even a future remote-write execution rides the same
+  `dispatcher.dispatch`-bypassing path, so nothing is traced. Should the
+  satellite path ever record its off-net traffic, the F2 redaction / F3 caps /
+  F4 retention rules are normative for it; that instrumentation is a follow-up
+  task (no issue filed), distinct from the permanent store-and-forward §6 effect
+  audit.
+- **`docs/decisions/governed-delete-operations.md`** — records that the flight
+  recorder's redaction engine **single-sources** its destructive-family
+  body-exclusion with this decision's delete-shaped classifier
+  (`redaction/flight_recorder/families.py` reads
+  `Settings.service_grant_delete_shaped_patterns`, plus the `DELETE` method and
+  `destructive` tag), so a destroy dispatch's trace keeps metadata spans but
+  **never records bodies** (`redact_span` → `body_recorded=False`). The
+  exclusion is a certain omission, not a redaction-uncertainty, so the trace
+  stays agent-readable (F5); the human-approval / preview-hash / blast-radius
+  gates remain approvals-plane artefacts the recorder captures around, never in.
+
 ### Fixed — epoch-in-`impl_id` probe registrations now reaped + rejected (#3061)
 
 - `#2977`'s epoch-reap (migration `0075`) and `IngestRequest._reject_epoch_version`

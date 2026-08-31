@@ -42,13 +42,17 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.audit_query import AuditEntry, AuditQueryResult, ReplayNode
+from meho_backplane.flight_recorder import TraceSpanView, TraceView
 
 __all__ = [
     "AuditEntry",
     "AuditQueryRequest",
     "AuditQueryResult",
     "AuditReplayResult",
+    "AuditTraceResult",
     "ReplayNode",
+    "TraceSpanView",
+    "TraceView",
 ]
 
 
@@ -134,3 +138,39 @@ class AuditReplayResult(BaseModel):
     tenant_id: uuid.UUID
     row_count: int
     excluded_null_session_count: int
+
+
+class AuditTraceResult(BaseModel):
+    """200 body for ``GET /api/v1/audit/{audit_id}/trace`` (#3215).
+
+    The operator read surface of the dispatch flight recorder
+    (``docs/decisions/dispatch-flight-recorder.md``). Wraps the tenant-scoped
+    :class:`~meho_backplane.flight_recorder.TraceView` with the echoed
+    ``audit_id`` and a ``trace_present`` discriminator, the same REST-envelope
+    layering :class:`AuditReplayResult` follows over the substrate's
+    :class:`ReplayNode`.
+
+    Two-level absence semantics -- distinct on purpose:
+
+    * The **audit row** being missing or in another tenant is a 404 from the
+      route, matching ``GET /show/{audit_id}``: existence never leaks across
+      the tenant boundary.
+    * The audit row existing but carrying **no captured trace** is *not* a 404 --
+      it is a 200 with ``trace_present=False`` and ``trace=None``. Capture is a
+      per-tenant/per-target opt-in and best-effort (F1/F7), so "no trace" is a
+      normal state an operator must be able to observe, not an error. The
+      console pane renders a "no trace captured" empty state for this case.
+
+    ``trace.redaction_uncertain`` surfaces the F5 degrade flag so an operator
+    (and a paired add-on reading over this route with its operator principal)
+    can see when a trace was withheld from the agent handle. The operator plane
+    keeps **full** access regardless of that flag.
+
+    Frozen like the models it carries.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    audit_id: uuid.UUID
+    trace_present: bool
+    trace: TraceView | None = None

@@ -248,7 +248,7 @@ jobs:
         # even before the attest step runs. We *also* pass `output-file:` so
         # the file lives at a predictable path for the cosign attest step.
         if: github.event_name != 'pull_request'
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
         with:
           image: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
           format: spdx-json

@@ -26,6 +26,13 @@ Exports:
   tenant-unique ``(tenant_id, id)`` per-target cache key (#1642). Every
   connector credential / session / client cache derives its key here so
   same-named targets in different tenants never collapse to one entry.
+* :mod:`meho_backplane.connectors._shared.wrapped_creds` — the per-work-item
+  short-lived response-wrapped credential broker + runner unwrap backend
+  (#3191, satellite write-path mechanism 3), registered under kind
+  ``wrapped`` on the #2229 resolver seam. Imported here so its
+  ``register_credential_backend`` call runs eagerly (as ``gsm_creds`` does
+  for ``gsm``) and the ``wrapped`` kind is present before any credential
+  resolution.
 
 New cross-connector shared modules land alongside these — keep each
 module focused on a single concern (auth, retries, pagination, etc.)
@@ -38,6 +45,14 @@ from meho_backplane.connectors._shared import (
     system_operator,
     vault_creds,
     vcf_auth,
+    wrapped_creds,
 )
 
-__all__ = ["cache_key", "gsm_creds", "system_operator", "vault_creds", "vcf_auth"]
+__all__ = [
+    "cache_key",
+    "gsm_creds",
+    "system_operator",
+    "vault_creds",
+    "vcf_auth",
+    "wrapped_creds",
+]

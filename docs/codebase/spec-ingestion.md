@@ -1248,11 +1248,47 @@ divergence above took:
   PG POSIX regex, SQLite `length` + `NOT GLOB`), not a product/impl_id
   allowlist. `downgrade()` is a documented no-op.
 
+The epoch can ride either coordinate — the #3061 follow-up
+----------------------------------------------------------
+
+`0075` and `_reject_epoch_version` both key on the **`version`** column,
+but the rows actually accreting on the lab carried the epoch in the
+**`impl_id`** tail with a *legitimate* `version="9.0"`:
+`impl_id="fleet-rest-probe-<epoch>"`, rendering
+`connector_id="fleet-rest-probe-<epoch>-9.0"`. `"9.0"` is not an epoch, so
+the version-keyed reap matched nothing and a v0.29.0 lab deploy still
+returned 9 such rows post-`0075`. #3061 closes the sibling shape with the
+same prevention-plus-cleanup pair, keyed on `impl_id` instead:
+
+- **Prevention.** `IngestRequest._reject_probe_epoch_impl_id` rejects an
+  `impl_id` ending in `-probe-<epoch>` (a `-probe-` segment then ≥ 9
+  trailing digits) with a `422 connector_impl_id_probe_epoch_rejected`,
+  on the same all-surfaces `IngestRequest` validator. The `-probe-` anchor
+  and end-of-string digit run keep it off the stable probe impls
+  (`net-probe` / `nsx-rest-probe` / `fleet-rest-probe` — bare `-probe`, no
+  epoch) and every real impl_id (`fleet-rest` / `vmware-rest` / `vcd`).
+- **Cleanup.** Migration `0088_reap_probe_epoch_impl_id_registrations`
+  reaps the leaked rows keyed on the `impl_id` tail (PG `impl_id ~
+  '-probe-[0-9]{9,}$'`, SQLite `GLOB` + `NOT GLOB '*[^0-9]'`), same
+  `source_kind='ingested'` guard, tenant-inclusive, no-op `downgrade()`.
+  It complements `0075` — the two predicates target disjoint row sets.
+
+The producer that mints the per-run epoch is the fingerprint/probe glue on
+the **consumer** side (a different repo, `claude-rdc-hetzner-dc`), not this
+backplane — the fleet connector's `fingerprint`/`probe` path returns a
+`FingerprintResult` and registers no epoch impl_id — so the ingest-boundary
+guard is the backplane's durable defence; the consumer separately switches
+to a stable impl_id (as `net-probe` does).
+
 Regression coverage:
 `tests/test_api_v1_connectors_ingest.py::test_ingest_request_epoch_version_boundary`
-(plus the REST 422 and schema cases),
+and `::test_ingest_request_probe_epoch_impl_id_boundary`
+(plus the REST 422 and schema cases, and
+`::test_probe_epoch_guard_spares_every_registered_impl_id` — a live fence
+over the whole registered catalog),
 `tests/test_mcp_tools_connector_ingest.py::test_inline_epoch_version_rejected_before_service`,
 `tests/migrations/test_migration_0075_reap_epoch_versioned_connector_registrations.py`,
+`tests/migrations/test_migration_0088_reap_probe_epoch_impl_id_registrations.py`,
 and the scope-isolation invariant the "counts bleed across duplicates"
 symptom was mistaken for (documented semantics — `total` counts only
 rendered-group ops) in

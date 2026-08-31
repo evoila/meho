@@ -67,6 +67,7 @@ __all__ = [
     "CredentialBackend",
     "CredentialsReadError",
     "UnknownCredentialBackendError",
+    "parse_credential_scheme",
     "register_credential_backend",
     "resolve_credential_backend",
     "split_credential_ref",
@@ -219,6 +220,27 @@ def resolve_credential_backend(kind: str) -> CredentialBackend:
     return backend
 
 
+def parse_credential_scheme(secret_ref: str) -> str | None:
+    """Return the explicit backend kind prefixing *secret_ref*, or ``None``.
+
+    A ``<kind>:<non-empty>`` value whose prefix before the first colon is a
+    bare scheme token carries an explicit kind; everything else — no colon,
+    an empty remainder, or a non-scheme-token prefix (e.g. a slashed path
+    segment) — is schemeless and returns ``None``.
+
+    Split out from :func:`split_credential_ref` so a caller can resolve the
+    deployment-default backend **lazily** — only for a schemeless ref. That
+    is what lets the DB-free satellite runner resolve an explicit-scheme
+    credential (notably its single-use ``wrapped:`` token) without a
+    ``get_settings()`` call, which the runner cannot make (it has no chassis
+    :class:`~meho_backplane.settings.Settings`).
+    """
+    kind, sep, rest = secret_ref.partition(":")
+    if sep and rest and _SCHEME_TOKEN.match(kind):
+        return kind
+    return None
+
+
 def split_credential_ref(secret_ref: str, *, default_backend: str) -> tuple[str, str]:
     """Split *secret_ref* into ``(kind, store_ref)``.
 
@@ -233,7 +255,7 @@ def split_credential_ref(secret_ref: str, *, default_backend: str) -> tuple[str,
     * ``"vault:targets/vc-01"`` → ``("vault", "targets/vc-01")``
     * ``"gsm:proj/secret#pw"`` → ``("gsm", "proj/secret#pw")``
     """
-    kind, sep, rest = secret_ref.partition(":")
-    if sep and rest and _SCHEME_TOKEN.match(kind):
-        return kind, rest
+    scheme = parse_credential_scheme(secret_ref)
+    if scheme is not None:
+        return scheme, secret_ref.partition(":")[2]
     return default_backend, secret_ref

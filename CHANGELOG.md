@@ -90,6 +90,62 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: cross-ref amendments to the satellite write-path + governed-delete decision docs (#3207)
+
+- Discharges the reciprocal cross-references the flight-recorder decision
+  (`docs/decisions/dispatch-flight-recorder.md`) flagged as a deliberate
+  follow-up, now that its caps / redaction / capture landed (#3212–#3217). A
+  dated `## Amendment (2026-08-31)` section is added to each sibling decision
+  doc; docs-only, no code, and **#3207 stays open** (the consumer-proof Task
+  #3218 remains).
+- **`docs/decisions/satellite-write-path.md`** — records that
+  **satellite-executed dispatches are not traced today**: the capture scope is
+  opened only inside the central dispatcher's `_execute_and_audit`
+  (`operations/dispatcher.py:706`), and a runner executes off-net through
+  `runner/executor.py`, which bypasses `dispatcher.dispatch` — so the shared
+  httpx/SSH recorder seams stay inert (no active scope) and the runner has no
+  trace store. Neither the central mint nor the runner's tier-ladder screen
+  (#3188) opens a capture scope; today only `safe`-tier ops execute on a runner
+  (the additive `remote-write` tier is fail-closed until #3189-#3193 wire it),
+  and even a future remote-write execution rides the same
+  `dispatcher.dispatch`-bypassing path, so nothing is traced. Should the
+  satellite path ever record its off-net traffic, the F2 redaction / F3 caps /
+  F4 retention rules are normative for it; that instrumentation is a follow-up
+  task (no issue filed), distinct from the permanent store-and-forward §6 effect
+  audit.
+- **`docs/decisions/governed-delete-operations.md`** — records that the flight
+  recorder's redaction engine **single-sources** its destructive-family
+  body-exclusion with this decision's delete-shaped classifier
+  (`redaction/flight_recorder/families.py` reads
+  `Settings.service_grant_delete_shaped_patterns`, plus the `DELETE` method and
+  `destructive` tag), so a destroy dispatch's trace keeps metadata spans but
+  **never records bodies** (`redact_span` → `body_recorded=False`). The
+  exclusion is a certain omission, not a redaction-uncertainty, so the trace
+  stays agent-readable (F5); the human-approval / preview-hash / blast-radius
+  gates remain approvals-plane artefacts the recorder captures around, never in.
+
+### Fixed — epoch-in-`impl_id` probe registrations now reaped + rejected (#3061)
+
+- `#2977`'s epoch-reap (migration `0075`) and `IngestRequest._reject_epoch_version`
+  both key on the connector **`version`** column, but the accreting
+  `fleet-rest-probe-<epoch>` rows carry the epoch in the **`impl_id`** tail
+  with a legitimate `version="9.0"` — so `0075` matched nothing and a
+  v0.29.0 lab deploy still returned 9 stale rows post-migration. Two guards
+  close the sibling shape: **migration `0088`** (down_revision `0087`;
+  `0087` is a coordinated peer migration, #3216) reaps
+  `endpoint_descriptor` (`source_kind='ingested'`) + `operation_group` rows
+  whose `impl_id` ends in `-probe-<epoch>` (≥ 9 trailing digits after a
+  `-probe-` segment; dialect-branched PG regex / SQLite `GLOB`,
+  tenant-scope-inclusive, no-op `downgrade()`); and
+  `IngestRequest._reject_probe_epoch_impl_id` rejects the same shape at the
+  ingest boundary on every surface (`422
+  connector_impl_id_probe_epoch_rejected`). The stable `*-probe` impls and
+  every real product-line impl_id are untouched (regression-fenced over the
+  whole registered catalog). The per-run epoch is minted by consumer-side
+  fingerprint/probe glue in a different repo (`claude-rdc-hetzner-dc`), so
+  the boundary guard is the backplane's durable defence; no backplane code
+  mints these rows.
+
 ### Fixed — large `deploy_from_library` OVAs: async dispatch survives caller disconnect + a 3 h sync read ceiling (#3176)
 
 - `vmware.composite.vm.deploy_from_library` of a **multi-GB** content-library
@@ -113,6 +169,34 @@ connector-related release-notes line.
   blocking read — is tracked under #2890.
 - The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
   unchanged for genuine faults.
+
+### Added — satellite write path: per-work-item wrapped-credential brokering (#3191)
+
+- Mechanism 3 of the ratified scoped-hybrid write path (Initiative #2901,
+  `docs/decisions/satellite-write-path.md`, design §3): the write tier never
+  hands a fenced satellite runner a **standing broad** vendor credential (the
+  T3 worst case). Instead the **centre brokers** a short-lived,
+  **single-target-scoped**, Vault-**response-wrapped** credential bound to one
+  work item, with credential TTL bounded ≤ the capability's `expires_at`
+  (`connectors/_shared/wrapped_creds.py::broker_wrapped_credential`).
+- The disk-spooled work item holds only a **single-use unwrap token**
+  (`secret_ref = wrapped:<token>`), never the credential value — the runner
+  **unwraps just-in-time at execution** by presenting the token itself to
+  Vault's unwrap endpoint (an **outbound** dial, push-only preserved #2877),
+  **not** the acting operator's JWT. This closes the empty-JWT edge-credential
+  gap (design §1.4): a `wrapped:` credential resolves on the DB-free runner
+  with **no** chassis `Settings` and **no** operator identity.
+- **Rides the existing credential seam** (#2229 / #2642) — a new `wrapped`
+  backend registered alongside `vault` / `gsm`, so connector handlers resolve
+  a wrapped credential through the unchanged `load_basic_credentials` call.
+  **Fail-closed everywhere:** a second unwrap of a consumed token, an expired
+  token, or a `remote-write` item carrying a standing/broad `secret_ref` is
+  refused. New runner env for the outbound unwrap dial: `MEHO_RUNNER_VAULT_ADDR`
+  (+ optional `MEHO_RUNNER_VAULT_NAMESPACE` / `MEHO_RUNNER_VAULT_TIMEOUT_SECONDS`).
+- Wrapped credentials are transient (they ride the existing `secret_ref` wire
+  field), so there is **no migration**. Wrapped brokering requires Vault
+  (response-wrapping); a Vault-free (`gsm`) deployment has no wrapped-brokering
+  path yet.
 
 ### Added — satellite write path: `remote-write` safety tier + tiered mint gate (#3188)
 

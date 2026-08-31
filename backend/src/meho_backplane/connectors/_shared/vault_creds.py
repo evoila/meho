@@ -99,6 +99,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
     CredentialsReadError,
+    parse_credential_scheme,
     register_credential_backend,
     resolve_credential_backend,
     split_credential_ref,
@@ -418,7 +419,14 @@ async def _resolve_and_load(
     is handed back so the caller can name it in a missing-field error.
     """
     ref = _require_secret_ref(target)
-    kind, store_ref = split_credential_ref(ref, default_backend=get_settings().credential_backend)
+    # Resolve the deployment-default backend lazily: an explicit ``<kind>:``
+    # ref (notably the satellite runner's single-use ``wrapped:`` token) never
+    # consults ``get_settings()``, so the DB-free runner — which cannot build
+    # the chassis ``Settings`` — resolves it. A schemeless ref keeps today's
+    # behaviour and routes through ``config.credentialBackend``.
+    scheme = parse_credential_scheme(ref)
+    default_backend = scheme if scheme is not None else get_settings().credential_backend
+    kind, store_ref = split_credential_ref(ref, default_backend=default_backend)
     backend = resolve_credential_backend(kind)
     secret_data = await backend.load_secret_data(
         store_ref, operator, target_name=target.name, mount=mount

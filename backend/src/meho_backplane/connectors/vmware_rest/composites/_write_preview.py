@@ -996,9 +996,7 @@ async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         vm_moid=vm,
     )
     for snap in snapshots:
-        children.append(
-            {"kind": "snapshot", "id": snap.get("snapshot"), "name": snap.get("name")}
-        )
+        children.append({"kind": "snapshot", "id": snap.get("snapshot"), "name": snap.get("name")})
     return {
         "blast_radius": {
             "object": {

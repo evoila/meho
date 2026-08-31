@@ -124,11 +124,15 @@ class _OpContext:
 
     Rebound per dispatch so a vendor call is redacted against the op that made
     it (a composite child's session mint is excluded by the child's family,
-    not the parent's).
+    not the parent's). ``impl_id`` + ``product`` are carried so a typed span
+    is keyed on the **implementation** (F8: both impls of a dual-impl product
+    are distinguished), not just the product.
     """
 
     op_id: str | None
     connector_id: str | None
+    impl_id: str | None
+    product: str | None
     tags: tuple[str, ...]
     body_paths: tuple[str, ...]
     delete_shaped_patterns: tuple[str, ...] | None
@@ -505,6 +509,8 @@ def _op_context_from(descriptor: Any, connector_id: str) -> _OpContext:
     return _OpContext(
         op_id=getattr(descriptor, "op_id", None),
         connector_id=connector_id,
+        impl_id=getattr(descriptor, "impl_id", None),
+        product=getattr(descriptor, "product", None),
         tags=tags,
         # Per-connector body-path config is a connector-authoring follow-up;
         # the credential-shape scrub + hard-excluded families still protect

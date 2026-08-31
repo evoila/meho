@@ -90,6 +90,44 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: typed-connector spans across every typed family (#3217)
+
+- Extends the flight recorder (`docs/decisions/dispatch-flight-recorder.md`, **F8
+  — the operator override "all of them in v1"**) to **typed** connectors, the
+  analog of the generic-connector `vendor_call` seam (#3214). A new
+  `meho_backplane.flight_recorder.typed` module rides the **same** per-dispatch
+  capture scope + op context — no parallel state — and exposes two seams:
+  - a **shared typed-dispatch seam** (`typed_dispatch_span`, wired once into
+    `dispatch_typed`) that brackets **every** typed handler invocation and emits
+    a real (non-`opaque`) `typed` span — operation id, target, duration, and
+    outcome — keyed on **`impl_id`** so both implementations of a dual-impl
+    product (`fleet` / `sddc` / `vcfa` / `vrli` / `vrops`) are distinguished. It
+    is metadata-only (it never records `params` or any vendor payload), so it
+    carries no secret and never degrades the trace; and
+  - a **transport-enricher seam** (`typed_span_start` + `record_typed_call`)
+    that redacts request/response-shaped detail through the **same** fail-closed
+    engine the vendor-call seam uses. Wired into the shared SSH seam
+    (`SshConnector._run_command`), so **every** SSH-based typed connector (bind9,
+    holodeck, pfsense, rke2, windows_dns) records one span per command with no
+    per-connector edit; the command + output are handed to the engine as plain
+    text, which cannot prove them secret-free and so **omits both and degrades
+    the trace to operator-only (F5)** — an SSH command or its output never
+    reaches a span un-redacted. REST-backed typed connectors are already covered
+    by the generic `vendor_call` seam; the direct-SDK families (hvac /
+    kubernetes / pymongo / postgres / gcloud) are covered by the shared `typed`
+    span at op granularity.
+- Coverage is **by construction**: because the seam sits on the one typed-dispatch
+  path, all 37 registered typed implementations — every class-based family plus
+  the builtin `product.*` families (net, mail, secret, topology, targets) — emit
+  real `typed` spans, retiring the transitional `opaque` fallback. A
+  **registry-driven conformance sweep** enumerates the typed families from the
+  live registrar set and asserts each produces a `typed` span through the seam,
+  so a newly added typed connector that skips instrumentation fails CI.
+- The **F7 invariant** holds for typed spans: capture is best-effort, the
+  disabled path is a single contextvar read, and a recorder or redaction failure
+  is swallowed and can never fail, block, or slow a typed dispatch — the
+  handler's own exception always propagates unchanged.
+
 ### Added — flight recorder: agent read surface — trace as a reduced result-handle, per-tenant gated, redaction-uncertainty degrade (#3216)
 
 - Ships **F5** of the flight-recorder decision
@@ -146,7 +184,6 @@ connector-related release-notes line.
   `Test-Path` verify-after-write folded into the same script), and silences the
   warning stream at the source (`$WarningPreference`). The self-contradictory
   `applied: true` / `config_id: null` envelope is now impossible.
-
 
 ### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
 

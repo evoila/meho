@@ -114,6 +114,34 @@ connector-related release-notes line.
 - The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
   unchanged for genuine faults.
 
+### Added — satellite write path: per-work-item wrapped-credential brokering (#3191)
+
+- Mechanism 3 of the ratified scoped-hybrid write path (Initiative #2901,
+  `docs/decisions/satellite-write-path.md`, design §3): the write tier never
+  hands a fenced satellite runner a **standing broad** vendor credential (the
+  T3 worst case). Instead the **centre brokers** a short-lived,
+  **single-target-scoped**, Vault-**response-wrapped** credential bound to one
+  work item, with credential TTL bounded ≤ the capability's `expires_at`
+  (`connectors/_shared/wrapped_creds.py::broker_wrapped_credential`).
+- The disk-spooled work item holds only a **single-use unwrap token**
+  (`secret_ref = wrapped:<token>`), never the credential value — the runner
+  **unwraps just-in-time at execution** by presenting the token itself to
+  Vault's unwrap endpoint (an **outbound** dial, push-only preserved #2877),
+  **not** the acting operator's JWT. This closes the empty-JWT edge-credential
+  gap (design §1.4): a `wrapped:` credential resolves on the DB-free runner
+  with **no** chassis `Settings` and **no** operator identity.
+- **Rides the existing credential seam** (#2229 / #2642) — a new `wrapped`
+  backend registered alongside `vault` / `gsm`, so connector handlers resolve
+  a wrapped credential through the unchanged `load_basic_credentials` call.
+  **Fail-closed everywhere:** a second unwrap of a consumed token, an expired
+  token, or a `remote-write` item carrying a standing/broad `secret_ref` is
+  refused. New runner env for the outbound unwrap dial: `MEHO_RUNNER_VAULT_ADDR`
+  (+ optional `MEHO_RUNNER_VAULT_NAMESPACE` / `MEHO_RUNNER_VAULT_TIMEOUT_SECONDS`).
+- Wrapped credentials are transient (they ride the existing `secret_ref` wire
+  field), so there is **no migration**. Wrapped brokering requires Vault
+  (response-wrapping); a Vault-free (`gsm`) deployment has no wrapped-brokering
+  path yet.
+
 ### Added — satellite write path: `remote-write` safety tier + tiered mint gate (#3188)
 
 - Extends the gateway's binary safe-wall into a **satellite-mint tier

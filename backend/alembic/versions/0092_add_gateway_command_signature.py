@@ -3,8 +3,8 @@
 
 """Add ``gateway_command.signature`` for the signed remote-write capability.
 
-Revision ID: 0089
-Revises: 0088
+Revision ID: 0092
+Revises: 0091
 Create Date: 2026-08-31
 
 Task #3189 under Initiative #2901 (satellite write path), design
@@ -33,7 +33,7 @@ Why nullable (no ``server_default``)
 Signing is a **remote-write-tier property only**: a ``safe`` capability (the
 read path, every row today) carries no signature -- the opaque-UUID PK + DB
 consume latch remain its authorization (#2500 stands for the read tier). The
-column is therefore ``NULL`` for every ``safe`` row and every pre-0089 row. A
+column is therefore ``NULL`` for every ``safe`` row and every pre-0092 row. A
 nullable ``ADD COLUMN`` needs no backfill default -- existing rows take
 ``NULL`` (the correct "unsigned" state) with no table rewrite. Mirrors the
 ``approval_request.preview_hash`` add (migration ``0086``), nullable for the
@@ -42,12 +42,12 @@ same "the property is tier-specific, absent rows have no value" reason.
 Migration-chain note (single linear head)
 ------------------------------------------
 
-Numbered ``0089`` with ``down_revision = "0088"`` -- the head on
-``origin/main`` after ``0088_reap_probe_epoch_impl_id_registrations`` (the
-#3061 follow-up) landed while this task was in flight. The chain is a single
-linear head ``0087 -> 0088 -> 0089``, which the ``Python (database
-migrations)`` CI gate requires. Concurrent sibling task #3192 (revocation)
-takes the number *after* this one (``0090`` onward, coordinated); #3191
+Numbered ``0092`` with ``down_revision = "0091"`` -- the head on
+``origin/main`` after two sibling migrations landed while this task was in
+flight: ``0088_reap_probe_epoch_impl_id_registrations`` (#3061) and
+``0091_add_gateway_command_safety_level`` (#3192 revocation). The chain is a
+single linear head ``0088 -> 0091 -> 0092``, which the ``Python (database
+migrations)`` CI gate requires (``0089`` / ``0090`` were never used). #3191
 (credential brokering) shipped no migration.
 
 Reversibility contract
@@ -64,8 +64,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0089"
-down_revision: str | None = "0088"
+revision: str = "0092"
+down_revision: str | None = "0091"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

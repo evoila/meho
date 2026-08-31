@@ -51,11 +51,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import Select, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.runner.satellite_tier import REMOTE_WRITE_SAFETY_LEVELS
 
 __all__ = [
     "GATEWAY_COMMAND_DEFAULT_TTL",
@@ -174,6 +175,7 @@ async def enqueue_command(
     params_hash: str | None = None,
     expires_at: datetime | None = None,
     mint_audit_id: uuid.UUID | None = None,
+    safety_level: str = "safe",
 ) -> GatewayCommand:
     """Insert a ``pending`` :class:`GatewayCommand` for a runner.
 
@@ -208,6 +210,11 @@ async def enqueue_command(
             ceiling); the default TTL when omitted.
         mint_audit_id: The id of the synchronous ``gateway.command.mint``
             audit row, stamped for result → mint audit lineage.
+        safety_level: The op's ``safety_level`` (#3192), denormalised onto
+            the row so the delivery path can tier-scope the
+            write-capable-runner revocation refusal without re-resolving the
+            descriptor. Defaults to ``'safe'`` (the read tier) for direct
+            enqueues; the mint path passes the descriptor's real level.
 
     Returns:
         The flushed :class:`GatewayCommand` row (with its generated ``id``).
@@ -225,6 +232,7 @@ async def enqueue_command(
         params_hash=params_hash if params_hash is not None else compute_params_hash(params),
         expires_at=bound_capability_expiry(expires_at),
         mint_audit_id=mint_audit_id,
+        safety_level=safety_level,
     )
     session.add(command)
     await session.flush()
@@ -239,11 +247,72 @@ async def enqueue_command(
     return command
 
 
+def _pending_claim_stmt(
+    *,
+    tenant_id: uuid.UUID,
+    runner_id: str,
+    now: datetime,
+    runner_revoked: bool,
+    for_update: bool,
+) -> Select[tuple[GatewayCommand]]:
+    """Build the oldest-claimable-``pending``-row SELECT for a runner.
+
+    Capability predicate (#2500): only an unexpired (``expires_at > now``),
+    unconsumed (``consumed_at IS NULL``) ``pending`` row is a candidate.
+    Revocation hardening (#3192): when *runner_revoked* the candidate set is
+    narrowed to ``safety_level NOT IN REMOTE_WRITE_SAFETY_LEVELS`` -- a
+    revoked runner never claims an already-minted remote-write, while a
+    ``safe`` (read) row still delivers (the coarse read-path kill switch is
+    unchanged). The NOT NULL ``safety_level`` column keeps that a pure
+    two-valued predicate. *for_update* adds ``FOR UPDATE SKIP LOCKED`` (PG
+    only; a no-op clause on SQLite).
+    """
+    stmt = (
+        select(GatewayCommand)
+        .where(
+            GatewayCommand.tenant_id == tenant_id,
+            GatewayCommand.runner_id == runner_id,
+            GatewayCommand.status == GatewayCommandStatus.PENDING.value,
+            GatewayCommand.expires_at > now,
+            GatewayCommand.consumed_at.is_(None),
+        )
+        .order_by(GatewayCommand.enqueued_at.asc())
+        .limit(1)
+    )
+    if runner_revoked:
+        stmt = stmt.where(GatewayCommand.safety_level.not_in(REMOTE_WRITE_SAFETY_LEVELS))
+    if for_update:
+        stmt = stmt.with_for_update(skip_locked=True)
+    return stmt
+
+
+def _params_hash_intact(row: GatewayCommand, *, tenant_id: uuid.UUID, runner_id: str) -> bool:
+    """Post-mint substitution defence (#2500): stored params still hash true.
+
+    A mismatch means the ``params`` column was mutated after mint -- a tamper
+    signal, not a race -- so delivery is refused fail-closed (the row stays
+    pending) and logged at error level for an operator, the same swap defence
+    ``approve_request`` runs. Returns ``True`` when the row's params still
+    hash to its bound ``params_hash``.
+    """
+    if compute_params_hash(row.params) == row.params_hash:
+        return True
+    structlog.get_logger(__name__).error(
+        "gateway_command_params_hash_mismatch",
+        command_id=str(row.id),
+        tenant_id=str(tenant_id),
+        runner_id=runner_id,
+        op_id=row.op_id,
+    )
+    return False
+
+
 async def claim_next_command(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     runner_id: str,
+    runner_revoked: bool = False,
 ) -> GatewayCommand | None:
     """Claim the oldest ``pending`` command for a runner; flip it ``delivered``.
 
@@ -261,55 +330,33 @@ async def claim_next_command(
     stamped) on a win, or ``None`` when the queue is empty **or** a
     concurrent claimer won the row between the SELECT and the UPDATE.
 
-    Capability predicate (#2500): only an **unexpired** (``expires_at >
-    now``), **unconsumed** (``consumed_at IS NULL``) ``pending`` row is
-    claimable, so an expired or already-consumed capability is never
-    delivered. Before flipping the row the stored ``params`` are re-hashed
-    against ``params_hash``; a mismatch (post-mint substitution) refuses
-    delivery (returns ``None`` + an error log) — the same swap defence
-    ``approve_request`` runs, here guarding the params column.
+    The claim candidate is built by :func:`_pending_claim_stmt` (the #2500
+    capability predicate + the #3192 revocation narrowing) and the stored
+    ``params`` are re-hashed by :func:`_params_hash_intact` before the flip.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed. The
             caller commits to persist the ``pending -> delivered`` flip.
         tenant_id: The runner's tenant (every query is tenant-scoped).
         runner_id: The runner principal name whose queue to claim from.
+        runner_revoked: When ``True``, exclude ``remote-write``-tier rows
+            from the claim (the runner is revoked, #3192); ``safe`` rows
+            still deliver, so the read path's coarse kill switch is unchanged.
     """
     conn = await session.connection()
     now = datetime.now(UTC)
-    stmt = (
-        select(GatewayCommand)
-        .where(
-            GatewayCommand.tenant_id == tenant_id,
-            GatewayCommand.runner_id == runner_id,
-            GatewayCommand.status == GatewayCommandStatus.PENDING.value,
-            # Capability binding (#2500): never deliver an expired or an
-            # already-consumed command.
-            GatewayCommand.expires_at > now,
-            GatewayCommand.consumed_at.is_(None),
-        )
-        .order_by(GatewayCommand.enqueued_at.asc())
-        .limit(1)
+    stmt = _pending_claim_stmt(
+        tenant_id=tenant_id,
+        runner_id=runner_id,
+        now=now,
+        runner_revoked=runner_revoked,
+        for_update=conn.dialect.name == "postgresql",
     )
-    if conn.dialect.name == "postgresql":
-        stmt = stmt.with_for_update(skip_locked=True)
     row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         return None
 
-    # Post-mint substitution defence (#2500): the stored params must still
-    # hash to the bound params_hash, else refuse delivery. A mismatch means
-    # the params column was mutated after mint — a tamper signal, not a race
-    # — so it is fail-closed (the row stays pending, undelivered) and logged
-    # at error level for an operator to investigate.
-    if compute_params_hash(row.params) != row.params_hash:
-        structlog.get_logger(__name__).error(
-            "gateway_command_params_hash_mismatch",
-            command_id=str(row.id),
-            tenant_id=str(tenant_id),
-            runner_id=runner_id,
-            op_id=row.op_id,
-        )
+    if not _params_hash_intact(row, tenant_id=tenant_id, runner_id=runner_id):
         return None
 
     # Conditional flip: the predicate + write commit together, so a second

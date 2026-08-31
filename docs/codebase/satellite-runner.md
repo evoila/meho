@@ -188,7 +188,7 @@ work item, plus approval-bound minting.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
-  `gateway_command` row (`signature` column, migration `0089`). This is the
+  `gateway_command` row (`signature` column, migration `0092`). This is the
   deliberate, **write-tier-only** reversal of #2500: for a `safe` read an
   edge-verifiable signature bought nothing, but for a write it is the offline
   integrity + freshness + target-scope check against transit tampering (T2)
@@ -221,6 +221,73 @@ everywhere, so delete-shaped work stays central-or-break-glass and never
 rides a runner — the satellite write-path decision's "delete-shaped
 operations never minted to a satellite," dovetailing with #3196's default
 gate exclusions.
+
+### Revocation hardening for write-capable runners (#3192, the Stage-3 gate)
+
+The read path's revocation is deliberately **coarse**: `assert_runner_scope`
+does **not** consult `revoked` (`auth/runner_guard.py`); a revoked runner is
+stopped by Keycloak `enabled=false` (blocks new token grants) + a short
+access-token TTL + the #2501 dead-man switch, so revocation latency ≈ token
+TTL. Fine for a read (a stale read at a silent edge changes nothing). For an
+already-minted **write**, that latency is the T8 gap: a revoked-but-not-yet-
+expired runner could still execute the mutation (blast radius = allowlist ×
+credential lifetime × **revocation latency**). The decision
+(`docs/decisions/satellite-write-path.md`, recommendation 3) answers this
+with **TTL + dead-man initially, and a per-mint revocation check as the
+Stage-3 gate** — so the write tier does not reach steady state without it.
+
+The revocation check is a **separate central gate** from the composed
+`evaluate_remote_write_gate` (which composes the four mechanisms; #3189 wires
+it): revocation is its own Stage-3 term, enforced live off the runner
+principal's `revoked` column, **scoped to the `remote-write` tier only** so
+the read path's coarse kill switch is untouched.
+
+- **No new mint to a revoked runner** — `mint_gateway_command`
+  (`operations/gateway_commands.py`): in the `REMOTE_WRITE` branch, a DB read
+  of `runner_principal.revoked` (`_runner_is_revoked`) refuses with
+  `MintRefusalCode.RUNNER_REVOKED` **before** the composed gate, so a revoked
+  runner reads the specific refusal and no command row is written. A `safe`
+  mint never reaches this branch.
+- **No delivery of an already-minted write** (the materialisation half) —
+  `claim_next_command` (`gateway/queue.py`): the poll route reads the live
+  `revoked` flag off the scope-gate row (once per poll) and threads
+  `runner_revoked` into the claim, which narrows to `safety_level NOT IN
+  REMOTE_WRITE_SAFETY_LEVELS`. So a `remote-write` command minted *before*
+  revocation is never handed to the runner post-revocation (it stays
+  `pending` and expires under its capability TTL), while a queued `safe`
+  command still delivers. This needs the op's `safety_level` denormalised
+  onto the command row at mint (migration `0091`) — the same "bind at mint,
+  check at delivery without a re-lookup" discipline as `params_hash` /
+  `expires_at`.
+- **At the edge** — `_screen_item` (`runner/executor.py`): the DB-free edge
+  cannot itself read `revoked`, but it already fail-closes on **every**
+  `remote-write` item through the unprovisioned composed gate
+  (`test_remote_write_op_is_refused_without_invocation`), so an
+  already-delivered write in a revoked runner's spool still refuses at
+  execution today. The residual in-flight window composes with the #3191
+  credential seam (`screen_remote_write_credential` +
+  `WrappedCredentialBackend`): the wrapped vendor credential is brokered only
+  at the authorised mint — which this task blocks for a revoked runner — and
+  is **single-use and TTL-bounded ≤ the capability expiry**, so a
+  delivered-but-not-yet-executed write carries a short-lived one-shot secret,
+  never a standing credential. Tying the wrapped-credential unwrap directly
+  to live revocation state, if ever needed, is #3191's concern; this task
+  owns only the mint + delivery gate and the audit trail.
+- **Observable / auditable** (mechanism 4) — `RunnerPrincipalService.revoke`
+  (`auth/runner_principals.py`) writes an internal audit row
+  (`method='INTERNAL'`, `path='runner.principal.revoked'`) on the central
+  clock, the tamper-evident trail that a runner's write capability was
+  withdrawn — distinct from the liveness `gateway.runner.stale` dead-man flip.
+
+**Residual (bounded, not eliminated).** A command already flipped
+`delivered` before revocation is off-net and cannot be recalled centrally;
+that window is bounded by the capability TTL (default 5 min) plus the #3191
+credential seam and the un-reported-mint security alarm (a sibling seam).
+
+**Stage-3 promotion criterion.** A `remote-write` domain does **not** advance
+to Stage 3 (standing capability within-allowlist) until this per-mint +
+per-delivery revocation check is in force — the write tier does not reach
+steady state on TTL + dead-man alone.
 
 ## Per-work-item wrapped-credential brokering — the write path (#3191)
 

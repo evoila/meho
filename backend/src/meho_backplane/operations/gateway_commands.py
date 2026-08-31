@@ -59,7 +59,7 @@ from enum import StrEnum
 from typing import Any
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -69,6 +69,7 @@ from meho_backplane.db.models import (
     GatewayCommand,
     GatewayCommandStatus,
     PermissionVerdict,
+    RunnerPrincipal,
 )
 from meho_backplane.gateway.queue import (
     GatewayCommandNotDeliveredError,
@@ -106,6 +107,12 @@ __all__ = [
     "consume_command",
     "mint_gateway_command",
 ]
+
+# code-quality-allow: file-size — the gateway command lifecycle (mint ladder +
+# consume latch + result-accept + audit lineage) is one cohesive
+# transaction-discipline contract; the #3192 revocation gate nudged it past the
+# 600-line limit. Splitting the module is its own refactor task (tracked with
+# the mint-ladder function-size debt below), not part of this security change.
 
 # NOTE: the structlog logger is resolved per-call at each log site below
 # rather than held as a module-level proxy. Production sets
@@ -157,7 +164,10 @@ class MintRefusalCode(StrEnum):
     binds the mint (mechanism 1, #3189 — and, once #3190 lands, when the
     op-class is off the runner's allowlist); ``REMOTE_WRITE_SIGNING_UNAVAILABLE``
     refuses a remote-write mint that cannot be signed because the central
-    signing key is not provisioned (#3189); ``POLICY_DENIED`` /
+    signing key is not provisioned (#3189); ``RUNNER_REVOKED`` is the
+    write-tier revocation refusal (#3192, the Stage-3 gate) — a revoked runner
+    gets no new ``remote-write`` mint, checked before the composed gate so a
+    revoked runner reads the specific refusal; ``POLICY_DENIED`` /
     ``NEEDS_APPROVAL`` are the policy-gate verdicts that are not
     ``AUTO_EXECUTE``.
     """
@@ -168,6 +178,7 @@ class MintRefusalCode(StrEnum):
     OP_NOT_SAFE = "op_not_safe"
     REMOTE_WRITE_GATE_UNSATISFIED = "remote_write_gate_unsatisfied"
     REMOTE_WRITE_SIGNING_UNAVAILABLE = "remote_write_signing_unavailable"
+    RUNNER_REVOKED = "runner_revoked"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -215,6 +226,30 @@ def _refuse_remote_write(
         runner_id=runner_id,
     )
     return _refused(code, reason)
+
+
+async def _runner_is_revoked(
+    session: AsyncSession, *, tenant_id: uuid.UUID, runner_name: str
+) -> bool:
+    """Whether the named runner principal is revoked in this tenant (#3192).
+
+    One indexed read on the unique ``(tenant_id, name)`` runner index — the
+    same row :func:`meho_backplane.auth.runner_guard.assert_runner_scope`
+    resolves, read here for its ``revoked`` column only (the read path
+    deliberately does **not** consult it; the write tier does). A name that
+    resolves to **no** row returns ``False``: an unknown runner is not this
+    check's concern (its remote-write mint still fails closed at the composed
+    ``evaluate_remote_write_gate`` seam / the enrollment allowlist, #3189),
+    so the revocation check stays scoped to the "row exists and is revoked"
+    case it owns and adds no new existence oracle.
+    """
+    revoked = await session.scalar(
+        select(RunnerPrincipal.revoked).where(
+            RunnerPrincipal.tenant_id == tenant_id,
+            RunnerPrincipal.name == runner_name,
+        )
+    )
+    return bool(revoked)
 
 
 def _refuse_unvalidatable_params(
@@ -340,13 +375,15 @@ async def mint_gateway_command(
        generalised, checked **before** the policy gate (so a refused op never
        reaches it and is never parked): ``EXCLUDED`` (``dangerous`` /
        ``destructive``) → :attr:`MintRefusalCode.OP_NOT_SAFE`, never minted
-       (composes with #3183); ``REMOTE_WRITE`` (``caution``) →
-       :func:`_mint_remote_write` (mechanism 1, #3189): mints **only** against
-       a committed, single-use, param-bound ``ApprovalRequest`` — bypassing
-       the live policy gate, since the human approval decision is the
-       authorization — and stamps an Ed25519 **signature** on the capability;
-       no approval → :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`,
-       unprovisioned signing key → :attr:`MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE`.
+       (composes with #3183); ``REMOTE_WRITE`` (``caution``) → the write-tier
+       revocation check (#3192 — a revoked runner →
+       :attr:`MintRefusalCode.RUNNER_REVOKED`) then :func:`_mint_remote_write`
+       (mechanism 1, #3189): mints **only** against a committed, single-use,
+       param-bound ``ApprovalRequest`` — bypassing the live policy gate, since
+       the human approval decision is the authorization — and stamps an Ed25519
+       **signature** on the capability; no approval →
+       :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`, unprovisioned
+       signing key → :attr:`MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE`.
        ``SAFE`` falls through to the policy gate, semantics unchanged.
     4. ``policy_gate`` (``SAFE`` tier only) — any verdict other than
        ``AUTO_EXECUTE`` refuses
@@ -437,10 +474,33 @@ async def mint_gateway_command(
             "dangerous/destructive ops are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
+        # Revocation hardening (#3192, the Stage-3 gate): a revoked runner
+        # gets no new remote-write mint. Checked *before* the mint so a
+        # revoked runner reads the specific RUNNER_REVOKED refusal, and
+        # scoped to the write tier only -- a `safe` mint never reaches here,
+        # so the read path's coarse kill switch is untouched. The delivery
+        # path (`claim_next_command`) re-checks live `revoked` for the
+        # already-minted-write gap; this is the mint-side half.
+        if await _runner_is_revoked(session, tenant_id=operator.tenant_id, runner_name=runner_id):
+            structlog.get_logger(__name__).warning(
+                "gateway_command_mint_refused_runner_revoked",
+                reason=MintRefusalCode.RUNNER_REVOKED.value,
+                op_id=op_id,
+                safety_level=descriptor.safety_level,
+                operator_sub=operator.sub,
+                runner_id=runner_id,
+            )
+            return _refused(
+                MintRefusalCode.RUNNER_REVOKED,
+                f"runner {runner_id!r} is revoked; no remote-write capability "
+                "is minted to a revoked runner",
+            )
         # The additive write tier (mechanism 1, #3189): a caution op mints
         # only against a committed, single-use, param-bound approval, and the
         # minted capability is signed for offline edge verification. Delegated
-        # so the safe path below stays the untouched Step-4 policy gate.
+        # so the safe path below stays the untouched Step-4 policy gate. The
+        # #3190 allowlist check composes inside _mint_remote_write; the edge
+        # still re-checks evaluate_remote_write_gate (defence in depth).
         return await _mint_remote_write(
             session,
             operator=operator,
@@ -453,6 +513,7 @@ async def mint_gateway_command(
             target_descriptor=target_descriptor,
             expires_at=expires_at,
             started=started,
+            safety_level=descriptor.safety_level,
         )
 
     # --- Step 4: policy gate (only AUTO_EXECUTE mints the SAFE tier) ------
@@ -490,6 +551,7 @@ async def mint_gateway_command(
         target_descriptor=target_descriptor,
         expires_at=expires_at,
         started=started,
+        safety_level=descriptor.safety_level,
     )
 
 
@@ -506,6 +568,7 @@ async def _mint_remote_write(
     target_descriptor: dict[str, Any] | None,
     expires_at: datetime | None,
     started: float,
+    safety_level: str,
 ) -> MintResult:
     """Mint a signed remote-write capability against a committed approval (#3189).
 
@@ -587,6 +650,7 @@ async def _mint_remote_write(
         target_descriptor=target_descriptor,
         expires_at=expires_at,
         started=started,
+        safety_level=safety_level,
         signing_key=signing_key,
         approval_request_id=approval.id,
     )
@@ -605,16 +669,19 @@ async def _finalize_mint(
     target_descriptor: dict[str, Any] | None,
     expires_at: datetime | None,
     started: float,
+    safety_level: str,
     signing_key: Any | None = None,
     approval_request_id: uuid.UUID | None = None,
 ) -> MintResult:
     """Enqueue the bound command, optionally sign it, and write the mint audit row.
 
-    Shared tail of both mint paths (safe and remote-write). When *signing_key*
-    is supplied (the remote-write tier), the capability is signed over its
+    Shared tail of both mint paths (safe and remote-write). *safety_level* is
+    stamped on the row (#3192) so the delivery-path revocation re-check can
+    tier-scope without a second descriptor lookup. When *signing_key* is
+    supplied (the remote-write tier), the capability is signed over its
     canonical payload — computed against the row's *bounded* ``expires_at``,
     so the signed freshness bound matches what the runner will verify — and
-    the signature is stamped on the command row (migration 0088). The mint
+    the signature is stamped on the command row (migration 0092). The mint
     audit payload records ``approval_request_id`` / ``signed`` for the
     remote-write lineage; the safe path leaves both unset (unchanged shape).
     """
@@ -630,6 +697,7 @@ async def _finalize_mint(
         params_hash=params_hash,
         expires_at=expires_at,
         mint_audit_id=mint_audit_id,
+        safety_level=safety_level,
     )
     signed = False
     if signing_key is not None:

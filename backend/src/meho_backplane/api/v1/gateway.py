@@ -217,8 +217,15 @@ async def poll_next_command(
     sessionmaker = get_sessionmaker()
 
     # Scope gate first: bind the token's runner_id to the named row (#2502).
+    # The resolved principal carries the live ``revoked`` flag (#3192): read
+    # it here (once per poll) and thread it into the claim so a revoked runner
+    # is never delivered an already-minted remote-write, while its safe (read)
+    # queue still drains -- the read path's coarse kill switch is unchanged.
+    # ``expire_on_commit=False`` keeps the attribute readable after the
+    # scope gate commits its heartbeat and the session block closes.
     async with sessionmaker() as session:
-        await assert_runner_scope(operator, runner_name=runner, session=session)
+        principal = await assert_runner_scope(operator, runner_name=runner, session=session)
+        runner_revoked = principal.revoked
 
     effective_wait = clamp_longpoll_wait(wait)
     loop = asyncio.get_running_loop()
@@ -228,7 +235,10 @@ async def poll_next_command(
         while True:
             async with sessionmaker() as session:
                 command = await claim_next_command(
-                    session, tenant_id=operator.tenant_id, runner_id=runner
+                    session,
+                    tenant_id=operator.tenant_id,
+                    runner_id=runner,
+                    runner_revoked=runner_revoked,
                 )
                 if command is not None:
                     envelope = _envelope(command)

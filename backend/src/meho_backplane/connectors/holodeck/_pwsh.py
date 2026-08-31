@@ -29,11 +29,34 @@ Wire shape
    ``ConvertTo-Json``, and Json output parses with the stdlib :mod:`json`
    without pulling in an undecided CliXml dependency (``pyclixml``).
 3. :func:`pwsh_run` runs ``pwsh -EncodedCommand <encoded>`` over the
-   pooled SSH connection and decodes ``stdout`` via
-   :func:`json.loads`, returning the parsed structure.
+   pooled SSH connection, strips any CLIXML warning/error blocks that
+   leaked onto stdout (see *Warning-stream hygiene* below), then
+   decodes the remaining ``stdout`` via :func:`json.loads`, returning
+   the parsed structure.
 4. Failures surface as a single structured :exc:`PwshRunError` that
    carries the exit status and a truncated stderr fragment but never
    embeds the original script body or any auth material.
+
+Warning-stream hygiene (#3081)
+------------------------------
+
+When a cmdlet (or PowerShell module auto-loading, e.g. ``HoloDeck``'s
+"unapproved verbs" import warning) writes to the warning / error
+stream, ``pwsh`` under ``-EncodedCommand`` can serialise that record
+as a CLIXML block — a ``#< CLIXML`` preamble followed by an ``<Objs>``
+document — **onto stdout**, ahead of the real ``ConvertTo-Json``
+payload. ``-OutputFormat Text`` does **not** reliably suppress this
+(PowerShell issue #5912: it is ignored on a redirected stream), so
+:func:`pwsh_run` defends at the parse boundary: :func:`strip_clixml`
+removes every ``#< CLIXML ... </Objs>`` block from stdout before the
+empty-check and :func:`json.loads`, leaving the JSON payload intact.
+A cmdlet that emits *only* a CLIXML warning (no JSON) strips to empty
+and fails closed via the existing empty-stdout guard — the honest
+failure ``holodeck.config.show`` already reports. Ops that must not
+report false success additionally silence the warning stream at the
+source (``$WarningPreference = 'SilentlyContinue'``), which is the
+reliable workaround; the strip is the universal net for every op that
+does not.
 
 Safety contract
 ---------------
@@ -72,11 +95,18 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from typing import Any
 
 import structlog
 
-__all__ = ["PWSH_DEFAULT_DEPTH", "PwshRunError", "encode_pwsh_command", "pwsh_run"]
+__all__ = [
+    "PWSH_DEFAULT_DEPTH",
+    "PwshRunError",
+    "encode_pwsh_command",
+    "pwsh_run",
+    "strip_clixml",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -120,6 +150,40 @@ class PwshRunError(RuntimeError):
         super().__init__(message)
         self.exit_status = exit_status
         self.stderr = stderr[:_STDERR_MAX_LEN]
+
+
+#: One CLIXML block PowerShell can prepend to stdout when a warning / error
+#: record is serialised under ``-EncodedCommand``: the literal ``#< CLIXML``
+#: preamble followed by a single ``<Objs>...</Objs>`` document. The pattern
+#: is non-greedy to the first ``</Objs>`` so multiple stacked blocks (one per
+#: warning) each match their own document, and ``DOTALL`` lets the ``<Objs>``
+#: body span the newlines the serialiser emits. The trailing ``\s*`` also
+#: consumes the newline the serialiser writes after each block, so a JSON
+#: payload trailing the block comes back clean and a warning-only stdout
+#: strips to ``""``. ``ConvertTo-Json`` output never contains ``</Objs>``, so
+#: the payload itself always survives.
+_CLIXML_BLOCK_RE: re.Pattern[str] = re.compile(r"#<\s*CLIXML\b.*?</Objs>\s*", re.DOTALL)
+
+
+def strip_clixml(stdout: str) -> str:
+    """Remove PowerShell CLIXML warning/error blocks polluting *stdout* (#3081).
+
+    ``pwsh -EncodedCommand`` can serialise a warning or error record as a
+    ``#< CLIXML`` preamble + ``<Objs>...</Objs>`` document written to stdout
+    ahead of the real ``ConvertTo-Json`` payload (the ``HoloDeck`` module's
+    "unapproved verbs" import warning is the motivating case). Left in place
+    it makes :func:`json.loads` fail on otherwise-valid output. This removes
+    every such block, leaving the JSON payload — or, when the cmdlet emitted
+    *only* a warning, an empty string that the caller's empty-stdout guard
+    turns into an honest failure.
+
+    Public so the unit suite can assert the strip against fixture text without
+    driving the whole :func:`pwsh_run` transport. A ``stdout`` with no CLIXML
+    marker is returned unchanged (cheap fast-path — the common healthy case).
+    """
+    if "CLIXML" not in stdout:
+        return stdout
+    return _CLIXML_BLOCK_RE.sub("", stdout)
 
 
 def encode_pwsh_command(script: str) -> str:
@@ -209,6 +273,9 @@ async def pwsh_run(
         stdout = ""
     if not isinstance(stderr, str):
         stderr = ""
+    # Strip any CLIXML warning/error block pwsh serialised onto stdout ahead
+    # of the JSON payload (#3081) before the empty-check and json.loads below.
+    stdout = strip_clixml(stdout)
     exit_status: int | None = getattr(proc, "exit_status", None)
 
     # Structured logging discipline (mirrors the SSH adapter's

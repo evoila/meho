@@ -23,6 +23,8 @@ Runs against the ``sqlite+aiosqlite`` engine the autouse
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -140,6 +142,93 @@ async def test_submit_call_persists_result_envelope_retrievable_via_handle(
         "duration_ms": 42.0,
     }
     assert post.ended_at is not None
+
+
+@pytest.mark.asyncio
+async def test_async_dispatch_survives_caller_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that disconnects mid-flight does not abort the in-flight dispatch (#3176).
+
+    This is failure mode (b) on a large ``deploy_from_library``: on the
+    synchronous path the multi-GB OVF POST is awaited *inside* the request
+    handler, so a client disconnect cancels that task, closes the connection,
+    and vCenter rolls the half-created VM back. Async mode anchors the dispatch
+    in an independent background task (``asyncio.create_task``), decoupled from
+    the request — cancelling the caller cannot propagate into the in-flight
+    deploy. This drives that end to end: the dispatch blocks (modelling the
+    server-side transfer that outruns a read ceiling), the caller task is
+    cancelled, and the deploy still runs to completion with its envelope
+    persisted on the durable run row.
+    """
+    deploy_args = {
+        "connector_id": "vmware-rest-9.0",
+        "op_id": "vmware.composite.vm.deploy_from_library",
+        "target": "dc-vcenter",
+        "params": {"library_item": "installer-appliance", "name": "vm-installer"},
+    }
+    deploy_in_flight = asyncio.Event()
+    release_transfer = asyncio.Event()
+    deploy_completed = False
+
+    async def slow_deploy(operator: Operator, arguments: dict[str, object]) -> dict[str, object]:
+        nonlocal deploy_completed
+        deploy_in_flight.set()  # vCenter accepted the POST; the copy is running
+        await release_transfer.wait()  # the multi-GB copy that outruns a read ceiling
+        deploy_completed = True
+        return {
+            "status": "deployed",
+            "op_id": arguments["op_id"],
+            "result": {"vm_id": "vm-4700", "library_item_id": "item-installer"},
+        }
+
+    monkeypatch.setattr(meta_tools, "call_operation", slow_deploy)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+    operator = _operator(tenant_id=tenant_id)
+    service = OperationRunService()
+
+    captured: dict[str, uuid.UUID] = {}
+
+    async def caller() -> None:
+        # Models the async ``/operations/call`` request handler: submit, take
+        # the 202 handle, then hold the (now idle) connection to poll later.
+        captured["run_id"] = await service.submit_call(operator, dict(deploy_args))
+        await asyncio.sleep(3600)  # client still connected, waiting to poll
+
+    caller_task = asyncio.create_task(caller())
+
+    # Let the caller submit and the background dispatch reach the in-flight
+    # point (no DB IO happens once the dispatch is parked on the event).
+    await asyncio.wait_for(deploy_in_flight.wait(), timeout=5)
+    run_id = captured["run_id"]
+    background = service._store[run_id].task
+    assert not background.done()
+
+    # The client disconnects mid-transfer: its request task is cancelled.
+    caller_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller_task
+
+    # The in-flight deploy is untouched — the background task owns the POST and
+    # is a sibling of (not a child of) the cancelled caller task.
+    assert not background.done()
+    assert not background.cancelled()
+    assert not deploy_completed
+
+    # The server-side transfer finishes; the background task finalises.
+    release_transfer.set()
+    await background
+
+    assert deploy_completed
+    row = await service.poll(operator, run_id)
+    assert row.status == OperationRunStatus.SUCCEEDED.value
+    assert row.result is not None
+    assert row.result["status"] == "deployed"
+    assert row.result["result"]["vm_id"] == "vm-4700"
+    assert row.ended_at is not None
 
 
 @pytest.mark.asyncio

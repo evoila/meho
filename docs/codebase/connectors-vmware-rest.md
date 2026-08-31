@@ -1046,8 +1046,10 @@ which any real appliance copy blows past — so the POST used to raise
 (`vm.clone`: a raw `connector_error`) while vCenter finished the copy
 server-side. The two deploy sub-ops now pass a per-request `timeout`
 override, `_LIBRARY_ITEM_DEPLOY_TIMEOUT`
-(`connect=5 / read=1800 / write=1800 / pool=5` — a 30-min read/write
-ceiling), threaded `composite → _write_sub_op → HttpConnector._post_json →
+(`connect=5 / read=10800 / write=10800 / pool=5` — a 3-hour read/write
+ceiling, widened from the original 30 min after a 4.7 GB installer OVA to an
+NFS datastore on the Hetzner fabric outran that window live, #3176), threaded
+`composite → _write_sub_op → HttpConnector._post_json →
 client.request(timeout=)`. The override defaults to
 `httpx.USE_CLIENT_DEFAULT`, so **every other call keeps the unchanged 30s
 client default** — the global client timeout is deliberately *not* raised,
@@ -1057,6 +1059,24 @@ When a deploy genuinely faults at the transport layer, the structured
 detail names the exception *type* — `transport fault (ReadTimeout)` — since
 `str(httpx.ReadTimeout())` is the empty string (the `_vsphere_fault_detail`
 helper, #3076).
+
+**Async dispatch is the supported mode for multi-GB deploys (#3176 / #3079).**
+Widening the read ceiling is a *bounded* mitigation: a still-larger item or a
+slower fabric can outrun any fixed window, and on the synchronous path a caller
+that disconnects mid-transfer aborts the deploy session — vCenter rolls the
+half-created VM back (the second live failure mode on the 4.7 GB installer
+OVA). Both are cured by dispatching the deploy in **async governed mode**
+(`POST /api/v1/operations/call` with `async: true`, or the `call_operation`
+meta-tool's async flag; #3079 / PR #3201): the dispatch runs on a durable
+background task that owns the vCenter POST, the route returns `202` + a run
+handle (`GET /api/v1/operations/runs/{handle}` polls it, and the completed
+`DeploymentResult` envelope is persisted on the run row), and because that task
+is spawned via `asyncio.create_task` — independent of the request handler
+task — a dropped caller no longer propagates cancellation into the in-flight
+copy. The synchronous path stays the default for small items but is bounded by
+the ceiling above; an item large enough to outrun even 3 h needs the durable
+typed `HttpNfcLease` import (#2890), which streams disks against a lease with
+progress instead of coupling completion to one blocking read.
 
 **204 / empty-body write acks (#3082).** Several vCenter write endpoints
 acknowledge success with **204 No Content** and no body — the power actions

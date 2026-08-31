@@ -52,6 +52,7 @@ from meho_backplane.gateway.errors import (
 from meho_backplane.gateway.schemas import AssignmentDocument, AuthoredCheckItem
 from meho_backplane.operations._lookup import lookup_descriptor
 from meho_backplane.runner import wire
+from meho_backplane.runner.satellite_tier import SatelliteMintTier, classify_satellite_tier
 from meho_backplane.targets.resolver import (
     AmbiguousTargetError,
     TargetNotFoundError,
@@ -67,8 +68,18 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: v1 authorizes read-only workloads only.
-_SAFE_LEVEL = "safe"
+
+def _is_safe_tier(descriptor: EndpointDescriptor) -> bool:
+    """True when *descriptor* sits in the satellite-mint ``SAFE`` tier (#3188).
+
+    The recurring assignment authorises only the read-only ``SAFE`` tier;
+    ``remote-write`` (``caution``) work rides the one-shot capability-mint path
+    (``mint_gateway_command``), not this document, and the ``EXCLUDED``
+    (``dangerous`` / ``destructive``) tier never rides a runner at all.
+    Classified against the ladder shared with the central mint and the edge
+    executor — the three-layer mirror.
+    """
+    return classify_satellite_tier(descriptor.safety_level) is SatelliteMintTier.SAFE
 
 
 def descriptor_from_target(target: TargetORM) -> wire.ResolvedTargetDescriptor:
@@ -178,7 +189,7 @@ async def _validate_authored_item(
             reason=f"no enabled descriptor for connector "
             f"({cls.product}, {cls.version}, {cls.impl_id})",
         )
-    if descriptor.safety_level != _SAFE_LEVEL:
+    if not _is_safe_tier(descriptor):
         raise AssignmentOpNotSafeError(
             check_ref=item.check_ref, op=item.op, safety_level=descriptor.safety_level
         )
@@ -277,14 +288,13 @@ async def _materialize_item(
 
 
 def _is_runnable_safe(descriptor: EndpointDescriptor | None) -> bool:
-    """True when *descriptor* is an enabled, safe op the runner can execute.
+    """True when *descriptor* is an enabled, ``SAFE``-tier op the runner can execute.
 
     Requires a non-empty ``handler_ref``: the runner executes an op by
     importing that dotted handler, so a descriptor without one (an
-    ingested/generic op) is not remotely runnable and is dropped.
+    ingested/generic op) is not remotely runnable and is dropped. The tier
+    check routes through the shared satellite-mint ladder (#3188) so a
+    ``remote-write`` or ``EXCLUDED`` op is never materialised into the
+    recurring assignment.
     """
-    return (
-        descriptor is not None
-        and descriptor.safety_level == _SAFE_LEVEL
-        and bool(descriptor.handler_ref)
-    )
+    return descriptor is not None and _is_safe_tier(descriptor) and bool(descriptor.handler_ref)

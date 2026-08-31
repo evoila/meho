@@ -155,13 +155,15 @@ async def _claim() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("level", ["caution", "dangerous", "destructive"])
-async def test_mint_refuses_non_safe_op(monkeypatch: pytest.MonkeyPatch, level: str) -> None:
-    """A non-'safe' op is refused before the policy gate — no rows written.
+async def _mint_refused_before_policy_gate(
+    monkeypatch: pytest.MonkeyPatch, *, level: str
+) -> gc.MintResult:
+    """Mint an op at *level* with the policy gate wired to blow up if consulted.
 
-    The ``destructive`` tier (#3183) is transitively excluded from every
-    satellite by this same safe-only wall: a delete is never minted to a
-    runner, agreeing with the satellite write-path decision (#2901 / #3187).
+    The satellite-mint tier ladder (#3188) refuses an ``EXCLUDED`` or
+    unauthorised ``remote-write`` op **before** the policy gate, so a
+    consulted gate is a bug. Returns the refusal result for the caller to
+    assert the exact code + zero rows written.
     """
     await _seed_tenant()
     _patch_lookup(monkeypatch, _descriptor(safety_level=level))
@@ -183,9 +185,42 @@ async def test_mint_refuses_non_safe_op(monkeypatch: pytest.MonkeyPatch, level: 
             runner_id=_RUNNER,
         )
         await session.commit()
+    return result
+
+
+@pytest.mark.parametrize("level", ["dangerous", "destructive"])
+async def test_mint_refuses_excluded_op(monkeypatch: pytest.MonkeyPatch, level: str) -> None:
+    """A ``dangerous`` / ``destructive`` op is never minted — no rows written.
+
+    The ``EXCLUDED`` tier keeps the ``OP_NOT_SAFE`` refusal: the destructive
+    tier (#3183/#3196) is excluded from every satellite by default, so a
+    delete is never minted to a runner (#3225 conformance, satellite write-path
+    decision #2901 / #3187).
+    """
+    result = await _mint_refused_before_policy_gate(monkeypatch, level=level)
 
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.OP_NOT_SAFE
+    assert await _count(GatewayCommand) == 0
+    assert await _count(ApprovalRequest) == 0
+
+
+async def test_mint_refuses_remote_write_gate_unsatisfied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``caution`` (remote-write) op is refused fail-closed — no rows written.
+
+    The additive ``remote-write`` tier mints only through the composed gate
+    (per-runner allowlist + approval/policy), wired by the sibling tasks
+    (#3189-#3193). Until then the gate is fail-closed, so a remote-write op is
+    refused with the tier's own refusal code — distinct from ``OP_NOT_SAFE`` —
+    before the policy gate and without parking.
+    """
+    result = await _mint_refused_before_policy_gate(monkeypatch, level="caution")
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
+    assert "remote-write" in (result.refusal_reason or "")
     assert await _count(GatewayCommand) == 0
     assert await _count(ApprovalRequest) == 0
 

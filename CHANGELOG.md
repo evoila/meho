@@ -90,6 +90,45 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — governed delete on bind9: `bind9.record.delete` on the destructive tier + conformance (#3231 / #3198)
+
+- Registers the **second governed delete** — and the first
+  `safety_level="destructive"` op on a **typed SSH connector** — on the
+  bind9 connector (decision `docs/decisions/governed-delete-operations.md`,
+  requirement 1; the `vmware.composite.vm.destroy` tier machinery, #3198,
+  needed no change to reach a typed op). `bind9.record.delete` deletes
+  **exactly one** DNS record scoped by `(zone, name, type, rdata?)` — never
+  zone-wide, never a wildcard, never a whole-rrset sweep — for the
+  DNS-retirement leg of a governed environment teardown in a shared zone.
+  `safety_level="destructive"` + `requires_approval=True`: mandatory human
+  approval (no agent path, no standing grant, no self-approval even under
+  break-glass), a mandatory preview-hash binding, and a mandatory
+  blast-radius statement (the exact record + its sibling values,
+  `irreversibility="recreatable"`).
+- Deliberately narrower than the existing caution-tier
+  `bind9.record.remove` (which clears every A + AAAA at a name): `type` is
+  required and `rdata` disambiguates a multi-value name. **Fail-closed
+  structured refusals** mirror `vm.destroy`'s shape — `not_found` (no silent
+  success), `ambiguous` (candidates named), `unmanaged_zone` — with a
+  dispatch-time fail-closed re-read. The atomic-apply verify predicate
+  confirms the single deleted value is gone (`deleted=True` only then;
+  siblings preserved; a `view` switches to the view-precise `rndc
+  zonestatus` check).
+- Folds into the delete-shaped classifier via the **single source**
+  (`safety_level="destructive"` on the resolved descriptor), never a
+  re-declared pattern list (the #3213 fail-open lesson) — a conformance test
+  proves the `ServicePrincipalGrant` refusal holds with the op-id glob
+  patterns blanked. The park-time blast radius is built by a read-only
+  preview builder wired onto the `_preview` hook (mirroring
+  `argocd.ops_write_preview`).
+- Conformance (`tests/test_connectors_bind9_record_delete.py`): agent
+  `DENY`, `ServicePrincipalGrant` refusal (single-source + pattern),
+  no self-approval under break-glass, satellite mint `OP_NOT_SAFE`,
+  dispatch refused without a matching hash, park refused without a
+  blast-radius block, the fail-closed refusal paths, and the full
+  preview → parked approval (hash + blast radius) → **distinct human**
+  approve → audited resume flow deleting exactly one record.
+
 ### Added — satellite write path: per-runner capability allowlist (#3190)
 
 - Mechanism 2 of the composed write-tier gate: a per-runner-principal

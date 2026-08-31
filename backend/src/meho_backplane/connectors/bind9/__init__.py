@@ -35,6 +35,7 @@ tie-break ladder unambiguous: only the v2 triple advertises this
 class.
 """
 
+from meho_backplane.connectors.bind9 import ops_record_delete_preview  # noqa: F401
 from meho_backplane.connectors.bind9.connector import Bind9Connector
 from meho_backplane.connectors.bind9.ops import BIND9_OPS, Bind9Op
 from meho_backplane.connectors.registry import register_connector_v2

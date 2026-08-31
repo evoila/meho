@@ -97,6 +97,8 @@ if TYPE_CHECKING:
 __all__ = [
     "BIND9_RECORD_ADD_LLM_INSTRUCTIONS",
     "BIND9_RECORD_ADD_PARAMETER_SCHEMA",
+    "BIND9_RECORD_DELETE_LLM_INSTRUCTIONS",
+    "BIND9_RECORD_DELETE_PARAMETER_SCHEMA",
     "BIND9_RECORD_GET_LLM_INSTRUCTIONS",
     "BIND9_RECORD_GET_PARAMETER_SCHEMA",
     "BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS",
@@ -105,6 +107,7 @@ __all__ = [
     "RemoteCommandError",
     "ZoneResolutionError",
     "bind9_record_add",
+    "bind9_record_delete",
     "bind9_record_get",
     "bind9_record_remove",
     "parse_dig_answer",
@@ -711,6 +714,166 @@ def _remove_record_from_zonefile(
 
 
 # ---------------------------------------------------------------------------
+# Scoped single-record delete (governed-delete tier, #3231)
+# ---------------------------------------------------------------------------
+#
+# ``bind9.record.delete`` (safety_level=destructive) deletes exactly ONE
+# record scoped by (zone, name, type, and — where the name carries more than
+# one value of that type — rdata). It is deliberately narrower than
+# ``bind9.record.remove`` (which clears every A + AAAA at a name in one
+# caution-tier write): a governed delete on the destructive tier must name
+# the single record that dies, never a zone-wide or multi-value sweep.
+
+
+def _canon_rdata(record_type: str, value: str) -> str:
+    """Return the canonical wire-form text of *value* for *record_type*.
+
+    dnspython normalises rdata to a canonical form (IPv6 zero-compression,
+    lower-case hex, etc.), so ``2001:DB8:0:0::1`` and ``2001:db8::1`` compare
+    equal. Raises :class:`dns.exception.DNSException` on a value that is not
+    valid rdata for the type.
+    """
+    rdtype = dns.rdatatype.from_text(record_type)
+    return dns.rdata.from_text(dns.rdataclass.IN, rdtype, value).to_text()
+
+
+def _rdata_matches(candidate: str, target: str, record_type: str) -> bool:
+    """``True`` when *candidate* and *target* are the same rdata value.
+
+    Compares the raw strings first (cheap, exact), then falls back to the
+    canonical wire form so an operator-typed value in a non-canonical
+    spelling still matches the stored record. A *target* that is not valid
+    rdata for the type never matches (fail-closed: an unparseable
+    disambiguator resolves to "no such record", not a wrong deletion).
+    """
+    if candidate == target:
+        return True
+    try:
+        return _canon_rdata(record_type, candidate) == _canon_rdata(record_type, target)
+    except dns.exception.DNSException:
+        return False
+
+
+def _find_record_matches(
+    zonefile_text: str,
+    *,
+    zone_name: str,
+    fqdn: str,
+    record_type: str,
+) -> list[str]:
+    """Return the rdata values currently at ``(fqdn, record_type)`` in the zone.
+
+    Pure function over the zonefile text. One entry per record value in the
+    rrset (canonical wire form), in a stable sorted order so the blast-radius
+    children and the ambiguity candidates are deterministic. An absent name /
+    rrset yields ``[]`` (a legitimate "record does not exist" statement, not
+    an error). Used by both the preview builder (blast radius + ambiguity
+    visibility) and the handler (fail-closed re-read) so the two paths cannot
+    drift on what "matches".
+    """
+    origin = zone_name if zone_name.endswith(".") else zone_name + "."
+    zone = dns.zone.from_text(
+        zonefile_text,
+        origin=origin,
+        relativize=False,
+        check_origin=False,
+    )
+    fqdn_abs = fqdn if fqdn.endswith(".") else fqdn + "."
+    name = dns.name.from_text(fqdn_abs)
+    rdtype = dns.rdatatype.from_text(record_type)
+    rds = zone.get_rdataset(name, rdtype)
+    if rds is None:
+        return []
+    return sorted(rd.to_text() for rd in rds)
+
+
+def _resolve_delete_target(
+    matches: list[str],
+    *,
+    record_type: str,
+    rdata_param: str | None,
+) -> tuple[str | None, str]:
+    """Resolve the single rdata value to delete, or a refusal status.
+
+    Returns ``(target_rdata, status)`` where ``status`` is one of:
+
+    * ``"ok"`` — exactly one record is targeted; ``target_rdata`` is the
+      stored value to remove.
+    * ``"not_found"`` — no record matches (name/type absent, or a supplied
+      ``rdata`` is not among the values).
+    * ``"ambiguous"`` — the name carries more than one value of the type and
+      no ``rdata`` was supplied to pick one; ``target_rdata`` is ``None`` and
+      the caller names ``matches`` as the candidates.
+
+    Fail-closed by construction: it never returns ``"ok"`` for anything but a
+    single, uniquely-identified record.
+    """
+    if not matches:
+        return None, "not_found"
+    if rdata_param is not None:
+        hits = [m for m in matches if _rdata_matches(rdata_param, m, record_type)]
+        if len(hits) == 1:
+            return hits[0], "ok"
+        if not hits:
+            return None, "not_found"
+        # More than one stored value canonicalises to the same rdata — not a
+        # shape a real zonefile produces (dnspython de-dupes rrsets), but the
+        # branch stays fail-closed rather than deleting an arbitrary one.
+        return None, "ambiguous"
+    if len(matches) == 1:
+        return matches[0], "ok"
+    return None, "ambiguous"
+
+
+def _delete_one_record_from_zonefile(
+    zonefile_text: str,
+    *,
+    zone_name: str,
+    fqdn: str,
+    record_type: str,
+    rdata: str,
+) -> str:
+    """Return new zonefile text with exactly the one ``(fqdn, type, rdata)`` gone.
+
+    Pure transformation — parses with dnspython, removes the single rdata
+    from the rrset (deleting the whole rrset only when that was its last
+    value), bumps the SOA serial, renders. Every other record at the name —
+    including other values of the *same* type — is preserved. The caller
+    (:func:`bind9_record_delete`) resolves *rdata* to a value it has already
+    confirmed is present via :func:`_resolve_delete_target`, so this never
+    silently no-ops.
+
+    Raises :class:`ValueError` if the resolved rdata is unexpectedly absent
+    (a between-read race the handler's re-read is meant to catch) rather than
+    bumping the serial on a phantom delete.
+    """
+    origin = zone_name if zone_name.endswith(".") else zone_name + "."
+    zone = dns.zone.from_text(
+        zonefile_text,
+        origin=origin,
+        relativize=False,
+        check_origin=False,
+    )
+    fqdn_abs = fqdn if fqdn.endswith(".") else fqdn + "."
+    name = dns.name.from_text(fqdn_abs)
+    rdtype = dns.rdatatype.from_text(record_type)
+    rds = zone.get_rdataset(name, rdtype)
+    if rds is None:
+        raise ValueError(f"no {record_type} rrset at {fqdn!r} to delete from")
+    victim = next(
+        (rd for rd in rds if _rdata_matches(rdata, rd.to_text(), record_type)),
+        None,
+    )
+    if victim is None:
+        raise ValueError(f"{record_type} value {rdata!r} not present at {fqdn!r}")
+    rds.remove(victim)  # type: ignore[no-untyped-call]
+    if len(rds) == 0:
+        zone.delete_rdataset(name, rdtype)
+    _bump_soa_serial(zone)
+    return _zonefile_text(zone)
+
+
+# ---------------------------------------------------------------------------
 # Write handlers
 # ---------------------------------------------------------------------------
 
@@ -840,6 +1003,35 @@ def _dig_remove_verify(fqdn: str) -> str:
         'printf "%s still resolves after remove (A: %s AAAA: %s)\\n" '
         f'{quoted_fqdn} "$A" "$AAAA"; '
         "exit 1"
+    )
+
+
+def _dig_value_absent_verify(fqdn: str, record_type: str, rdata: str) -> str:
+    """Scoped verify predicate for ``record.delete`` — one value gone, others kept.
+
+    The post-delete verification read for a single-record scoped delete: the
+    deleted ``(type, rdata)`` value must be absent from
+    ``dig @localhost <fqdn> <type> +short``, while any *other* values at the
+    same name/type legitimately remain (this is why ``record.remove``'s
+    "resolves to nothing" predicate is wrong here). ``grep -qxF`` is literal
+    whole-line so a substring cannot false-match. ``record_type`` is one of
+    the enum-validated A / AAAA tokens (never operator-free-text), so it is
+    safe to interpolate; ``fqdn`` / ``rdata`` are ``shlex.quote``-wrapped. On
+    a still-present value the observed ``dig`` output is echoed so the
+    ``AtomicApplyError`` detail is diagnosable (the #2897 discipline).
+    """
+    quoted_fqdn = shlex.quote(fqdn)
+    quoted_rdata = shlex.quote(rdata)
+    # ``if <present> then <diagnose>; exit 1; fi; exit 0`` — a grep miss (the
+    # value is gone, the success case) falls through to ``exit 0`` and never
+    # aborts early under the pipeline's ``set -e``.
+    return (
+        f"ANSWER=$(dig @localhost {quoted_fqdn} {record_type} +short 2>&1) || true; "
+        f'if printf "%s\\n" "$ANSWER" | grep -qxF {quoted_rdata}; then '
+        f'printf "{record_type} value %s still resolves for %s after delete; '
+        f'dig +short returned:\\n%s\\n" {quoted_rdata} {quoted_fqdn} "$ANSWER"; '
+        "exit 1; fi; "
+        "exit 0"
     )
 
 
@@ -1101,6 +1293,216 @@ async def bind9_record_remove(
         "op_class": "write",
         "result_state_before": apply_result.state_before,
         "result_state_after": apply_result.state_after,
+    }
+
+
+def _delete_refusal(
+    status: str,
+    *,
+    fqdn: str,
+    record_type: str,
+    rdata: str | None,
+    zone: str | None,
+    view: str | None,
+    guidance: str,
+    candidates: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a structured, fail-closed ``record.delete`` refusal envelope.
+
+    Mirrors the destructive-tier refusal shape of ``vmware.composite.vm.destroy``
+    (#3198): a ``status`` naming the refusal reason, ``deleted=False`` (never
+    a silent success), and an operator-actionable ``guidance`` sentence.
+    ``candidates`` carries the competing rdata values on the ``ambiguous``
+    path so the operator can re-issue with the ``rdata`` that picks one.
+    """
+    return {
+        "status": status,
+        "deleted": False,
+        "fqdn": fqdn,
+        "type": record_type,
+        "rdata": rdata,
+        "zone": zone,
+        "file": None,
+        "view": view,
+        "candidates": candidates or [],
+        "op_class": "write",
+        "result_state_before": None,
+        "result_state_after": None,
+        "guidance": guidance,
+    }
+
+
+async def bind9_record_delete(
+    connector: Bind9Connector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``bind9.record.delete`` -- governed single-record delete (#3231).
+
+    The bind9 arm of the governed-delete tier (decision
+    ``docs/decisions/governed-delete-operations.md``): ``safety_level=
+    destructive`` + ``requires_approval=True``, so it rides the hardest gate
+    MEHO has — mandatory human approval (no agent path, no standing grant, no
+    self-approval even under break-glass), a mandatory preview-hash binding,
+    and a mandatory blast-radius statement (built by
+    :func:`._ops_record_delete_preview._bind9_record_delete_preview`).
+
+    Deletes **exactly one** record scoped by ``(zone, name, type, rdata?)`` —
+    never zone-wide, never a multi-value sweep. ``type`` is required (unlike
+    ``record.remove``, which clears both A and AAAA at a name); ``rdata`` is
+    required only to disambiguate a name that carries more than one value of
+    that type.
+
+    **Fail-closed re-read at dispatch time (post-approval).** Like
+    ``vm.destroy``'s power-state re-read, the handler re-resolves the target
+    against live state — a record added/changed between park and approval is
+    caught — and returns a structured refusal rather than a broad or wrong
+    deletion:
+
+    * ``unmanaged_zone`` — no writable zone this server serves owns the FQDN
+      (or a split-horizon zone needs a ``view``); nothing is touched.
+    * ``not_found`` — the ``(name, type[, rdata])`` resolves to no record;
+      ``deleted=False`` (never a silent success).
+    * ``ambiguous`` — the name carries multiple values of the type and no
+      ``rdata`` was supplied; refused with the candidate values named.
+
+    On a uniquely-resolved target it removes that one value via the atomic
+    stage-validate-commit-reload-verify-rollback primitive. The verify
+    predicate is the **post-delete verification read** — the deleted value
+    must be absent from ``dig`` (a ``view`` switches it to the view-precise
+    ``rndc zonestatus`` serial check, #2897) — so ``deleted=True`` is
+    returned only after the record is confirmed gone; any verify miss rolls
+    the zone back byte-identical and raises :class:`AtomicApplyError`.
+    """
+    fqdn: str = params["fqdn"]
+    record_type: str = params["type"].upper()
+    rdata_param: str | None = params.get("rdata")
+    explicit_zone: str | None = params.get("zone")
+    explicit_view: str | None = params.get("view")
+
+    if record_type not in _WRITE_SUPPORTED_TYPES:
+        raise ValueError(
+            f"record.delete only supports A / AAAA; got type={record_type!r}. "
+            f"CNAME / MX / TXT deletes are out of scope."
+        )
+
+    sudo_password = await _sudo_password_from_target(connector, target, operator)
+
+    try:
+        zone_name, zonefile_path, view = await _resolve_zone_and_path(
+            connector,
+            target,
+            fqdn=fqdn,
+            explicit_zone=explicit_zone,
+            explicit_view=explicit_view,
+            operator=operator,
+        )
+    except ZoneResolutionError as exc:
+        return _delete_refusal(
+            "unmanaged_zone",
+            fqdn=fqdn,
+            record_type=record_type,
+            rdata=rdata_param,
+            zone=explicit_zone,
+            view=explicit_view,
+            guidance=str(exc),
+            candidates=exc.candidates,
+        )
+
+    current_text = await _read_zonefile_text(connector, target, zonefile_path, operator)
+    try:
+        matches = _find_record_matches(
+            current_text, zone_name=zone_name, fqdn=fqdn, record_type=record_type
+        )
+    except dns.exception.DNSException as exc:
+        raise ValueError(f"failed to parse zonefile for zone {zone_name!r}: {exc}") from exc
+
+    target_rdata, status = _resolve_delete_target(
+        matches, record_type=record_type, rdata_param=rdata_param
+    )
+    if status == "not_found":
+        detail = f" with rdata {rdata_param!r}" if rdata_param is not None else ""
+        return _delete_refusal(
+            "not_found",
+            fqdn=fqdn,
+            record_type=record_type,
+            rdata=rdata_param,
+            zone=zone_name,
+            view=view,
+            guidance=(
+                f"no {record_type} record at {fqdn!r}{detail} in zone {zone_name!r}; "
+                "nothing deleted"
+            ),
+        )
+    if status == "ambiguous":
+        return _delete_refusal(
+            "ambiguous",
+            fqdn=fqdn,
+            record_type=record_type,
+            rdata=rdata_param,
+            zone=zone_name,
+            view=view,
+            candidates=matches,
+            guidance=(
+                f"{fqdn!r} carries {len(matches)} {record_type} records "
+                f"({', '.join(matches)}); pass ``rdata`` to name the single "
+                "record to delete — this op never deletes more than one"
+            ),
+        )
+
+    assert target_rdata is not None  # status == "ok" ⇒ a resolved value
+    try:
+        new_text = _delete_one_record_from_zonefile(
+            current_text,
+            zone_name=zone_name,
+            fqdn=fqdn,
+            record_type=record_type,
+            rdata=target_rdata,
+        )
+    except (dns.exception.DNSException, ValueError) as exc:
+        raise ValueError(f"failed to transform zonefile for zone {zone_name!r}: {exc}") from exc
+
+    # View-aware verify — see bind9_record_add for the #2897 rationale. The
+    # no-views path asserts the deleted VALUE is gone (others at the name may
+    # remain), not that the name stops resolving.
+    if explicit_view is not None:
+        verify_cmd = _zonestatus_serial_verify(
+            zone_name, explicit_view, _soa_serial_from_text(new_text, zone_name)
+        )
+    else:
+        verify_cmd = _dig_value_absent_verify(fqdn, record_type, target_rdata)
+
+    apply_result = await atomic_apply(
+        connector,
+        target,
+        operator=operator,
+        sudo_password=sudo_password,
+        audit_slice_path=zonefile_path,
+        zone_name=zone_name,
+        staged_bytes=new_text.encode("utf-8"),
+        verify_command=verify_cmd,
+    )
+
+    # Chassis audit enrichment — see bind9_record_add for rationale.
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=apply_result.state_before,
+        audit_state_after=apply_result.state_after,
+    )
+    return {
+        "status": "deleted",
+        "deleted": True,
+        "fqdn": fqdn,
+        "type": record_type,
+        "rdata": target_rdata,
+        "zone": zone_name,
+        "file": zonefile_path,
+        "view": view,
+        "candidates": [],
+        "op_class": "write",
+        "result_state_before": apply_result.state_before,
+        "result_state_after": apply_result.state_after,
+        "guidance": None,
     }
 
 
@@ -1372,6 +1774,178 @@ BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+_DELETE_WARNING = (
+    "GOVERNED DELETE (destructive tier). This op deletes exactly ONE record "
+    "scoped by (zone, name, type, and — when the name carries more than one "
+    "value of that type — rdata); it never deletes zone-wide, a wildcard "
+    "match, or a whole rrset. It is ``safety_level=destructive`` + "
+    "``requires_approval=True``: the hardest gate MEHO has — mandatory human "
+    "approval always (no agent path, no standing grant, no self-approval even "
+    "under break-glass), a mandatory preview-hash binding, and a mandatory "
+    "blast-radius statement (the exact zone / name / type / rdata that dies, "
+    "plus the record's sibling values) the four-eyes approver reads before "
+    "deciding. Change is global and atomic: the atomic-apply primitive stages, "
+    "runs ``named-checkzone`` + ``rndc reload`` + a verify predicate that "
+    "confirms the deleted value is gone, and rolls the ``/etc/bind/`` tree "
+    "back byte-identical on any failure. Prefer ``bind9.record.delete`` over "
+    "``bind9.record.remove`` when a shared zone must retire a single record "
+    "under governance (environment teardown); ``record.remove`` is the "
+    "un-governed caution-tier both-families clear."
+)
+
+
+BIND9_RECORD_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "fqdn": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Fully-qualified domain name of the record to delete, e.g. "
+                "``api.example.test``. Trailing dot optional. The handler "
+                "resolves the owning zone from ``named-checkconf -p`` by "
+                "longest-suffix match unless ``zone`` is set explicitly; an "
+                "FQDN outside every writable zone is refused "
+                "``unmanaged_zone``."
+            ),
+        },
+        "type": {
+            "type": "string",
+            "enum": sorted(_WRITE_SUPPORTED_TYPES),
+            "description": (
+                "Record type to delete — required. Only A and AAAA are "
+                "supported. Required (unlike ``record.remove``, which clears "
+                "both A and AAAA) because a governed delete must name the "
+                "single record type that dies."
+            ),
+        },
+        "rdata": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional. The exact record value to delete (e.g. the IP for "
+                "an A record). Required only when the name carries more than "
+                "one value of the type: without it a multi-value name is "
+                "refused ``ambiguous`` with the candidate values named. "
+                "Compared in canonical form, so a non-canonical spelling "
+                "still matches."
+            ),
+        },
+        "zone": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional. Owning zone name. When omitted, resolved by "
+                "longest-suffix match against ``named-checkconf -p`` the same "
+                "way ``record.add`` / ``record.remove`` do."
+            ),
+        },
+        "view": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Optional. Split-horizon view that owns the zone. Required "
+                "only when the zone is declared in more than one view "
+                "(otherwise the resolve step refuses ``unmanaged_zone`` and "
+                "lists the candidate views). Selects which view's zonefile is "
+                "edited and switches verification to the view-precise "
+                "``rndc zonestatus`` check."
+            ),
+        },
+    },
+    "required": ["fqdn", "type"],
+    "additionalProperties": False,
+}
+
+
+_BIND9_RECORD_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "not_found", "ambiguous", "unmanaged_zone"],
+            "description": (
+                "``'deleted'`` on a successful single-record delete; "
+                "``'not_found'`` when the (name, type[, rdata]) resolves to no "
+                "record (deleted=False, no silent success); ``'ambiguous'`` "
+                "when the name carries multiple values of the type and no "
+                "``rdata`` was given (candidates named); ``'unmanaged_zone'`` "
+                "when no writable zone this server serves owns the FQDN."
+            ),
+        },
+        "deleted": {
+            "type": "boolean",
+            "description": (
+                "``True`` only after the record is verified gone (the "
+                "atomic-apply verify predicate passed); ``False`` on every "
+                "refusal path."
+            ),
+        },
+        "fqdn": {"type": "string"},
+        "type": {"type": "string", "enum": sorted(_WRITE_SUPPORTED_TYPES)},
+        "rdata": {
+            "type": ["string", "null"],
+            "description": (
+                "The deleted value on success; the requested rdata (or null) on a refusal."
+            ),
+        },
+        "zone": {"type": ["string", "null"]},
+        "file": {"type": ["string", "null"]},
+        "view": {"type": ["string", "null"]},
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "The competing rdata values on the ``ambiguous`` refusal; empty otherwise."
+            ),
+        },
+        "op_class": {"type": "string", "enum": ["write"]},
+        "result_state_before": {"type": ["string", "null"]},
+        "result_state_after": {"type": ["string", "null"]},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "deleted", "fqdn", "type"],
+    "additionalProperties": False,
+}
+
+
+BIND9_RECORD_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Delete a single DNS record from a bind9-served zone under "
+        "governance — the DNS-retirement leg of an environment teardown in a "
+        "shared zone. " + _DELETE_WARNING
+    ),
+    "parameter_hints": {
+        "fqdn": "Required. The FQDN of the record to delete. Trailing dot optional.",
+        "type": "Required. ``A`` or ``AAAA`` — the single record type to delete.",
+        "rdata": (
+            "Optional. The exact value to delete; required only to "
+            "disambiguate a name with more than one value of the type (the "
+            "``ambiguous`` refusal names the candidates)."
+        ),
+        "zone": (
+            "Optional. Owning zone. Omit to let the handler pick the "
+            "longest-suffix-matching zone automatically."
+        ),
+        "view": (
+            "Optional. Split-horizon view that owns the zone. Needed only "
+            "when the zone is declared in multiple views."
+        ),
+    },
+    "output_shape": (
+        "{'status', 'deleted', 'fqdn', 'type', 'rdata', 'zone', 'file', "
+        "'view', 'candidates', 'op_class': 'write', 'result_state_before', "
+        "'result_state_after', 'guidance'}. ``deleted`` is True only after "
+        "the delete is verified; ``status`` names the refusal on the "
+        "not_found / ambiguous / unmanaged_zone paths."
+    ),
+}
+
+
 # ---------------------------------------------------------------------------
 # Op metadata table
 # ---------------------------------------------------------------------------
@@ -1442,5 +2016,29 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
         safety_level="caution",
         requires_approval=False,
         llm_instructions=BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS,
+    ),
+    Bind9Op(
+        op_id="bind9.record.delete",
+        handler_attr="bind9_record_delete",
+        summary="Delete ONE governed record (zone/name/type[/rdata]) — destructive tier.",
+        description=(
+            "The bind9 arm of the governed-delete tier (#3231, decision "
+            "docs/decisions/governed-delete-operations.md). Deletes exactly "
+            "one record scoped by (zone, name, type, and — where the name "
+            "carries multiple values of that type — rdata); never zone-wide, "
+            "never a wildcard match, never a whole-rrset sweep. Atomic "
+            "stage-validate-commit-reload-verify-rollback; the verify "
+            "predicate confirms the deleted value is gone (deleted=True only "
+            "then). Fail-closed structured refusals: ``not_found`` (no such "
+            "record), ``ambiguous`` (multiple values, no rdata — candidates "
+            "named), ``unmanaged_zone`` (no writable zone owns the FQDN). " + _DELETE_WARNING
+        ),
+        parameter_schema=BIND9_RECORD_DELETE_PARAMETER_SCHEMA,
+        response_schema=_BIND9_RECORD_DELETE_RESPONSE_SCHEMA,
+        group_key="record",
+        tags=("write", "record", "delete", "destructive", "atomic-apply"),
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=BIND9_RECORD_DELETE_LLM_INSTRUCTIONS,
     ),
 )

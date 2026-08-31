@@ -13,7 +13,7 @@ Postgres-backed ``audit_log``.
 What this harness proves (Task #591 DoD)
 =========================================
 
-* All 11 bind9 ops registered into ``endpoint_descriptor`` via
+* All 12 bind9 ops registered into ``endpoint_descriptor`` via
   :func:`~meho_backplane.operations.typed_register.register_typed_operation`
   by ``Bind9Connector.register_operations()``. The full set is reachable
   via ``search_operations(connector_id="bind9-ssh-9.x", query=...)``;
@@ -128,7 +128,8 @@ _TARGET_NAME: str = "bind9-e2e"
 #: Every op id this harness exercises. Pinned here (rather than
 #: re-derived from ``BIND9_OPS``) so a registration regression
 #: surfaces as a clear "missing op" assertion failure rather than a
-#: silent test-count change. The eleven ops correspond to G3.4-T1..T4.
+#: silent test-count change. The twelve ops correspond to G3.4-T1..T4
+#: plus the #3231 governed-delete-tier ``bind9.record.delete``.
 EXPECTED_OP_IDS: tuple[str, ...] = (
     "bind9.about",
     "bind9.zone.list",
@@ -136,6 +137,7 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "bind9.record.get",
     "bind9.record.add",
     "bind9.record.remove",
+    "bind9.record.delete",
     "bind9.config.show",
     "bind9.config.apply_file",
     "bind9.config.apply_views",

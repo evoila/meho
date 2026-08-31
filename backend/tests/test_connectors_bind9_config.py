@@ -784,12 +784,12 @@ class TestT4OpsRegistration:
     """The new T4 ops carry the right safety + audit metadata."""
 
     def test_all_four_t4_ops_registered(self) -> None:
-        """Eleven total ops -- the full Initiative #367 §4 surface."""
+        """Twelve total ops -- the Initiative #367 §4 surface + #3231 delete."""
         op_ids = {op.op_id for op in BIND9_OPS}
         for expected in _T4_OP_IDS:
             assert expected in op_ids
-        # All eleven landed.
-        assert len(BIND9_OPS) == 11
+        # All twelve landed (11 from #367 §4 + the #3231 governed delete).
+        assert len(BIND9_OPS) == 12
 
     @pytest.mark.parametrize(
         "op_id, expected_safety, expected_requires_approval",

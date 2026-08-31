@@ -139,3 +139,59 @@ Three sub-points are recorded here as recommendations, resolved on PR review:
 - Consumer scenarios in the meho-automation design doc
   (evoila-bosnia/meho-internal#223) are updated to match under the implementation
   Tasks, not here.
+
+## Amendment (2026-08-31) — dispatch flight recorder cross-reference
+
+Added once the dispatch flight recorder's capture, redaction, and storage
+landed ([docs/decisions/dispatch-flight-recorder.md](dispatch-flight-recorder.md),
+Initiative [#3207](https://github.com/evoila/meho/issues/3207); store #3212,
+redaction #3213, capture #3214). It discharges the reciprocal cross-reference
+that decision flagged as a deliberate follow-up ("Interactions with sibling
+decisions" → "Satellite write path"). It records only what the merged code does
+today and grants no new capability.
+
+**Satellite-executed dispatches are not traced today.** The flight recorder's
+capture scope is opened exactly once, inside the central dispatcher's
+`_execute_and_audit` (`operations/dispatcher.py:706` `begin_dispatch_capture` /
+`:730` `end_dispatch_capture`), keyed on the central `audit_log.id`. A satellite
+runner does **not** go through that path: it executes a minted work item off-net
+through `runner/executor.py` (`execute_work_item` → `_invoke`), which — per that
+module's docstring — "reuses the chassis's DB-free handler-resolution primitives
+… but **not** the DB-bound `dispatcher.dispatch`." No capture scope is ever
+opened on the runner, so:
+
+- the shared connector seams the runner loads still *call* the recorder
+  (`flight_recorder.capture.span_start` on the httpx seam
+  `connectors/adapters/http.py`; `flight_recorder.typed.typed_span_start` on the
+  SSH seam `connectors/adapters/ssh.py`), but every call is **inert** — each
+  returns `None` / no-ops while `_active_capture_var` is unset
+  (`flight_recorder/capture.py`, `flight_recorder/typed.py`), so no span is
+  produced; and
+- the runner has no Postgres trace store to persist to — the dedicated trace
+  table and its retention reaper (F6 / F4, #3212) live on the central instance
+  only.
+
+The central satellite **mint** path (`operations/gateway_commands.py`
+`mint_gateway_command`) re-runs the dispatcher's pre-execution ladder and writes
+its own gateway audit row; it does **not** call `_execute_and_audit`, so it opens
+no capture scope and produces no trace either. The satellite-mint tier ladder
+(#3188, `runner/satellite_tier.py`) — mirrored at the mint, the assignment
+materialiser, and the edge executor's `_screen_item` — does not change this:
+`dangerous` / `destructive` ops are `EXCLUDED` and never minted, and the additive
+`remote-write` (`caution`) tier is fail-closed at `evaluate_remote_write_gate`
+until its per-runner allowlist + approval binding is wired (#3189–#3193), so
+today only `safe`-tier ops actually execute on a runner. Even once the write tier
+is provisioned, a `remote-write` item still executes through `execute_work_item`
+→ `_invoke` — the same `dispatcher.dispatch`-bypassing path — so it too opens no
+capture scope. No satellite dispatch, of any tier, is traced today.
+
+**The recording contract is normative if/when remote capture is instrumented.**
+The flight-recorder decision fixes the rules any trace must obey — the F2 header
+allowlist + fail-closed body redaction, the F3 caps (64 KB/span, 1 MB/trace, ~50
+spans), and the F4 retention window. Should the satellite path ever record its
+off-net request/response traffic, that traffic must be captured under those
+**same** rules. That off-net instrumentation does **not** exist today and is
+**not** filed as an issue — it remains a follow-up task. It is distinct from, and
+does not replace, the store-and-forward **effect** audit (mechanism 4 above),
+which stays the permanent v0.1-spec §6 record; the flight recorder is only the
+short-lived request/response exhaust, never that record.

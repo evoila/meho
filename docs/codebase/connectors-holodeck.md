@@ -77,6 +77,19 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   base64) and the `-EncodedCommand` argv shape are unchanged from the
   original design.
 
+  **CLIXML warning-stream hygiene (#3081).** `pwsh -EncodedCommand` can
+  serialise a warning / error record — notably the `HoloDeck` module's
+  "unapproved verbs" auto-load warning — as a `#< CLIXML … </Objs>` block
+  written to **stdout** ahead of the real `ConvertTo-Json` payload, which
+  makes `json.loads` fail on otherwise-valid output. `-OutputFormat Text`
+  does not reliably suppress it (PowerShell #5912). `strip_clixml(stdout)`
+  removes every such block before the empty-check and parse; a cmdlet that
+  emits *only* a warning strips to empty and fails closed via the existing
+  empty-stdout guard (the honest failure `config.show` already reports).
+  This is the **single shared seam**, so every pwsh-backed op benefits at
+  once. Ops that must never report false success also silence the warning
+  at the source (`$WarningPreference = 'SilentlyContinue'`).
+
 - **Op metadata** (`ops.py`) — the `HolodeckOp` dataclass and the
   `HOLODECK_OPS` tuple. T1 shipped the single `holodeck.about` canary; T2
   (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
@@ -392,7 +405,15 @@ broadcast surfaces.
   approves a config that would fail. `validate_config_apply_params` re-expresses
   the same rule as a clear string for the handler belt-and-braces and the direct
   test. It is deliberately **not** pinned credential-class, so it keeps its
-  generic param-echo preview (no secret is ever a param).
+  generic param-echo preview (no secret is ever a param). **Fail-closed
+  (#3081):** the op reports `applied: true` **only** when the cmdlet returns a
+  non-null `configID` **and** the persisted config file
+  (`/holodeck-runtime/config/<id>.json`) exists on disk — a verify-after-write
+  via `Test-Path` folded into the same script. A run that writes nothing (the
+  CLIXML import-warning corrupting stdout, or `New-HoloDeckConfig` failing
+  silently) returns `{applied: false, config_id, error}` instead of the
+  self-contradictory `{applied: true, config_id: null}` that let a runbook
+  proceed on a false premise.
 - **`holodeck.instance.start`** (group `deploy-lifecycle`). Runs a **single-shot
   fail-fast `Connect-VIServer` precheck before launch**: a pwsh script reads the
   persisted config on the appliance, builds a `PSCredential`, and makes exactly

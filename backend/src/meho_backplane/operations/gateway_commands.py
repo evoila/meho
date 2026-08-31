@@ -83,6 +83,11 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.runner.satellite_tier import (
+    SatelliteMintTier,
+    classify_satellite_tier,
+    evaluate_remote_write_gate,
+)
 
 __all__ = [
     "GatewayCommandAlreadyConsumedError",
@@ -135,16 +140,20 @@ class MintRefusalCode(StrEnum):
     """Closed vocabulary of central mint refusals.
 
     Every value is a fail-closed outcome: the command is **not** minted, so
-    it never reaches a runner. ``OP_NOT_SAFE`` is the v1 read-only wall;
-    ``POLICY_DENIED`` / ``NEEDS_APPROVAL`` are the policy-gate verdicts that
-    are not ``AUTO_EXECUTE`` (change-ops-over-gateway is v2, so a
-    ``needs-approval`` verdict is refused here rather than parked).
+    it never reaches a runner. ``OP_NOT_SAFE`` walls off the
+    :attr:`~meho_backplane.runner.satellite_tier.SatelliteMintTier.EXCLUDED`
+    tier (``dangerous`` / ``destructive`` — never minted to a satellite);
+    ``REMOTE_WRITE_GATE_UNSATISFIED`` is the fail-closed refusal of the
+    additive ``remote-write`` tier while its composed gate is unprovisioned
+    (#3188); ``POLICY_DENIED`` / ``NEEDS_APPROVAL`` are the policy-gate
+    verdicts that are not ``AUTO_EXECUTE``.
     """
 
     DESCRIPTOR_UNKNOWN = "descriptor_unknown"
     INVALID_PARAMS = "invalid_params"
     INVALID_OP_SCHEMA = "invalid_op_schema"
     OP_NOT_SAFE = "op_not_safe"
+    REMOTE_WRITE_GATE_UNSATISFIED = "remote_write_gate_unsatisfied"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -293,10 +302,15 @@ async def mint_gateway_command(
     2. ``validate_params`` — invalid params → :attr:`MintRefusalCode.INVALID_PARAMS`;
        a stored schema whose own ``$ref`` cannot resolve (#3095) →
        :attr:`MintRefusalCode.INVALID_OP_SCHEMA`.
-    3. **safe-only wall** — ``descriptor.safety_level != 'safe'`` →
-       :attr:`MintRefusalCode.OP_NOT_SAFE`. Checked **before** the policy
-       gate so a non-``safe`` op is refused without even consulting it (and
-       so a ``requires_approval`` non-``safe`` op is never parked).
+    3. **satellite-mint tier ladder** (#3188,
+       :mod:`~meho_backplane.runner.satellite_tier`) — the safe-only wall
+       generalised, checked **before** the policy gate (so a refused op never
+       reaches it and is never parked): ``EXCLUDED`` (``dangerous`` /
+       ``destructive``) → :attr:`MintRefusalCode.OP_NOT_SAFE`, never minted
+       (composes with #3183); ``REMOTE_WRITE`` (``caution``) → the composed
+       gate, fail-closed until the siblings wire it →
+       :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`; ``SAFE`` falls
+       through to the policy gate, semantics unchanged.
     4. ``policy_gate`` — any verdict other than ``AUTO_EXECUTE`` refuses
        (``DENY`` → :attr:`MintRefusalCode.POLICY_DENIED`, ``NEEDS_APPROVAL``
        → :attr:`MintRefusalCode.NEEDS_APPROVAL`); the defensive
@@ -362,12 +376,15 @@ async def mint_gateway_command(
     if params_refusal is not None:
         return params_refusal
 
-    # --- Safe-only wall (v1 read-only guarantee) -------------------------
-    # Bound to the real op-identity metadata read straight off the
-    # descriptor (dispatcher.py:1772), NOT a re-derived value. Checked
-    # before the policy gate so a non-'safe' op is refused centrally and is
-    # never parked — change-ops-over-gateway is a v2 follow-on (#2415).
-    if descriptor.safety_level != "safe":
+    # --- Satellite-mint tier ladder (#3188) ------------------------------
+    # The safe-only wall generalised, bound to the real op-identity metadata
+    # read straight off the descriptor (dispatcher.py:1772). Classified against
+    # the single source of truth shared with the edge executor and the
+    # assignment materialiser (defence in depth), before the policy gate so a
+    # refused op is never parked.
+    tier = classify_satellite_tier(descriptor.safety_level)
+    if tier is SatelliteMintTier.EXCLUDED:
+        # dangerous / destructive — never minted (composes with #3183).
         structlog.get_logger(__name__).warning(
             "gateway_command_mint_refused_non_safe",
             reason=MintRefusalCode.OP_NOT_SAFE.value,
@@ -378,9 +395,24 @@ async def mint_gateway_command(
         )
         return _refused(
             MintRefusalCode.OP_NOT_SAFE,
-            f"op {op_id!r} has safety_level {descriptor.safety_level!r}; the gateway "
-            "mints only safety_level='safe' ops in v1",
+            f"op {op_id!r} has safety_level {descriptor.safety_level!r}; "
+            "dangerous/destructive ops are never minted to a satellite",
         )
+    if tier is SatelliteMintTier.REMOTE_WRITE:
+        # The additive write tier, separate from the untouched `safe` wall.
+        # Its composed gate (per-runner allowlist + approval/policy binding)
+        # is wired by sibling tasks (#3189-#3193); until then it is fail-closed.
+        gate = evaluate_remote_write_gate(op_id=op_id, runner_id=runner_id)
+        if not gate.permitted:
+            structlog.get_logger(__name__).warning(
+                "gateway_command_mint_refused_remote_write",
+                reason=MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED.value,
+                op_id=op_id,
+                safety_level=descriptor.safety_level,
+                operator_sub=operator.sub,
+                runner_id=runner_id,
+            )
+            return _refused(MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED, gate.reason)
 
     # --- Step 4: policy gate (only AUTO_EXECUTE mints) -------------------
     verdict, gate_reason = await policy_gate(

@@ -112,6 +112,152 @@ connector-related release-notes line.
   the boundary guard is the backplane's durable defence; no backplane code
   mints these rows.
 
+### Fixed — large `deploy_from_library` OVAs: async dispatch survives caller disconnect + a 3 h sync read ceiling (#3176)
+
+- `vmware.composite.vm.deploy_from_library` of a **multi-GB** content-library
+  item (a 4.7 GB installer OVA to an NFS datastore on the Hetzner fabric) hit
+  two failure modes. **(b) Caller disconnect rolled the deploy back:** on the
+  synchronous path the OVF POST is awaited inside the request handler, so a
+  client that dropped mid-transfer cancelled the task, closed the connection,
+  and vCenter rolled the half-created VM back. This is now cured by dispatching
+  the deploy in **async governed mode** (`async: true` → `202` + a durable run
+  handle, #3079 / PR #3201): the dispatch runs on an independent background task
+  that owns the vCenter POST, so a dropped caller no longer propagates
+  cancellation into the in-flight copy. Async is the **supported mode for
+  multi-GB items** (documented on the handler + the connector doc); the
+  synchronous path stays the default for small items.
+- **(a) Transfer outrunning the read ceiling:** the synchronous deploy's
+  `_LIBRARY_ITEM_DEPLOY_TIMEOUT` read/write cap is raised from 30 min to **3 h**
+  — the 4.7 GB copy outran the original 30-min window live while vCenter kept
+  copying. This is a **bounded mitigation**, not the durable fix: a still-larger
+  item or a slower fabric can outrun any fixed ceiling. The durable fix — a
+  typed pyvmomi `HttpNfcLease` import that uncouples completion from one
+  blocking read — is tracked under #2890.
+- The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
+  unchanged for genuine faults.
+
+### Added — satellite write path: `remote-write` safety tier + tiered mint gate (#3188)
+
+- Extends the gateway's binary safe-wall into a **satellite-mint tier
+  ladder** — the foundation seam of the ratified scoped-hybrid write path
+  (Initiative #2901, `docs/decisions/satellite-write-path.md`). A single
+  source of truth (`runner/satellite_tier.py`) classifies the existing
+  `safe < caution < dangerous < destructive` `safety_level` enum (#3196)
+  into three tiers: `safe` → `SAFE` (mints on `AUTO_EXECUTE`, **unchanged**);
+  `caution` → `REMOTE_WRITE` (the additive, separately-gated write tier);
+  `dangerous`/`destructive` → `EXCLUDED` (**never** minted to a satellite).
+  It is a runtime classification, **not** a new `safety_level` value, so
+  there is **no migration**.
+- **Three-layer mirror, each fail-closed independently** (defence in depth):
+  the central mint (`mint_gateway_command` — `EXCLUDED` keeps
+  `MintRefusalCode.OP_NOT_SAFE`; `REMOTE_WRITE` refuses with the new
+  `REMOTE_WRITE_GATE_UNSATISFIED`), the assignment materialiser
+  (`assignment_service` — only `SAFE`-tier ops are authorable into the
+  recurring assignment), and the edge executor (`_screen_item` — re-screens
+  the delivered item against the same ladder).
+- The `remote-write` **composed gate** (`evaluate_remote_write_gate`) is a
+  fail-closed **seam**: a remote-write op mints only under a per-runner
+  allowlist + approval/policy binding, wired by the sibling tasks
+  (#3189-#3193). Until then it refuses every remote-write op at both the mint
+  and the edge. Composes with #3183: the `destructive` tier is excluded by
+  the satellite gate by default everywhere, so delete-shaped work never rides
+  a runner (#3225's conformance stays green).
+
+### Added — flight recorder: typed-connector spans across every typed family (#3217)
+
+- Extends the flight recorder (`docs/decisions/dispatch-flight-recorder.md`, **F8
+  — the operator override "all of them in v1"**) to **typed** connectors, the
+  analog of the generic-connector `vendor_call` seam (#3214). A new
+  `meho_backplane.flight_recorder.typed` module rides the **same** per-dispatch
+  capture scope + op context — no parallel state — and exposes two seams:
+  - a **shared typed-dispatch seam** (`typed_dispatch_span`, wired once into
+    `dispatch_typed`) that brackets **every** typed handler invocation and emits
+    a real (non-`opaque`) `typed` span — operation id, target, duration, and
+    outcome — keyed on **`impl_id`** so both implementations of a dual-impl
+    product (`fleet` / `sddc` / `vcfa` / `vrli` / `vrops`) are distinguished. It
+    is metadata-only (it never records `params` or any vendor payload), so it
+    carries no secret and never degrades the trace; and
+  - a **transport-enricher seam** (`typed_span_start` + `record_typed_call`)
+    that redacts request/response-shaped detail through the **same** fail-closed
+    engine the vendor-call seam uses. Wired into the shared SSH seam
+    (`SshConnector._run_command`), so **every** SSH-based typed connector (bind9,
+    holodeck, pfsense, rke2, windows_dns) records one span per command with no
+    per-connector edit; the command + output are handed to the engine as plain
+    text, which cannot prove them secret-free and so **omits both and degrades
+    the trace to operator-only (F5)** — an SSH command or its output never
+    reaches a span un-redacted. REST-backed typed connectors are already covered
+    by the generic `vendor_call` seam; the direct-SDK families (hvac /
+    kubernetes / pymongo / postgres / gcloud) are covered by the shared `typed`
+    span at op granularity.
+- Coverage is **by construction**: because the seam sits on the one typed-dispatch
+  path, all 37 registered typed implementations — every class-based family plus
+  the builtin `product.*` families (net, mail, secret, topology, targets) — emit
+  real `typed` spans, retiring the transitional `opaque` fallback. A
+  **registry-driven conformance sweep** enumerates the typed families from the
+  live registrar set and asserts each produces a `typed` span through the seam,
+  so a newly added typed connector that skips instrumentation fails CI.
+- The **F7 invariant** holds for typed spans: capture is best-effort, the
+  disabled path is a single contextvar read, and a recorder or redaction failure
+  is swallowed and can never fail, block, or slow a typed dispatch — the
+  handler's own exception always propagates unchanged.
+
+### Added — flight recorder: agent read surface — trace as a reduced result-handle, per-tenant gated, redaction-uncertainty degrade (#3216)
+
+- Ships **F5** of the flight-recorder decision
+  (`docs/decisions/dispatch-flight-recorder.md`) — the operator override that
+  makes a captured dispatch trace **readable by an agent**, but only through
+  the existing narrow-waist result-handle idiom. A trace is materialized as a
+  set-shaped result (its ordered spans) and spilled to the same
+  `ResultHandleStore` (Valkey, tenant + operator scoped, TTL-bounded) any large
+  response uses; the agent pages it via the **unchanged** `result_query`
+  meta-tool (`read_result_window`, `MAX_LIMIT=500`). **No new tool** is
+  registered, **no vendor-specific name** reaches the agent surface, and **no
+  raw payload** enters agent context — postulates 5 and 6 intact, and
+  `docs/codebase/mcp.md` + `test_mcp_surface_conformance.py` are untouched.
+- **Per-tenant gate, independent of operator access.** Agent trace readability
+  is a new tri-state per-tenant policy (`tenant.flight_recorder_agent_readable`,
+  migration `0087`): `NULL` inherits the capture default (so it "follows the F1
+  lab-on posture"), `True` forces on, `False` withholds from agents while the
+  operator plane keeps full access. Resolved fail-open to "no agent exposure"
+  by `flight_recorder.config.should_expose_to_agent`.
+- **Redaction-uncertainty degrade (the F5 discharge).** Any trace whose
+  redaction could not be proven complete (`redaction_uncertain=True`) is
+  withheld from the agent handle **entirely** — checked before any span is
+  loaded or spilled — while remaining readable on the operator plane. Composed
+  with the #3213 fail-closed redaction, this discharges the operator's
+  condition (*"as long as there are no secrets in there"*): a secret-bearing /
+  uncertain span never reaches an agent-visible handle. The default on doubt is
+  less agent exposure, never more.
+- **Live trigger wired into the recorder.** After the capture seam
+  (`flight_recorder.capture`, #3214) persists a trace via `record_trace` on the
+  recorder's best-effort path, it mints the agent handle
+  (`flight_recorder.materialize_agent_trace_handle`, gated by
+  `should_expose_to_agent`, degraded on `redaction_uncertain`) and attaches it
+  to the dispatch response as `flight_recorder_trace_handle`. The trigger runs
+  **strictly inside the F7 swallow-everything discipline** — a trigger failure
+  can never fail, block, or slow a dispatch and never alters the dispatch
+  result, and the disabled / gated-off path is a cheap gate check that spills
+  nothing.
+
+### Fixed — `holodeck.config.apply` fails closed instead of reporting false success on a CLIXML-corrupted stdout (#3081)
+
+- `holodeck.config.apply` returned `{applied: true, config_id: null}` while
+  writing **nothing** to the HoloRouter: no config file appeared under
+  `/holodeck-runtime/config/`, so the next runbook step (`instance.start`) had
+  nothing to launch from and proceeded on a false premise. Root cause was the
+  `HoloDeck` PowerShell module's "unapproved verbs" auto-load warning, which
+  `pwsh -EncodedCommand` serialised as a `#< CLIXML … </Objs>` block onto
+  **stdout** ahead of the `ConvertTo-Json` payload — `holodeck.config.show`
+  failed honestly on the same transport, but `config.apply` reported success
+  regardless. Two fixes: (1) the shared `_pwsh` transport seam now strips CLIXML
+  warning/error blocks from stdout before parsing (`strip_clixml`), so every
+  pwsh-backed op tolerates the noise and a warning-only stdout fails closed as
+  empty rather than crashing the parse; and (2) `config.apply` reports
+  `applied: true` **only** with a non-null `config_id` verified on disk (a
+  `Test-Path` verify-after-write folded into the same script), and silences the
+  warning stream at the source (`$WarningPreference`). The self-contradictory
+  `applied: true` / `config_id: null` envelope is now impossible.
+
 ### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
 
 - Ships the **operator read surface** of the flight-recorder decision
@@ -137,6 +283,7 @@ connector-related release-notes line.
   best-effort). Tenant isolation is enforced twice — the audit-existence check
   and the trace read are both tenant-scoped. No change to the MCP surface (the
   agent read is a separate task); REST + console only. (#3215)
+
 ### Added — flight recorder: capture seam + caps + best-effort invariant (#3214)
 
 - Ships the **capture seam** plus the **F3 caps** and **F7 failure invariant**

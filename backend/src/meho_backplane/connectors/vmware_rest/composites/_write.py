@@ -206,11 +206,24 @@ _OP_DEPLOY_OVF_LIBRARY_ITEM = "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}
 # well past the connector's 30s client-default read timeout and used to fault
 # with a false ``deploy_error`` while vCenter finished the copy server-side
 # (#3076). This override grants only these two calls a generous read/write
-# ceiling (30 min); connect/pool stay at the fast client default so a dead
-# target still fails fast, and every *other* call on the connector keeps the
-# unchanged 30s default (raising the global client timeout would make ordinary
-# reads hang on a dead target).
-_LIBRARY_ITEM_DEPLOY_TIMEOUT = httpx.Timeout(connect=5.0, read=1800.0, write=1800.0, pool=5.0)
+# ceiling; connect/pool stay at the fast client default so a dead target still
+# fails fast, and every *other* call on the connector keeps the unchanged 30s
+# default (raising the global client timeout would make ordinary reads hang on
+# a dead target).
+#
+# The ceiling is 3 hours, widened from the original 30 min (#3176): a 4.7 GB
+# installer OVA copied to an NFS datastore on the Hetzner fabric outran the
+# 30-min window live, faulting mid-transfer while vCenter kept copying.
+# Widening the read cap is a *bounded mitigation*, not the durable fix — a
+# still-larger item or a slower fabric can outrun any fixed ceiling, and on
+# this synchronous path a caller that disconnects mid-wait still aborts + rolls
+# the deploy back. The durable fixes are orthogonal and live elsewhere: async
+# governed dispatch (#3079) decouples completion from the request connection so
+# a dropped caller no longer cancels the in-flight deploy (the supported mode
+# for multi-GB items — see ``vm_deploy_from_library_composite``'s docstring),
+# and a typed pyvmomi ``HttpNfcLease`` import (#2890) would uncouple completion
+# from a single blocking read entirely.
+_LIBRARY_ITEM_DEPLOY_TIMEOUT = httpx.Timeout(connect=5.0, read=10800.0, write=10800.0, pool=5.0)
 _OP_FIND_LIBRARY = "POST:/content/library?action=find"
 _OP_FIND_LIBRARY_ITEM = "POST:/content/library/item?action=find"
 # Content-library item type discriminator for OVF/OVA templates — the find
@@ -2570,6 +2583,18 @@ async def vm_deploy_from_library_composite(
     itself faults (HTTP 400/404 for invalid / missing placement resources) —
     so a placement or network-mapping error is a structured status, never a
     raw vendor error. With ``power_on`` the deployed VM is started best-effort.
+
+    **Calling convention for large items.** The OVF deploy is *synchronous* —
+    the POST is held open for the whole server-side copy, bounded by
+    :data:`_LIBRARY_ITEM_DEPLOY_TIMEOUT` (3 h; #3176). Small items deploy fine
+    on the default sync path, but a **multi-GB installer OVA should be
+    dispatched in async mode** (``call_operation`` with ``async=true`` → HTTP
+    202 + a durable run handle, #3079): the deploy then runs on a background
+    task that owns the vCenter POST, so a caller that disconnects mid-transfer
+    no longer cancels the in-flight deploy — on the sync path a dropped caller
+    propagates cancellation into the POST and vCenter rolls the half-created VM
+    back. The sync ceiling stays a bounded mitigation; an item large enough to
+    outrun 3 h still needs the typed ``HttpNfcLease`` import (#2890).
     """
     try:
         item_id, resolution_error = await _resolve_deploy_library_item(

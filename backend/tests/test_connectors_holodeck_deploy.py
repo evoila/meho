@@ -228,7 +228,7 @@ async def test_config_apply_composes_new_holodeckconfig_without_default() -> Non
         "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
         new_callable=AsyncMock,
     ) as mock_pwsh:
-        mock_pwsh.return_value = {"configID": "hd9mgmt1"}
+        mock_pwsh.return_value = {"configID": "hd9mgmt1", "configWritten": True}
         result = await connector.config_apply(
             _StubTarget(),
             {
@@ -247,6 +247,152 @@ async def test_config_apply_composes_new_holodeckconfig_without_default() -> Non
     assert "Import-HoloDeckConfig" in script
     # Credentials referenced by env-var NAME only -- no interpolated value.
     assert "$env:VC_USER" in script and "$env:VC_PW" in script
+    # #3081: the warning stream is silenced at the source and the write is
+    # verified on disk before the op can report success.
+    assert "$Global:WarningPreference = 'SilentlyContinue'" in script
+    assert "Test-Path" in script and "/holodeck-runtime/config/" in script
+
+
+# ===========================================================================
+# C.1 config.apply fail-closed on an unwritten config (#3081)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_config_apply_fails_closed_on_null_config_id() -> None:
+    """A cmdlet that returns configID:null must NOT report applied:true (#3081).
+
+    The severe defect: config.apply reported ``{applied: true, config_id:
+    null}`` while writing nothing to the HoloRouter. The self-contradictory
+    envelope is now impossible -- a null configID fails closed.
+    """
+    connector = HolodeckConnector()
+    with patch(
+        "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
+        new_callable=AsyncMock,
+    ) as mock_pwsh:
+        mock_pwsh.return_value = {"configID": None, "configWritten": False}
+        result = await connector.config_apply(
+            _StubTarget(), {"version": "9.0.2.0", "variant": "management_only"}
+        )
+    assert result["applied"] is False
+    assert result["config_id"] is None
+    assert "NOT applied" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_apply_fails_closed_when_file_not_on_disk() -> None:
+    """A real-looking configID with no persisted file must fail closed (#3081).
+
+    verify-after-write: even when New-HoloDeckConfig returns a plausible
+    configID, applied stays false unless the config file is actually on disk.
+    """
+    connector = HolodeckConnector()
+    with patch(
+        "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
+        new_callable=AsyncMock,
+    ) as mock_pwsh:
+        mock_pwsh.return_value = {"configID": "hd9mgmt1", "configWritten": False}
+        result = await connector.config_apply(
+            _StubTarget(), {"version": "9.0.2.0", "variant": "management_only"}
+        )
+    assert result["applied"] is False
+    # The configID is still surfaced for triage, but applied is false.
+    assert result["config_id"] == "hd9mgmt1"
+    assert "NOT applied" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_apply_pwsh_error_fails_closed() -> None:
+    """A PwshRunError (empty/corrupt stdout) surfaces as applied:false (#3081).
+
+    ``holodeck.config.show`` already fails honestly on the same transport;
+    config.apply must too, rather than defaulting to success.
+    """
+    connector = HolodeckConnector()
+    with patch(
+        "meho_backplane.connectors.holodeck.ops_deploy.pwsh_run",
+        new_callable=AsyncMock,
+    ) as mock_pwsh:
+        mock_pwsh.side_effect = PwshRunError(
+            "pwsh -EncodedCommand produced empty stdout; expected ConvertTo-Json output",
+            exit_status=0,
+            stderr="",
+        )
+        result = await connector.config_apply(
+            _StubTarget(), {"version": "9.0.2.0", "variant": "management_only"}
+        )
+    assert result["applied"] is False
+    assert "empty stdout" in result["error"]
+
+
+# ===========================================================================
+# C.2 config.apply end-to-end through the real pwsh transport (#3081)
+# ===========================================================================
+#
+# These drive the REAL pwsh_run by stubbing the SSH exec channel
+# (connector._run_command) instead of mocking pwsh_run, so the CLIXML strip
+# + empty-stdout guard + fail-closed handler are exercised as one chain.
+
+_APPLY_PARAMS = {"version": "9.0.2.0", "variant": "management_only", "external_ip": "vc.lab"}
+_CLEAN_APPLY_JSON = '{"configID":"hd9mgmt1","configWritten":true}'
+_CLIXML_WARNING = (
+    "#< CLIXML\n"
+    '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+    '<S S="warning">The names of some imported commands from the module '
+    "'HoloDeck' include unapproved verbs that might make them less "
+    "discoverable.</S></Objs>\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_config_apply_transport_parses_clixml_polluted_stdout() -> None:
+    """(a) CLIXML warning prepended to valid JSON -> stripped -> applied:true."""
+    connector = HolodeckConnector()
+    polluted = _CLIXML_WARNING + _CLEAN_APPLY_JSON
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = _proc(stdout=polluted, exit_status=0)
+        result = await connector.config_apply(_StubTarget(), dict(_APPLY_PARAMS))
+    assert result["applied"] is True
+    assert result["config_id"] == "hd9mgmt1"
+
+
+@pytest.mark.asyncio
+async def test_config_apply_transport_fails_closed_on_empty_stdout() -> None:
+    """(b) empty stdout -> PwshRunError -> applied:false, never a false success."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = _proc(stdout="", exit_status=0)
+        result = await connector.config_apply(_StubTarget(), dict(_APPLY_PARAMS))
+    assert result["applied"] is False
+    assert "empty stdout" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_apply_transport_succeeds_on_clean_json() -> None:
+    """(c) clean JSON -> applied:true with the parsed config_id."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = _proc(stdout=_CLEAN_APPLY_JSON, exit_status=0)
+        result = await connector.config_apply(_StubTarget(), dict(_APPLY_PARAMS))
+    assert result["applied"] is True
+    assert result["config_id"] == "hd9mgmt1"
+
+
+@pytest.mark.asyncio
+async def test_config_apply_transport_never_true_with_null_config_id() -> None:
+    """The invariant: CLIXML-only stdout (no JSON) can never yield applied:true.
+
+    A fresh HoloRouter where the write silently failed emits only the warning
+    block; stripped, that is empty stdout -> fail-closed. This is the exact
+    #3081 scenario end-to-end.
+    """
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_run:
+        mock_run.return_value = _proc(stdout=_CLIXML_WARNING, exit_status=0)
+        result = await connector.config_apply(_StubTarget(), dict(_APPLY_PARAMS))
+    assert result["applied"] is False
+    assert not (result["applied"] is True and result["config_id"] is None)
 
 
 @pytest.mark.asyncio

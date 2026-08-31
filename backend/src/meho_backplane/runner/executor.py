@@ -13,8 +13,14 @@ Two fail-closed guards make the runner a strictly bounded executor
 (defence in depth — central mint is the real authorization boundary,
 owned by #2500):
 
-* **safe-only** — any item whose ``safety_level`` is not ``"safe"`` is
-  refused without invoking anything (v1 authorizes read-only workloads).
+* **satellite-mint tier ladder** (#3188) — the item's ``safety_level`` is
+  classified against the shared
+  :mod:`~meho_backplane.runner.satellite_tier` ladder (the same source of
+  truth the central mint and the assignment materialiser use). An
+  ``EXCLUDED`` (``dangerous`` / ``destructive``) item is refused outright;
+  a ``REMOTE_WRITE`` (``caution``) item is re-screened through the composed
+  gate and fails closed until the runner is authorised for the tier; only a
+  ``SAFE`` item proceeds.
 * **connector-tree-only** — a ``handler_ref`` that does not resolve inside
   ``meho_backplane.connectors.*`` is refused. The lexical prefix is
   checked *before* import (an import has module-load side effects) and the
@@ -39,6 +45,11 @@ from meho_backplane.operations._handler_resolve import (
     import_handler,
     is_unbound_method,
 )
+from meho_backplane.runner.satellite_tier import (
+    SatelliteMintTier,
+    classify_satellite_tier,
+    evaluate_remote_write_gate,
+)
 from meho_backplane.runner.spool import ExecutedCommandStore
 from meho_backplane.runner.wire import RunnerResult, RunnerWorkItem
 
@@ -46,7 +57,6 @@ __all__ = ["execute_command_once", "execute_work_item"]
 
 _log = structlog.get_logger(__name__)
 
-_ALLOWED_SAFETY_LEVEL = "safe"
 _CONNECTOR_MODULE_PREFIX = "meho_backplane.connectors."
 
 
@@ -70,11 +80,26 @@ def _result(
 def _screen_item(item: RunnerWorkItem) -> str | None:
     """Pre-import fail-closed screen: a refusal reason, or ``None`` to proceed.
 
-    Both checks run before any import so an out-of-tree ``handler_ref``
-    never triggers a module-load side effect.
+    Mirrors the central mint's satellite-mint tier ladder (#3188) against the
+    same shared classifier — defence in depth, the runner independently
+    re-checking what the centre already gated. Every check runs before any
+    import so an out-of-tree ``handler_ref`` never triggers a module-load side
+    effect.
     """
-    if item.safety_level != _ALLOWED_SAFETY_LEVEL:
-        return f"safety_level {item.safety_level!r} refused; runner executes only 'safe' ops"
+    tier = classify_satellite_tier(item.safety_level)
+    if tier is SatelliteMintTier.EXCLUDED:
+        return (
+            f"safety_level {item.safety_level!r} refused; dangerous/destructive "
+            "ops are never dispatched to a runner"
+        )
+    if tier is SatelliteMintTier.REMOTE_WRITE:
+        # A remote-write item still fails closed at the edge if the runner is
+        # not authorised for the tier (mechanism 2's edge re-check). The
+        # allowlist/signature machinery is a sibling task; until it exists the
+        # gate refuses every remote-write item.
+        decision = evaluate_remote_write_gate(op_id=item.op_id)
+        if not decision.permitted:
+            return decision.reason
     if not item.handler_ref.startswith(_CONNECTOR_MODULE_PREFIX):
         return f"handler_ref {item.handler_ref!r} is outside {_CONNECTOR_MODULE_PREFIX}*"
     return None

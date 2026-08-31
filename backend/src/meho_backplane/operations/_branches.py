@@ -40,6 +40,7 @@ from urllib.parse import quote
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.flight_recorder import typed as flight_recorder_typed
 from meho_backplane.operations._rfc6570 import RFC6570_PATH_OPERATORS
 
 __all__ = [
@@ -497,9 +498,18 @@ async def dispatch_typed(
             f"instance-cache fault, not a missing handler — do not mask it as "
             f"handler_unreachable."
         )
-    if "operator" in param_names:
-        return await handler(operator=operator, target=target, params=params)
-    return await handler(target=target, params=params)
+    # Flight-recorder typed span (#3217, F8). The shared typed-handler seam:
+    # every typed connector family emits a real (non-``opaque``) ``typed``
+    # span -- op id, target, duration, outcome -- through this one bracket,
+    # with no per-connector edit. Metadata-only (never records ``params`` or
+    # any vendor payload), best-effort (F7): a recorder failure is swallowed
+    # and the handler's own exception propagates unchanged. The ``self``-check
+    # above is left outside the span deliberately -- an unbound handler is a
+    # dispatcher-resolution fault, not a typed vendor interaction.
+    with flight_recorder_typed.typed_dispatch_span(target=target):
+        if "operator" in param_names:
+            return await handler(operator=operator, target=target, params=params)
+        return await handler(target=target, params=params)
 
 
 async def dispatch_composite(

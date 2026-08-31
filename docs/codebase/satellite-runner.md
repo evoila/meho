@@ -101,7 +101,10 @@ Each tick (`run_one_tick`):
 `execute_work_item` is fail-closed defence in depth (the real
 authorization boundary is central minting, #2500):
 
-1. Refuse any item whose `safety_level != "safe"`.
+1. Classify the item's `safety_level` against the shared satellite-mint
+   tier ladder (see below) and refuse anything but a `SAFE`-tier item —
+   an `EXCLUDED` (`dangerous`/`destructive`) item outright, a `remote-write`
+   (`caution`) item through the fail-closed edge re-check.
 2. Refuse any `handler_ref` not lexically under
    `meho_backplane.connectors.` — checked **before** import (import has
    module-load side effects) and re-checked on the resolved callable's
@@ -120,6 +123,64 @@ authorization boundary is central minting, #2500):
 5. Invoke `handler(operator, target, params)`. A handler exception
    becomes a structured `error` result — a failed check is a result,
    never a crashed tick.
+
+## Satellite-mint tier ladder — the write path (#3188)
+
+The read path refuses any non-`safe` op at three independent layers. The
+write path (Initiative #2901, decision
+`docs/decisions/satellite-write-path.md`) generalises that binary safe-wall
+into a **tier ladder** without widening what `safe` means. The ladder is a
+runtime classification of the existing `safe < caution < dangerous <
+destructive` `safety_level` enum (#3196) — **not** a new `safety_level`
+value, so it needs no migration:
+
+| `safety_level` | Satellite tier | Mint outcome |
+|---|---|---|
+| `safe` | `SAFE` | mints on `AUTO_EXECUTE` — the read path, **unchanged** |
+| `caution` | `REMOTE_WRITE` | mints **only** through the composed write-path gate; fail-closed today |
+| `dangerous`, `destructive` (or unknown) | `EXCLUDED` | **never** minted to a satellite |
+
+The single source of truth is `runner/satellite_tier.py`
+(`classify_satellite_tier` + the `evaluate_remote_write_gate` seam). It
+lives beside `runner/wire.py` — the other central+edge shared contract — and
+imports only the standard library, so classifying a tier on the **DB-free**
+runner never pulls the central stack.
+
+**The three-layer mirror.** All three fail-closed layers classify against
+that one ladder (defence in depth — no single layer alone can punch a write
+through):
+
+- **Central mint** — `mint_gateway_command`
+  (`operations/gateway_commands.py`): `EXCLUDED` → `MintRefusalCode.OP_NOT_SAFE`
+  (the code #3225's conformance test asserts for `vmware.composite.vm.destroy`);
+  `REMOTE_WRITE` → the composed gate, refused with
+  `MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED` until it is provisioned;
+  `SAFE` → the unchanged policy gate. All checked **before** the policy gate,
+  so a refused op is never parked.
+- **Assignment materialiser** — `_is_runnable_safe` /
+  `_validate_authored_item` (`gateway/assignment_service.py`): only `SAFE`-tier
+  ops are authorable into (and materialised from) the recurring assignment;
+  `remote-write` work rides the one-shot capability-mint path, not this
+  document.
+- **Edge executor** — `_screen_item` (`runner/executor.py`): re-screens the
+  delivered item independently, refusing `EXCLUDED` outright and re-checking
+  `REMOTE_WRITE` through the same gate seam (mechanism 2's "checked at mint
+  *and* re-checked at the edge").
+
+**The composed gate is a seam.** `evaluate_remote_write_gate` is fail-closed
+by construction: a `remote-write` op mints only when its op-class is on the
+runner's enrollment allowlist **and** policy `AUTO_EXECUTE` (idempotent
+subset) or a committed `ApprovalRequest` (caution subset) authorises it —
+the four-mechanism composition of design §3. That allowlist + approval +
+work-item-signing machinery is filed as sibling tasks (#3189-#3193); until it
+lands there is no way to authorise a remote-write capability, so the seam
+refuses every remote-write op at both the mint and the edge.
+
+**Composition with #3183.** The destructive tier is `EXCLUDED` by this ladder
+everywhere, so delete-shaped work stays central-or-break-glass and never
+rides a runner — the satellite write-path decision's "delete-shaped
+operations never minted to a satellite," dovetailing with #3196's default
+gate exclusions.
 
 ## Dead-man switch + mandatory heartbeat (#2501)
 
@@ -228,13 +289,15 @@ default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
 - The outbound long-poll command plane
   (`GET /gateway/{runner}/next` / `POST /gateway/{runner}/result`) — #2498.
 - Single-use capability-command minting + request-id dedup — #2500. The
-  runner's `safe`-only executor guard is defence in depth, not the mint
-  rule. The central mint wall (`mint_gateway_command`) refuses any
-  `safety_level != "safe"` op with `MintRefusalCode.OP_NOT_SAFE` *before*
-  the policy gate, so the `destructive` tier (#3183) is transitively
-  excluded from every satellite the day it exists — **deletes are never
-  minted to a satellite**, agreeing with the satellite write-path decision
-  (#2901 / #3187).
+  runner's tier-ladder executor guard is defence in depth, not the mint
+  rule. The central mint wall (`mint_gateway_command`) classifies each op
+  against the satellite-mint tier ladder (#3188, see above) *before* the
+  policy gate: `EXCLUDED` (`dangerous`/`destructive`) refuses with
+  `MintRefusalCode.OP_NOT_SAFE`, so the `destructive` tier (#3183) is
+  excluded from every satellite — **deletes are never minted to a
+  satellite** — while the additive `remote-write` tier fails closed until
+  its composed gate is provisioned (satellite write-path decision
+  #2901 / #3187).
 - Heartbeat + central stale/unknown flipping — #2501.
 - The scoped per-runner service principal + credential scoping — #2502.
   `MEHO_RUNNER_TOKEN` is the seam it fills; this chassis treats it as an

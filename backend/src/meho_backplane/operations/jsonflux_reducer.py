@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — pre-existing 1332-line reducer (predates this
+# rule); #3214 adds only the JSONFlux reduction-span call. Splitting the reducer
+# is a separate refactor, out of scope for this surgical capture-seam change.
+
 """Real JSONFlux reducer — the production default behind the dispatcher seam.
 
 G0.6.1-T3 (#753) of Initiative #750. Bridges the vendored
@@ -77,6 +81,7 @@ from meho_backplane.connectors.schemas import (
     PaginationHint,
     ResultHandle,
 )
+from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.jsonflux.query.engine import QueryEngine
 from meho_backplane.settings import get_settings
 
@@ -416,8 +421,35 @@ class JsonFluxReducer:
         spill_outcome = await self._spill(materialized, context)
         preserved_scalars = _preserved_scalars(payload, envelope_key, context)
         digest = _row_digest(rows, envelope_key, digest_spec)
-        return self._assemble(
+        summary, handle = self._assemble(
             materialized, envelope_key, context, spill_outcome, preserved_scalars, digest
+        )
+        self._record_flux_span(rows, materialized, summary, context)
+        return summary, handle
+
+    @staticmethod
+    def _record_flux_span(
+        rows: list[Any],
+        materialized: _MaterializedSet,
+        summary: Any,
+        context: dict[str, Any] | None,
+    ) -> None:
+        """Emit the flight-recorder JSONFlux reduction span (#3214).
+
+        Metadata only (input rows -> kept fields -> output size -> handle id);
+        best-effort (F7) and a no-op when capture is off, so a non-dispatch
+        reduce or a disabled recorder pays a single contextvar read. The
+        kept-field extraction is fully isinstance-guarded so it can NEVER raise
+        into :meth:`reduce` (which ``_reduce_or_error`` wraps -- a raise here
+        would turn a dispatch success into a connector_error, an F7 violation).
+        """
+        flight_recorder_capture.record_jsonflux_reduction(
+            op_id=context.get("op_id") if context else None,
+            input_rows=len(rows),
+            total_rows=materialized.total_rows,
+            kept_fields=_flux_kept_fields(materialized.schema_),
+            summary=summary,
+            handle_id=materialized.handle_id,
         )
 
     def _over_threshold(self, rows: list[Any], payload: Any) -> bool:
@@ -771,6 +803,25 @@ def _normalize_rows(rows: list[Any]) -> list[dict[str, Any]]:
     if rows and isinstance(rows[0], dict):
         return rows
     return [{_SCALAR_COLUMN: item} for item in rows]
+
+
+def _flux_kept_fields(schema: dict[str, Any] | None) -> list[str]:
+    """Kept-field names for the flight-recorder JSONFlux span (#3214).
+
+    ``_build_json_schema`` nests the object's properties under ``items`` (the
+    set-of-objects contract). Fully isinstance-guarded so it can never raise
+    into :meth:`JsonFluxReducer.reduce` -- capture must never alter a dispatch
+    (F7).
+    """
+    if not isinstance(schema, dict):
+        return []
+    items = schema.get("items")
+    if not isinstance(items, dict):
+        return []
+    props = items.get("properties")
+    if not isinstance(props, dict):
+        return []
+    return [str(key) for key in props]
 
 
 def _build_json_schema(engine: QueryEngine) -> dict[str, Any]:

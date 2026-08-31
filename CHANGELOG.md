@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — large `deploy_from_library` OVAs: async dispatch survives caller disconnect + a 3 h sync read ceiling (#3176)
+
+- `vmware.composite.vm.deploy_from_library` of a **multi-GB** content-library
+  item (a 4.7 GB installer OVA to an NFS datastore on the Hetzner fabric) hit
+  two failure modes. **(b) Caller disconnect rolled the deploy back:** on the
+  synchronous path the OVF POST is awaited inside the request handler, so a
+  client that dropped mid-transfer cancelled the task, closed the connection,
+  and vCenter rolled the half-created VM back. This is now cured by dispatching
+  the deploy in **async governed mode** (`async: true` → `202` + a durable run
+  handle, #3079 / PR #3201): the dispatch runs on an independent background task
+  that owns the vCenter POST, so a dropped caller no longer propagates
+  cancellation into the in-flight copy. Async is the **supported mode for
+  multi-GB items** (documented on the handler + the connector doc); the
+  synchronous path stays the default for small items.
+- **(a) Transfer outrunning the read ceiling:** the synchronous deploy's
+  `_LIBRARY_ITEM_DEPLOY_TIMEOUT` read/write cap is raised from 30 min to **3 h**
+  — the 4.7 GB copy outran the original 30-min window live while vCenter kept
+  copying. This is a **bounded mitigation**, not the durable fix: a still-larger
+  item or a slower fabric can outrun any fixed ceiling. The durable fix — a
+  typed pyvmomi `HttpNfcLease` import that uncouples completion from one
+  blocking read — is tracked under #2890.
+- The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
+  unchanged for genuine faults.
+
 ### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
 
 - Ships the **operator read surface** of the flight-recorder decision

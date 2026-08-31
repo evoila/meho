@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — satellite write path: revocation hardening for write-capable runners (#3192)
+
+- Closes the T8 already-minted-write gap: a **revoked** runner can no longer
+  obtain **or execute** a `remote-write` capability, while the read path's
+  coarse kill switch (Keycloak `enabled=false` + token TTL + dead-man switch)
+  stays deliberately unchanged. This is the **Stage-3 gate** of the satellite
+  write-path decision (recommendation 3) — the write tier does not reach
+  steady state on TTL + dead-man alone.
+- **No new mint:** `mint_gateway_command` refuses a `remote-write` mint for a
+  revoked runner with `MintRefusalCode.RUNNER_REVOKED`, checked (off the
+  runner principal's live `revoked` column) *before* the composed gate and
+  scoped to the write tier — a `safe` mint is untouched.
+- **No delivery of an already-minted write:** the poll route threads the
+  runner's live `revoked` flag into `claim_next_command`, which narrows a
+  revoked runner's claim to non-`remote-write` rows, so a write minted before
+  revocation is never delivered afterwards (it stays `pending` and expires
+  under its TTL) — a queued `safe` read still delivers. Backed by a new
+  denormalised `gateway_command.safety_level` column (migration `0091`).
+- **Auditable:** revoking a runner writes a tamper-evident internal audit row
+  (`path='runner.principal.revoked'`), distinct from the liveness dead-man
+  flip. The residual in-flight (already-`delivered`) window is bounded by the
+  capability TTL and the #3191 credential seam.
+
 ### Added — flight recorder: cross-ref amendments to the satellite write-path + governed-delete decision docs (#3207)
 
 - Discharges the reciprocal cross-references the flight-recorder decision

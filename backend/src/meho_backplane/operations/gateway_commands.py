@@ -59,7 +59,7 @@ from enum import StrEnum
 from typing import Any
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -69,6 +69,7 @@ from meho_backplane.db.models import (
     GatewayCommand,
     GatewayCommandStatus,
     PermissionVerdict,
+    RunnerPrincipal,
 )
 from meho_backplane.gateway.queue import (
     GatewayCommandNotDeliveredError,
@@ -97,6 +98,12 @@ __all__ = [
     "consume_command",
     "mint_gateway_command",
 ]
+
+# code-quality-allow: file-size — the gateway command lifecycle (mint ladder +
+# consume latch + result-accept + audit lineage) is one cohesive
+# transaction-discipline contract; the #3192 revocation gate nudged it past the
+# 600-line limit. Splitting the module is its own refactor task (tracked with
+# the mint-ladder function-size debt below), not part of this security change.
 
 # NOTE: the structlog logger is resolved per-call at each log site below
 # rather than held as a module-level proxy. Production sets
@@ -145,7 +152,10 @@ class MintRefusalCode(StrEnum):
     tier (``dangerous`` / ``destructive`` — never minted to a satellite);
     ``REMOTE_WRITE_GATE_UNSATISFIED`` is the fail-closed refusal of the
     additive ``remote-write`` tier while its composed gate is unprovisioned
-    (#3188); ``POLICY_DENIED`` / ``NEEDS_APPROVAL`` are the policy-gate
+    (#3188); ``RUNNER_REVOKED`` is the write-tier revocation refusal (#3192,
+    the Stage-3 gate) — a revoked runner gets no new ``remote-write`` mint,
+    checked before the composed gate so a revoked runner reads the specific
+    refusal; ``POLICY_DENIED`` / ``NEEDS_APPROVAL`` are the policy-gate
     verdicts that are not ``AUTO_EXECUTE``.
     """
 
@@ -154,6 +164,7 @@ class MintRefusalCode(StrEnum):
     INVALID_OP_SCHEMA = "invalid_op_schema"
     OP_NOT_SAFE = "op_not_safe"
     REMOTE_WRITE_GATE_UNSATISFIED = "remote_write_gate_unsatisfied"
+    RUNNER_REVOKED = "runner_revoked"
     POLICY_DENIED = "policy_denied"
     NEEDS_APPROVAL = "needs_approval"
 
@@ -182,6 +193,30 @@ class MintResult:
 def _refused(code: MintRefusalCode, reason: str) -> MintResult:
     """Build a fail-closed refusal result (no rows written)."""
     return MintResult(refusal_code=code, refusal_reason=reason)
+
+
+async def _runner_is_revoked(
+    session: AsyncSession, *, tenant_id: uuid.UUID, runner_name: str
+) -> bool:
+    """Whether the named runner principal is revoked in this tenant (#3192).
+
+    One indexed read on the unique ``(tenant_id, name)`` runner index — the
+    same row :func:`meho_backplane.auth.runner_guard.assert_runner_scope`
+    resolves, read here for its ``revoked`` column only (the read path
+    deliberately does **not** consult it; the write tier does). A name that
+    resolves to **no** row returns ``False``: an unknown runner is not this
+    check's concern (its remote-write mint still fails closed at the composed
+    ``evaluate_remote_write_gate`` seam / the enrollment allowlist, #3189),
+    so the revocation check stays scoped to the "row exists and is revoked"
+    case it owns and adds no new existence oracle.
+    """
+    revoked = await session.scalar(
+        select(RunnerPrincipal.revoked).where(
+            RunnerPrincipal.tenant_id == tenant_id,
+            RunnerPrincipal.name == runner_name,
+        )
+    )
+    return bool(revoked)
 
 
 def _refuse_unvalidatable_params(
@@ -307,8 +342,10 @@ async def mint_gateway_command(
        generalised, checked **before** the policy gate (so a refused op never
        reaches it and is never parked): ``EXCLUDED`` (``dangerous`` /
        ``destructive``) → :attr:`MintRefusalCode.OP_NOT_SAFE`, never minted
-       (composes with #3183); ``REMOTE_WRITE`` (``caution``) → the composed
-       gate, fail-closed until the siblings wire it →
+       (composes with #3183); ``REMOTE_WRITE`` (``caution``) → the write-tier
+       revocation check (#3192 — a revoked runner →
+       :attr:`MintRefusalCode.RUNNER_REVOKED`) then the composed gate,
+       fail-closed until the siblings wire it →
        :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`; ``SAFE`` falls
        through to the policy gate, semantics unchanged.
     4. ``policy_gate`` — any verdict other than ``AUTO_EXECUTE`` refuses
@@ -399,6 +436,27 @@ async def mint_gateway_command(
             "dangerous/destructive ops are never minted to a satellite",
         )
     if tier is SatelliteMintTier.REMOTE_WRITE:
+        # Revocation hardening (#3192, the Stage-3 gate): a revoked runner
+        # gets no new remote-write mint. Checked *before* the composed gate
+        # so a revoked runner reads the specific RUNNER_REVOKED refusal, and
+        # scoped to the write tier only -- a `safe` mint never reaches here,
+        # so the read path's coarse kill switch is untouched. The delivery
+        # path (`claim_next_command`) re-checks live `revoked` for the
+        # already-minted-write gap; this is the mint-side half.
+        if await _runner_is_revoked(session, tenant_id=operator.tenant_id, runner_name=runner_id):
+            structlog.get_logger(__name__).warning(
+                "gateway_command_mint_refused_runner_revoked",
+                reason=MintRefusalCode.RUNNER_REVOKED.value,
+                op_id=op_id,
+                safety_level=descriptor.safety_level,
+                operator_sub=operator.sub,
+                runner_id=runner_id,
+            )
+            return _refused(
+                MintRefusalCode.RUNNER_REVOKED,
+                f"runner {runner_id!r} is revoked; no remote-write capability "
+                "is minted to a revoked runner",
+            )
         # The additive write tier, separate from the untouched `safe` wall.
         # Its composed gate (per-runner allowlist + approval/policy binding)
         # is wired by sibling tasks (#3189-#3193); until then it is fail-closed.
@@ -449,6 +507,7 @@ async def mint_gateway_command(
         params_hash=params_hash,
         expires_at=expires_at,
         mint_audit_id=mint_audit_id,
+        safety_level=descriptor.safety_level,
     )
     await _write_gateway_audit_row(
         session,

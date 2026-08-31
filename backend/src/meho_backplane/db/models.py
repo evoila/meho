@@ -6158,6 +6158,20 @@ class GatewayCommand(Base):
       result's audit row stamps ``parent_audit_id = mint_audit_id`` so a
       remote execution forms one audit subtree.
 
+    Revocation hardening (#3192, migration ``0091``)
+    ------------------------------------------------
+
+    * ``safety_level`` -- Text NOT NULL. The op's ``safety_level``
+      denormalised at mint so the delivery path can tier-scope the
+      write-capable-runner revocation refusal without a second descriptor
+      lookup: a revoked runner's ``claim_next_command`` narrows to
+      ``safety_level NOT IN`` the remote-write set, so an already-minted
+      ``remote-write`` capability is never delivered post-revocation while a
+      ``safe`` (read) capability is unaffected. The constant ``'safe'``
+      server_default is the read-tier fail-safe for the ADD COLUMN on the
+      empty clean-slate table; every minted row is stamped by
+      ``enqueue_command``.
+
     Index
     -----
 
@@ -6248,6 +6262,22 @@ class GatewayCommand(Base):
         Uuid(),
         nullable=True,
         default=None,
+    )
+    # --- Revocation hardening (#3192, migration 0091) ------------------
+    # The op's ``safety_level`` denormalised onto the row at mint, so the
+    # DB-side delivery path can tier-scope the write-capable-runner
+    # revocation refusal (``claim_next_command``) without a second
+    # descriptor lookup -- the same "bind at mint, check at delivery"
+    # discipline ``params_hash`` / ``expires_at`` follow. NOT NULL with a
+    # constant ``'safe'`` server_default: the ADD COLUMN lands on the empty
+    # clean-slate table (SQLite forbids an expression default here), and
+    # ``'safe'`` is the read-tier default so a legacy / direct-enqueue row
+    # is never mis-classified as a remote-write. ``enqueue_command`` stamps
+    # the descriptor's real level on every minted row.
+    safety_level: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sa.text("'safe'"),
     )
 
     __table_args__ = (

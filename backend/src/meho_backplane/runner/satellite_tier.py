@@ -49,11 +49,25 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 __all__ = [
+    "REMOTE_WRITE_SAFETY_LEVELS",
     "RemoteWriteGateDecision",
     "SatelliteMintTier",
     "classify_satellite_tier",
     "evaluate_remote_write_gate",
 ]
+
+#: The ``safety_level`` values that classify into
+#: :attr:`SatelliteMintTier.REMOTE_WRITE`. The SQL-expressible companion of
+#: :func:`classify_satellite_tier` for callers that must tier-scope a query
+#: without importing the classifier into the database layer — the
+#: revocation-hardening delivery filter (#3192,
+#: :func:`meho_backplane.gateway.queue.claim_next_command`) narrows a revoked
+#: runner's claim to non-remote-write rows via
+#: ``safety_level NOT IN REMOTE_WRITE_SAFETY_LEVELS``. Kept in lock-step with
+#: :func:`classify_satellite_tier` by ``tests/test_runner_satellite_tier.py``:
+#: a level added to the classifier's ``REMOTE_WRITE`` branch must be added
+#: here, or the drift guard fails.
+REMOTE_WRITE_SAFETY_LEVELS: frozenset[str] = frozenset({"caution"})
 
 
 class SatelliteMintTier(StrEnum):

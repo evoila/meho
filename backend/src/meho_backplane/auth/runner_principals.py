@@ -49,6 +49,7 @@ token-issuing runner as revoked.
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Final
@@ -66,6 +67,7 @@ from meho_backplane.auth.keycloak_admin import (
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunnerPrincipal
+from meho_backplane.memory.audit import INTERNAL_METHOD, write_internal_audit_row
 from meho_backplane.scheduler.vault_credentials import (
     SchedulerVaultNotConfiguredError,
     write_agent_secret,
@@ -97,6 +99,19 @@ NAME_MAX_LENGTH: Final[int] = 128
 
 #: Convention: the Keycloak clientId for a runner principal.
 _CLIENT_ID_PREFIX: str = "runner:"
+
+#: Audit ``path`` for a runner-principal revocation (#3192). Revocation is the
+#: write-path kill switch (satellite write-path decision, mechanism 4:
+#: "revocation observable"); this row is the tamper-evident trail that a
+#: runner's write capability was withdrawn, distinct from the liveness
+#: ``gateway.runner.stale`` dead-man flip. Written on the central clock with a
+#: system-attributed ``operator_sub`` (the service method takes no operator).
+_REVOKE_AUDIT_PATH: str = "runner.principal.revoked"
+
+#: System identity stamped on the revocation audit row (the revoke service
+#: method is invoked by the REST route but does not thread the operator sub);
+#: a stable name so audit filters can partition by this background source.
+_REVOKE_AUDIT_SUB: str = "system:runner-principal-revoke"
 
 #: ``tenant_role`` stamped into the runner client's access token. Read-only
 #: credential scope in v1 (vs the agent's ``tenant_admin``): a runner is a
@@ -478,6 +493,28 @@ class RunnerPrincipalService:
             return None
         return RunnerPrincipalRead.model_validate(row)
 
+    async def _disable_keycloak_client(
+        self, keycloak_internal_id: str, *, tenant_id: uuid.UUID, name: str
+    ) -> None:
+        """Disable the runner's Keycloak client — the authoritative kill switch.
+
+        Called *before* the DB row is marked revoked so a non-404 failure
+        aborts the revoke without falsely reporting a still-token-issuing
+        runner as revoked. A Keycloak *not-found* is treated as success (the
+        client is already gone) and the caller still marks the row revoked.
+        """
+        kc_client = KeycloakAdminClient.from_settings()
+        try:
+            async with kc_client:
+                await kc_client.disable_client(keycloak_internal_id)
+        except KeycloakClientNotFoundError:
+            self._log.warning(
+                "runner_principal_revoke_keycloak_not_found",
+                tenant_id=str(tenant_id),
+                name=name,
+                keycloak_internal_id=keycloak_internal_id,
+            )
+
     async def revoke(
         self,
         tenant_id: uuid.UUID,
@@ -507,6 +544,7 @@ class RunnerPrincipalService:
             On a non-404 Keycloak Admin API failure — the DB row is left
             unchanged, so the runner stays active and the operator can retry.
         """
+        started = time.monotonic()
         sessionmaker = get_sessionmaker()
         # Phase 1: validate + fetch the Keycloak internal id (read-only).
         async with sessionmaker() as session:
@@ -523,19 +561,9 @@ class RunnerPrincipalService:
             keycloak_internal_id = row.keycloak_internal_id
 
         # Phase 2: disable the Keycloak client FIRST (authoritative kill
-        # switch). A non-404 failure propagates before any DB write, so a
-        # runner is never marked revoked while it can still mint tokens.
-        kc_client = KeycloakAdminClient.from_settings()
-        try:
-            async with kc_client:
-                await kc_client.disable_client(keycloak_internal_id)
-        except KeycloakClientNotFoundError:
-            self._log.warning(
-                "runner_principal_revoke_keycloak_not_found",
-                tenant_id=str(tenant_id),
-                name=name,
-                keycloak_internal_id=keycloak_internal_id,
-            )
+        # switch) — before any DB write, so a runner is never marked revoked
+        # while it can still mint tokens.
+        await self._disable_keycloak_client(keycloak_internal_id, tenant_id=tenant_id, name=name)
 
         # Phase 3: persist revoked=true now that the client is disabled.
         async with sessionmaker() as session:
@@ -556,6 +584,20 @@ class RunnerPrincipalService:
             await session.refresh(row)
             entry = RunnerPrincipalRead.model_validate(row)
             await session.commit()
+
+        # Revocation audit trail (#3192, mechanism 4): a tamper-evident row
+        # proving the runner's write capability was withdrawn, on the central
+        # clock, distinct from the liveness dead-man flip. Written after the
+        # DB commit so it records only a completed revocation.
+        await write_internal_audit_row(
+            operator_sub=_REVOKE_AUDIT_SUB,
+            tenant_id=tenant_id,
+            method=INTERNAL_METHOD,
+            path=_REVOKE_AUDIT_PATH,
+            status_code=200,
+            duration_ms=(time.monotonic() - started) * 1000,
+            payload={"runner": name, "keycloak_internal_id": keycloak_internal_id},
+        )
 
         self._log.info(
             "runner_principal_revoke",

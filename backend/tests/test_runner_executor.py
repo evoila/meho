@@ -73,11 +73,13 @@ async def test_safe_op_executes_and_returns_structured_result(
     assert len(result.result_uid) == 32
 
 
-async def test_non_safe_op_is_refused_without_invocation(
+async def test_remote_write_op_is_refused_without_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An allowlisted host would let the probe succeed *if* it ran — proving
-    # the refusal short-circuits before the handler is ever invoked.
+    # the refusal short-circuits before the handler is ever invoked. A
+    # `caution` op is the `remote-write` tier: it fails closed at the edge
+    # (mechanism 2's edge re-check) until the runner is authorised (#3188).
     monkeypatch.setenv(_ALLOWLIST_ENV, "127.0.0.1")
     item = _tcp_check_item(host="127.0.0.1", port=9, safety_level="caution", check_ref="chk-2")
 
@@ -85,7 +87,24 @@ async def test_non_safe_op_is_refused_without_invocation(
 
     assert result.status == "refused"
     assert result.result is None
-    assert "caution" in (result.error or "")
+    assert "remote-write" in (result.error or "")
+
+
+@pytest.mark.parametrize("level", ["dangerous", "destructive"])
+async def test_excluded_op_is_refused_without_invocation(
+    monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    # `dangerous` / `destructive` are the EXCLUDED tier — never dispatched to
+    # a runner, refused at the edge as defence in depth (#3188).
+    monkeypatch.setenv(_ALLOWLIST_ENV, "127.0.0.1")
+    item = _tcp_check_item(host="127.0.0.1", port=9, safety_level=level, check_ref="chk-x")
+
+    result = await execute_work_item(item)
+
+    assert result.status == "refused"
+    assert result.result is None
+    assert level in (result.error or "")
+    assert "never dispatched" in (result.error or "")
 
 
 async def test_out_of_tree_handler_ref_is_refused_fail_closed() -> None:

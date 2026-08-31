@@ -55,6 +55,7 @@ staged`` will hit.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -147,6 +148,34 @@ def _version_looks_like_epoch(version: str) -> bool:
     connector version never matches (they carry ``.`` / letters / ``-``).
     """
     return version.isascii() and version.isdigit() and len(version) >= _EPOCH_VERSION_MIN_DIGITS
+
+
+#: Matches an ``impl_id`` ending in ``-probe-<epoch>`` — a ``-probe-``
+#: segment followed by a bare integer of at least
+#: :data:`_EPOCH_VERSION_MIN_DIGITS` digits running to the end of the
+#: string. The sibling of :func:`_version_looks_like_epoch` for the
+#: #3061 shape, where the epoch rides the ``impl_id`` tail rather than
+#: the ``version``. The ``-probe-`` anchor plus the trailing digit run
+#: keep it off every legitimate connector: the stable probe impls end in
+#: a bare ``-probe`` with no epoch (``net-probe`` / ``nsx-rest-probe`` /
+#: ``fleet-rest-probe``), and no real product-line impl_id
+#: (``fleet-rest`` / ``vmware-rest`` / ``vcd``) carries a
+#: ``-probe-<digits>`` tail at all. ``[0-9]`` (not ``\d``) keeps it
+#: ASCII-exact, identical to the migration's POSIX-regex reap predicate.
+_PROBE_EPOCH_IMPL_ID_RE = re.compile(rf"-probe-[0-9]{{{_EPOCH_VERSION_MIN_DIGITS},}}$")
+
+
+def _impl_id_looks_like_probe_epoch(impl_id: str) -> bool:
+    """Return whether *impl_id* ends in the ``-probe-<epoch>`` accretion shape.
+
+    The #3061 companion to :func:`_version_looks_like_epoch`: the
+    consumer probe-then-ingest loop that keeps a *stable* ``version``
+    (``9.0``) instead mints a per-run epoch into the ``impl_id``
+    (``fleet-rest-probe-<epoch>``), so a changed ``impl_id`` renders a
+    fresh ``(product, version, impl_id)`` triple on every run — the same
+    unbounded-catalog defect #2977 fixed for the ``version`` column.
+    """
+    return _PROBE_EPOCH_IMPL_ID_RE.search(impl_id) is not None
 
 
 class IngestRequest(BaseModel):
@@ -521,6 +550,48 @@ class IngestRequest(BaseModel):
                 "ingest, minting the unbounded '<impl>-probe-<epoch>' "
                 "catalog rows #2977 fixes. Re-ingest under a stable "
                 "product-line version. See docs/codebase/error-message-shape.md."
+            )
+        return value
+
+    @field_validator("impl_id")
+    @classmethod
+    def _reject_probe_epoch_impl_id(cls, value: str | None) -> str | None:
+        """Reject an ``impl_id`` ending in ``-probe-<epoch>`` (#3061).
+
+        The sibling shape to the epoch-``version`` guard above:
+        :meth:`_reject_epoch_version` catches the consumer probe-then-ingest
+        loop that stamps the epoch as ``version``, but the loop that filed
+        #3061 keeps a *legitimate* ``version`` (``9.0``) and mints the
+        per-run epoch into the ``impl_id`` instead
+        (``fleet-rest-probe-<epoch>``, rendering
+        ``connector_id="fleet-rest-probe-<epoch>-9.0"``). ``9.0`` is a real
+        product-line version, so the ``version`` guard never fires — yet a
+        changed ``impl_id`` still renders a fresh ``(product, version,
+        impl_id)`` triple, so the upsert INSERTs a new connector per run
+        and the catalog grows without bound exactly as #2977 described.
+        Rejecting the shape here — on the one :class:`IngestRequest` both
+        the REST route and the ``meho_connector_ingest`` MCP tool construct
+        through — stops the growth at the source on every surface; the
+        ``0088`` data migration reaps the rows already leaked in. The
+        upstream fingerprint/probe glue that mints the epoch is
+        consumer-side (a different repo), so this boundary guard is the
+        backplane's durable defence.
+
+        ``None`` (the catalog-driven shape, where ``impl_id`` is resolved
+        server-side from the packaged — and therefore never epoch —
+        catalog entry) passes untouched. The ``snake_case`` classifier
+        follows the T11 error-message-shape convention so callers branch
+        without re-parsing the prose.
+        """
+        if value is not None and _impl_id_looks_like_probe_epoch(value):
+            raise ValueError(
+                "connector_impl_id_probe_epoch_rejected: impl_id "
+                f"{value!r} ends in a '-probe-<epoch>' Unix-epoch tail, not a "
+                "stable impl_id (e.g. 'fleet-rest', 'fleet-rest-probe'). A "
+                "per-run epoch renders a fresh connector_id on every ingest, "
+                "minting the unbounded '<impl>-probe-<epoch>' catalog rows "
+                "#3061 fixes. Re-ingest under a stable impl_id. "
+                "See docs/codebase/error-message-shape.md."
             )
         return value
 

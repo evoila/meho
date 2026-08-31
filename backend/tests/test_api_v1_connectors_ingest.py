@@ -3932,6 +3932,136 @@ def test_ingest_returns_422_on_epoch_version(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #3061 — reject probe-epoch impl_id (epoch in the impl_id tail, not version)
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_request_rejects_probe_epoch_impl_id() -> None:
+    """``IngestRequest`` rejects an ``impl_id`` ending in ``-probe-<epoch>`` (#3061).
+
+    The shape ``0075`` missed: the epoch rides the ``impl_id`` tail while
+    the ``version`` is a legitimate ``9.0``, so the version-keyed guard
+    never fires. The impl_id guard fires on the one validator both the REST
+    route and the MCP tool construct through, so every surface fails closed.
+    """
+    from pydantic import ValidationError
+
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    with pytest.raises(ValidationError) as exc_info:
+        IngestRequest(
+            product="fleet",
+            version="9.0",
+            impl_id="fleet-rest-probe-1784123249",
+            specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+        )
+    assert "connector_impl_id_probe_epoch_rejected" in str(exc_info.value)
+
+
+def test_ingest_request_accepts_stable_probe_impl_id() -> None:
+    """A bare ``-probe`` impl_id (no epoch tail) passes untouched.
+
+    ``fleet-rest-probe`` is the stable "one probe registration per impl"
+    pattern #2977 asked for; it must not trip the ``-probe-<epoch>`` guard.
+    """
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    req = IngestRequest(
+        product="fleet",
+        version="9.0",
+        impl_id="fleet-rest-probe",
+        specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+    )
+    assert req.impl_id == "fleet-rest-probe"
+
+
+@pytest.mark.parametrize(
+    ("impl_id", "rejected"),
+    [
+        ("fleet-rest-probe-1784123249", True),  # 10-digit epoch tail — the defect
+        ("fleet-rest-probe-169999999", True),  # 9-digit — at the floor, still an epoch
+        ("fleet-rest-probe-16999999", False),  # 8-digit — below the floor
+        ("fleet-rest-probe", False),  # bare -probe, no epoch tail
+        ("fleet-rest", False),  # stable dispatch-canonical impl_id
+        ("net-probe", False),  # sibling stable probe impl
+        ("vmware-rest-probe", False),  # sibling stable probe impl
+        ("vcd", False),  # single-token impl_id
+        ("fleet-rest-probe-1784123249-extra", False),  # epoch not at the tail
+    ],
+)
+def test_ingest_request_probe_epoch_impl_id_boundary(impl_id: str, rejected: bool) -> None:
+    """Lock the ``-probe-<epoch>`` shape: 9+ trailing digits after ``-probe-`` rejected."""
+    from pydantic import ValidationError
+
+    from meho_backplane.operations.ingest import IngestRequest, SpecSource
+
+    def _build() -> IngestRequest:
+        return IngestRequest(
+            product="fleet",
+            version="9.0",
+            impl_id=impl_id,
+            specs=[SpecSource(uri="https://specs.test/never-fetched.yaml")],
+        )
+
+    if rejected:
+        with pytest.raises(ValidationError, match="connector_impl_id_probe_epoch_rejected"):
+            _build()
+    else:
+        assert _build().impl_id == impl_id
+
+
+def test_probe_epoch_guard_spares_every_registered_impl_id() -> None:
+    """No shipped connector's ``impl_id`` matches the ``-probe-<epoch>`` guard.
+
+    The guard is a blanket predicate on the ingest boundary, so a
+    false-positive would reject a legitimate re-ingest. Enumerate every
+    registered ``(product, version, impl_id)`` triple in the v2 registry
+    and assert none of the impl_ids trip the predicate — a live regression
+    fence over the whole connector catalog (``vcd`` / ``vrops8`` /
+    ``vmware-rest`` / the stable ``*-probe`` impls all included).
+    """
+    from meho_backplane.connectors.registry import (
+        _eager_import_connectors,
+        list_connector_impls,
+    )
+    from meho_backplane.operations.ingest.api_schemas import _impl_id_looks_like_probe_epoch
+
+    _eager_import_connectors()
+    impls = list_connector_impls()
+    assert impls, "expected a populated v2 connector registry"
+
+    offenders = [
+        impl_id
+        for (_product, _version, impl_id) in impls
+        if _impl_id_looks_like_probe_epoch(impl_id)
+    ]
+    assert not offenders, f"registered impl_ids must not match the probe-epoch guard: {offenders}"
+
+
+def test_ingest_returns_422_on_probe_epoch_impl_id(client: TestClient) -> None:
+    """End-to-end: POST with a ``-probe-<epoch>`` impl_id → 422 with the classifier.
+
+    Validation fails at body-parse (before the handler, so no spec is
+    fetched); the ``snake_case`` classifier surfaces in the 422 body.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "fleet",
+                "version": "9.0",
+                "impl_id": "fleet-rest-probe-1784123249",
+                "specs": [{"uri": "https://specs.test/never-fetched.yaml"}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    assert "connector_impl_id_probe_epoch_rejected" in response.text
+
+
+# ---------------------------------------------------------------------------
 # G0.14-T9 (#1150) — catalog-driven REST ingest shape
 # ---------------------------------------------------------------------------
 

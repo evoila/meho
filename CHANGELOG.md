@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — epoch-in-`impl_id` probe registrations now reaped + rejected (#3061)
+
+- `#2977`'s epoch-reap (migration `0075`) and `IngestRequest._reject_epoch_version`
+  both key on the connector **`version`** column, but the accreting
+  `fleet-rest-probe-<epoch>` rows carry the epoch in the **`impl_id`** tail
+  with a legitimate `version="9.0"` — so `0075` matched nothing and a
+  v0.29.0 lab deploy still returned 9 stale rows post-migration. Two guards
+  close the sibling shape: **migration `0088`** (down_revision `0087`;
+  `0087` is a coordinated peer migration, #3216) reaps
+  `endpoint_descriptor` (`source_kind='ingested'`) + `operation_group` rows
+  whose `impl_id` ends in `-probe-<epoch>` (≥ 9 trailing digits after a
+  `-probe-` segment; dialect-branched PG regex / SQLite `GLOB`,
+  tenant-scope-inclusive, no-op `downgrade()`); and
+  `IngestRequest._reject_probe_epoch_impl_id` rejects the same shape at the
+  ingest boundary on every surface (`422
+  connector_impl_id_probe_epoch_rejected`). The stable `*-probe` impls and
+  every real product-line impl_id are untouched (regression-fenced over the
+  whole registered catalog). The per-run epoch is minted by consumer-side
+  fingerprint/probe glue in a different repo (`claude-rdc-hetzner-dc`), so
+  the boundary guard is the backplane's durable defence; no backplane code
+  mints these rows.
+
 ### Fixed — large `deploy_from_library` OVAs: async dispatch survives caller disconnect + a 3 h sync read ceiling (#3176)
 
 - `vmware.composite.vm.deploy_from_library` of a **multi-GB** content-library

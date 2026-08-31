@@ -114,6 +114,44 @@ connector-related release-notes line.
 - The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
   unchanged for genuine faults.
 
+### Added — flight recorder: agent read surface — trace as a reduced result-handle, per-tenant gated, redaction-uncertainty degrade (#3216)
+
+- Ships **F5** of the flight-recorder decision
+  (`docs/decisions/dispatch-flight-recorder.md`) — the operator override that
+  makes a captured dispatch trace **readable by an agent**, but only through
+  the existing narrow-waist result-handle idiom. A trace is materialized as a
+  set-shaped result (its ordered spans) and spilled to the same
+  `ResultHandleStore` (Valkey, tenant + operator scoped, TTL-bounded) any large
+  response uses; the agent pages it via the **unchanged** `result_query`
+  meta-tool (`read_result_window`, `MAX_LIMIT=500`). **No new tool** is
+  registered, **no vendor-specific name** reaches the agent surface, and **no
+  raw payload** enters agent context — postulates 5 and 6 intact, and
+  `docs/codebase/mcp.md` + `test_mcp_surface_conformance.py` are untouched.
+- **Per-tenant gate, independent of operator access.** Agent trace readability
+  is a new tri-state per-tenant policy (`tenant.flight_recorder_agent_readable`,
+  migration `0087`): `NULL` inherits the capture default (so it "follows the F1
+  lab-on posture"), `True` forces on, `False` withholds from agents while the
+  operator plane keeps full access. Resolved fail-open to "no agent exposure"
+  by `flight_recorder.config.should_expose_to_agent`.
+- **Redaction-uncertainty degrade (the F5 discharge).** Any trace whose
+  redaction could not be proven complete (`redaction_uncertain=True`) is
+  withheld from the agent handle **entirely** — checked before any span is
+  loaded or spilled — while remaining readable on the operator plane. Composed
+  with the #3213 fail-closed redaction, this discharges the operator's
+  condition (*"as long as there are no secrets in there"*): a secret-bearing /
+  uncertain span never reaches an agent-visible handle. The default on doubt is
+  less agent exposure, never more.
+- **Live trigger wired into the recorder.** After the capture seam
+  (`flight_recorder.capture`, #3214) persists a trace via `record_trace` on the
+  recorder's best-effort path, it mints the agent handle
+  (`flight_recorder.materialize_agent_trace_handle`, gated by
+  `should_expose_to_agent`, degraded on `redaction_uncertain`) and attaches it
+  to the dispatch response as `flight_recorder_trace_handle`. The trigger runs
+  **strictly inside the F7 swallow-everything discipline** — a trigger failure
+  can never fail, block, or slow a dispatch and never alters the dispatch
+  result, and the disabled / gated-off path is a cheap gate check that spills
+  nothing.
+
 ### Fixed — `holodeck.config.apply` fails closed instead of reporting false success on a CLIXML-corrupted stdout (#3081)
 
 - `holodeck.config.apply` returned `{applied: true, config_id: null}` while
@@ -132,6 +170,7 @@ connector-related release-notes line.
   `Test-Path` verify-after-write folded into the same script), and silences the
   warning stream at the source (`$WarningPreference`). The self-contradictory
   `applied: true` / `config_id: null` envelope is now impossible.
+
 
 ### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
 

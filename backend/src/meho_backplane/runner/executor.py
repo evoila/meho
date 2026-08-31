@@ -39,6 +39,7 @@ from typing import Any
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.wrapped_creds import screen_remote_write_credential
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
@@ -100,6 +101,13 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
         decision = evaluate_remote_write_gate(op_id=item.op_id)
         if not decision.permitted:
             return decision.reason
+        # Mechanism 3 (#3191) edge check, composed after the gate: a
+        # remote-write item must carry a per-work-item single-use wrapped
+        # credential — a standing/broad secret_ref is refused, so no standing
+        # runner credential ever rides the write tier.
+        cred_refusal = screen_remote_write_credential(item.target_descriptor)
+        if cred_refusal is not None:
+            return cred_refusal
     if not item.handler_ref.startswith(_CONNECTOR_MODULE_PREFIX):
         return f"handler_ref {item.handler_ref!r} is outside {_CONNECTOR_MODULE_PREFIX}*"
     return None

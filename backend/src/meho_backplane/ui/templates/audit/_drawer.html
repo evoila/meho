@@ -20,9 +20,14 @@
                        method/path, humanized status + timestamp.
     4. Lineage      -- labelled parent / replay-session / run links
                        (replay TENANT_ADMIN-gated, disabled w/ tooltip).
-    5. Identifiers  -- the raw audit_id / request_id / work_ref (the raw
+    5. Flight recorder -- the operator read of the dispatch trace (#3215):
+                       ordered redacted+capped spans w/ method/URL/status/
+                       duration, expandable redacted bodies + truncation
+                       markers, and the redaction-uncertainty banner. Empty
+                       state when no trace was captured (opt-in/best-effort).
+    6. Identifiers  -- the raw audit_id / request_id / work_ref (the raw
                        ids always reachable here, plus on every chip title).
-    6. Payload      -- the full request payload JSON when the op is not
+    7. Payload      -- the full request payload JSON when the op is not
                        aggregate-only; the 🔒 placeholder otherwise
                        (a sensitive op never leaks its payload -- decision #3).
 
@@ -35,6 +40,8 @@
     request_payload-- dict: the stripped request payload (empty when gated)
     gated_op_classes -- list[str]: the withheld op-class names (🔒 copy)
     references     -- AuditReferences: resolved named/linked substance
+    trace          -- dict: projected flight-recorder trace pane (#3215);
+                       always carries a ``present`` discriminator
 -#}
 {% from "_references.html" import what_happened, principal_chip, operation_ref, target_ref, status_badge, timestamp, work_ref_ref, lineage %}
 <aside
@@ -98,6 +105,168 @@
 
     {# ---------- Lineage (labelled parent / replay / run links) ---------- #}
     {{ lineage(references, "audit") }}
+
+    {# ---------- Flight recorder trace (operator read surface, #3215) ---------- #}
+    <section aria-label="Flight recorder trace">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Flight recorder</h3>
+      {% if not trace.present %}
+        <p class="text-sm opacity-60">
+          No trace captured for this dispatch (capture is per-tenant opt-in and best-effort).
+        </p>
+      {% else %}
+        {% if trace.redaction_uncertain %}
+          <p class="flex items-center gap-1 text-sm text-warning" role="status">
+            <span aria-hidden="true">&#x26A0;&#xFE0F;</span>
+            <span>
+              Redaction uncertain — this trace was withheld from agents and is
+              visible on the operator plane only.
+            </span>
+          </p>
+        {% endif %}
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+          <dt class="opacity-60">Spans</dt>
+          <dd>{{ trace.span_count }}</dd>
+          <dt class="opacity-60">Captured</dt>
+          <dd><time datetime="{{ trace.created_at }}">{{ trace.created_at }} UTC</time></dd>
+          <dt class="opacity-60">Expires</dt>
+          <dd><time datetime="{{ trace.expires_at }}">{{ trace.expires_at }} UTC</time></dd>
+          <dt class="opacity-60">Trace ID</dt>
+          <dd class="font-mono break-all">{{ trace.trace_id }}</dd>
+        </dl>
+        {% if trace.spans %}
+          <ol class="mt-2 space-y-2" aria-label="Trace spans">
+            {% for span in trace.spans %}
+              <li class="border-base-300 rounded border p-2">
+                <details>
+                  <summary class="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
+                    <span class="font-mono text-xs opacity-50">#{{ span.seq }}</span>
+                    <span class="badge badge-sm {{ span.kind_badge }}">{{ span.span_kind }}</span>
+                    <span class="font-mono text-xs break-all">{{ span.name }}</span>
+                    {% if span.status %}
+                      <span class="badge badge-sm {{ span.status_tone }}">{{ span.status }}</span>
+                    {% endif %}
+                    {% if span.duration_ms is not none %}
+                      <span class="text-xs opacity-60">{{ span.duration_ms }} ms</span>
+                    {% endif %}
+                    {% if span.truncated %}
+                      <span
+                        class="badge badge-warning badge-xs"
+                        title="Body exceeded the capture cap and was truncated at capture time."
+                      >truncated</span>
+                    {% endif %}
+                  </summary>
+                  <div class="mt-2 space-y-2 text-xs">
+                    <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
+                      {% if span.method %}
+                        <dt class="opacity-60">Method</dt>
+                        <dd><span class="badge badge-outline badge-xs">{{ span.method }}</span></dd>
+                      {% endif %}
+                      {% if span.url %}
+                        <dt class="opacity-60">URL</dt>
+                        <dd class="font-mono break-all">{{ span.url }}</dd>
+                      {% endif %}
+                      {% if span.op_id %}
+                        <dt class="opacity-60">Operation</dt>
+                        <dd class="font-mono break-all">{{ span.op_id }}</dd>
+                      {% endif %}
+                      {% if span.connector_id %}
+                        <dt class="opacity-60">Connector</dt>
+                        <dd class="font-mono break-all">{{ span.connector_id }}</dd>
+                      {% endif %}
+                      {% if span.source_kind %}
+                        <dt class="opacity-60">Source kind</dt>
+                        <dd>{{ span.source_kind }}</dd>
+                      {% endif %}
+                      <dt class="opacity-60">Started</dt>
+                      <dd><time datetime="{{ span.started_at }}">{{ span.started_at }}</time></dd>
+                    </dl>
+
+                    {% if span.collapsed %}
+                      <p class="opacity-60">
+                        Collapsed group of {{ span.collapsed_count }} spans (capture cap reached).
+                      </p>
+                    {% endif %}
+
+                    {% if span.input_rows is not none or span.handle %}
+                      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
+                        {% if span.input_rows is not none %}
+                          <dt class="opacity-60">Input rows</dt>
+                          <dd>
+                            {{ span.input_rows }}{% if span.total_rows is not none %} / {{ span.total_rows }} total{% endif %}
+                          </dd>
+                        {% endif %}
+                        {% if span.kept_fields %}
+                          <dt class="opacity-60">Kept fields</dt>
+                          <dd class="font-mono break-all">{{ span.kept_fields | join(", ") }}</dd>
+                        {% endif %}
+                        {% if span.output_bytes is not none %}
+                          <dt class="opacity-60">Output bytes</dt>
+                          <dd>{{ span.output_bytes }}</dd>
+                        {% endif %}
+                        {% if span.handle %}
+                          <dt class="opacity-60">Handle</dt>
+                          <dd class="font-mono break-all">{{ span.handle }}</dd>
+                        {% endif %}
+                      </dl>
+                    {% endif %}
+
+                    {% if span.redaction_reasons %}
+                      <div>
+                        <p class="opacity-60">Redaction notes</p>
+                        <ul class="list-disc pl-4">
+                          {% for reason in span.redaction_reasons %}
+                            <li>{{ reason }}</li>
+                          {% endfor %}
+                        </ul>
+                      </div>
+                    {% endif %}
+
+                    {% if span.request_headers %}
+                      <details>
+                        <summary class="cursor-pointer opacity-60">
+                          Request headers ({{ span.request_headers | length }})
+                        </summary>
+                        <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.request_headers | tojson(indent=2) }}</pre>
+                      </details>
+                    {% endif %}
+                    {% if span.request_body_present %}
+                      <details>
+                        <summary class="cursor-pointer opacity-60">Request body (redacted)</summary>
+                        <pre class="bg-base-200 mt-1 max-h-72 overflow-auto rounded p-2">{{ span.request_body | tojson(indent=2) }}</pre>
+                      </details>
+                    {% endif %}
+
+                    {% if span.response_headers %}
+                      <details>
+                        <summary class="cursor-pointer opacity-60">
+                          Response headers ({{ span.response_headers | length }})
+                        </summary>
+                        <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.response_headers | tojson(indent=2) }}</pre>
+                      </details>
+                    {% endif %}
+                    {% if span.response_body_present %}
+                      <details>
+                        <summary class="cursor-pointer opacity-60">Response body (redacted)</summary>
+                        <pre class="bg-base-200 mt-1 max-h-72 overflow-auto rounded p-2">{{ span.response_body | tojson(indent=2) }}</pre>
+                      </details>
+                    {% elif not span.body_recorded %}
+                      <p class="opacity-60">Body not recorded (secret-bearing op family).</p>
+                    {% endif %}
+
+                    {% if span.other_attributes %}
+                      <details>
+                        <summary class="cursor-pointer opacity-60">Other attributes</summary>
+                        <pre class="bg-base-200 mt-1 max-h-48 overflow-auto rounded p-2">{{ span.other_attributes | tojson(indent=2) }}</pre>
+                      </details>
+                    {% endif %}
+                  </div>
+                </details>
+              </li>
+            {% endfor %}
+          </ol>
+        {% endif %}
+      {% endif %}
+    </section>
 
     {# ---------- Identifiers (raw ids, always reachable) ---------- #}
     <section aria-label="Identifiers">

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line audit console router
+# (predates #3215, which adds only the drawer trace-pane hook); splitting the
+# surface router is out of scope for this task.
 
 """Audit-query forensic console: a filter form over unbounded history.
 
@@ -107,10 +110,12 @@ from meho_backplane.audit_query import (
 from meho_backplane.broadcast import classify_op
 from meho_backplane.db.engine import get_raw_session, get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.flight_recorder import load_trace
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.references import resolve_audit_references
 from meho_backplane.ui.roles import is_ui_tenant_admin
+from meho_backplane.ui.routes.audit.trace_pane import project_trace
 from meho_backplane.ui.routes.broadcast.aggregate_gate import (
     AGGREGATE_ONLY_OP_CLASSES,
     INTERNAL_PAYLOAD_KEYS,
@@ -392,6 +397,19 @@ async def _build_drawer_context(
     references = await resolve_audit_references(
         db_session, row, op_id=op_id, op_class=op_class, is_admin=is_admin
     )
+    # Flight-recorder trace pane (#3215). Operator-plane read: full access
+    # (redaction-uncertain traces included), tenant-scoped on the row's own
+    # tenant (the row was already resolved under ``session.tenant_id`` by the
+    # caller, and ``load_trace`` re-filters the trace header on ``tenant_id``).
+    # A resolved row always carries a tenant (``fetch_audit_row`` matches on a
+    # concrete ``tenant_id``, and ``NULL = :id`` never matches), so the guard's
+    # else branch is unreachable for a resolved row -- it only satisfies the
+    # nullable column type and shows the empty state for the impossible case.
+    trace_view = (
+        await load_trace(db_session, audit_id=row.id, tenant_id=row.tenant_id)
+        if row.tenant_id is not None
+        else None
+    )
     return {
         "row": row,
         "op_id": op_id,
@@ -399,6 +417,7 @@ async def _build_drawer_context(
         "badge_class": _badge_class(op_class),
         "aggregate_only": aggregate_only,
         "request_payload": request_payload,
+        "trace": project_trace(trace_view),
         # The single-source gated op-class set (from the shared
         # broadcast aggregate_gate) names the withheld classes in the 🔒
         # placeholder copy, so the drawer text stays honest about which

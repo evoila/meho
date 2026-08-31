@@ -182,6 +182,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
+| `GET /api/v1/audit/{audit_id}/trace` | The dispatch flight-recorder read (#3215). Audit-existence check via the same tenant-scoped substrate (`audit_id`, `limit=1`) → **404** (not 403) on a missing / cross-tenant row, matching `show`. Then `flight_recorder.load_trace(audit_id, tenant_id)` loads the trace header + ordered spans (tenant-scoped again as defence in depth). 200 body is `AuditTraceResult` (`{audit_id, trace_present, trace}`); an audit row with **no** captured trace is a `200` with `trace_present=false` (capture is opt-in/best-effort, not an error), and `trace.redaction_uncertain` surfaces the F5 degrade flag. Operator plane keeps full access independent of the agent gate. | Flight-recorder trace (#3215). |
 | `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
@@ -196,8 +197,9 @@ counted — "session rows" are defined by the `agent_session_id` anchor.
 
 Every route binds two audit-override contextvars **before** the substrate
 call — `audit_op_class="audit_query"` (always) plus an `audit_op_id`:
-`"meho.audit.query"` for the four query routes and `"meho_audit_replay"`
-for the replay route (so operators can tell replay usage apart from
+`"meho.audit.query"` for the four query routes, `"meho_audit_replay"` for
+the replay route, and `"meho_audit_trace"` for the flight-recorder trace
+route (so operators can tell replay and trace-read usage apart from
 flat-query usage in `audit_log`). The shared `audit_query` op_class flips
 the broadcast event to aggregate-only (`{op_id, result_status,
 row_count}` only, never the request filter or the replayed `ReplayNode`
@@ -206,11 +208,14 @@ returns — and on the 413 path before raising — so the broadcast event's
 `row_count` field reflects the actual cardinality. The shape mirrors
 `api/v1/retrieve_usage.py`.
 
-RBAC: the five flat / self-scoped routes (`query`, `who-touched`,
-`by-work-ref`, `my-recent`, `show`) require `operator` minimum —
-`read_only` → 403; `operator` / `tenant_admin` → 200. These mirror the
-operator-gated MCP `query_audit` tool (including its self-session-only
-`shape="tree"` path).
+RBAC: the flat / self-scoped operator routes (`query`, `who-touched`,
+`by-work-ref`, `my-recent`, `show`, and the flight-recorder `trace`)
+require `operator` minimum — `read_only` → 403; `operator` /
+`tenant_admin` → 200. These mirror the operator-gated MCP `query_audit`
+tool (including its self-session-only `shape="tree"` path). The
+flight-recorder trace read stays on the operator plane with **full**
+access independent of the agent gate (the agent read is a separate task);
+the console pane renders the same trace through the audit-row drawer.
 
 **Tenant-broadcast read surfaces (#2084).** Within a tenant, `query` and
 `show` are principal-agnostic by design: `POST /api/v1/audit/query` (with

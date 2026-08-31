@@ -360,6 +360,54 @@ def test_screen_refuses_when_target_descriptor_is_none() -> None:
     assert WRAPPED_CREDENTIAL_SCHEME in reason
 
 
+async def test_executor_refuses_remote_write_without_wrapped_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end edge enforcement: with the composed gate permitting (its real
+    # wiring is #3189), a remote-write item whose target carries a standing
+    # secret_ref is still refused at the edge by the mechanism-3 credential
+    # screen — no standing runner credential ever rides the write tier.
+    from meho_backplane.runner import executor
+    from meho_backplane.runner.satellite_tier import RemoteWriteGateDecision
+    from meho_backplane.runner.wire import (
+        ResolvedTargetDescriptor,
+        RunnerPrincipal,
+        RunnerWorkItem,
+    )
+
+    monkeypatch.setattr(
+        executor,
+        "evaluate_remote_write_gate",
+        lambda **_kw: RemoteWriteGateDecision(permitted=True, reason="permitted-in-test"),
+    )
+
+    descriptor = ResolvedTargetDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        name="vc-a",
+        product="vmware",
+        host="vc-a.example.internal",
+        secret_ref="targets/vc-a",  # standing/broad — not a wrapped token
+    )
+    item = RunnerWorkItem(
+        check_ref="chk-rw",
+        op_id="vmware.vm.tag_set",
+        product="vmware",
+        handler_ref="meho_backplane.connectors.vmware.ops.tag_set",
+        safety_level="caution",
+        principal=RunnerPrincipal(
+            sub="runner-svc", tenant_id=uuid.uuid4(), tenant_role=TenantRole.READ_ONLY
+        ),
+        target_descriptor=descriptor,
+    )
+
+    result = await executor.execute_work_item(item)
+
+    assert result.status == "refused"
+    assert result.result is None
+    assert "no standing runner credential" in (result.error or "")
+
+
 # ---------------------------------------------------------------------------
 # Seam lazy default — the runner resolves a wrapped: ref with no chassis Settings
 # ---------------------------------------------------------------------------

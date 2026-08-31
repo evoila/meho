@@ -188,7 +188,7 @@ work item, plus approval-bound minting.
 - **Signed capability.** On a bound mint the centre signs the canonical
   payload (`op_id` + `params_hash` + `target_scope` + `expires_at`) with its
   Ed25519 **signing (private) key** and stamps the base64 signature on the
-  `gateway_command` row (`signature` column, migration `0088`). This is the
+  `gateway_command` row (`signature` column, migration `0089`). This is the
   deliberate, **write-tier-only** reversal of #2500: for a `safe` read an
   edge-verifiable signature bought nothing, but for a write it is the offline
   integrity + freshness + target-scope check against transit tampering (T2)

@@ -245,7 +245,7 @@ connector-related release-notes line.
 - **Signed capability (write-tier-only #2500 reversal).** The centre signs the
   canonical payload (`op_id` + `params_hash` + `target_scope` + `expires_at`)
   with its Ed25519 **signing (private) key** and stamps the signature on the
-  `gateway_command` row (new `signature` column, **migration 0088**). New
+  `gateway_command` row (new `signature` column, **migration 0089**). New
   edge-safe module `runner/work_item_signing.py` (stdlib + `cryptography`,
   no DB import); the runner holds only the **verification (public) key**,
   provisioned at enrollment, so a compromised runner cannot forge a capability.

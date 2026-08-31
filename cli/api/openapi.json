@@ -27190,6 +27190,17 @@
             "type": "object",
             "nullable": true,
             "title": "Target Descriptor"
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true,
+            "title": "Signature"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
           }
         },
         "type": "object",
@@ -30263,6 +30274,17 @@
           "target_descriptor": {
             "$ref": "#/components/schemas/ResolvedTargetDescriptor",
             "nullable": true
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true,
+            "title": "Signature"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
           }
         },
         "type": "object",
@@ -30275,7 +30297,7 @@
           "principal"
         ],
         "title": "RunnerWorkItem",
-        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``)."
+        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field."
       },
       "SafetyChangeModel": {
         "properties": {

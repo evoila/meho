@@ -6249,7 +6249,7 @@ class GatewayCommand(Base):
         nullable=True,
         default=None,
     )
-    # Signed remote-write capability (#3189, migration 0088). Base64 Ed25519
+    # Signed remote-write capability (#3189, migration 0089). Base64 Ed25519
     # signature over the canonical work-item payload (op_id + params_hash +
     # target_scope + expires_at), stamped by ``mint_gateway_command`` for a
     # ``remote-write`` (caution) mint only and verified offline at the edge

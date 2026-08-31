@@ -4623,9 +4623,11 @@ type FreshnessCompare struct {
 
 // GatewayCommandEnvelope The claimed-command envelope returned by “GET .../next“ (200).
 type GatewayCommandEnvelope struct {
+	ExpiresAt        *time.Time              `json:"expires_at"`
 	Id               openapi_types.UUID      `json:"id"`
 	OpId             string                  `json:"op_id"`
 	Params           map[string]interface{}  `json:"params"`
+	Signature        *string                 `json:"signature"`
 	TargetDescriptor *map[string]interface{} `json:"target_descriptor"`
 }
 
@@ -6622,8 +6624,19 @@ type RunnerResultBatch struct {
 // “params“, the “safety_level“ the runner re-checks (defence in
 // depth), the principal context, and the resolved target descriptor
 // (“None“ for targetless synthetic ops such as “net.*“).
+//
+// Remote-write signing (#3189): a “caution“ / “remote-write“ item
+// additionally carries the centre's Ed25519 “signature“ over its
+// canonical payload and the “expires_at“ freshness bound the signature
+// covers, both verified in
+// :func:`~meho_backplane.runner.executor._screen_item` before execution.
+// Both are “None“ for a “safe“ read item (the recurring assignment
+// path materialises only “safe“ ops and never signs them) -- signing is
+// a write-tier property, so their absence on a “safe“ item is correct,
+// not a missing field.
 type RunnerWorkItem struct {
 	CheckRef   string                  `json:"check_ref"`
+	ExpiresAt  *time.Time              `json:"expires_at"`
 	HandlerRef string                  `json:"handler_ref"`
 	ImplId     *string                 `json:"impl_id,omitempty"`
 	OpId       string                  `json:"op_id"`
@@ -6638,6 +6651,7 @@ type RunnerWorkItem struct {
 	Principal   RunnerPrincipal `json:"principal"`
 	Product     string          `json:"product"`
 	SafetyLevel string          `json:"safety_level"`
+	Signature   *string         `json:"signature"`
 
 	// TargetDescriptor Centrally-resolved target attributes a connector handler reads.
 	//

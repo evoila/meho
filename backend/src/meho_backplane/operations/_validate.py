@@ -267,7 +267,22 @@ async def _non_agent_verdict(
     is_service = operator.principal_kind is PrincipalKind.SERVICE
 
     gate_reason: str | None = None
-    if descriptor.requires_approval:
+    if descriptor.safety_level == "destructive":
+        # #3198: the destructive tier is mandatory-human-approval for EVERY
+        # non-agent principal — it parks regardless of ``requires_approval``
+        # and regardless of principal kind. Without this branch a USER
+        # dispatching a destructive op declared ``requires_approval=False``
+        # would auto-execute below (the safety_level→park mapping lived only
+        # on the ``elif is_service`` branch), bypassing the preview-hash +
+        # blast-radius gate entirely. No standing grant can pre-clear it
+        # either: ``consult_and_record_grant`` refuses the destructive tier
+        # (decision ``governed-delete-operations.md`` requirement 1).
+        gate_reason = (
+            "safety_level=destructive; mandatory human approval — every "
+            "non-agent principal parks (routed to the approval queue), never "
+            "auto-executes, and no standing grant can pre-clear it (#3183)"
+        )
+    elif descriptor.requires_approval:
         gate_reason = "requires_approval is True; routed to the approval queue (G11.7-T1)"
     elif is_service:
         gate_reason = _service_safety_gate_reason(descriptor)

@@ -152,6 +152,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _read_cdrom,
     _read_ethernet_nic,
     _read_vm_info,
+    _read_vm_snapshots_best_effort,
     _resolve_cluster_hosts,
     _resolve_cluster_name,
     _resolve_disk_info,
@@ -185,6 +186,25 @@ def _vm_identity(row: dict[str, Any]) -> dict[str, Any]:
 def _host_identity(row: dict[str, Any]) -> dict[str, Any]:
     """Identity-only projection of a cluster-host listing row."""
     return {key: row[key] for key in ("host", "name") if row.get(key) is not None}
+
+
+def _map_items(value: Any) -> list[tuple[str, Any]]:
+    """Yield ``(id, detail)`` pairs from a vCenter ``map<id, Info>`` field.
+
+    vCenter serialises map fields (``Vm.Info.disks`` / ``Vm.Info.nics``)
+    either as a JSON object (modern ``/api``) or as a list of
+    ``{"key", "value"}`` pairs (legacy ``/rest``). Normalises both to a list
+    of ``(id, detail)`` tuples; any other shape yields ``[]``.
+    """
+    if isinstance(value, dict):
+        return [(str(key), detail) for key, detail in value.items()]
+    if isinstance(value, list):
+        items: list[tuple[str, Any]] = []
+        for entry in value:
+            if isinstance(entry, dict) and "key" in entry:
+                items.append((str(entry["key"]), entry.get("value")))
+        return items
+    return []
 
 
 def _capped_resolution(
@@ -923,11 +943,80 @@ async def _guest_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     }
 
 
-#: op_id → builder for the 23 write composites. Module-level so the
+async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.destroy`` — the mandatory destructive-tier blast radius (#3198).
+
+    The load-bearing destructive-tier builder: it populates the
+    ``blast_radius`` block the park gate requires
+    (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`)
+    — object identity, enumerated child objects, irreversibility class — so
+    the four-eyes approver reads *exactly what dies* before deciding. The
+    dispatcher promotes this ``blast_radius`` sub-dict to the top of
+    ``proposed_effect`` (#3197).
+
+    Live-reads the VM's ``Vm.Info`` (identity + power state + disks with
+    capacities + NICs, one read-only GET via the shared
+    :func:`._write._read_vm_info`) and best-effort enumerates snapshots (vim
+    ``RetrievePropertiesEx`` via :func:`._write._read_vm_snapshots_best_effort`).
+    Declines (``None`` → identifier-only default → the park is refused
+    ``blast_radius_required``, fail-closed) without a resolved connector or
+    when the VM cannot be read. The destroy sub-op never fires here.
+    """
+    vm = ctx.params.get("vm")
+    if not isinstance(vm, str) or ctx.connector_instance is None:
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    if info is None:
+        return None
+    children: list[dict[str, Any]] = []
+    for disk_id, disk in _map_items(info.get("disks")):
+        entry: dict[str, Any] = {"kind": "disk", "id": disk_id}
+        capacity = disk.get("capacity") if isinstance(disk, dict) else None
+        if isinstance(capacity, int) and not isinstance(capacity, bool):
+            entry["capacity_bytes"] = capacity
+        label = disk.get("label") if isinstance(disk, dict) else None
+        if isinstance(label, str):
+            entry["label"] = label
+        children.append(entry)
+    for nic_id, nic in _map_items(info.get("nics")):
+        nic_entry: dict[str, Any] = {"kind": "nic", "id": nic_id}
+        mac = nic.get("mac_address") if isinstance(nic, dict) else None
+        if isinstance(mac, str):
+            nic_entry["mac_address"] = mac
+        children.append(nic_entry)
+    snapshots = await _read_vm_snapshots_best_effort(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm_moid=vm,
+    )
+    for snap in snapshots:
+        children.append({"kind": "snapshot", "id": snap.get("snapshot"), "name": snap.get("name")})
+    return {
+        "blast_radius": {
+            "object": {
+                "kind": "vm",
+                "moid": vm,
+                "name": info.get("name"),
+                "power_state": info.get("power_state"),
+            },
+            "children": children,
+            "irreversibility": "permanent",
+        },
+    }
+
+
+#: op_id → builder for the 24 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
     "vmware.composite.vm.create": _vm_create_preview,
+    "vmware.composite.vm.destroy": _vm_destroy_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
     "vmware.composite.vm.deploy_from_library": _vm_deploy_from_library_preview,
     "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
@@ -953,7 +1042,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 23 write-composite park-time preview builders. Import-time.
+    """Wire the 24 write-composite park-time preview builders. Import-time.
 
     The 9 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

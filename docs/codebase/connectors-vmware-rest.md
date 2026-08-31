@@ -12,8 +12,8 @@ vSphere 8.5+ / ESXi 8.5+ targets, plus 32 hand-authored composites
 that orchestrate cross-spec workflows: 9 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 23 write
-composites (G3.1-T6 / `#509`, the
+in `#2258`; plus the four guest-operations reads `#3100`) and 24 write
+composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
@@ -235,8 +235,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (`StartProgramInGuest`) is a deliberately deferred tier.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 32
-  `_CompositeSpec` rows (9 read + 23 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 33
+  `_CompositeSpec` rows (9 read + 24 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -366,7 +366,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    queued registrar and upserts: the 32 `vmware.composite.*` rows with
    `source_kind="composite"` (9 reads with `safety_level="safe"` +
    `requires_approval=False`; 23 writes with `safety_level="dangerous"`
-   + `requires_approval=True`), plus the `vmware.host.usage` row with
+   + `requires_approval=True`, and the destructive-tier `vm.destroy` with
+   `safety_level="destructive"` + `requires_approval=True` / `#3198`),
+   plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
    it depends on no ingested descriptor.
@@ -461,7 +463,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 32 composites (9 reads + 23 writes) land as `source_kind="composite"`
+The 33 composites (9 reads + 24 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -528,7 +530,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 32 composites are hand-authored aggregators the connector ships as
+The 33 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -854,6 +856,47 @@ capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
 requested_capacity_bytes, delta_bytes}`) — the delta is the decision the
 approver makes; a failing disk read parks with the #1628
 `preview_unavailable` marker (the delta is unknowable).
+
+### Governed destructive delete (`vm.destroy`, #3198)
+
+`vmware.composite.vm.destroy` is the connector's — and MEHO's — **first
+`safety_level="destructive"`** op: the first delete family modeled into the
+governed-delete tier (decision
+[`governed-delete-operations.md`](../decisions/governed-delete-operations.md)).
+Op id: `vmware.composite.vm.destroy` (the reconcile string the teardown
+tooling matches; group `vm`, tags `composite / write / vm / lifecycle /
+destroy / destructive`). Params: one required `vm` moid — no `force` flag,
+because the mandatory human approval *is* the confirmation.
+
+The destructive tier is enforced generically (see
+[`approvals.md`](approvals.md#first-governed-delete-vmwarecompositevmdestroy-3198)):
+mandatory human approval always (agent verdict `DENY`, no standing grant,
+no self-approval even under break-glass), a mandatory preview-hash binding,
+and a mandatory blast-radius block. Two things are connector-specific:
+
+- **Fail-closed on a running VM.** The handler live-re-reads `Vm.Info`
+  (`GET:/vcenter/vm/{vm}`) at dispatch time (post-approval, so a VM powered
+  on between park and approval is still caught) and refuses with
+  `status="not_powered_off"` unless `power_state == "POWERED_OFF"`. It
+  issues **no implicit power-off** — vSphere faults a destroy on a running
+  VM, and powering it down is a separate deliberate decision through
+  `vmware.composite.vm.power`.
+- **Dual arm** (mirrors `vm.create`'s `_vim_create_required` gate). A
+  resolvable pre-9.0 `about.version` routes through the vim
+  `VirtualMachine.Destroy_Task` (task-polled via the governed
+  `_write_vmomi_sub_op` seam, #2893 substrate); 9.0+ (and an unresolved
+  version) issues the synchronous REST `DELETE:/vcenter/vm/{vm}`. The vim
+  arm's `Destroy_Task` + the preview's snapshot `RetrievePropertiesEx` are
+  declared in `_write._VIM_SUB_OPS_VM_DESTROY` and reconciled against the
+  pinned `vi-json.yaml` (the same lane as disk-grow).
+
+The blast-radius preview builder (`_write_preview._vm_destroy_preview`)
+live-reads `Vm.Info` for object identity (moid / name / power state) plus
+the enumerated disks (with capacities) and NICs, and best-effort enumerates
+snapshots via the vim snapshot read (`_read_vm_snapshots_best_effort` — a
+fault yields "no snapshots enumerated", never sinks the park). It declines
+(`None` → the park is refused `blast_radius_required`, fail-closed) when the
+VM cannot be read.
 
 ### Two clone ops: content-library vs folder-template (`vm.clone_from_template`, #2894)
 

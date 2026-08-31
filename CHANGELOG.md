@@ -90,6 +90,38 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — first governed delete: `vmware.composite.vm.destroy` on the destructive tier + conformance (evoila-bosnia/meho-internal#3183 / #3198)
+
+- Models the **first real delete family** into the `destructive` safety
+  tier (decision `docs/decisions/governed-delete-operations.md`,
+  requirement 1). `vmware.composite.vm.destroy` permanently deletes a
+  powered-off VM and all its disks, `safety_level="destructive"` +
+  `requires_approval=True` — the 24th vmware write composite and the first
+  destructive one. **Fail-closed** on a running VM (`status="not_powered_off"`,
+  no implicit power-off) and **dual-arm** (pre-9.0 vim `Destroy_Task`,
+  task-polled; 9.0+ synchronous REST `DELETE:/vcenter/vm/{vm}`). A bespoke
+  preview builder populates the mandatory blast-radius block: object identity
+  (moid / name / power state), enumerated disks (with capacities), NICs, and
+  best-effort snapshots, irreversibility class `permanent`.
+- **Closes three human-side gaps** the tier left. `_non_agent_verdict` now
+  parks the destructive tier for **every** non-agent principal
+  unconditionally (a USER dispatching a `requires_approval=False` destructive
+  op previously auto-executed). `_check_self_approval` refuses self-approval
+  of a destructive row even under `APPROVAL_ALLOW_SELF_APPROVAL` (break-glass
+  does not reach this tier). Registration (`_register_in_session`) fail-fasts
+  a `destructive` descriptor declared `requires_approval=False`.
+- **Composite ops are now previewable when destructive**, so the #3197
+  preview-hash binding reaches the composite surface: `preview_dispatch`
+  binds the logical request tuple (redacted params on the `redacted_body`
+  slot) for a destructive non-ingested op, keeping the hash param-sensitive
+  while every non-destructive typed/composite op keeps its `unavailable`
+  contract.
+- Conformance (`tests/test_connectors_vmware_rest_vm_destroy.py`): agent
+  `DENY`, `ServicePrincipalGrant` refusal, no self-approval under break-glass,
+  satellite mint `OP_NOT_SAFE`, dispatch refused without a matching hash,
+  park refused without a blast-radius block, and the full preview → parked
+  approval (hash + blast radius) → **human** approve → audited resume flow.
+
 ### Added — add-on pairing contract proof plane: reference double, unpaired conformance, versioned-contract docs + trust-model review (#3030)
 
 - Closes Initiative #2900's proof-plane DoD. Adds a reference add-on **test

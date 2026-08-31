@@ -1140,6 +1140,15 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     comparison is on the stable ``sub`` claim, so a renamed display name
     cannot launder a self-approval.
 
+    **The destructive tier does not honour break-glass (#3198).** For a
+    ``safety_level="destructive"`` request self-approval is refused
+    *unconditionally* — even under ``APPROVAL_ALLOW_SELF_APPROVAL`` — so a
+    governed delete is genuine four-eyes on every deployment (decision
+    ``governed-delete-operations.md`` requirement 1: "no self-approval, even
+    under break-glass"; a single-operator tenant uses the agent-requester
+    pattern, never self-approval). The tier is read off the durable
+    ``proposed_effect`` envelope the dispatcher stamped at park time.
+
     Imported lazily to keep the queue module decoupled from settings at
     import time (mirrors the local ``TenantRole`` import in
     :func:`_check_reviewer_role`).
@@ -1147,9 +1156,12 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     if operator.sub != request.principal_sub:
         return
 
+    effect = request.proposed_effect or {}
+    is_destructive = effect.get("safety_level") == "destructive"
+
     from meho_backplane.settings import get_settings
 
-    if get_settings().approval_allow_self_approval:
+    if not is_destructive and get_settings().approval_allow_self_approval:
         _log.warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),

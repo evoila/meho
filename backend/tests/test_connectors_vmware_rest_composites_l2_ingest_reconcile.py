@@ -473,6 +473,66 @@ def test_vm_disk_grow_vi_json_paths_exist_in_the_pinned_spec() -> None:
 
 
 # ---------------------------------------------------------------------------
+# vm.destroy VI-JSON sub-op reconciliation (#3198)
+# ---------------------------------------------------------------------------
+#
+# vm.destroy's pre-9.0 delete arm is vi-json, not vcenter REST:
+# ``POST:/VirtualMachine/{moId}/Destroy_Task`` (the core vim delete) plus the
+# best-effort snapshot ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx``
+# the blast-radius preview reads. These are declared in
+# ``_write._VIM_SUB_OPS_VM_DESTROY`` (deliberately NOT in the ``_SUB_OPS_*``
+# namespace, so the vcenter.yaml sweep skips them). The 9.0+ arm is the
+# synchronous REST ``DELETE:/vcenter/vm/{vm}`` — a plain vcenter.yaml path.
+
+
+def test_vm_destroy_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the destroy vi-json manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_DESTROY) == {
+        "POST:/VirtualMachine/{moId}/Destroy_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+
+
+def test_vm_destroy_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The destroy vi-json op_ids are byte-for-byte what the parser emits."""
+    required = set(_write._VIM_SUB_OPS_VM_DESTROY)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_destroy_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each destroy vi-json sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    ``VirtualMachine.Destroy_Task`` is a core vim25 method; the definitive
+    #3198 grounding is that the connector's pre-9.0 delete arm targets a path
+    the pinned spec serves. Skips when the spec-shelf is not configured (the
+    canary's convention), so CI — where the env vars are wired — is the
+    operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_DESTROY:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "destroy vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
 # vm.clone_from_template VI-JSON sub-op reconciliation (#2894)
 # ---------------------------------------------------------------------------
 #

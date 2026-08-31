@@ -106,6 +106,39 @@ def compute_preview_hash(envelope: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _preview_unavailable_envelope(
+    *,
+    op_id: str,
+    connector_id: str,
+    source_kind: str,
+) -> dict[str, Any]:
+    """Structured ``unavailable`` envelope for a non-previewable typed/composite op.
+
+    A ``typed`` / ``composite`` op runs a Python handler with no single
+    literal HTTP request to preview. (A ``destructive`` composite is the
+    exception — it is routed to :func:`_build_composite_preview` instead of
+    here, #3198.)
+    """
+    return {
+        "status": "unavailable",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": source_kind,
+        "error": (
+            f"preview_unavailable: op {op_id!r} is source_kind="
+            f"{source_kind!r}, not an HTTP-ingested op -- it "
+            "runs a typed/composite handler with no single literal HTTP "
+            "request to preview. The dispatch-request preview covers "
+            "source_kind='ingested' ops only."
+        ),
+        "extras": {
+            "error_code": "preview_unavailable",
+            "reason": "not_ingested",
+            "source_kind": source_kind,
+        },
+    }
+
+
 def _invalid_op_schema_envelope(
     *,
     op_id: str,
@@ -193,25 +226,19 @@ async def _resolve_previewable_descriptor(
     # A ``typed`` / ``composite`` op invokes a Python handler (which may
     # itself make zero or many HTTP calls, or none); there is no one
     # method/path/body to preview. Say so explicitly rather than fabricate.
-    if descriptor.source_kind != "ingested":
-        return {
-            "status": "unavailable",
-            "op_id": op_id,
-            "connector_id": connector_id,
-            "source_kind": descriptor.source_kind,
-            "error": (
-                f"preview_unavailable: op {op_id!r} is source_kind="
-                f"{descriptor.source_kind!r}, not an HTTP-ingested op -- it "
-                "runs a typed/composite handler with no single literal HTTP "
-                "request to preview. The dispatch-request preview covers "
-                "source_kind='ingested' ops only."
-            ),
-            "extras": {
-                "error_code": "preview_unavailable",
-                "reason": "not_ingested",
-                "source_kind": descriptor.source_kind,
-            },
-        }
+    #
+    # #3198 exception: the ``destructive`` tier MUST be previewable, because
+    # the governed-delete gate refuses to park a destructive op unless a
+    # ``preview_operation`` of the identical tuple bound a matching hash
+    # (decision requirement 2). A composite/typed destructive op has no
+    # literal HTTP request, so its preview binds the logical request tuple
+    # (params on the ``redacted_body`` slot) instead — see
+    # :func:`_build_composite_preview`. Scoped to ``destructive`` so every
+    # non-destructive typed/composite op keeps the "unavailable" contract.
+    if descriptor.source_kind != "ingested" and descriptor.safety_level != "destructive":
+        return _preview_unavailable_envelope(
+            op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
+        )
 
     # --- Step 3: parameter_schema validation (mirrors dispatch) -----------
     try:
@@ -410,6 +437,60 @@ def _ok_ingested_envelope(
     return envelope
 
 
+#: Sentinel ``method`` for a destructive composite/typed preview (#3198) —
+#: there is no HTTP verb, but the slot is one of the hashed keys, so a
+#: constant keeps the hash stable while the params on ``redacted_body`` make
+#: it param-sensitive.
+_COMPOSITE_PREVIEW_METHOD: Final[str] = "COMPOSITE"
+
+
+def _build_composite_preview(
+    *,
+    operator: Operator,
+    connector_id: str,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Assemble the params-bound preview for a ``destructive`` non-ingested op (#3198).
+
+    A composite / typed op has no single literal HTTP request, so the
+    preview-hash binding (decision ``governed-delete-operations.md``
+    requirement 2) binds the *logical request tuple* instead: the redacted
+    params ride the ``redacted_body`` slot, so :func:`compute_preview_hash`
+    — unchanged — is param-sensitive (two different deletes hash
+    differently) while ``method`` (a ``COMPOSITE`` sentinel) and
+    ``resolved_path`` (the ``op_id``) name the op. Only reached for the
+    ``destructive`` tier (the gate in :func:`_resolve_previewable_descriptor`),
+    so the non-destructive typed/composite surface keeps its
+    ``"unavailable"`` contract. No handler runs and nothing is sent — this
+    is a pure request-shape projection.
+    """
+    redacted_body = _redact_request_body(
+        params, connector_id=connector_id, operator=operator, op_id=op_id
+    )
+    _log.info(
+        "preview_dispatch_composite",
+        connector_id=connector_id,
+        op_id=op_id,
+        source_kind=descriptor.source_kind,
+        safety_level=descriptor.safety_level,
+        tenant_id=str(operator.tenant_id),
+    )
+    envelope: dict[str, Any] = {
+        "status": "ok",
+        "op_id": op_id,
+        "connector_id": connector_id,
+        "source_kind": descriptor.source_kind,
+        "method": _COMPOSITE_PREVIEW_METHOD,
+        "resolved_path": op_id,
+        "query": None,
+        "redacted_body": redacted_body,
+    }
+    envelope["preview_hash"] = compute_preview_hash(envelope)
+    return envelope
+
+
 async def preview_dispatch(
     *,
     operator: Operator,
@@ -470,6 +551,16 @@ async def preview_dispatch(
     )
     if isinstance(resolved, dict):
         return resolved  # structured unknown_op / unavailable / invalid_params
+    if resolved.source_kind != "ingested":
+        # A destructive composite/typed op cleared the previewability gate
+        # (#3198) — bind the logical request tuple, no handler runs.
+        return _build_composite_preview(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            descriptor=resolved,
+            params=params,
+        )
     return await _build_ingested_preview(
         operator=operator,
         connector_id=connector_id,

@@ -1401,6 +1401,21 @@ async def _register_in_session(
     so ORM-side defaults (``id``, ``created_at``, ``updated_at``) are
     populated even when the caller defers the commit.
     """
+    # #3198 fail-fast: the destructive tier is human-approval-always by
+    # construction, so a descriptor that declares ``safety_level="destructive"``
+    # with ``requires_approval=False`` is inconsistent — it would (absent the
+    # dispatcher's own destructive park) invite the auto-execute path. Refuse
+    # it at registration time rather than let an ill-declared row exist. This
+    # is belt-and-suspenders with the runtime guarantee in
+    # ``_non_agent_verdict`` (which parks the destructive tier for every
+    # non-agent principal regardless of this flag).
+    if safety_level == "destructive" and not requires_approval:
+        raise ValueError(
+            f"op {op_id!r} declares safety_level='destructive' but "
+            "requires_approval=False; the destructive tier is "
+            "human-approval-always — register it with requires_approval=True"
+        )
+
     log = structlog.get_logger()
     now = datetime.now(UTC)
 

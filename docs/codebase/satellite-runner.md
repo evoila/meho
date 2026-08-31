@@ -224,10 +224,14 @@ the read path's coarse kill switch is untouched.
   `remote-write` item through the unprovisioned composed gate
   (`test_remote_write_op_is_refused_without_invocation`), so an
   already-delivered write in a revoked runner's spool still refuses at
-  execution today. The live per-runner edge revocation signal composes
-  through the credential seam (#3191): a revoked runner's just-in-time
-  wrapped-credential unwrap must fail, so a delivered-but-not-yet-executed
-  write cannot resolve its secret. That linkage is #3191's concern; this task
+  execution today. The residual in-flight window composes with the #3191
+  credential seam (`screen_remote_write_credential` +
+  `WrappedCredentialBackend`): the wrapped vendor credential is brokered only
+  at the authorised mint — which this task blocks for a revoked runner — and
+  is **single-use and TTL-bounded ≤ the capability expiry**, so a
+  delivered-but-not-yet-executed write carries a short-lived one-shot secret,
+  never a standing credential. Tying the wrapped-credential unwrap directly
+  to live revocation state, if ever needed, is #3191's concern; this task
   owns only the mint + delivery gate and the audit trail.
 - **Observable / auditable** (mechanism 4) — `RunnerPrincipalService.revoke`
   (`auth/runner_principals.py`) writes an internal audit row
@@ -244,6 +248,60 @@ credential seam and the un-reported-mint security alarm (a sibling seam).
 to Stage 3 (standing capability within-allowlist) until this per-mint +
 per-delivery revocation check is in force — the write tier does not reach
 steady state on TTL + dead-man alone.
+
+## Per-work-item wrapped-credential brokering — the write path (#3191)
+
+A `remote-write` op mutates a vendor estate, so it needs a **vendor
+credential** at the edge — but the read path's credential resolution stumbles
+on the runner: `load_basic_credentials` resolves a target's `secret_ref`
+through `vault_client_for_operator`, which needs `operator.raw_jwt`, and the
+runner reconstructs its acting operator with an **empty** `raw_jwt` (the
+empty-JWT gap, decision §1.4). Handing the runner a **standing broad** vendor
+credential instead is the write path's worst case (threat T3): a compromised
+fenced host would hold broad estate-mutation power for the credential's whole
+life.
+
+Mechanism 3 (`connectors/_shared/wrapped_creds.py`) resolves both without a
+standing credential and without the operator JWT:
+
+- **Centre broker** (`broker_wrapped_credential`) — at the authorised
+  remote-write mint (where the operator *is* present with a real JWT), the
+  centre reads **one** target's secret and Vault-**response-wraps** that single
+  payload with a TTL bounded so the credential never outlives the capability
+  (`credential TTL ≤ expires_at`). It returns only a `wrapped:<token>`
+  reference; the credential value never leaves the centre. The brokered
+  reference is set as the runner-bound target descriptor's `secret_ref` at
+  mint (the approval-bound mint seam, #3189, calls the broker — this function
+  *is* the seam).
+- **Runner unwrap backend** (`WrappedCredentialBackend`, registered under kind
+  `wrapped` on the shared credential seam) — the disk-spooled item carries only
+  the single-use token as `secret_ref = wrapped:<token>`, honouring the
+  no-durable-artifact rule (`wire.py`). At execution a connector handler's
+  unchanged `load_basic_credentials` call dispatches to this backend, which
+  dials Vault **outbound** (push-only preserved, #2877) and presents the
+  **wrapping token itself** to the unwrap endpoint — *not* the acting operator
+  (its empty `raw_jwt` is ignored). Vault consumes the token on the first
+  unwrap, so single-use is enforced by Vault: a replay or spool redelivery
+  unwraps a second time and Vault refuses.
+- **Seam, not a fork.** `wrapped_creds` registers alongside `vault` / `gsm`
+  (`_shared/__init__.py`, mould: `gsm_creds`) and reuses `load_vault_secret_data`
+  for the centre-side read. Resolving an explicit-scheme ref (the `wrapped:`
+  token) no longer consults the chassis `Settings` (`credential_backend.py::parse_credential_scheme`
+  + the lazy default in `vault_creds._resolve_and_load`), so the **DB-free
+  runner** — which cannot build `Settings` — resolves a wrapped credential.
+
+**Fail-closed at the edge.** `screen_remote_write_credential` (composed after
+the remote-write gate in `executor._screen_item`) refuses a `remote-write`
+item whose target carries a standing/broad `secret_ref` (schemeless, `vault:`,
+`gsm:`, …) or no target at all — only a single-use `wrapped:` credential may
+ride the write tier, so a config that would grant a standing runner credential
+fails closed. An expired or already-consumed token fails closed at unwrap.
+
+**Runner env for the outbound unwrap.** `MEHO_RUNNER_VAULT_ADDR` (required for
+the write tier — the runner needs an outbound Vault to unwrap against; unset
+fails closed), plus optional `MEHO_RUNNER_VAULT_NAMESPACE` (Enterprise) and
+`MEHO_RUNNER_VAULT_TIMEOUT_SECONDS` (default 10). Wrapped brokering is a Vault
+feature; a Vault-free (`gsm`) deployment has no wrapped-brokering path yet.
 
 ## Dead-man switch + mandatory heartbeat (#2501)
 

@@ -745,6 +745,31 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Per-tenant gate for the *agent* flight-recorder read surface (#3216, F5
+    # of ``docs/decisions/dispatch-flight-recorder.md`` -- the operator
+    # override that makes traces agent-readable through the narrow-waist
+    # result-handle idiom). **Tri-state**, mirroring the
+    # :attr:`Target.flight_recorder_capture` override shape:
+    #
+    # * ``None`` (default) -- inherit the per-tenant capture default
+    #   (:attr:`flight_recorder_enabled`). This is what makes the gate "follow
+    #   the F1 default (lab-on)": a lab-class tenant with capture ON exposes
+    #   traces to agents by default, no second flag to set.
+    # * ``True`` -- force agent-readable ON.
+    # * ``False`` -- force agent-readable OFF while the operator plane keeps
+    #   full access. The independent gate-off the F5 override requires:
+    #   withhold traces from agents without turning capture (and thus operator
+    #   visibility) off.
+    #
+    # Resolved by :func:`meho_backplane.flight_recorder.config.should_expose_to_agent`
+    # (cache-aware, fail-open to "no agent exposure"). Nullable, so migration
+    # ``0087`` needs no backfill. No index -- read by primary-key lookup on a
+    # cache miss, never a filter predicate.
+    flight_recorder_agent_readable: Mapped[bool | None] = mapped_column(
+        sa.Boolean(),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(

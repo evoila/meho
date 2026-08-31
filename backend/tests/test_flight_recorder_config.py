@@ -9,6 +9,9 @@ Covers :mod:`meho_backplane.flight_recorder.config`:
   override > per-tenant default) and its fail-open-to-``False`` behaviour;
 * :func:`resolve_retention_days` (per-tenant override vs global default,
   fail-open to default);
+* :func:`should_expose_to_agent` resolution (kill switch > per-tenant explicit
+  override > inherit the capture default) and its fail-open-to-``False``
+  behaviour (F5, #3216);
 * :func:`compute_expires_at` window math (pure).
 
 Runs against the autouse ``sqlite+aiosqlite`` engine the conftest pre-migrates
@@ -34,6 +37,7 @@ from meho_backplane.flight_recorder.config import (
     reset_flight_recorder_config_cache_for_testing,
     resolve_retention_days,
     should_capture,
+    should_expose_to_agent,
 )
 from meho_backplane.settings import get_settings
 
@@ -56,6 +60,7 @@ async def _seed_tenant(
     slug: str,
     enabled: bool = False,
     retention_days: int | None = None,
+    agent_readable: bool | None = None,
 ) -> uuid.UUID:
     tenant_id = uuid.uuid4()
     session.add(
@@ -65,6 +70,7 @@ async def _seed_tenant(
             name=f"Tenant {slug}",
             flight_recorder_enabled=enabled,
             flight_recorder_retention_days=retention_days,
+            flight_recorder_agent_readable=agent_readable,
         )
     )
     await session.commit()
@@ -167,7 +173,7 @@ async def test_should_capture_fails_open_to_false_on_error(
 ) -> None:
     """A resolver DB error must never fail a dispatch — it resolves to no-capture."""
 
-    async def _boom(_tenant_id: uuid.UUID) -> tuple[bool, int | None]:
+    async def _boom(_tenant_id: uuid.UUID) -> tuple[bool, int | None, bool | None]:
         raise RuntimeError("db down")
 
     monkeypatch.setattr(fr_config, "_resolve_tenant_policy", _boom)
@@ -203,11 +209,88 @@ async def test_retention_honours_global_default_env(monkeypatch: pytest.MonkeyPa
 
 
 async def test_retention_fails_open_to_default_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _boom(_tenant_id: uuid.UUID) -> tuple[bool, int | None]:
+    async def _boom(_tenant_id: uuid.UUID) -> tuple[bool, int | None, bool | None]:
         raise RuntimeError("db down")
 
     monkeypatch.setattr(fr_config, "_resolve_tenant_policy", _boom)
     assert await resolve_retention_days(uuid.uuid4()) == 7
+
+
+# --------------------------------------------------------------------------
+# should_expose_to_agent — per-tenant agent gate (F5, #3216)
+# --------------------------------------------------------------------------
+
+
+async def test_agent_read_off_by_default_for_non_lab_tenant() -> None:
+    """NULL override + capture OFF => agents cannot read (inherits capture)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug="fr-agent-default-off")
+    assert await should_expose_to_agent(tenant_id=tenant_id) is False
+
+
+async def test_agent_read_inherits_capture_default_lab_on() -> None:
+    """NULL override + capture ON => agents can read: "follows the F1 default (lab-on)"."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug="fr-agent-inherit-on", enabled=True)
+    assert await should_expose_to_agent(tenant_id=tenant_id) is True
+
+
+async def test_agent_read_explicit_off_while_capture_on_keeps_operator_access() -> None:
+    """override=False withholds from agents even with capture ON.
+
+    This is the F5 "independent of the operator plane" gate: capture stays ON
+    (so the operator plane keeps full access) while agents are cut off.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(
+            session, slug="fr-agent-off", enabled=True, agent_readable=False
+        )
+    assert await should_expose_to_agent(tenant_id=tenant_id) is False
+    # Capture (and thus the operator plane's data source) is unaffected.
+    assert await should_capture(tenant_id=tenant_id) is True
+
+
+async def test_agent_read_explicit_on_while_capture_off() -> None:
+    """override=True forces agent access on even when the capture default is OFF."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(
+            session, slug="fr-agent-force-on", enabled=False, agent_readable=True
+        )
+    assert await should_expose_to_agent(tenant_id=tenant_id) is True
+
+
+async def test_agent_read_kill_switch_overrides_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global kill switch beats an explicit agent-readable=True override."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(
+            session, slug="fr-agent-kill", enabled=True, agent_readable=True
+        )
+    monkeypatch.setenv("FLIGHT_RECORDER_ENABLED", "false")
+    get_settings.cache_clear()
+    assert await should_expose_to_agent(tenant_id=tenant_id) is False
+
+
+async def test_agent_read_unknown_tenant_fails_closed() -> None:
+    assert await should_expose_to_agent(tenant_id=uuid.uuid4()) is False
+
+
+async def test_agent_read_fails_open_to_false_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolver DB error withholds agent access (doubt reduces exposure)."""
+
+    async def _boom(_tenant_id: uuid.UUID) -> tuple[bool, int | None, bool | None]:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(fr_config, "_resolve_tenant_policy", _boom)
+    assert await should_expose_to_agent(tenant_id=uuid.uuid4()) is False
 
 
 # --------------------------------------------------------------------------

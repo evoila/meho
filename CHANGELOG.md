@@ -114,6 +114,25 @@ connector-related release-notes line.
 - The structured `deploy_error` / `deploy_failed` mapping (#3071 family) is
   unchanged for genuine faults.
 
+### Fixed — `holodeck.config.apply` fails closed instead of reporting false success on a CLIXML-corrupted stdout (#3081)
+
+- `holodeck.config.apply` returned `{applied: true, config_id: null}` while
+  writing **nothing** to the HoloRouter: no config file appeared under
+  `/holodeck-runtime/config/`, so the next runbook step (`instance.start`) had
+  nothing to launch from and proceeded on a false premise. Root cause was the
+  `HoloDeck` PowerShell module's "unapproved verbs" auto-load warning, which
+  `pwsh -EncodedCommand` serialised as a `#< CLIXML … </Objs>` block onto
+  **stdout** ahead of the `ConvertTo-Json` payload — `holodeck.config.show`
+  failed honestly on the same transport, but `config.apply` reported success
+  regardless. Two fixes: (1) the shared `_pwsh` transport seam now strips CLIXML
+  warning/error blocks from stdout before parsing (`strip_clixml`), so every
+  pwsh-backed op tolerates the noise and a warning-only stdout fails closed as
+  empty rather than crashing the parse; and (2) `config.apply` reports
+  `applied: true` **only** with a non-null `config_id` verified on disk (a
+  `Test-Path` verify-after-write folded into the same script), and silences the
+  warning stream at the source (`$WarningPreference`). The self-contradictory
+  `applied: true` / `config_id: null` envelope is now impossible.
+
 ### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
 
 - Ships the **operator read surface** of the flight-recorder decision
@@ -139,6 +158,7 @@ connector-related release-notes line.
   best-effort). Tenant isolation is enforced twice — the audit-existence check
   and the trace read are both tenant-scoped. No change to the MCP surface (the
   agent read is a separate task); REST + console only. (#3215)
+
 ### Added — flight recorder: capture seam + caps + best-effort invariant (#3214)
 
 - Ships the **capture seam** plus the **F3 caps** and **F7 failure invariant**

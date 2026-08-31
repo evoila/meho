@@ -214,10 +214,20 @@ async def holodeck_config_apply(
     schema; :func:`validate_config_apply_params` re-checks it here as
     belt-and-braces for a direct call that bypassed the dispatcher.
 
+    Fail-closed (#3081): the op returns ``applied: true`` **only** when the
+    cmdlet reports a non-null ``configID`` **and** the persisted config file
+    (``/holodeck-runtime/config/<id>.json``) exists on disk (a verify-after-
+    write via ``Test-Path`` folded into the same script). A run that writes
+    nothing -- e.g. the ``HoloDeck`` import warning corrupting stdout, or
+    ``New-HoloDeckConfig`` failing silently -- returns ``{applied: false,
+    config_id, error}`` rather than a self-contradictory ``applied: true`` /
+    ``config_id: null``. The import warning is additionally silenced at the
+    source (``$WarningPreference``) so it never reaches the JSON stream.
+
     Runs only on the ``_approved=True`` resume path (``requires_approval``).
-    Returns ``{applied, config_id, deploy: {version, variant, ...}}`` -- a
-    param-echo of the non-secret applied config; no credential material is
-    read or echoed.
+    On success returns ``{applied: true, config_id, deploy: {version,
+    variant, ...}}`` -- a param-echo of the non-secret applied config; no
+    credential material is read or echoed.
     """
     semantic_errors = validate_config_apply_params(params)
     if semantic_errors:
@@ -232,14 +242,29 @@ async def holodeck_config_apply(
     # $env:VC_USER / $env:VC_PW (staged out-of-band per the runbook). NEVER
     # -Default. The description is the only operator-supplied string
     # interpolated into the script body, and it carries no credential.
+    #
+    # $WarningPreference = 'SilentlyContinue' silences the HoloDeck module's
+    # "unapproved verbs" import warning at the source so it never gets
+    # CLIXML-serialised onto stdout (#3081; the reliable workaround per
+    # PowerShell #5912, complementing the transport's strip_clixml net).
+    #
+    # configWritten is a verify-after-write: New-HoloDeckConfig persists the
+    # config to /holodeck-runtime/config/<configID>.json, so Test-Path on
+    # exactly that file confirms the write actually landed on disk. A run that
+    # returns no real configID leaves the path as ".../.json" -> $false, so
+    # applied:true is impossible without a config genuinely on the appliance.
     quoted_desc = _pwsh_single_quote(description)
     quoted_host = _pwsh_single_quote(str(external_ip)) if external_ip else "$env:VC_HOST"
     script = (
         "$Global:ProgressPreference = 'SilentlyContinue'; "
+        "$Global:WarningPreference = 'SilentlyContinue'; "
         f"$cfg = New-HoloDeckConfig -Description {quoted_desc} "
         f"-TargetHost {quoted_host} -UserName $env:VC_USER -Password $env:VC_PW; "
         "$null = Import-HoloDeckConfig -ConfigID $cfg.configID; "
-        "@{ configID = $cfg.configID } | ConvertTo-Json -Compress"
+        '$cfgPath = "/holodeck-runtime/config/$($cfg.configID).json"; '
+        "@{ configID = $cfg.configID; "
+        "configWritten = [bool](Test-Path -LiteralPath $cfgPath) } "
+        "| ConvertTo-Json -Compress"
     )
 
     try:
@@ -248,6 +273,23 @@ async def holodeck_config_apply(
         return {"applied": False, "error": str(exc)}
 
     config_id = payload.get("configID") if isinstance(payload, dict) else None
+    config_written = bool(payload.get("configWritten")) if isinstance(payload, dict) else False
+    # Fail closed (#3081): only report applied:true when the cmdlet produced a
+    # real configID AND the persisted config file exists on disk. A null/blank
+    # configID or an absent file means nothing was written -- returning
+    # applied:true there converts a silent failure into a believed success and
+    # the next runbook step (instance.start) would proceed on a false premise.
+    if not isinstance(config_id, str) or not config_id.strip() or not config_written:
+        return {
+            "applied": False,
+            "config_id": config_id if isinstance(config_id, str) else None,
+            "error": (
+                "New-HoloDeckConfig did not produce a persisted config on the "
+                "HoloRouter (no configID and/or no config file at "
+                "/holodeck-runtime/config/<id>.json); nothing was written, so "
+                "the deploy config was NOT applied"
+            ),
+        }
     return {
         "applied": True,
         "config_id": config_id,
@@ -1029,7 +1071,9 @@ DEPLOY_OPS: tuple[HolodeckOp, ...] = (
             },
             "output_shape": (
                 "{applied, config_id, deploy: {version, variant, ...non-secret echo}}. "
-                "On a bound violation: {applied: false, error}."
+                "applied is true ONLY with a non-null config_id verified on disk; "
+                "a bound violation or an unwritten config returns {applied: false, "
+                "config_id, error}."
             ),
         },
     ),

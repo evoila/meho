@@ -45,6 +45,7 @@ from meho_backplane.connectors.holodeck._pwsh import (
     PwshRunError,
     encode_pwsh_command,
     pwsh_run,
+    strip_clixml,
 )
 from meho_backplane.settings import get_settings
 
@@ -275,6 +276,62 @@ async def test_pwsh_run_error_truncates_long_stderr() -> None:
     # The truncated stderr still starts with the first bytes -- the
     # cap doesn't drop content from the wrong end.
     assert exc_info.value.stderr.startswith("x" * 100)
+
+
+# ---------------------------------------------------------------------------
+# CLIXML warning-stream hygiene (#3081)
+# ---------------------------------------------------------------------------
+
+_CLIXML_WARNING = (
+    "#< CLIXML\n"
+    '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+    '<S S="warning">The names of some imported commands from the module '
+    "'HoloDeck' include unapproved verbs that might make them less "
+    "discoverable.</S></Objs>\n"
+)
+
+
+def test_strip_clixml_passes_clean_json_through_unchanged() -> None:
+    clean = '{"configID":"hd9mgmt1"}'
+    assert strip_clixml(clean) is clean
+
+
+def test_strip_clixml_removes_leading_warning_block_keeps_json() -> None:
+    payload = '{"configID":"hd9mgmt1","configWritten":true}'
+    assert strip_clixml(_CLIXML_WARNING + payload) == payload
+
+
+def test_strip_clixml_only_warning_strips_to_blank() -> None:
+    """A cmdlet that emits ONLY a CLIXML warning strips to an empty-ish string.
+
+    The remainder is whitespace-only, so the caller's ``stdout.strip()``
+    empty-check turns it into an honest failure rather than a parse crash.
+    """
+    assert strip_clixml(_CLIXML_WARNING).strip() == ""
+
+
+def test_strip_clixml_removes_multiple_stacked_blocks() -> None:
+    payload = "[1,2,3]"
+    stacked = _CLIXML_WARNING + _CLIXML_WARNING + payload
+    assert strip_clixml(stacked) == payload
+
+
+async def test_pwsh_run_parses_json_after_clixml_warning() -> None:
+    """The whole transport tolerates a CLIXML warning ahead of the JSON."""
+    payload = {"configID": "hd9mgmt1", "configWritten": True}
+    connector = _connector_with_run(
+        _proc(stdout=_CLIXML_WARNING + json.dumps(payload), exit_status=0)
+    )
+    result = await pwsh_run(connector, _TARGET, "Get-HoloDeckConfig | ConvertTo-Json")
+    assert result == payload
+
+
+async def test_pwsh_run_clixml_only_stdout_fails_closed_as_empty() -> None:
+    """CLIXML-only stdout strips to empty -> the empty-stdout guard fires."""
+    connector = _connector_with_run(_proc(stdout=_CLIXML_WARNING, exit_status=0))
+    with pytest.raises(PwshRunError) as exc_info:
+        await pwsh_run(connector, _TARGET, "Get-HoloDeckConfig | ConvertTo-Json")
+    assert "empty stdout" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

@@ -109,6 +109,32 @@ connector-related release-notes line.
   warning stream at the source (`$WarningPreference`). The self-contradictory
   `applied: true` / `config_id: null` envelope is now impossible.
 
+### Added — flight recorder: operator read surface — REST trace endpoint + console drawer pane (#3215)
+
+- Ships the **operator read surface** of the flight-recorder decision
+  (`docs/decisions/dispatch-flight-recorder.md`): an operator (and a paired
+  add-on using its operator-granted principal) can now see, for one governed
+  dispatch, the actual vendor request/response traffic and how the backplane
+  processed it. Two fronts over one tenant-scoped read: a new REST route
+  **`GET /api/v1/audit/{audit_id}/trace`** behind the operator claim (alongside
+  `GET /api/v1/audit/show/{audit_id}`), and a new **Flight recorder** pane in
+  the audit-row console drawer (after Lineage). Both return the ordered spans —
+  vendor calls (method / URL / status / duration), composite sub-steps, and the
+  JSONFlux reduction (input rows → kept fields → output size → handle id) — with
+  the **redacted, capped** headers/bodies and truncation markers the capture
+  and redaction seams (#3213 / #3214) already stored; the read surface renders
+  what is stored and never re-processes, un-redacts, or writes. The **operator
+  plane keeps full access independent of the agent gate** — including
+  redaction-uncertain traces, with the uncertainty flag **surfaced** (a banner
+  in the pane, a `redaction_uncertain` field in the REST body) so an operator
+  sees when a trace was withheld from agents. Absence has two levels: a missing
+  or cross-tenant **audit row** is a `404` (never `403`, matching `/show`, so
+  existence never leaks across tenants); an audit row that exists but carries
+  **no captured trace** is a `200` empty state (capture is per-tenant opt-in and
+  best-effort). Tenant isolation is enforced twice — the audit-existence check
+  and the trace read are both tenant-scoped. No change to the MCP surface (the
+  agent read is a separate task); REST + console only. (#3215)
+
 ### Added — flight recorder: capture seam + caps + best-effort invariant (#3214)
 
 - Ships the **capture seam** plus the **F3 caps** and **F7 failure invariant**

@@ -20,7 +20,10 @@ owned by #2500):
   ``EXCLUDED`` (``dangerous`` / ``destructive``) item is refused outright;
   a ``REMOTE_WRITE`` (``caution``) item has its centre-issued Ed25519
   signature verified offline (integrity + freshness + target scope, #3189)
-  and is then re-screened through the allowlist gate, failing closed at
+  and is then re-screened through the per-runner allowlist gate (#3190)
+  against the runner's **own** provisioning config
+  (``satellite_write_allowlist``) — not the mint's, so an item allowlisted
+  centrally is still refused if the edge config disagrees — failing closed at
   every step until the runner is authorised for the tier; only a ``SAFE``
   item proceeds.
 * **connector-tree-only** — a ``handler_ref`` that does not resolve inside
@@ -54,6 +57,7 @@ from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
     evaluate_remote_write_gate,
+    parse_runner_allowlist,
 )
 from meho_backplane.runner.spool import ExecutedCommandStore
 from meho_backplane.runner.wire import RunnerResult, RunnerWorkItem
@@ -98,6 +102,8 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
     import so an out-of-tree ``handler_ref`` never triggers a module-load side
     effect.
     """
+    from meho_backplane.settings import get_settings
+
     tier = classify_satellite_tier(item.safety_level)
     if tier is SatelliteMintTier.EXCLUDED:
         return (
@@ -112,11 +118,22 @@ def _screen_item(item: RunnerWorkItem) -> str | None:
         signature_refusal = _verify_remote_write_signature(item)
         if signature_refusal is not None:
             return signature_refusal
-        # Mechanism 2 edge re-check (#3190): the per-runner allowlist. Still
-        # fail-closed until #3190 wires it, so a validly-signed remote-write
-        # item does not execute at the edge until the allowlist is provisioned
-        # — the tier stays closed end-to-end.
-        decision = evaluate_remote_write_gate(op_id=item.op_id)
+        # Mechanism 2 edge re-check (#3190): the per-runner allowlist. The
+        # DB-free runner screens the op against its **own** provisioning-config
+        # allowlist (never the mint's, and never a field on the work item) —
+        # defence in depth, so an item allowlisted at the mint is still refused
+        # if the runner's own config disagrees. Fed to the same shared matcher
+        # the mint ran; fail-closed when the config is unprovisioned.
+        target_scope = (
+            str(item.target_descriptor.id)
+            if item.target_descriptor is not None
+            else TARGETLESS_SCOPE
+        )
+        decision = evaluate_remote_write_gate(
+            op_id=item.op_id,
+            allowlist=parse_runner_allowlist(get_settings().satellite_write_allowlist),
+            target_scope=target_scope,
+        )
         if not decision.permitted:
             return decision.reason
         # Mechanism 3 (#3191) edge check, composed after the gate: a

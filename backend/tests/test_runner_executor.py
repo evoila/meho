@@ -280,3 +280,63 @@ async def test_tampered_signed_item_is_refused_end_to_end(monkeypatch: pytest.Mo
     assert result.status == "refused"
     assert result.result is None
     assert "remote-write" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Per-runner allowlist edge re-check (#3190, mechanism 2) — defence in depth
+# ---------------------------------------------------------------------------
+
+
+def _set_edge_allowlist(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """Provision the runner's OWN allowlist config, then re-load settings."""
+    monkeypatch.setenv("SATELLITE_WRITE_ALLOWLIST", raw)
+    get_settings.cache_clear()
+
+
+async def test_edge_refuses_validly_signed_item_off_config_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Defence in depth: an item the centre validly signed (i.e. allowlisted at
+    # the mint) is STILL refused at the edge when the runner's own config
+    # allowlist disagrees — the runner never trusts the mint's allowlist.
+    signing_key = _provision_verify_key(monkeypatch)
+    _set_edge_allowlist(monkeypatch, "vmware.vm.some_other_op")  # not the signed op
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+
+    result = await execute_work_item(item)
+
+    assert result.status == "refused"
+    assert "not on this runner's remote-write allowlist" in (result.error or "")
+
+
+async def test_edge_refuses_when_config_allowlist_unprovisioned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No runner allowlist config at all → fail-closed (unprovisioned), even for
+    # a validly-signed item. This is every runner today (Stage 0).
+    signing_key = _provision_verify_key(monkeypatch)
+    _set_edge_allowlist(monkeypatch, "")
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+
+    result = await execute_work_item(item)
+
+    assert result.status == "refused"
+    assert "remote-write" in (result.error or "")
+
+
+async def test_edge_allowlist_gate_crossed_when_config_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A validly-signed item whose op-class is on the runner's own config
+    # allowlist crosses the allowlist gate — the remaining refusal is the
+    # *credential* screen (mechanism 3), not the allowlist, proving the gate
+    # was passed rather than short-circuited.
+    signing_key = _provision_verify_key(monkeypatch)
+    _set_edge_allowlist(monkeypatch, "vmware.vm.tag_set")  # the signed op
+    item = _signed_rw_item(signing_key, expires_at=datetime.now(UTC) + timedelta(minutes=5))
+
+    result = await execute_work_item(item)
+
+    assert result.status == "refused"
+    assert "allowlist" not in (result.error or "")
+    assert "wrapped credential" in (result.error or "")

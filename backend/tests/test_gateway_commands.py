@@ -38,6 +38,7 @@ from meho_backplane.db.models import (
     GatewayCommandStatus,
     PermissionVerdict,
     RunnerPrincipal,
+    RunnerWriteAllowlistEntry,
     Tenant,
 )
 from meho_backplane.gateway.queue import (
@@ -218,6 +219,49 @@ async def _seed_runner_principal(*, revoked: bool, name: str = _RUNNER) -> None:
         await session.commit()
 
 
+async def _seed_write_allowlist(*, op_pattern: str = _OP_ID, target_scope: str = "*") -> None:
+    """Seed a runner principal (idempotent) + one write-allowlist entry (#3190).
+
+    The mint's ``load_runner_allowlist`` joins the ``runner_write_allowlist``
+    rows to the ``(tenant, name)`` runner principal, so both must exist for the
+    op to be admitted. Idempotent on the principal so a test can seed several
+    capabilities.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        runner_pk = await session.scalar(
+            select(RunnerPrincipal.id).where(
+                RunnerPrincipal.tenant_id == _TENANT,
+                RunnerPrincipal.name == _RUNNER,
+            )
+        )
+        if runner_pk is None:
+            runner_pk = uuid.uuid4()
+            session.add(
+                RunnerPrincipal(
+                    id=runner_pk,
+                    tenant_id=_TENANT,
+                    name=_RUNNER,
+                    keycloak_client_id=f"runner:{_RUNNER}",
+                    keycloak_internal_id=f"kc-{_RUNNER}",
+                    owner_sub="owner-sub",
+                    created_by_sub="creator-sub",
+                    revoked=False,
+                )
+            )
+        session.add(
+            RunnerWriteAllowlistEntry(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT,
+                runner_principal_id=runner_pk,
+                op_pattern=op_pattern,
+                target_scope=target_scope,
+                created_by_sub="operator-sub",
+            )
+        )
+        await session.commit()
+
+
 async def _claim() -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -348,6 +392,9 @@ async def test_mint_remote_write_binds_approval_and_signs(
     approval is consumed single-use.
     """
     approval_id = await _seed_committed_approval()
+    # #3190: the caution tier now also requires the op-class on the runner's
+    # allowlist (ANDed with the approval binding).
+    await _seed_write_allowlist()
 
     result = await _mint_caution(monkeypatch)
 
@@ -403,6 +450,7 @@ async def test_mint_remote_write_approval_is_single_use(
 ) -> None:
     """One committed approval mints at most one capability."""
     await _seed_committed_approval()
+    await _seed_write_allowlist()
 
     first = await _mint_caution(monkeypatch)
     second = await _mint_caution(monkeypatch)
@@ -463,6 +511,73 @@ async def test_mint_remote_write_ignores_non_approved_request(
     assert not result.minted
     assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED
     assert await _count(GatewayCommand) == 0
+
+
+# ---------------------------------------------------------------------------
+# Remote-write tier — per-runner capability allowlist (#3190, mechanism 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_mint_remote_write_refused_without_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caution op with a valid approval but NO allowlist is refused (fail-closed).
+
+    The composed gate is satisfiable only when **both** halves pass: even with a
+    committed, param-bound approval binding, an unprovisioned runner allowlist
+    refuses the mint with the tier's own ``REMOTE_WRITE_NOT_ALLOWLISTED`` code,
+    writes no command row, and leaves the approval **unconsumed** (the allowlist
+    gate is read-only, before the single-use latch).
+    """
+    approval_id = await _seed_committed_approval()
+
+    result = await _mint_caution(monkeypatch)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
+    assert "remote-write" in (result.refusal_reason or "")
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_refused_off_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caution op on an approval but off the runner's allowlist is refused.
+
+    The runner has a provisioned allowlist, but for a *different* op-class, so
+    the op-class outside the allowlist is refused with the distinct
+    ``REMOTE_WRITE_NOT_ALLOWLISTED`` code — the approval alone cannot punch an
+    off-allowlist op through, and the approval stays unconsumed.
+    """
+    approval_id = await _seed_committed_approval()
+    await _seed_write_allowlist(op_pattern="net.some_other_write")
+
+    result = await _mint_caution(monkeypatch)
+
+    assert not result.minted
+    assert result.refusal_code is MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED
+    assert "not on this runner's remote-write allowlist" in (result.refusal_reason or "")
+    assert await _count(GatewayCommand) == 0
+    assert await _approval_resumed_at(approval_id) is None
+
+
+async def test_mint_remote_write_stage1_single_class_admits_exactly_that_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-class Stage-1 allowlist admits exactly that op-class at the mint.
+
+    The runner is granted exactly ``_OP_ID``; that op (with its approval) mints,
+    while a sibling caution op — approved but not on the allowlist — is refused.
+    Proves the allowlist, not the approval, is what bounds the blast radius.
+    """
+    await _seed_committed_approval()
+    await _seed_write_allowlist(op_pattern=_OP_ID)
+
+    admitted = await _mint_caution(monkeypatch)
+
+    assert admitted.minted
+    assert await _count(GatewayCommand) == 1
 
 
 async def test_mint_refuses_poisoned_parameter_schema(monkeypatch: pytest.MonkeyPatch) -> None:

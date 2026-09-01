@@ -8090,6 +8090,122 @@
         }
       }
     },
+    "/api/v1/runner-principals/{name}/write-allowlist": {
+      "get": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "List Runner Write Allowlist",
+        "description": "List a runner's granted ``remote-write`` capabilities (#3190).\n\nRead-back of the per-runner capability allowlist (mechanism 2 of the\nsatellite write path). 404 when the runner is unknown or revoked.",
+        "operationId": "list_runner_write_allowlist_api_v1_runner_principals__name__write_allowlist_get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerWriteAllowlistResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Grant Runner Write Capability",
+        "description": "Grant one ``remote-write`` capability to a runner (#3190).\n\nThe **separate human step** a write capability requires after enrollment:\n``tenant_admin`` only, and never reachable by a runner's own read-only,\nroute-caged token \u2014 so a runner cannot widen its own allowlist (threat T7,\ndecision recommendation 2). Programmatic enrollment grants no write\ncapability at birth; this route is the only path that adds one. The grant\nis bound at issuance (``created_by_sub`` records the operator) and\nidempotent on ``(op_pattern, target_scope)``. 404 when the runner is\nunknown or revoked.",
+        "operationId": "grant_runner_write_capability_api_v1_runner_principals__name__write_allowlist_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteWriteCapabilityGrant"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerWriteAllowlistEntryRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/gateway/{runner}/next": {
       "get": {
         "tags": [
@@ -29323,6 +29439,30 @@
         "title": "RememberBody",
         "description": "POST body for ``/api/v1/memory`` -- create one memory.\n\n``slug`` is constrained to :data:`SLUG_PATTERN` at the model\nboundary; the service-layer\n:func:`~meho_backplane.memory.schemas.validate_slug` is the\nparallel gate for non-Pydantic callers. ``frozen=True`` matches\nthe rest of the memory + kb schemas (a handler accidentally\nmutating a parsed request body surfaces as a pydantic error\ninstead of a confused-deputy bug). ``extra=\"forbid\"`` rejects\nunknown fields at 422 so a typo (``\"bodytext\"``) doesn't\nsilently become a no-op. A ``mode=\"before\"`` validator runs *ahead*\nof that rejection to turn the two known cross-surface field names\n(``ttl`` / top-level ``tags``, the MCP ``add_to_memory`` shape) into\na targeted 422 that names the correct REST field rather than the\nopaque ``extra_forbidden`` (see :data:`_CROSS_SURFACE_FIELD_HINTS`).\n\n``target_name`` is required when ``scope`` is ``user-target`` or\n``target``; the service-level\n:meth:`MemoryService._require_target_name` raises ``ValueError``\nwhen missing, which this route maps to 422 (parity with\npydantic's own missing-field shape)."
       },
+      "RemoteWriteCapabilityGrant": {
+        "properties": {
+          "op_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Op Pattern"
+          },
+          "target_scope": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Target Scope",
+            "default": "*"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op_pattern"
+        ],
+        "title": "RemoteWriteCapabilityGrant",
+        "description": "Input shape for :meth:`RunnerWriteAllowlistService.grant`."
+      },
       "ReplayNode": {
         "properties": {
           "id": {
@@ -30383,6 +30523,71 @@
         ],
         "title": "RunnerWorkItem",
         "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``).\n\nRemote-write signing (#3189): a ``caution`` / ``remote-write`` item\nadditionally carries the centre's Ed25519 ``signature`` over its\ncanonical payload and the ``expires_at`` freshness bound the signature\ncovers, both verified in\n:func:`~meho_backplane.runner.executor._screen_item` before execution.\nBoth are ``None`` for a ``safe`` read item (the recurring assignment\npath materialises only ``safe`` ops and never signs them) -- signing is\na write-tier property, so their absence on a ``safe`` item is correct,\nnot a missing field."
+      },
+      "RunnerWriteAllowlistEntryRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "runner_principal_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Runner Principal Id"
+          },
+          "op_pattern": {
+            "type": "string",
+            "title": "Op Pattern"
+          },
+          "target_scope": {
+            "type": "string",
+            "title": "Target Scope"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "runner_principal_id",
+          "op_pattern",
+          "target_scope",
+          "created_by_sub",
+          "created_at"
+        ],
+        "title": "RunnerWriteAllowlistEntryRead",
+        "description": "One granted remote-write capability, as returned by the accessors."
+      },
+      "RunnerWriteAllowlistResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerWriteAllowlistEntryRead"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "RunnerWriteAllowlistResponse",
+        "description": "Response envelope for ``GET .../{name}/write-allowlist``."
       },
       "SafetyChangeModel": {
         "properties": {

@@ -4260,6 +4260,97 @@ class RunnerPrincipal(Base):
     )
 
 
+class RunnerWriteAllowlistEntry(Base):
+    """One ``remote-write`` capability a runner principal is allowed to execute (#3190).
+
+    Mechanism 2 of the satellite write-path composed gate (Initiative #2901,
+    design ``docs/research/2901-satellite-write-path.md`` §3, decision
+    ``docs/decisions/satellite-write-path.md``). Each row grants one
+    ``(op_pattern, target_scope)`` capability to one runner principal; the set
+    of rows for a runner **is** the definition of that runner's write blast
+    radius (threats T1/T8). A ``remote-write`` (``caution``) op is minted to a
+    runner **only** when its ``op_id`` + target matches one of these rows
+    (checked at the central mint,
+    :func:`~meho_backplane.operations.gateway_commands.mint_gateway_command`)
+    **and** an approval binds it (#3189); the runner independently re-checks
+    its own provisioning-config mirror at the edge
+    (:func:`~meho_backplane.runner.executor._screen_item`), defence in depth.
+
+    **Not granted at enrollment.** Registering a runner principal
+    (:meth:`~meho_backplane.auth.runner_principals.RunnerPrincipalService.register`)
+    writes **no** rows here: programmatic enrollment can never grant write
+    capability at birth (decision recommendation 2, threat T7). A write
+    capability requires a separate human step —
+    :meth:`~meho_backplane.auth.runner_write_allowlist.RunnerWriteAllowlistService.grant`,
+    reachable only over the operator-gated REST route — so the runner cannot
+    widen its own allowlist (its read-only, route-caged token cannot reach the
+    grant path). ``created_by_sub`` records the granting human for the audit
+    trail, binding the capability at issuance.
+
+    Additive-only (migration-compat contract): a fresh table plus its indexes,
+    no ALTER of an existing object (migration ``0095``).
+    """
+
+    __tablename__ = "runner_write_allowlist"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # The runner principal this capability is hung off. FK to the row's id
+    # (the same value the token's unforgeable ``runner_id`` claim carries).
+    runner_principal_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("runner_principal.id"),
+        nullable=False,
+    )
+    # A glob over ``op_id`` (``fnmatch`` semantics): an exact op-class for a
+    # minimal Stage-1 allowlist (``vmware.vm.tag_set``) or a prefix
+    # (``vmware.vm.*``). Matched by the shared, DB-free gate
+    # (:func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`).
+    op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    # A target-scope cap: ``*`` (any target in the tenant), or a concrete
+    # ``str(target.id)`` binding the capability to one target. Matched by the
+    # same gate against the work item's resolved target scope.
+    target_scope: Mapped[str] = mapped_column(Text, nullable=False)
+    # The human operator who granted this capability (never a runner) — the
+    # issuance binding that makes the grant a deliberate, auditable human step.
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # The mint reads "every allowlist row for runner R in tenant T"; the
+        # edge never touches this table (it reads its own config mirror).
+        Index(
+            "runner_write_allowlist_lookup_idx",
+            "tenant_id",
+            "runner_principal_id",
+            postgresql_using="btree",
+        ),
+        # At most one row per fully-scoped capability, so a re-grant of the
+        # same ``(op_pattern, target_scope)`` is idempotent rather than
+        # accumulating duplicates.
+        Index(
+            "uq_runner_write_allowlist_capability",
+            "runner_principal_id",
+            "op_pattern",
+            "target_scope",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
 class AddonPairing(Base):
     """A paired add-on product — a Keycloak service principal + a versioned contract.
 

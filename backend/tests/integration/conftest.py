@@ -478,7 +478,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
-                "agent_principal, runner_principal, "
+                "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
@@ -552,7 +552,7 @@ async def pg_engine_empty_tenant(
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
-                "agent_principal, runner_principal, "
+                "agent_principal, runner_principal, runner_write_allowlist, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "

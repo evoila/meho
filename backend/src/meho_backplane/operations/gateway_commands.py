@@ -63,6 +63,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.runner_write_allowlist import load_runner_allowlist
 from meho_backplane.db.models import (
     AuditLog,
     EndpointDescriptor,
@@ -91,6 +92,7 @@ from meho_backplane.operations.approval_queue import (
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
+    evaluate_remote_write_gate,
 )
 from meho_backplane.runner.work_item_signing import (
     TARGETLESS_SCOPE,
@@ -161,8 +163,10 @@ class MintRefusalCode(StrEnum):
     tier (``dangerous`` / ``destructive`` — never minted to a satellite);
     ``REMOTE_WRITE_GATE_UNSATISFIED`` is the fail-closed refusal of the
     additive ``remote-write`` tier when no committed, single-use approval
-    binds the mint (mechanism 1, #3189 — and, once #3190 lands, when the
-    op-class is off the runner's allowlist); ``REMOTE_WRITE_SIGNING_UNAVAILABLE``
+    binds the mint (mechanism 1, #3189); ``REMOTE_WRITE_NOT_ALLOWLISTED`` is the
+    mechanism-2 refusal (#3190) — the op-class + target is not on the runner's
+    per-runner capability allowlist, ANDed with the approval binding so the tier
+    is satisfiable only when both pass; ``REMOTE_WRITE_SIGNING_UNAVAILABLE``
     refuses a remote-write mint that cannot be signed because the central
     signing key is not provisioned (#3189); ``RUNNER_REVOKED`` is the
     write-tier revocation refusal (#3192, the Stage-3 gate) — a revoked runner
@@ -177,6 +181,7 @@ class MintRefusalCode(StrEnum):
     INVALID_OP_SCHEMA = "invalid_op_schema"
     OP_NOT_SAFE = "op_not_safe"
     REMOTE_WRITE_GATE_UNSATISFIED = "remote_write_gate_unsatisfied"
+    REMOTE_WRITE_NOT_ALLOWLISTED = "remote_write_not_allowlisted"
     REMOTE_WRITE_SIGNING_UNAVAILABLE = "remote_write_signing_unavailable"
     RUNNER_REVOKED = "runner_revoked"
     POLICY_DENIED = "policy_denied"
@@ -555,6 +560,102 @@ async def mint_gateway_command(
     )
 
 
+async def _screen_remote_write(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    op_id: str,
+    target: Any,
+    params_hash: str,
+    runner_id: str,
+) -> tuple[Any, Any, MintResult | None]:
+    """Run the three read-only remote-write pre-checks, in fail-closed order.
+
+    Returns ``(approval, signing_key, refusal)``. On any fail-closed check
+    ``refusal`` is a :class:`MintResult` (the mint aborts **before** the
+    single-use latch); when it is ``None`` both ``approval`` and ``signing_key``
+    are bound. None of these three checks writes a row or consumes the approval:
+
+    1. **Approval binding** (mechanism 1, #3189) — a committed, un-consumed,
+       param-bound ``ApprovalRequest`` for ``(op, target, params_hash)``; none →
+       :attr:`MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED`.
+    2. **Signing key** (#3189) — the central Ed25519 key must be provisioned to
+       sign the capability; unavailable →
+       :attr:`MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE`.
+    3. **Per-runner allowlist** (mechanism 2, #3190) — the op-class + target must
+       be on the runner's ``runner_write_allowlist``, screened through the shared
+       :func:`~meho_backplane.runner.satellite_tier.evaluate_remote_write_gate`
+       matcher the DB-free edge re-runs (defence in depth); off-allowlist (or no
+       allowlist at all) → :attr:`MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`.
+    """
+    from meho_backplane.settings import get_settings
+
+    raw_target_id = getattr(target, "id", None) if target is not None else None
+    target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
+
+    approval = await find_remote_write_approval(
+        session,
+        tenant_id=operator.tenant_id,
+        op_id=op_id,
+        target_id=target_id,
+        params_hash=params_hash,
+    )
+    if approval is None:
+        return (
+            None,
+            None,
+            _refuse_remote_write(
+                MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
+                f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
+                "binding for this (op, target, params); the caution tier mints only "
+                "against a human-approved ApprovalRequest (mechanism 1)",
+                op_id=op_id,
+                operator=operator,
+                runner_id=runner_id,
+            ),
+        )
+
+    try:
+        signing_key = load_signing_key(get_settings().satellite_write_signing_key)
+    except SigningKeyUnavailableError as exc:
+        return (
+            None,
+            None,
+            _refuse_remote_write(
+                MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE,
+                f"remote-write op {op_id!r} refused: {exc}",
+                op_id=op_id,
+                operator=operator,
+                runner_id=runner_id,
+            ),
+        )
+
+    # Mechanism 2 (#3190): the per-runner capability allowlist, ANDed with the
+    # approval binding above. The runner's rows are screened through the same
+    # shared matcher the edge re-runs -- an op-class/target outside the allowlist
+    # (or no allowlist at all) fails closed here.
+    allowlist = await load_runner_allowlist(
+        session, tenant_id=operator.tenant_id, runner_name=runner_id
+    )
+    gate = evaluate_remote_write_gate(
+        op_id=op_id, allowlist=allowlist, target_scope=_target_scope(target), runner_id=runner_id
+    )
+    if not gate.permitted:
+        return (
+            None,
+            None,
+            _refuse_remote_write(
+                MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED,
+                gate.reason,
+                op_id=op_id,
+                operator=operator,
+                runner_id=runner_id,
+            ),
+        )
+
+    return approval, signing_key, None
+
+
 async def _mint_remote_write(
     session: AsyncSession,
     *,
@@ -570,64 +671,32 @@ async def _mint_remote_write(
     started: float,
     safety_level: str,
 ) -> MintResult:
-    """Mint a signed remote-write capability against a committed approval (#3189).
+    """Mint a signed, allowlisted remote-write capability (#3189 + #3190).
 
-    Mechanism 1 of the composed write-path gate: the caution tier mints
-    **only** against a committed, single-use, param-bound ``ApprovalRequest``
-    for the identical ``(op, target, params_hash)`` — the human approval
-    decision is the authorization (policy gate bypassed for this tier, the
-    mould of ``approve_request``'s ``_approved=True`` re-dispatch). On a win
-    the capability is **signed** for offline edge verification.
-
-    **Composition point for #3190** (mechanism 2, the per-runner allowlist):
-    the allowlist check slots in below, ANDed with this approval binding.
-    Until #3190 wires it at the mint, the edge allowlist re-check
-    (``executor._screen_item`` → ``evaluate_remote_write_gate``, still
-    fail-closed) keeps the tier closed end-to-end.
-
-    Order matters: the approval is located read-only and the signing key
-    checked **before** the single-use latch is claimed, so a fail-closed
-    refusal never consumes an approval (the "a refusal writes no rows"
-    invariant holds).
+    The caution tier's authorization is the **composition** of two halves,
+    resolved read-only by :func:`_screen_remote_write` (approval binding + signing
+    key + the per-runner allowlist) **before** the single-use latch: the tier is
+    satisfiable only when **both** the committed approval **and** the allowlist
+    pass, and either absent fails closed. The human approval decision is the
+    authorization (policy gate bypassed for this tier, the mould of
+    ``approve_request``'s ``_approved=True`` re-dispatch); on a win the capability
+    is **signed** for offline edge verification, and the same allowlist matcher is
+    re-run at the DB-free edge (``executor._screen_item``), defence in depth.
     """
-    from meho_backplane.settings import get_settings
-
-    raw_target_id = getattr(target, "id", None) if target is not None else None
-    target_id = raw_target_id if isinstance(raw_target_id, uuid.UUID) else None
-
-    # #3190 allowlist check composes here, ANDed with the approval binding.
-    approval = await find_remote_write_approval(
+    approval, signing_key, refusal = await _screen_remote_write(
         session,
-        tenant_id=operator.tenant_id,
+        operator=operator,
         op_id=op_id,
-        target_id=target_id,
+        target=target,
         params_hash=params_hash,
+        runner_id=runner_id,
     )
-    if approval is None:
-        return _refuse_remote_write(
-            MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,
-            f"remote-write op {op_id!r} refused: no committed, unconsumed approval "
-            "binding for this (op, target, params); the caution tier mints only "
-            "against a human-approved ApprovalRequest (mechanism 1)",
-            op_id=op_id,
-            operator=operator,
-            runner_id=runner_id,
-        )
-
-    try:
-        signing_key = load_signing_key(get_settings().satellite_write_signing_key)
-    except SigningKeyUnavailableError as exc:
-        return _refuse_remote_write(
-            MintRefusalCode.REMOTE_WRITE_SIGNING_UNAVAILABLE,
-            f"remote-write op {op_id!r} refused: {exc}",
-            op_id=op_id,
-            operator=operator,
-            runner_id=runner_id,
-        )
-
-    # Claim the single-use latch only now the mint is certain to proceed. A
-    # racing mint that already claimed this approval loses (touches zero rows),
-    # so an approval binds at most one capability.
+    if refusal is not None:
+        return refusal
+    # refusal is None ⇒ the approval + signing key are bound (invariant of
+    # _screen_remote_write); claim the single-use latch only now the mint is
+    # certain to proceed. A racing mint that already claimed this approval loses
+    # (touches zero rows), so an approval binds at most one capability.
     if not await consume_remote_write_approval(session, approval):
         return _refuse_remote_write(
             MintRefusalCode.REMOTE_WRITE_GATE_UNSATISFIED,

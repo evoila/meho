@@ -902,6 +902,32 @@ those). Every read + decision derives `tenant_id` from the validated
 `UISessionContext` only, and calls the `approval_queue` service
 in-process (same in-process-audit binding the REST routes get).
 
+**Access model — operator-or-approver, parity with REST (#3243 / #3270 /
+#3282).** The console decide path carries the **same** access model the
+Bearer REST plane adopted in #3243/#3270, reached through the *same*
+shared service gate rather than a console-local role check. The BFF
+reconstructs the full `Operator` via `_resolve_operator` →
+`verify_access_token_with_refresh` → `_operator_from_claims` (which lifts
+the orthogonal `approver` claim, `Operator.approver`), then calls
+`approve_request` / `reject_request`; their `_check_reviewer_role` admits
+a principal that is `operator`-or-higher **or** carries `approver`, and
+refuses only a `read_only` principal *without* the flag (403, re-rendered
+in the modal banner naming both levers). So a dedicated approver
+provisioned as `read_only` role + `approver=true` can clear a four-eyes
+gate through the console exactly as it can over REST/CLI. The read
+surfaces (badge / panel / history / detail) stay gated on the BFF session
+alone — any authenticated console session may glance the tenant-scoped
+queue, unchanged. Two invariants are preserved and pinned in
+`test_ui_approvals.py`: the `sub`-keyed self-approval refusal (#1401) is
+orthogonal to the capability (an approver still cannot decide a request it
+parked), and the capability grants **no other console surface** —
+`operator.approver` is consulted only by `require_approvals_access` (REST)
+and `_check_reviewer_role` (service), never by dispatch or any
+`require_role`-gated admin plane, so `read_only + approver` remains denied
+the operations/dispatch console and every operator plane. This is a
+verify-and-pin of parity #3270 already established at the service layer —
+no new gate, service call, route, or migration.
+
 | Verb | Path | Purpose |
 |---|---|---|
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |

@@ -559,6 +559,7 @@ const (
 	TargetCreateProductVrli       TargetCreateProduct = "vrli"
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"
+	TargetCreateProductWinsrv     TargetCreateProduct = "winsrv"
 )
 
 // Defines values for TemplateSummaryStatus.

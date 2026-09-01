@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `winsrv` connector: Windows Server core over PowerShell-5.1-over-SSH (#3261 / #3271)
+
+- **`winsrv` connector** — typed connector for Windows Server core management
+  over SSH → PowerShell 5.1, on the shared `_shared/pwsh` transport (#3260) +
+  `SshConnector` base, registered as `("winsrv", "2022.x", "winsrv-ssh")` (+
+  wildcard). 23 ops across six groups — `system` (about / os-info / uptime /
+  pending-reboot), `services` (list / get / start / stop / restart), `features`
+  (list / install / remove — the c1sql1 `Install-WindowsFeature` path), `power`
+  (reboot / shutdown), `localusers` (list / create / set / delete), `storage`
+  (disk / volume / iSCSI-target list, iSCSI connect, raw-disk format).
+- Safety tiers per the Initiative #3259 satellite table: reads `safe`;
+  recoverable writes `caution`; `power.reboot` / `power.shutdown` /
+  `localuser.delete` are `dangerous` + `requires_approval` (the rke2
+  approval-parked-write mold, satellite-excluded by the tier ladder). Secret
+  hygiene: no credential rides the `-EncodedCommand` argv — `localuser.create`
+  is passwordless and `iscsi.connect` has no CHAP (both deferred to a
+  Vault-brokered flow); every operator string is escaped via `ps_single_quote`.
+- The new `winsrv` product token extends the OpenAPI `TargetCreate.product`
+  enum, so the CLI snapshot (`cli/api/openapi.json` + generated client) is
+  regenerated. `winsrv` is the estate mold for the incoming `msad` / `wsfc` /
+  `hyperv` connectors. Live c1sql1 consumer proof is deferred (lab VMs not yet
+  built); scripted-transport unit suite + injection-safety + secret-leak guard
+  are the deliverable, consistent with recent connector tasks.
+
 ### Added — typed HttpNfcLease OVF import: `vm.import_from_library` (#3229)
 
 - The durable, transfer-window-decoupled sibling of `vm.deploy_from_library`.

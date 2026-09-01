@@ -456,6 +456,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "vrops-rest",
         "vrops-vrops8",
         "windns-ssh",
+        "winsrv-ssh",
     }
 )
 

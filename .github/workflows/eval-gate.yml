@@ -84,7 +84,7 @@ jobs:
       - name: Sync Python environment (locked)
         # --locked refuses to update uv.lock; if pyproject.toml drifted
         # from the lock, CI fails here rather than silently bumping
-        # deps. Same pattern as ci.yml's python-lint-test job.
+        # deps. Same pattern as ci.yml's python-lint job.
         run: uv sync --locked --all-groups
 
       - name: Run retrieval-eval gate

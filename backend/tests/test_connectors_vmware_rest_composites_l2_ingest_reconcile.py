@@ -134,10 +134,11 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Fourteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
-    writes, the #2891 hardware trio, the two GOSC composites / #2892, plus
-    the OVF/OVA content-library deploy / #2909 — whose reads ride the
-    content-library find actions, both served by the pinned vcenter.yaml).
+    Fifteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    writes, the #2891 hardware trio, the two GOSC composites / #2892, the
+    OVF/OVA content-library deploy / #2909, plus the typed HttpNfcLease import
+    / #3229 — whose REST sub-ops ride the content-library find + download-session
+    actions, all served by the pinned vcenter.yaml).
     ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
     the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
     REST resource), so its manifest lives in
@@ -157,6 +158,7 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_CUSTOMIZE",
         "_SUB_OPS_VM_DEPLOY_FROM_LIBRARY",
         "_SUB_OPS_VM_DEVICE_CDROM",
+        "_SUB_OPS_VM_IMPORT_FROM_LIBRARY",
         "_SUB_OPS_VM_MIGRATE",
         "_SUB_OPS_VM_NIC_REPOINT",
         "_SUB_OPS_VM_POWER",
@@ -177,6 +179,27 @@ def test_vm_deploy_from_library_sub_op_manifest_is_expected() -> None:
         "POST:/content/library?action=find",
         "POST:/content/library/item?action=find",
         "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    }
+
+
+def test_vm_import_from_library_sub_op_manifest_is_expected() -> None:
+    """Pin the import_from_library REST manifest so a drift can't shrink the reconcile.
+
+    All eight REST sub-ops are ``vcenter.yaml``-served paths (the two shared
+    content-library find actions, the five download-session steps the typed
+    HttpNfcLease source reads the OVF through, and the power-on), so they
+    reconcile through the generic ``_SUB_OPS_*`` sweep. The vim control-plane
+    sub-ops are the separate ``_VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY`` lane below.
+    """
+    assert set(_write._SUB_OPS_VM_IMPORT_FROM_LIBRARY) == {
+        "POST:/content/library?action=find",
+        "POST:/content/library/item?action=find",
+        "POST:/content/library/item/download-session",
+        "GET:/content/library/item/download-session/{downloadSessionId}/file",
+        "POST:/content/library/item/download-session/{downloadSessionId}/file?action=prepare",
+        "POST:/content/library/item/download-session/{downloadSessionId}?action=keep-alive",
+        "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
         "POST:/vcenter/vm/{vm}/power?action=start",
     }
 
@@ -529,6 +552,75 @@ def test_vm_destroy_vi_json_paths_exist_in_the_pinned_spec() -> None:
         assert _vi_json_path_item_has_post(spec_text, path), (
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "destroy vi-json sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# vm.import_from_library VI-JSON sub-op reconciliation (#3229)
+# ---------------------------------------------------------------------------
+#
+# The typed HttpNfcLease import's control plane is vi-json, not vcenter REST:
+# ``ServiceInstance.RetrieveServiceContent`` (resolve OvfManager/rootFolder),
+# ``OvfManager.CreateImportSpec`` (validate descriptor), the governed
+# ``ResourcePool.ImportVApp`` write, ``PropertyCollector.RetrievePropertiesEx``
+# (lease-state poll), and the ``HttpNfcLease`` progress / complete / abort
+# lifecycle. Declared in ``_write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY``
+# (deliberately NOT in the ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep
+# above skips them). Same ``METHOD:/path`` keying as the other vim writes — the
+# moId rides the path as ``{moId}`` — so the same reconciliation proof applies,
+# and it is additionally checked against the pinned ``vi-json.yaml`` when the
+# spec-shelf is configured.
+
+
+def test_vm_import_from_library_vi_json_sub_op_manifest_is_expected() -> None:
+    """Pin the import vim manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY) == {
+        "POST:/ServiceInstance/{moId}/RetrieveServiceContent",
+        "POST:/OvfManager/{moId}/CreateImportSpec",
+        "POST:/ResourcePool/{moId}/ImportVApp",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/HttpNfcLease/{moId}/HttpNfcLeaseProgress",
+        "POST:/HttpNfcLease/{moId}/HttpNfcLeaseComplete",
+        "POST:/HttpNfcLease/{moId}/HttpNfcLeaseAbort",
+    }
+
+
+def test_vm_import_from_library_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The import vim op_ids are byte-for-byte what the parser emits."""
+    required = set(_write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_import_from_library_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each import vim sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The #3229 grounding: the typed HttpNfcLease import's OvfManager /
+    ResourcePool.ImportVApp / HttpNfcLease control-plane methods are core vim25
+    (version-agnostic), so the pinned spec must serve every one. Skips when the
+    spec-shelf is not configured, so CI — where the env vars are wired — is the
+    operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "import vi-json sub-op targets a path the spec does not serve"
         )
 
 

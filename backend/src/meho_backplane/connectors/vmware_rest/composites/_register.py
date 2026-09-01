@@ -91,6 +91,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_destroy_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
+    vm_import_from_library_composite,
     vm_migrate_composite,
     vm_nic_repoint_composite,
     vm_power_bulk_composite,
@@ -153,6 +154,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
     VM_DISK_GROW_RESPONSE_SCHEMA,
+    VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA,
+    VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA,
     VM_MIGRATE_PARAMETER_SCHEMA,
     VM_MIGRATE_RESPONSE_SCHEMA,
     VM_NIC_REPOINT_PARAMETER_SCHEMA,
@@ -535,6 +538,41 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ),
         parameter_schema=VM_DEPLOY_FROM_LIBRARY_PARAMETER_SCHEMA,
         response_schema=VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "ovf"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.import_from_library",
+        handler=vm_import_from_library_composite,
+        summary="Import an OVF/OVA content-library item to a new VM via a typed HttpNfcLease.",
+        description=(
+            "The durable, transfer-window-decoupled counterpart to "
+            "vm.deploy_from_library (#3229). deploy_from_library's synchronous REST "
+            "deploy holds one POST open for the whole server-side copy, so completion "
+            "is bounded by the client read-timeout — a multi-GB installer OVA outran "
+            "even the 3h mitigation ceiling live (#3176). This composite drives the "
+            "transfer itself over a typed vim HttpNfcLease import: ServiceContent "
+            "resolve → OvfManager.CreateImportSpec (validates the descriptor) → the "
+            "governed ResourcePool.ImportVApp write → poll the lease to ready → stream "
+            "each disk from the content library (client-side download-session) straight "
+            "to the lease device URLs with an HttpNfcLeaseProgress heartbeat → "
+            "HttpNfcLeaseComplete. Completion is bounded only by the transfer's own "
+            "duration, not any single HTTP read, and under async governed dispatch "
+            "(#3079) a dropped caller no longer aborts it. Version-agnostic (core "
+            "vim25 OvfManager / HttpNfcLease; no 9.0-only fields), so it also covers "
+            "the pre-9.0 VCF 5.x migration-source fleet (#3056). The library item is "
+            "referenced by id (passthrough) or name (resolved via "
+            "POST:/content/library/item?action=find, ambiguity-refused before any "
+            "mutation); resource_pool and datastore are required. Any failure after "
+            "the lease exists aborts it, so vCenter removes the half-created VM. Maps "
+            "to the same deployed / deploy_failed / deploy_error envelope (#3071) as "
+            "the deploy composite, plus a per-disk transfer manifest. Equivalent of a "
+            "task-polled 'govc library.deploy' for large OVAs."
+        ),
+        parameter_schema=VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA,
+        response_schema=VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA,
         group_key="vm",
         tags=["composite", "write", "vm", "lifecycle", "ovf"],
         safety_level="dangerous",

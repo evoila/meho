@@ -35,6 +35,7 @@ re-wrapped.
 
 from __future__ import annotations
 
+from meho_backplane.connectors.vmware_rest import library_download
 from meho_backplane.connectors.vmware_rest.composites import _write
 from tests._spec_shelf import openapi_request_body_props, require_shelf_spec
 
@@ -51,6 +52,13 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
     "POST:/content/library?action=find",
     "POST:/content/library/item?action=find",
+    # Content-library download-session flow the typed HttpNfcLease import source
+    # reads the OVF descriptor + disks through (#3229; POST ops declared in
+    # ``library_download``).
+    "POST:/content/library/item/download-session",
+    "POST:/content/library/item/download-session/{downloadSessionId}/file?action=prepare",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=keep-alive",
+    "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
     "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
     "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect",
     "PATCH:/vcenter/vm/{vm}/hardware/cpu",
@@ -80,30 +88,34 @@ _FLATTENED_WRITE_OP_IDS = {
 
 
 def _rest_write_op_ids() -> set[str]:
-    """Every REST-Automation write op_id in ``_write``, introspected live.
+    """Every REST-Automation write op_id the connector emits, introspected live.
 
-    A REST write op is a ``POST`` / ``PATCH`` / ``PUT`` ``_OP_*`` constant whose
-    path root is a lowercase Automation family (``/vcenter``, ``/esx``,
-    ``/content``, ...). The vmomi VI-JSON methods (``ReconfigVM_Task``,
-    ``CloneVM_Task``, ...) dispatch through ``_post_vmomi_json`` onto the
-    ``/sdk/vim25`` mount and are keyed by an **uppercase** managed-object type
-    (``/VirtualMachine/{moId}/...``); their request types genuinely carry a
-    ``spec`` field, so they are correctly excluded from the flat-body contract.
+    A REST write op is a ``POST`` / ``PATCH`` / ``PUT`` op_id constant whose path
+    root is a lowercase Automation family (``/vcenter``, ``/esx``, ``/content``,
+    ...). Scans the ``_OP_*`` constants in ``_write`` plus the public ``OP_*``
+    constants in ``library_download`` (the #3229 download-session source module),
+    so a new REST write op in either forces a body-shape review. The vmomi
+    VI-JSON methods (``ReconfigVM_Task``, ``CloneVM_Task``, ...) dispatch through
+    ``_post_vmomi_json`` onto the ``/sdk/vim25`` mount and are keyed by an
+    **uppercase** managed-object type (``/VirtualMachine/{moId}/...``); their
+    request types genuinely carry a ``spec`` field, so they are correctly
+    excluded from the flat-body contract.
     """
     ops: set[str] = set()
-    for name in dir(_write):
-        if not name.startswith("_OP_"):
-            continue
-        value = getattr(_write, name)
-        if not isinstance(value, str) or ":" not in value:
-            continue
-        method, _, path = value.partition(":")
-        if method not in {"POST", "PATCH", "PUT"}:
-            continue
-        first = path.lstrip("/").split("/", 1)[0].split("?", 1)[0]
-        if not first or first[0].isupper():  # vmomi VI-JSON method, not the /api surface
-            continue
-        ops.add(value)
+    for module, prefix in ((_write, "_OP_"), (library_download, "OP_")):
+        for name in dir(module):
+            if not name.startswith(prefix):
+                continue
+            value = getattr(module, name)
+            if not isinstance(value, str) or ":" not in value:
+                continue
+            method, _, path = value.partition(":")
+            if method not in {"POST", "PATCH", "PUT"}:
+                continue
+            first = path.lstrip("/").split("/", 1)[0].split("?", 1)[0]
+            if not first or first[0].isupper():  # vmomi VI-JSON method, not the /api surface
+                continue
+            ops.add(value)
     return ops
 
 
@@ -189,6 +201,7 @@ def test_flattened_2973_bodies_are_served_flat_by_the_pinned_spec() -> None:
 # literal the substrate can emit must name a real component schema in the
 # pinned ``vi-json.yaml``.
 
+from meho_backplane.connectors.vmware_rest import ovf_import_control  # noqa: E402
 from meho_backplane.connectors.vmware_rest.vim_body import (  # noqa: E402
     MOREF_TYPE_NAME,
     retrieve_properties_body,
@@ -218,6 +231,11 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._CLUSTER_RULE_SPEC_TYPE,
     _write._CLUSTER_AFFINITY_RULE_TYPE,
     _write._CLUSTER_ANTI_AFFINITY_RULE_TYPE,
+    # Typed HttpNfcLease OVF import (#3229) -- the CreateImportSpec cisp +
+    # its network / property mapping DataObjects.
+    ovf_import_control.OVF_CREATE_IMPORT_SPEC_PARAMS_TYPE,
+    ovf_import_control.OVF_NETWORK_MAPPING_TYPE,
+    ovf_import_control.KEY_VALUE_TYPE,
 }
 
 

@@ -716,10 +716,15 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   (`consult_and_record_grant` already refuses the tier).
 - **The self-approval break-glass hole.** `_check_self_approval`
   (`operations/approval_queue.py`) honoured `APPROVAL_ALLOW_SELF_APPROVAL`
-  for every tier. It now refuses self-approval of a `destructive` row
-  *unconditionally* — the break-glass switch does not reach this tier
-  (decision requirement 1). A single-operator tenant uses the
-  agent-requester pattern, never self-approval.
+  for every tier. It now refuses self-approval of a `dangerous` **or**
+  `destructive` row *unconditionally* (`_NO_SELF_APPROVAL_TIERS`) — the
+  break-glass switch does not reach either tier (decision requirement 1).
+  #3198 scoped this to `destructive` only, but a delete-class op can
+  legitimately register on the reversible `dangerous` tier (e.g. a KV
+  secret-version soft-delete) while still being the four-eyes-critical
+  action the requirement protects, so #3290 widened the refusal to cover
+  it; `caution` / `safe` still honour break-glass. A single-operator
+  tenant uses the agent-requester pattern, never self-approval.
 - **Registration fail-fast.** `_register_in_session` (`operations/typed_register.py`)
   now rejects a `destructive` descriptor declared `requires_approval=False`
   at registration time — an inconsistent row can't exist. Belt-and-suspenders

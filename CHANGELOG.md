@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
+
+- The unconditional self-approval refusal (#3198 — "no self-approval, even
+  under break-glass") was scoped to `safety_level == "destructive"` only, so a
+  delete-class op registered on the reversible **`dangerous`** tier (e.g. a KV
+  secret-version soft-delete) fell through to the break-glass allow-path: with
+  `APPROVAL_ALLOW_SELF_APPROVAL=true` a single operator could park *and*
+  approve their own governed delete. `_check_self_approval` now refuses
+  self-approval unconditionally for `safety_level in {"dangerous",
+  "destructive"}`; the `caution` / `safe` tiers still honour break-glass. The
+  user-`sub` keying is unchanged (a different operator, or a different client
+  carrying the same user, is unaffected — only genuine self-approval is
+  refused).
+- `POST /api/v1/approvals/{id}/decide` now returns `decided_by` (the effective
+  authenticated reviewer's `sub`) so a CLI / console can show *who* decided
+  without a second lookup. Additive and optional — existing clients are
+  unaffected.
+
 ### Changed — `bind9.record.remove` promoted to the governed destructive tier (#3247)
 
 - **Behaviour change for agents — approval now required.** `bind9.record.remove`

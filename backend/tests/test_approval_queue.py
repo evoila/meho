@@ -1213,6 +1213,130 @@ async def test_self_reject_is_always_allowed(session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Break-glass tier scoping (#3198 destructive, #3290 dangerous)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier", ["dangerous", "destructive"])
+async def test_self_approval_refused_on_no_break_glass_tier_even_with_break_glass(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tier: str
+) -> None:
+    """``dangerous`` + ``destructive`` self-approval is refused even under break-glass.
+
+    #3198 made the ``destructive`` tier ignore ``APPROVAL_ALLOW_SELF_APPROVAL``
+    so a governed delete is genuine four-eyes on every deployment; #3290
+    extends that to ``dangerous`` because a delete-class op can legitimately
+    register on the reversible ``dangerous`` tier (e.g. a KV secret-version
+    soft-delete) while still being the four-eyes-critical action #3198
+    protects. The tier is read off the durable ``proposed_effect`` envelope
+    the dispatcher stamps at park time. The self-approval guard fires before
+    the destructive preview-binding check, so no ``preview_hash`` is needed
+    to reach it for the ``destructive`` case.
+    """
+    monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
+    get_settings.cache_clear()
+
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.delete",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+        proposed_effect={"op_id": "vault.kv.delete", "safety_level": tier},
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, pending.id, operator=requester, params=params)
+
+    # A refused self-approval is not a decision — the row stays pending.
+    async with get_sessionmaker()() as s3:
+        row = await s3.get(ApprovalRequest, pending.id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tier", ["caution", "safe"])
+async def test_self_approval_still_honours_break_glass_for_low_tiers(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, tier: str
+) -> None:
+    """``caution`` / ``safe`` self-approval still succeeds under break-glass.
+
+    #3290 widened the unconditional refusal to ``dangerous`` + ``destructive``
+    only; the audited single-operator break-glass mode
+    (``APPROVAL_ALLOW_SELF_APPROVAL=true``) is unchanged for the lower tiers.
+    """
+    monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
+    get_settings.cache_clear()
+
+    requester = _make_operator(sub="solo-operator", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+        proposed_effect={"op_id": "vault.kv.put", "safety_level": tier},
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        row = await approve_request(s2, pending.id, operator=requester, params=params)
+        await s2.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.reviewed_by == requester.sub
+
+
+@pytest.mark.asyncio
+async def test_different_sub_approval_on_dangerous_tier_passes(
+    session: AsyncSession,
+) -> None:
+    """A *different* operator approving a ``dangerous`` request is genuine four-eyes.
+
+    The guard keys on the stable ``sub`` claim: a distinct reviewer clears
+    the self-approval check and the approval proceeds normally — the #3290
+    widening only refuses *self*-approval, never a real second operator.
+    Break-glass is irrelevant here (default off).
+    """
+    requester = _make_operator(sub="requester-sub", role=TenantRole.OPERATOR)
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.delete",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+        proposed_effect={"op_id": "vault.kv.delete", "safety_level": "dangerous"},
+    )
+    await session.commit()
+
+    approver = _make_operator(sub="approver-sub", role=TenantRole.OPERATOR)
+    async with get_sessionmaker()() as s2:
+        row = await approve_request(s2, pending.id, operator=approver, params=params)
+        await s2.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+    assert row.reviewed_by == approver.sub
+
+
+# ---------------------------------------------------------------------------
 # expire_stale_requests
 # ---------------------------------------------------------------------------
 

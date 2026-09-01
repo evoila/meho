@@ -3947,8 +3947,14 @@ type DecideRequestBody struct {
 // first (the run-bound waiter-alive case) — a benign "executed elsewhere"
 // that keeps the approver from double-dispatching. They stay “None“
 // only on a rejection.
+//
+// “decided_by“ names the effective authenticated user (the reviewer's
+// stable “sub“) whose credential made this decision, so a CLI / console
+// can show *who* decided without a second lookup (#3290). Additive and
+// optional — a client that ignores it is unaffected.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
+	DecidedBy         *string                            `json:"decided_by"`
 	Decision          string                             `json:"decision"`
 	DispatchError     *string                            `json:"dispatch_error"`
 	DispatchOpId      *string                            `json:"dispatch_op_id"`

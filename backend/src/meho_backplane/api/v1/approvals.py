@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line approvals REST
+# surface; #3290 adds one optional response field, not a split.
 
 """``/api/v1/approvals/*`` — approval queue REST surface.
 
@@ -765,6 +767,11 @@ class DecideResponseBody(BaseModel):
     first (the run-bound waiter-alive case) — a benign "executed elsewhere"
     that keeps the approver from double-dispatching. They stay ``None``
     only on a rejection.
+
+    ``decided_by`` names the effective authenticated user (the reviewer's
+    stable ``sub``) whose credential made this decision, so a CLI / console
+    can show *who* decided without a second lookup (#3290). Additive and
+    optional — a client that ignores it is unaffected.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -772,6 +779,7 @@ class DecideResponseBody(BaseModel):
     approval_request_id: uuid.UUID
     decision: str
     reason: str
+    decided_by: str | None = None
     dispatch_status: str | None = None
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
@@ -852,6 +860,7 @@ async def decide_approval_request(
             approval_request_id=request_id,
             decision=decision,
             reason=body.reason,
+            decided_by=operator.sub,
             dispatch_status=dispatch_result.status,
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
@@ -862,4 +871,5 @@ async def decide_approval_request(
         approval_request_id=request_id,
         decision=decision,
         reason=body.reason,
+        decided_by=operator.sub,
     )

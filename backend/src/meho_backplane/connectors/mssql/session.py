@@ -70,6 +70,7 @@ __all__ = [
     "DEFAULT_LOGIN_TIMEOUT_S",
     "DEFAULT_PORT",
     "DEFAULT_QUERY_TIMEOUT_S",
+    "DEFAULT_WRITE_TIMEOUT_S",
     "MAX_IDENTIFIER_LENGTH",
     "SQL_CREDENTIAL_FIELDS",
     "MssqlIdentifierError",
@@ -94,10 +95,16 @@ DEFAULT_DATABASE = "master"
 #: handshake so a probe or op fails fast rather than hanging the dispatcher.
 DEFAULT_LOGIN_TIMEOUT_S = 15
 
-#: Per-statement query timeout in seconds. A long-running catalog read or a
-#: backup/restore utility statement is bounded so a wedged instance cannot pin
-#: the ``asyncio.to_thread`` worker indefinitely.
+#: Per-statement timeout for **read** ops in seconds. A catalog read is bounded
+#: so a wedged instance cannot pin the ``asyncio.to_thread`` worker.
 DEFAULT_QUERY_TIMEOUT_S = 30
+
+#: Per-statement timeout for **write** ops (``BACKUP`` / ``RESTORE`` /
+#: ``CREATE`` / ``DROP``) in seconds. Backup and restore of a real database run
+#: for minutes to hours, so the 30 s read timeout would abort them mid-flight;
+#: writes get a generous 4-hour ceiling that still bounds a truly-hung
+#: statement without cutting a legitimate long-running restore short.
+DEFAULT_WRITE_TIMEOUT_S = 4 * 60 * 60
 
 #: The KV-v2 secret fields the SQL-auth connection needs. Prefixed ``sql_`` so
 #: a future dbatools-over-PowerShell increment can store SSH creds
@@ -174,8 +181,9 @@ def jsonable_row(row: dict[str, Any]) -> dict[str, Any]:
     ``MONEY``, ``bytes`` for ``VARBINARY``). The dispatcher wraps a handler's
     return value into an :class:`OperationResult` whose ``result`` must be
     JSON-serialisable, so every row value is normalised: temporals become
-    ISO-8601 strings, ``Decimal`` becomes ``float``, ``bytes`` becomes a hex
-    string, and everything else passes through.
+    ISO-8601 strings, an integral ``Decimal`` becomes an exact ``int`` and a
+    fractional one a ``float``, ``bytes`` becomes a hex string, and everything
+    else passes through.
     """
     return {key: _jsonable(value) for key, value in row.items()}
 
@@ -188,7 +196,14 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, _dt.timedelta):
         return value.total_seconds()
     if isinstance(value, Decimal):
-        return float(value)
+        # An integral Decimal (SQL Server ``numeric(p,0)`` — a ``backup_size``
+        # in bytes, a large row count) must round-trip exactly: ``float`` loses
+        # precision beyond ~15 digits, so keep it a Python ``int`` (arbitrary
+        # precision). Only a genuinely fractional value (``size_mb``,
+        # ``decimal(18,2)``) becomes a ``float``. High-precision identifier
+        # columns (backup LSNs, ``numeric(25,0)``) are cast to ``varchar`` in
+        # the query itself so they arrive here already as strings.
+        return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).hex()
     return str(value)
@@ -217,7 +232,7 @@ async def resolve_sql_credentials(target: Any, operator: Operator | None) -> dic
 
 
 def _connect_kwargs(
-    *, host: str, port: int, database: str, creds: dict[str, str]
+    *, host: str, port: int, database: str, creds: dict[str, str], query_timeout: int
 ) -> dict[str, Any]:
     """Assemble the ``pytds.connect`` kwargs shared by read + write runners.
 
@@ -226,7 +241,8 @@ def _connect_kwargs(
     (``CREATE`` / ``DROP DATABASE`` cannot run inside a multi-statement
     transaction) and is harmless for reads; ``disable_connect_retry=True``
     makes an unreachable target fail fast inside ``login_timeout`` rather than
-    silently retrying.
+    silently retrying. ``query_timeout`` is the per-statement timeout — short
+    for reads, generous for long-running backup/restore writes.
     """
     return {
         "server": host,
@@ -235,7 +251,7 @@ def _connect_kwargs(
         "user": creds["sql_username"],
         "password": creds["sql_password"],
         "login_timeout": DEFAULT_LOGIN_TIMEOUT_S,
-        "timeout": DEFAULT_QUERY_TIMEOUT_S,
+        "timeout": query_timeout,
         "as_dict": True,
         "autocommit": True,
         "disable_connect_retry": True,
@@ -247,7 +263,15 @@ def _blocking_fetch(
     *, host: str, port: int, database: str, creds: dict[str, str], sql: str, params: Any
 ) -> list[dict[str, Any]]:
     """Synchronous connect → execute → fetchall → close (runs in a worker thread)."""
-    conn = pytds.connect(**_connect_kwargs(host=host, port=port, database=database, creds=creds))
+    conn = pytds.connect(
+        **_connect_kwargs(
+            host=host,
+            port=port,
+            database=database,
+            creds=creds,
+            query_timeout=DEFAULT_QUERY_TIMEOUT_S,
+        )
+    )
     try:
         cursor = conn.cursor()
         cursor.execute(sql, params)
@@ -260,8 +284,21 @@ def _blocking_fetch(
 def _blocking_execute(
     *, host: str, port: int, database: str, creds: dict[str, str], sql: str, params: Any
 ) -> None:
-    """Synchronous connect → execute → close for a non-row-returning statement."""
-    conn = pytds.connect(**_connect_kwargs(host=host, port=port, database=database, creds=creds))
+    """Synchronous connect → execute → close for a non-row-returning statement.
+
+    Uses :data:`DEFAULT_WRITE_TIMEOUT_S` (a generous ceiling) so a legitimate
+    long-running ``BACKUP`` / ``RESTORE`` is not aborted by the short read
+    timeout.
+    """
+    conn = pytds.connect(
+        **_connect_kwargs(
+            host=host,
+            port=port,
+            database=database,
+            creds=creds,
+            query_timeout=DEFAULT_WRITE_TIMEOUT_S,
+        )
+    )
     try:
         conn.cursor().execute(sql, params)
     finally:

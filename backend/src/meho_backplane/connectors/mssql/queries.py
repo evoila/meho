@@ -312,7 +312,11 @@ async def fetch_backup_history(
         "bs.backup_finish_date, bs.type, bs.recovery_model, bs.is_copy_only, "
         "CAST(bs.backup_size AS decimal(20,0)) AS backup_size, "
         "CAST(bs.compressed_backup_size AS decimal(20,0)) AS compressed_backup_size, "
-        "bs.first_lsn, bs.last_lsn, bs.server_name, bs.user_name "
+        # LSNs are numeric(25,0) identifiers, not quantities — cast to varchar so
+        # their full 25-digit precision survives JSON (float/JS would truncate).
+        "CAST(bs.first_lsn AS varchar(48)) AS first_lsn, "
+        "CAST(bs.last_lsn AS varchar(48)) AS last_lsn, "
+        "bs.server_name, bs.user_name "
         "FROM msdb.dbo.backupset AS bs"
     )
     params: dict[str, Any] = {"limit": int(effective_limit)}

@@ -58,6 +58,7 @@ from meho_backplane.connectors.mssql.session import (
     SQL_CREDENTIAL_FIELDS,
     MssqlIdentifierError,
     assert_valid_identifier,
+    jsonable_row,
     quote_identifier,
     resolve_sql_credentials,
 )
@@ -375,6 +376,28 @@ def test_assert_valid_identifier_rejects_non_string() -> None:
 
 def test_assert_valid_identifier_accepts_boundary_length() -> None:
     assert assert_valid_identifier("a" * 128) == "a" * 128
+
+
+# ---------------------------------------------------------------------------
+# Row JSON coercion -- integral Decimals keep full precision
+# ---------------------------------------------------------------------------
+
+
+def test_jsonable_row_preserves_integral_decimal_precision() -> None:
+    """A numeric(p,0) (backup_size) round-trips as an exact int, not a lossy float."""
+    from decimal import Decimal
+
+    row = jsonable_row(
+        {
+            "backup_size": Decimal("12345678901234567890"),  # 20 digits, > float precision
+            "size_mb": Decimal("1024.50"),
+        }
+    )
+    assert row["backup_size"] == 12345678901234567890
+    assert isinstance(row["backup_size"], int)
+    # A genuinely fractional Decimal stays a float.
+    assert row["size_mb"] == 1024.5
+    assert isinstance(row["size_mb"], float)
 
 
 # ---------------------------------------------------------------------------

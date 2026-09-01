@@ -560,6 +560,7 @@ const (
 	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 	TargetCreateProductWindns     TargetCreateProduct = "windns"
 	TargetCreateProductWinsrv     TargetCreateProduct = "winsrv"
+	TargetCreateProductWsfc       TargetCreateProduct = "wsfc"
 )
 
 // Defines values for TemplateSummaryStatus.

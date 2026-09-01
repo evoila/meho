@@ -90,6 +90,37 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `wsfc` connector: Windows Server Failover Clustering over PowerShell-5.1-over-SSH (#3263)
+
+- **`wsfc` connector** — typed connector for Windows Server Failover Clustering
+  (the `FailoverClusters` PowerShell module) over SSH → PowerShell 5.1, on the
+  shared `_shared/pwsh` transport (#3260) + `SshConnector` base, registered as
+  `("wsfc", "2022.x", "wsfc-ssh")` (+ wildcard). A structured copy of the
+  `winsrv` estate mold (#3261). 19 ops across five groups — `cluster` (about /
+  get health-rollup / quorum / validation-report / long-running `Test-Cluster`),
+  `nodes` (list / state / pause-drain / resume / evict), `groups` (list / state /
+  move / offline / online), `resources` (list / dependency-report), `witness`
+  (get / set). The target is any single cluster node — the cmdlets fan out
+  cluster-wide from one node.
+- Safety tiers per the Initiative #3259 satellite table: reads `safe`;
+  recoverable writes (`cluster.test` / `nodes.pause` / `nodes.resume` /
+  `groups.move` / `witness.set`) `caution`; `nodes.evict` / `groups.offline` /
+  `groups.online` are `dangerous` + `requires_approval` (the rke2
+  approval-parked-write mold, satellite-excluded by the tier ladder — a
+  production-role state change is an outage / data-risk event). Secret hygiene:
+  no credential rides the `-EncodedCommand` argv — `witness.set` has no cloud
+  witness (its access key can't ride the transport; deferred to a Vault-brokered
+  flow); every operator string is escaped via `ps_single_quote`.
+- Ships **ready-made Sensor pin recipes** for the checks plane in
+  `docs/codebase/connectors-wsfc.md` (cluster node count, SQL FCI role online,
+  quorum witness online, failed-role / failed-resource) — `wsfc.cluster.get`
+  exposes flat scalar health counts precisely so a bounded assertion can pin
+  them. The new `wsfc` product token extends the OpenAPI `TargetCreate.product`
+  enum, so the CLI snapshot (`cli/api/openapi.json` + generated client) is
+  regenerated. Live c1sql1 consumer proof (probe + governed failover + live
+  Sensor) is deferred (lab cluster not yet built); scripted-transport unit suite
+  + injection-safety + secret-leak guard are the deliverable.
+
 ### Changed — docs-only CI fast path (#3252)
 
 - A PR whose diff is **purely documentation** — every changed path under

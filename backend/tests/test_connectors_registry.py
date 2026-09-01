@@ -362,6 +362,16 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # hits the real get_settings() -> KeyError on
                     # KEYCLOAK_ISSUER_URL, since this test pins no env).
                     gateway_deadman_enabled=False,
+                    # Initiative #2901 (#3193) added the un-reported-mint
+                    # security-alarm sweeper, gated on
+                    # GATEWAY_UNREPORTED_MINT_ENABLED (default on). Pin it off
+                    # for the same reason as the dead-man flag above — a bare
+                    # MagicMock attribute is truthy, so without this the gate
+                    # reads True and the real
+                    # start_gateway_unreported_mint_sweeper runs _sweeper_loop,
+                    # which hits the real get_settings() -> KeyError on
+                    # KEYCLOAK_ISSUER_URL (this test pins no env).
+                    gateway_unreported_mint_enabled=False,
                     # #3079 async governed dispatch added an operation_run
                     # reaper to the lifespan, gated on
                     # OPERATION_RUN_REAPER_ENABLED (default on). Pin it off — a
@@ -436,6 +446,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # #2501 gateway dead-man sweeper — same defensive patch.
                 start_gateway_deadman_sweeper=MagicMock(),
                 stop_gateway_deadman_sweeper=AsyncMock(),
+                # #3193 gateway un-reported-mint security-alarm sweeper — same
+                # defensive patch (the gate above is pinned off) so a future
+                # default flip can't smuggle the real sweeper (and its
+                # get_settings() tick read) back into this env-free test.
+                start_gateway_unreported_mint_sweeper=MagicMock(),
+                stop_gateway_unreported_mint_sweeper=AsyncMock(),
                 # #3079 async governed dispatch operation_run reaper — same
                 # defensive patch (the gate above is pinned off) so a future
                 # default flip can't smuggle the real reaper (and the topology
@@ -584,6 +600,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # #2501 gateway dead-man sweeper — same defensive patch.
                 start_gateway_deadman_sweeper=MagicMock(),
                 stop_gateway_deadman_sweeper=AsyncMock(),
+                # #3193 gateway un-reported-mint security-alarm sweeper — same
+                # defensive patch (the gate above is pinned off) so a future
+                # default flip can't smuggle the real sweeper (and its
+                # get_settings() tick read) back into this env-free test.
+                start_gateway_unreported_mint_sweeper=MagicMock(),
+                stop_gateway_unreported_mint_sweeper=AsyncMock(),
                 # #3079 async governed dispatch operation_run reaper — same
                 # defensive patch (the gate above is pinned off) so a future
                 # default flip can't smuggle the real reaper (and the topology

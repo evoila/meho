@@ -1332,6 +1332,16 @@ class Settings(BaseModel):
     gateway_deadman_enabled: bool = True
     gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)
+    # Initiative #2901 (#3193) -- un-reported-mint security alarm. A separate
+    # sweeper from the dead-man switch above: it flags a *security* condition (a
+    # minted remote-write capability past ``expires_at`` still unconsumed, so its
+    # effect was never reported -- threat T4), distinct from the liveness
+    # ``stale_at`` flip. Default-on for the same reason central enforcement is
+    # mandatory; an external monitor can disable the in-tree sweep. The cadence
+    # is its own knob (not the dead-man's) because the two monitors watch
+    # different clocks -- liveness vs capability expiry.
+    gateway_unreported_mint_enabled: bool = True
+    gateway_unreported_mint_tick_interval_seconds: int = Field(default=60, ge=5, le=3600)
     # Initiative #2901 (#3189) -- satellite write-path work-item signing keys.
     # Asymmetric Ed25519 (mechanism 1, design §3): the central instance holds
     # the SIGNING (private) key and stamps a signature on every remote-write
@@ -2110,6 +2120,12 @@ def get_settings() -> Settings:
         ),
         gateway_runner_stale_after_multiplier=int(
             os.environ.get("GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER", "3"),
+        ),
+        gateway_unreported_mint_enabled=parse_bool_env(
+            os.environ.get("GATEWAY_UNREPORTED_MINT_ENABLED", "true"),
+        ),
+        gateway_unreported_mint_tick_interval_seconds=int(
+            os.environ.get("GATEWAY_UNREPORTED_MINT_TICK_INTERVAL_SECONDS", "60"),
         ),
         satellite_write_signing_key=os.environ.get("SATELLITE_WRITE_SIGNING_KEY", "").strip(),
         satellite_write_verify_key=os.environ.get("SATELLITE_WRITE_VERIFY_KEY", "").strip(),

@@ -235,6 +235,14 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # PG-backed acceptance test errors at setup with ``cannot truncate a
     # table referenced in a foreign key constraint``.
     "gateway_command",
+    # ``runner_effect_chain.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0094`` (#3193 satellite effect audit — the per-runner
+    # effect-chain head). Same rule: PG rejects truncating ``tenant`` unless
+    # every referencing table is listed in the same statement, so
+    # ``runner_effect_chain`` must appear here or every PG-backed acceptance
+    # test errors at setup with ``cannot truncate a table referenced in a
+    # foreign key constraint``.
+    "runner_effect_chain",
     # ``graph_edge_history`` carries a real FK ``graph_edge(id) ON DELETE
     # SET NULL`` per migration ``0012`` (#856 T1); the same applies to
     # ``graph_node_history``. PG rejects a TRUNCATE on the parent table

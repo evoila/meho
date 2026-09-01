@@ -32442,6 +32442,7 @@
               "keycloak",
               "loki",
               "mongodb",
+              "msad",
               "nsx",
               "pfsense",
               "postgres",

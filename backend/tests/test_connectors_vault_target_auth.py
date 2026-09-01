@@ -144,6 +144,27 @@ def test_resolve_no_extras_keys_is_no_override() -> None:
     assert resolve_vault_target_auth(_make_vault_target()) == VaultTargetAuth(None, None)
 
 
+def test_resolve_duck_typed_target_without_extras_is_no_override() -> None:
+    """A duck-typed target lacking ``extras`` (or with ``extras=None``) is safe.
+
+    The handlers receive ``target: Any``; the dispatcher/resolver contract
+    admits a minimal descriptor (e.g. the integration suite's ``_VaultTarget``
+    stub) that carries no ``extras`` attribute, and an ORM row can present
+    ``extras=None``. Either must resolve to no override rather than raising
+    ``AttributeError`` — the login then falls back to the settings-global role.
+    """
+
+    class _NoExtrasTarget:
+        product = "vault"
+
+    class _NullExtrasTarget:
+        product = "vault"
+        extras = None
+
+    assert resolve_vault_target_auth(_NoExtrasTarget()) == VaultTargetAuth(None, None)  # type: ignore[arg-type]
+    assert resolve_vault_target_auth(_NullExtrasTarget()) == VaultTargetAuth(None, None)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # vault_client_for_target — resolution threaded into the login
 # ---------------------------------------------------------------------------

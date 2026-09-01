@@ -109,12 +109,23 @@ def resolve_vault_target_auth(target: Target | None) -> VaultTargetAuth:
     vault connector's own handlers call this, and they only run for a target
     the resolver matched to the vault connector, but gating on the product
     keeps a non-vault target's stray extras key from ever selecting a role.
+
+    Attribute access is duck-typed via :func:`getattr`: the handlers pass
+    ``target: Any`` and the dispatcher/resolver contract admits any
+    target-shaped object — a real :class:`Target` (``extras`` is a dict), an
+    ORM row (``extras`` may be SQL ``NULL`` → ``None``), or a minimal
+    duck-typed descriptor that carries no ``extras`` at all. Any of those
+    that does not present a ``Mapping`` ``extras`` simply names no override,
+    so the login falls back to the settings-global role — never a crash.
     """
-    if target is None or target.product not in _VAULT_PRODUCT_FAMILY:
+    if getattr(target, "product", None) not in _VAULT_PRODUCT_FAMILY:
+        return _NO_OVERRIDE
+    extras = getattr(target, "extras", None)
+    if not isinstance(extras, Mapping):
         return _NO_OVERRIDE
     return VaultTargetAuth(
-        role=_extras_string(target.extras, VAULT_ROLE_EXTRAS_KEY),
-        mount_path=_extras_string(target.extras, VAULT_MOUNT_EXTRAS_KEY),
+        role=_extras_string(extras, VAULT_ROLE_EXTRAS_KEY),
+        mount_path=_extras_string(extras, VAULT_MOUNT_EXTRAS_KEY),
     )
 
 

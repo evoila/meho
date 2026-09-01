@@ -77,6 +77,12 @@ Guarantees:
   under the resolved role too (it takes the dispatch `target`), so the
   approval banner reflects the role that will execute.
 
+Checks/sensors pinned to a role-overridden target authenticate under that
+override — so if the override role lacks the grant a sensor's op needs, the
+evaluation fails closed to `unknown` (a `VaultRoleDeniedError`), which is a
+loud flag of a misconfigured sensor rather than a silent widen; pin
+monitoring sensors on the standard target, not the delete-scoped one.
+
 Consumer-side provisioning (the `meho-teardown` role + `rdc-vault-teardown`
 target registration) is documented in
 [`docs/cross-repo/vault-provisioning.md`](../cross-repo/vault-provisioning.md)

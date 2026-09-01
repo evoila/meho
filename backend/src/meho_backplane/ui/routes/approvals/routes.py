@@ -24,6 +24,26 @@ in-process (``list_pending`` / ``get_request`` / ``approve_request`` /
 memory surfaces use. The in-process call keeps the synchronous-audit
 binding and avoids a self-HTTP hop that the cookie could not auth anyway.
 
+Access model -- operator-or-approver, parity with REST (#3243 / #3282)
+----------------------------------------------------------------------
+
+The read surfaces (badge / panel / history / detail) gate on the BFF
+session alone (``require_ui_session`` + CSRF): any authenticated console
+session may glance the queue, exactly as before. The **decision** POSTs
+carry the same access model the Bearer REST plane adopted in #3243/#3270:
+``approve_request`` / ``reject_request`` run the shared service gate
+``_check_reviewer_role``, which admits a principal that is
+``operator``-or-higher **or** carries the orthogonal ``approver``
+capability (``Operator.approver``, lifted from the JWT ``approver`` claim
+by :func:`~meho_backplane.auth.jwt._operator_from_claims`). So a dedicated
+approver provisioned as ``read_only`` role + ``approver=true`` can clear a
+four-eyes gate through the console just as it can over REST/CLI, while a
+``read_only`` principal *without* the flag is still refused (403). The
+capability is scoped to the approvals decision: it grants no dispatch or
+other ``require_role``-gated console surface (those never read
+``operator.approver``), and the ``sub``-keyed self-approval refusal
+(#1401) is unchanged -- an approver cannot decide a request it parked.
+
 Route inventory
 ---------------
 
@@ -714,9 +734,17 @@ async def _commit_decision(
             detail="approval_request_not_found",
         ) from exc
     except UnauthorizedApprovalError as exc:
+        # The console decide path admits the same principals the REST plane
+        # does (#3243 / #3270): operator-or-higher, OR a principal carrying
+        # the orthogonal ``approver`` capability. Only a ``read_only``
+        # principal *without* ``approver`` lands here, so the banner names
+        # both levers rather than implying operator role is the sole one.
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your role cannot decide approval requests (operator role required).",
+            detail=(
+                "Your role cannot decide approval requests "
+                "(operator role or the approver capability required)."
+            ),
         ) from exc
     except SelfApprovalForbiddenError as exc:
         # The disabled Approve button is UX only; a forged self-approve

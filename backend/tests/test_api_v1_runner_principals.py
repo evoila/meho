@@ -146,6 +146,27 @@ async def _seed_tenants() -> None:
         await session.commit()
 
 
+async def _seed_runner_row(name: str, *, tenant_id: uuid.UUID = _TENANT_A) -> uuid.UUID:
+    """Insert a runner principal row directly (no Keycloak) for allowlist tests."""
+    runner_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            RunnerPrincipal(
+                id=runner_id,
+                tenant_id=tenant_id,
+                name=name,
+                keycloak_client_id=f"runner:{name}",
+                keycloak_internal_id=f"kc-{name}",
+                owner_sub="owner-sub",
+                created_by_sub="creator-sub",
+                revoked=False,
+            )
+        )
+        await session.commit()
+    return runner_id
+
+
 async def _fetch_principals(tenant_id: uuid.UUID) -> list[RunnerPrincipal]:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -800,6 +821,122 @@ async def test_runner_kind_token_caged_from_non_gateway_route(client: TestClient
         resp = client.get(
             "/api/v1/agent-principals",
             headers={"Authorization": f"Bearer {_runner_token(key)}"},
+        )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "runner_scope_violation"
+
+
+# ---------------------------------------------------------------------------
+# Write-allowlist provisioning (#3190, mechanism 2) — grant + list + cage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_allowlist_grant_and_list_round_trip(client: TestClient) -> None:
+    """POST grant (201) → GET list returns the granted capability.
+
+    The separate human step a write capability requires after enrollment: the
+    runner row exists (enrollment) but carries no capability until a
+    ``tenant_admin`` grants one here.
+    """
+    await _seed_tenants()
+    runner_id = await _seed_runner_row("edge-runner")
+    key = make_rsa_keypair("kid-wa-rt")
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        admin_headers = {"Authorization": f"Bearer {_token(key)}"}
+
+        # Enrollment granted nothing: the allowlist starts empty.
+        empty = client.get(
+            "/api/v1/runner-principals/edge-runner/write-allowlist", headers=admin_headers
+        )
+        assert empty.status_code == 200, empty.text
+        assert empty.json()["entries"] == []
+
+        granted = client.post(
+            "/api/v1/runner-principals/edge-runner/write-allowlist",
+            json={"op_pattern": "vmware.vm.tag_set", "target_scope": "*"},
+            headers=admin_headers,
+        )
+        assert granted.status_code == 201, granted.text
+        body = granted.json()
+        assert body["op_pattern"] == "vmware.vm.tag_set"
+        assert body["target_scope"] == "*"
+        assert body["runner_principal_id"] == str(runner_id)
+        assert body["created_by_sub"] == "op-admin"
+
+        listed = client.get(
+            "/api/v1/runner-principals/edge-runner/write-allowlist", headers=admin_headers
+        )
+        assert listed.status_code == 200
+        entries = listed.json()["entries"]
+        assert len(entries) == 1
+        assert entries[0]["op_pattern"] == "vmware.vm.tag_set"
+
+
+@pytest.mark.asyncio
+async def test_write_allowlist_grant_requires_admin(client: TestClient) -> None:
+    """``operator`` may read the allowlist but not grant (403) — a grant is a privilege."""
+    await _seed_tenants()
+    await _seed_runner_row("edge-runner")
+    key = make_rsa_keypair("kid-wa-rbac")
+
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        op_headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+
+        assert (
+            client.get(
+                "/api/v1/runner-principals/edge-runner/write-allowlist", headers=op_headers
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/api/v1/runner-principals/edge-runner/write-allowlist",
+                json={"op_pattern": "vmware.vm.tag_set"},
+                headers=op_headers,
+            ).status_code
+            == 403
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_allowlist_grant_unknown_runner_404(client: TestClient) -> None:
+    """Granting to an unknown runner returns 404."""
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-wa-404")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals/ghost/write-allowlist",
+            json={"op_pattern": "vmware.vm.tag_set"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "runner_principal_not_found"
+
+
+@pytest.mark.asyncio
+async def test_runner_cannot_widen_its_own_allowlist(client: TestClient) -> None:
+    """A runner-kind token is 403'd on the grant route — it cannot self-widen (T7).
+
+    The write-allowlist routes live under ``/api/v1/runner-principals/``, outside
+    :data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`, so the
+    negative cage fail-closed 403s a runner's own read-only token before the
+    route runs — the enrollment path can never be turned into self-service
+    write-capability widening.
+    """
+    await _seed_tenants()
+    runner_id = await _seed_runner_row("edge-runner")
+    key = make_rsa_keypair("kid-wa-cage")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals/edge-runner/write-allowlist",
+            json={"op_pattern": "vmware.vm.tag_set"},
+            headers={"Authorization": f"Bearer {_runner_token(key, runner_id=runner_id)}"},
         )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "runner_scope_violation"

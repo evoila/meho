@@ -165,8 +165,9 @@ through):
 - **Edge executor** — `_screen_item` (`runner/executor.py`): re-screens the
   delivered item independently, refusing `EXCLUDED` outright, verifying a
   `REMOTE_WRITE` item's signature (mechanism 1, below) and re-checking it
-  through the allowlist gate seam (mechanism 2's "checked at mint *and*
-  re-checked at the edge").
+  through the per-runner allowlist gate against the runner's **own**
+  provisioning config (mechanism 2's "checked at mint *and* re-checked at the
+  edge", below).
 
 ### Mechanism 1 — signed work items + approval-bound minting (#3189)
 
@@ -206,15 +207,50 @@ work item, plus approval-bound minting.
   unsigned, tampered, out-of-scope, expired, or unverifiable-key item all fail
   closed **before** any handler import.
 
-**The allowlist gate is still a seam.** `evaluate_remote_write_gate` remains
-fail-closed by construction — mechanism 2 (the per-runner enrollment
-allowlist, #3190) is not yet wired, so it refuses at the edge. A remote-write
-op mints only when its op-class is on the runner's allowlist **and** the #3189
-approval binding authorises it — the composition of design §3. The mint's
-allowlist check is the marked composition point in `_mint_remote_write`; until
-#3190 wires it there, the edge allowlist re-check keeps the tier closed
-end-to-end. Credential brokering (#3191) and revocation hardening (#3192) are
-the remaining sibling mechanisms.
+### Mechanism 2 — per-runner capability allowlist (#3190)
+
+The allowlist **is** the definition of a runner's write blast radius (design
+§3, threats T1/T8): a `remote-write` op mints (and executes) **only** when its
+op-class + target is on the runner's allowlist. Composed with #3189 so the tier
+is satisfiable only when **both** halves pass — the approval binding **and** the
+allowlist — and fail-closed when either is absent.
+
+- **Storage — `runner_write_allowlist` (migration `0093`).** One row per
+  granted `(op_pattern, target_scope)` capability, hung off the runner principal
+  (`runner_principal_id` FK). `op_pattern` is an `fnmatch` glob over `op_id`
+  (an exact op-class for a minimal Stage-1 allowlist, or a `*` prefix);
+  `target_scope` is a cap — `*` (any target in the tenant) or a concrete
+  `str(target.id)`. `created_by_sub` records the granting human.
+- **Not at birth (T7).** Enrollment (`RunnerPrincipalService.register`) writes
+  **no** rows here: programmatic enrollment can never grant write capability at
+  birth. A capability requires the **separate human step**
+  `RunnerWriteAllowlistService.grant`, reachable only over the operator-gated
+  route `POST /api/v1/runner-principals/{name}/write-allowlist` (`tenant_admin`).
+  A runner's own read-only, route-caged token cannot reach that path, so a
+  runner cannot self-widen its allowlist. Read back with the `GET` sibling.
+- **Shared matcher (single source of truth).**
+  `evaluate_remote_write_gate(op_id, allowlist, target_scope)`
+  (`runner/satellite_tier.py`, stdlib-only, DB-free) is the one matcher both
+  layers run against a `RemoteWriteAllowEntry` sequence — the same
+  defence-in-depth mould `classify_satellite_tier` uses.
+- **At the mint** — `_mint_remote_write` reads the runner's rows
+  (`load_runner_allowlist`) and ANDs the gate with the approval binding; an
+  op-class/target off the allowlist (or no allowlist at all) →
+  `MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`, before the single-use latch
+  (a refusal writes no rows / consumes no approval).
+- **At the edge** — `_screen_item` re-runs the same matcher against the
+  runner's **own** provisioning-config mirror (`satellite_write_allowlist`,
+  parsed by `parse_runner_allowlist`), never the mint's and never a field on
+  the work item. So an item allowlisted centrally is still refused if the edge
+  config disagrees — defence in depth, fail-closed when unprovisioned.
+
+The **assignment materialiser** needs no third mirror here: only `SAFE`-tier ops
+are ever materialised into recurring assignments (`_is_runnable_safe`), and
+`remote-write` work rides the one-shot capability-mint path exclusively, so it
+never reaches that layer.
+
+Credential brokering (#3191) and revocation hardening (#3192) are the remaining
+sibling mechanisms.
 
 **Composition with #3183.** The destructive tier is `EXCLUDED` by this ladder
 everywhere, so delete-shaped work stays central-or-break-glass and never

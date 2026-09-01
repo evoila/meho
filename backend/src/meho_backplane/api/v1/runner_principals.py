@@ -24,6 +24,12 @@ Route inventory
 * ``DELETE /api/v1/runner-principals/{name}/revoke`` — revoke a runner
   (kill switch: disables Keycloak client + marks row revoked). Returns the
   updated row. Role: ``tenant_admin``.
+* ``GET /api/v1/runner-principals/{name}/write-allowlist`` — list the
+  runner's granted ``remote-write`` capabilities (#3190). Role: ``operator``.
+* ``POST /api/v1/runner-principals/{name}/write-allowlist`` — grant one
+  ``remote-write`` capability (op-pattern + target-scope). The separate human
+  step a write capability requires after enrollment (a runner is never
+  granted write capability at birth). Returns 201. Role: ``tenant_admin``.
 
 Enforcement scope (the #2489 lesson, stated explicitly)
 -------------------------------------------------------
@@ -71,6 +77,11 @@ from meho_backplane.auth.runner_principals import (
     RunnerPrincipalRead,
     RunnerPrincipalService,
 )
+from meho_backplane.auth.runner_write_allowlist import (
+    RemoteWriteCapabilityGrant,
+    RunnerWriteAllowlistEntryRead,
+    RunnerWriteAllowlistService,
+)
 from meho_backplane.scheduler.vault_credentials import (
     SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
     SchedulerVaultBrokerError,
@@ -88,6 +99,8 @@ _OP_IDS: Final[dict[str, str]] = {
     "show": "runner_principal.show",
     "register": "runner_principal.register",
     "revoke": "runner_principal.revoke",
+    "write_allowlist_list": "runner_principal.write_allowlist.list",
+    "write_allowlist_grant": "runner_principal.write_allowlist.grant",
 }
 
 
@@ -97,6 +110,14 @@ class RunnerPrincipalListResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     principals: list[RunnerPrincipalRead]
+
+
+class RunnerWriteAllowlistResponse(BaseModel):
+    """Response envelope for ``GET .../{name}/write-allowlist``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    entries: list[RunnerWriteAllowlistEntryRead]
 
 
 def _handle_admin_error(exc: Exception) -> HTTPException:
@@ -247,3 +268,70 @@ async def revoke_runner_principal(
         ) from exc
     except KeycloakAdminError as exc:
         raise _handle_admin_error(exc) from exc
+
+
+@router.get("/{name}/write-allowlist", response_model=RunnerWriteAllowlistResponse)
+async def list_runner_write_allowlist(
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
+    operator: Operator = _require_operator,
+) -> RunnerWriteAllowlistResponse:
+    """List a runner's granted ``remote-write`` capabilities (#3190).
+
+    Read-back of the per-runner capability allowlist (mechanism 2 of the
+    satellite write path). 404 when the runner is unknown or revoked.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_IDS["write_allowlist_list"],
+        audit_op_class="read",
+        audit_runner_principal_name=name,
+    )
+    service = RunnerWriteAllowlistService()
+    try:
+        entries = await service.list_(operator.tenant_id, name)
+    except RunnerPrincipalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="runner_principal_not_found",
+        ) from exc
+    return RunnerWriteAllowlistResponse(entries=entries)
+
+
+@router.post(
+    "/{name}/write-allowlist",
+    response_model=RunnerWriteAllowlistEntryRead,
+    status_code=http_status.HTTP_201_CREATED,
+)
+async def grant_runner_write_capability(
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
+    body: RemoteWriteCapabilityGrant,
+    operator: Operator = _require_admin,
+) -> RunnerWriteAllowlistEntryRead:
+    """Grant one ``remote-write`` capability to a runner (#3190).
+
+    The **separate human step** a write capability requires after enrollment:
+    ``tenant_admin`` only, and never reachable by a runner's own read-only,
+    route-caged token — so a runner cannot widen its own allowlist (threat T7,
+    decision recommendation 2). Programmatic enrollment grants no write
+    capability at birth; this route is the only path that adds one. The grant
+    is bound at issuance (``created_by_sub`` records the operator) and
+    idempotent on ``(op_pattern, target_scope)``. 404 when the runner is
+    unknown or revoked.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_IDS["write_allowlist_grant"],
+        audit_op_class="write",
+        audit_runner_principal_name=name,
+    )
+    service = RunnerWriteAllowlistService()
+    try:
+        return await service.grant(
+            tenant_id=operator.tenant_id,
+            runner_name=name,
+            created_by_sub=operator.sub,
+            payload=body,
+        )
+    except RunnerPrincipalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="runner_principal_not_found",
+        ) from exc

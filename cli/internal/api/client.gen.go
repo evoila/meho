@@ -6096,6 +6096,12 @@ type RememberBody struct {
 	TargetName *string     `json:"target_name"`
 }
 
+// RemoteWriteCapabilityGrant Input shape for :meth:`RunnerWriteAllowlistService.grant`.
+type RemoteWriteCapabilityGrant struct {
+	OpPattern   string  `json:"op_pattern"`
+	TargetScope *string `json:"target_scope,omitempty"`
+}
+
 // ReplayNode One node of a per-session audit-replay tree (G8.2-T3).
 //
 // Subclasses :class:`AuditEntry` so it carries every audit field verbatim —
@@ -6679,6 +6685,22 @@ type RunnerWorkItem struct {
 	// would durably persist — a locked no-durable-artifact violation).
 	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
 	Version          *string                   `json:"version,omitempty"`
+}
+
+// RunnerWriteAllowlistEntryRead One granted remote-write capability, as returned by the accessors.
+type RunnerWriteAllowlistEntryRead struct {
+	CreatedAt         time.Time          `json:"created_at"`
+	CreatedBySub      string             `json:"created_by_sub"`
+	Id                openapi_types.UUID `json:"id"`
+	OpPattern         string             `json:"op_pattern"`
+	RunnerPrincipalId openapi_types.UUID `json:"runner_principal_id"`
+	TargetScope       string             `json:"target_scope"`
+	TenantId          openapi_types.UUID `json:"tenant_id"`
+}
+
+// RunnerWriteAllowlistResponse Response envelope for “GET .../{name}/write-allowlist“.
+type RunnerWriteAllowlistResponse struct {
+	Entries []RunnerWriteAllowlistEntryRead `json:"entries"`
 }
 
 // SafetyChangeModel Pydantic projection of
@@ -9476,6 +9498,16 @@ type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams defines parameters for ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet.
+type ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams defines parameters for GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost.
+type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
 type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
@@ -10211,6 +10243,9 @@ type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = Under
 
 // RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
 type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
+
+// GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody defines body for GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost for application/json ContentType.
+type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody = RemoteWriteCapabilityGrant
 
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
@@ -12338,6 +12373,14 @@ type ClientInterface interface {
 
 	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete request
 	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet request
+	ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet(ctx context.Context, name string, params *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBody request with any body
+	GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBody(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, body GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTriggersApiV1SchedulerTriggersGet request
 	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15425,6 +15468,42 @@ func (c *Client) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Con
 
 func (c *Client) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet(ctx context.Context, name string, params *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBody(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, body GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -28030,6 +28109,117 @@ func NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(server
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetRequest generates requests for ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet
+func NewListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetRequest(server string, name string, params *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s/write-allowlist", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequest calls the generic GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost builder with application/json body
+func NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequest(server string, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, body GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequestWithBody generates requests for GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost with any type of body
+func NewGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostRequestWithBody(server string, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s/write-allowlist", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -41645,6 +41835,14 @@ type ClientWithResponsesInterface interface {
 	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request
 	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error)
 
+	// ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetWithResponse request
+	ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetWithResponse(ctx context.Context, name string, params *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams, reqEditors ...RequestEditorFn) (*ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse, error)
+
+	// GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBodyWithResponse request with any body
+	GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBodyWithResponse(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse, error)
+
+	GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithResponse(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, body GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse, error)
+
 	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
 	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
 
@@ -45581,6 +45779,52 @@ func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) Stat
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerWriteAllowlistResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *RunnerWriteAllowlistEntryRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -52553,6 +52797,32 @@ func (c *ClientWithResponses) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevo
 		return nil, err
 	}
 	return ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp)
+}
+
+// ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetWithResponse request returning *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse
+func (c *ClientWithResponses) ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetWithResponse(ctx context.Context, name string, params *ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetParams, reqEditors ...RequestEditorFn) (*ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse, error) {
+	rsp, err := c.ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse(rsp)
+}
+
+// GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBodyWithResponse request with arbitrary body returning *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse
+func (c *ClientWithResponses) GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBodyWithResponse(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse, error) {
+	rsp, err := c.GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithResponse(ctx context.Context, name string, params *GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostParams, body GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse, error) {
+	rsp, err := c.GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPost(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse(rsp)
 }
 
 // ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
@@ -59916,6 +60186,72 @@ func ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse parses an HTTP response from a ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetWithResponse call
+func ParseListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse(rsp *http.Response) (*ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunnerWriteAllowlistApiV1RunnerPrincipalsNameWriteAllowlistGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerWriteAllowlistResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse parses an HTTP response from a GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostWithResponse call
+func ParseGrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse(rsp *http.Response) (*GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GrantRunnerWriteCapabilityApiV1RunnerPrincipalsNameWriteAllowlistPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest RunnerWriteAllowlistEntryRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

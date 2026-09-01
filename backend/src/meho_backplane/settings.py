@@ -1351,6 +1351,18 @@ class Settings(BaseModel):
     # print(base64.b64encode(k.public_key().public_bytes_raw()).decode())'``.
     satellite_write_signing_key: str = ""
     satellite_write_verify_key: str = ""
+    # Initiative #2901 (#3190) -- the runner's OWN remote-write capability
+    # allowlist (mechanism 2), provisioned at enrollment beside the
+    # verification key. The DB-free edge cannot read the central
+    # ``runner_write_allowlist`` table, so it re-checks its own config mirror
+    # in ``executor._screen_item`` (defence in depth: an item allowlisted at
+    # the mint is still refused if this config disagrees). Format: a
+    # comma-separated list of ``op_pattern`` or ``op_pattern@target_scope``
+    # tokens (``@`` omitted => ``target_scope='*'``), e.g.
+    # ``"vmware.vm.tag_set@*,vmware.vm.annotation_set"``; default ``""`` is
+    # fail-closed (no remote-write executes at the edge until provisioned).
+    # Central-only deployments (no runner role) leave this unset.
+    satellite_write_allowlist: str = ""
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -2113,6 +2125,7 @@ def get_settings() -> Settings:
         ),
         satellite_write_signing_key=os.environ.get("SATELLITE_WRITE_SIGNING_KEY", "").strip(),
         satellite_write_verify_key=os.environ.get("SATELLITE_WRITE_VERIFY_KEY", "").strip(),
+        satellite_write_allowlist=os.environ.get("SATELLITE_WRITE_ALLOWLIST", "").strip(),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),

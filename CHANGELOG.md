@@ -90,6 +90,39 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — satellite write path: per-runner capability allowlist (#3190)
+
+- Mechanism 2 of the composed write-tier gate: a per-runner-principal
+  **capability allowlist** (`op_pattern` glob + `target_scope` cap, tenant-scoped)
+  that **is** the definition of a runner's write blast radius (design §3, threats
+  T1/T8). New `runner_write_allowlist` table (migration `0093`, `down_revision
+  0092`) hung off the runner principal, plus `RunnerWriteAllowlistService`.
+- **Composed, not weakened:** a `remote-write` op mints only when its op-class +
+  target is on the runner's allowlist **and** the #3189 approval binds it — the
+  gate is satisfiable only when **both** halves pass, fail-closed when either is
+  absent. An off-allowlist op refuses with the distinct
+  `MintRefusalCode.REMOTE_WRITE_NOT_ALLOWLISTED`, before the single-use latch
+  (no rows written, no approval consumed). Destructive/dangerous stay `EXCLUDED`
+  and unmintable; the safe read path is untouched.
+- **Checked twice (defence in depth):** the shared, DB-free
+  `evaluate_remote_write_gate` matcher runs at the **mint** (against the DB rows,
+  `load_runner_allowlist`) and is re-run at the **edge** (`executor._screen_item`)
+  against the runner's **own** provisioning config
+  (`SATELLITE_WRITE_ALLOWLIST` / `satellite_write_allowlist`) — never the mint's,
+  so an item allowlisted centrally is still refused if the edge config disagrees.
+  The assignment materialiser needs no third mirror (only `safe` ops materialise
+  into recurring assignments; `remote-write` rides the one-shot mint path).
+- **Not self-widenable (T7):** enrollment grants **no** write capability at
+  birth; a capability requires the separate human step
+  `POST /api/v1/runner-principals/{name}/write-allowlist` (`tenant_admin`,
+  bound at issuance via `created_by_sub`, idempotent), with a `GET` read-back.
+  A runner's read-only, route-caged token cannot reach the grant path.
+- Composes with the peer-owned "Amendment (2026-08-31)" in
+  `docs/decisions/satellite-write-path.md`: satellite dispatches (any tier)
+  remain untraced by the flight recorder; wiring the allowlist does not change
+  that (the `remote-write` item still executes through the
+  `dispatcher.dispatch`-bypassing edge path).
+
 ### Added — satellite write path: revocation hardening for write-capable runners (#3192)
 
 - Closes the T8 already-minted-write gap: a **revoked** runner can no longer

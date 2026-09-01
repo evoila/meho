@@ -85,7 +85,11 @@ start/end times (see "The exit-code poll" below). It deliberately does
 then `guest.file.read`), because baking it in would multiply the blast
 radius and the audited surface for the common "run this and tell me the
 exit code" case. `arguments` and `env` may carry secrets, so their values
-are redacted from every durable surface (see the safety model).
+are kept off the governed decision surfaces (the sub-op policy gate, the
+park preview, the result, and the audit-row hash) — but note that, exactly
+like `guest.file.write`'s `content`, they are **not** scrubbed on every
+surface (see the safety model for the precise split and the operator
+guidance on not passing bare secrets).
 
 **Why (b) is still deferred, not discarded.** After #3255, one capability
 branch (a) genuinely cannot serve remains:
@@ -113,11 +117,18 @@ load-bearing-ness:
    never appears in an operation parameter, an `OperationResult`, an
    audit row, a broadcast event, or a log line — it lives only as the
    ephemeral in-memory `NamePasswordAuthentication` object the vim
-   request body carries. This is a deliberate improvement on the GOSC
-   `credential-class` ops (`guest.customization_spec.create`), which
-   accept the Windows admin password *in params* and rely on
-   reviewer-surface suppression to hide it; here the secret is never in
-   params to begin with.
+   request body carries. For the guest **login** credential this is a
+   deliberate improvement on the GOSC `credential-class` ops
+   (`guest.customization_spec.create`), which accept the Windows admin
+   password *in params*: here the login secret is never in params to begin
+   with. For any secret an operator might pass *inside* `guest.program.run`'s
+   `arguments` / `env` (which, like GOSC's password param, do ride in
+   params), `program.run` **matches** the GOSC posture rather than
+   exceeding it — both are pinned in `_CREDENTIAL_WRITE_OPS` so their
+   broadcasts clamp to aggregate-only (point 4), and both rely on the
+   park-preview builder to keep values off the reviewer surface. The pin is
+   what makes that parity true; without it `program.run` would have been
+   *weaker* than GOSC on the broadcast surface.
 2. **Structured sub-ops, not freeform shell.** Each op is a discrete
    typed verb with a JSON-schema parameter contract. `guest.program.run`
    *does* run an arbitrary program, but through an explicit
@@ -137,16 +148,41 @@ load-bearing-ness:
    approval. Both writes gate *first* through the #2254
    `enforce_subop_policy` seam: a parked / denied gate resolves no guest
    credential and starts / writes nothing.
-4. **`arguments` / `env` are redaction-safe on every durable surface.**
-   A command line or an environment variable can carry a secret (a
-   password argument, an API token in an env var). For `guest.program.run`
-   these never reach the sub-op policy gate params, the audit row (the
-   dispatcher stores a `params_hash`, never the raw params, and the
-   handler's result echoes only PID / exit code / times — never
-   `arguments` / `env`), the approval preview (the bespoke builder echoes
-   only shape, above), or a log line. This mirrors `guest.file.write`
-   excluding `content`. Guest credentials themselves resolve from
-   `secret_ref` and are never a parameter (point 1).
+4. **`arguments` / `env` are kept off the governed decision surfaces —
+   but are not scrubbed everywhere.** A command line or an environment
+   variable can carry a secret (a password argument, an API token in an
+   env var). For `guest.program.run` these are kept off the surfaces an
+   operator's governance decision reads: they never reach the **sub-op
+   policy gate** params (`_run_gate_params` passes VM + program path +
+   working directory only), the **park preview** `proposed_effect` (the
+   bespoke builder echoes program identity + argument *byte size* + env-var
+   *names*, never the values), the **operation result** (only PID / exit
+   code / times), or a **log line** (the handler logs nothing; the vim
+   `_post_json` seam does not log its body). The **audit row** stores a
+   `params_hash`, never the raw params.
+
+   **Broadcast is clamped to aggregate-only.** `guest.program.run` is
+   pinned in `broadcast/events.py`'s `_CREDENTIAL_WRITE_OPS` frozenset, so
+   `classify_op` returns `credential_write` and the dispatch broadcast
+   collapses the whole params dict to aggregate-only — it never ships the
+   `arguments` string or `env` values on the SSE feed / Slack mirror /
+   durable `BroadcastEvent` row. This is the exact remedy the codebase
+   already applies to `k8s.job.create` (inline pod-template `env`) and the
+   GOSC `guest.customization_spec.create` write, so `program.run` **matches
+   the GOSC broadcast posture** rather than being weaker than it.
+
+   **What still carries the values — the same characteristic as
+   `guest.file.write`'s `content`, from shared machinery, not a
+   `program.run` bug:** the durable **`ApprovalRequest.params`** row stores
+   the *full* params verbatim (the resume path re-dispatches the exact call
+   after a human approves, so it must persist them), and **flight-recorder
+   vendor-call spans** (only when a capture policy is active) record the
+   `StartProgramInGuest` request body. So **operators must not put bare
+   secrets in `arguments` / `env`.** Where a program needs a secret, pass
+   its env-var *name* and stage the value guest-side (a file the guest user
+   reads, a Vault-agent-templated env file), or use the guest's own
+   credential store — the same discipline the guest OS credential itself
+   follows (point 1, resolved from `secret_ref`, never a parameter).
 5. **Full audit of command + result + truncated output.** Every op
    dispatches through the synchronous append-only audit path
    (v0.1-spec §6). The audit row names the op, the VM, and the outcome;

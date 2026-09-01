@@ -140,7 +140,12 @@ connector-related release-notes line.
   program identity + argument byte size + env-var names, the operation
   result echoes only PID / exit code / times, and the sub-op policy gate
   never sees them (verified by test); the audit row records a params hash,
-  not raw params. Mirrors `guest.file.write` excluding `content`.
+  not raw params; and the op is pinned in `_CREDENTIAL_WRITE_OPS` so its
+  broadcast clamps to aggregate-only (the same remedy `k8s.job.create` and
+  the GOSC create use). The resume-bound `ApprovalRequest.params` row and
+  flight-recorder vendor spans still carry the values, so operators must not
+  pass bare secrets in `arguments` / `env` — same characteristic as
+  `guest.file.write`'s `content`.
 
 ### Added — flight recorder: operator mutation surface for capture policy (#3272)
 

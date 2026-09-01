@@ -238,8 +238,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   params. The sub-manager MoRefs are resolved dynamically off the
   overridable `guestOperationsManager` default (no verified literal is
   hard-coded). `guest.program.run`'s `arguments` / `env` values may carry
-  secrets and are redacted from result / audit / preview like
-  `guest.file.write`'s `content`. The design fork (vim guest-ops over a
+  secrets and are kept off the governed surfaces (result / audit-hash /
+  preview / gate) and clamped to aggregate-only on broadcast via the
+  `_CREDENTIAL_WRITE_OPS` pin; the resume-bound `ApprovalRequest.params` and
+  flight-recorder spans still carry them (same characteristic as
+  `guest.file.write`'s `content`), so operators must not pass bare secrets
+  there. The design fork (vim guest-ops over a
   still-deferred generic-ssh tier for Tools-less guests) and the full
   safety model live in `connectors-vmware-rest-guest-ops.md`; the freeform
   in-guest program-exec tier `StartProgramInGuest` #3100 deferred is now

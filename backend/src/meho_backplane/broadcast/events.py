@@ -202,6 +202,20 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # its staged env, never a param), so it keeps its param-echo preview
         # and is deliberately NOT pinned.
         "holodeck.router.patch",
+        # #3255 — the governed in-guest program-execution write. Its
+        # ``arguments`` string (a command line) and ``env`` values can hold
+        # credential material (``--token=…``, ``API_KEY=…``) in ``params``,
+        # and neither is a secret-*named* key nor a recognisable secret
+        # *shape*, so the key-name / Tier-1 scrub in ``scrub_broadcast_params``
+        # would miss them — a plain ``write`` classification (the ``.run``
+        # suffix) would ship the command line in full on the feed. Pinning it
+        # collapses the whole params dict to aggregate-only, exactly as
+        # ``k8s.job.create``'s inline-env case and the GOSC create above; the
+        # park-time preview additionally echoes only program identity +
+        # argument byte size + env-var names. The sibling ``guest.file.write``
+        # is unpinned (its ``content`` has the same characteristic) and is
+        # tracked under the estate-wide broadcast-hygiene follow-up, not here.
+        "vmware.composite.vm.guest.program.run",
     }
 )
 

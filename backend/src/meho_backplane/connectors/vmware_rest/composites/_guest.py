@@ -30,8 +30,13 @@ Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
   ``arguments`` / ``env`` contract with the same ``dangerous`` /
   ``requires_approval`` governance as the file write, not an open
   ``run(cmd)`` shell endpoint. Its ``arguments`` / ``env`` values may
-  carry secrets and are kept off every durable surface, mirroring
-  ``file.write`` excluding ``content``.
+  carry secrets and are kept off the governed decision surfaces (sub-op
+  gate params, park preview, result, audit-row hash, logs) and clamped to
+  aggregate-only on broadcast via the ``_CREDENTIAL_WRITE_OPS`` pin; the
+  resume-bound ``ApprovalRequest.params`` and flight-recorder spans still
+  carry them, so operators must not pass bare secrets there -- the same
+  characteristic as ``file.write``'s ``content`` (see the guest-ops doc's
+  safety model).
 * **Read/write split.** ``process.list`` / ``env.read`` / ``net.show`` /
   ``file.read`` are ``safety_level="safe"`` reads; ``file.write`` and
   ``program.run`` are the ``dangerous`` / ``requires_approval`` writes,

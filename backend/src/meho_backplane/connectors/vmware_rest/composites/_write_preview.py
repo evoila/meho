@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 20 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,10 +9,13 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 19 write composites onto the per-op preview hook shipped
-by #1437 (:mod:`meho_backplane.operations._preview`), following the
+This wires 25 of the 28 write composites onto the per-op preview hook
+shipped by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
-helpers, never the mutating sub-ops.
+helpers, never the mutating sub-ops. (The three most recent write ops —
+``network.portgroup.create`` / ``network.portgroup.security.set`` /
+``vm.import_from_library`` — carry no bespoke builder yet and fall back to
+the identifier-only default.)
 
 ========================  ====================================================
 ``vmware.composite.*``    preview stored in ``proposed_effect["preview"]``

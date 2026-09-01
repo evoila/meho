@@ -213,6 +213,10 @@ class TestClassifyOp:
             "vault.kv.put",
             "vault.kv.patch",
             "k8s.secret.create",
+            # #3255 — in-guest program exec: arguments/env may carry secrets
+            # in params (not secret-named/shaped), so the pin collapses its
+            # broadcast to aggregate-only rather than shipping the command line.
+            "vmware.composite.vm.guest.program.run",
         ],
     )
     def test_credential_write_allowlist(self, op_id: str) -> None:

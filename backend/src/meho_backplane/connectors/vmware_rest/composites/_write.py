@@ -757,14 +757,11 @@ _PROP_DVPG_CONFIG_VERSION = "config.configVersion"
 _PROP_DVPG_CONFIG_NAME = "config.name"
 _PROP_DVPG_DEFAULT_PORT_CONFIG = "config.defaultPortConfig"
 
-# Portgroup binding type (DistributedVirtualPortgroupPortgroupType_enum --
-# earlyBinding / lateBinding / ephemeral); a static trunk PG is earlyBinding.
+# Default portgroup binding type when the caller does not pin one
+# (DistributedVirtualPortgroupPortgroupType_enum -- earlyBinding / lateBinding
+# / ephemeral, enforced by the parameter schema's enum); a static trunk PG is
+# earlyBinding. The VLAN-id bounds (0..4094) are enforced by the schema too.
 _DVPG_DEFAULT_PORT_BINDING = "earlyBinding"
-_DVPG_PORT_BINDING_TYPES = ("earlyBinding", "lateBinding", "ephemeral")
-
-# Trunk VLAN-id bounds the pinned NumericRange documents (0..4094).
-_VLAN_ID_MIN = 0
-_VLAN_ID_MAX = 4094
 
 # Wall-clock bound for the portgroup task polls -- the 600s convention shared
 # by disk-grow / clone / drs_rule / detach.

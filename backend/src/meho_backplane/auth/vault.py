@@ -222,8 +222,35 @@ async def _to_thread_read_health(client: hvac.Client) -> Any:
     return await asyncio.to_thread(_do_read_health, client)
 
 
+def _resolve_login_role(operator: Operator, settings: Settings, override: str | None) -> str:
+    """Select the Vault JWT role for a login. Precedence (highest first):
+
+    1. an explicit *override* — the per-target role the vault connector
+       resolved off the dispatch ``Target``'s ``extras["vault_role"]``
+       (#3274), so a governed teardown's ``vault.kv.delete`` logs in under a
+       dedicated narrow role instead of the shared ``meho-mcp`` identity;
+    2. the check-runner's dedicated ``vault_check_runner_role`` (#2757),
+       selected only for the synthetic background-dispatch operator;
+    3. the deployment-global ``vault_oidc_role`` — today's default.
+
+    No fallback on denial: the caller surfaces :class:`VaultRoleDeniedError`
+    rather than silently widening back to ``vault_oidc_role`` (the #2757 rule,
+    extended to the per-target role).
+    """
+    if override is not None:
+        return override
+    if operator.check_runner_dispatch:
+        return settings.vault_check_runner_role or settings.vault_oidc_role
+    return settings.vault_oidc_role
+
+
 @asynccontextmanager
-async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Client]:
+async def vault_client_for_operator(
+    operator: Operator,
+    *,
+    role: str | None = None,
+    mount_path: str | None = None,
+) -> AsyncIterator[hvac.Client]:
     """Yield an authenticated :class:`hvac.Client` bound to *operator*.
 
     Performs the JWT/OIDC login on every entry — v0.1 has no per-operator
@@ -232,6 +259,29 @@ async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Cl
     token on exit, capping the token's lifetime at one request even
     when Vault's role TTL is generous.
 
+    Parameters
+    ----------
+    role:
+        Explicit Vault JWT role override. When ``None`` (the default) the
+        role is resolved from settings — the ``vault_check_runner_role``
+        dedicated role for the check-runner's synthetic dispatch operator
+        (#2757), the deployment-global ``vault_oidc_role`` otherwise. When
+        a caller passes a non-``None`` value it wins over both — this is
+        the per-target role the vault connector resolves off the dispatch
+        ``Target``'s ``extras["vault_role"]`` (#3274), so a governed
+        teardown's ``vault.kv.delete`` logs in under a dedicated narrow
+        role instead of the shared ``meho-mcp`` identity. This module is
+        connector-agnostic: it only *applies* the role, it does not read
+        the ``Target`` (:mod:`meho_backplane.connectors.vault.target_auth`
+        owns that).
+    mount_path:
+        Explicit JWT auth-method mount-path override. ``None`` (the
+        default) keeps the deployment-global ``vault_oidc_mount_path``; a
+        non-``None`` value (the target's ``extras["vault_mount"]``, #3274)
+        logs in against a non-default auth mount. The Vault *address*
+        stays global — there is one Vault — so only the role + auth mount
+        are ever per-target.
+
     Raises
     ------
     VaultUnreachableError:
@@ -239,7 +289,9 @@ async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Cl
         translate this into a 503 from any HTTP route that needed Vault.
     VaultRoleDeniedError:
         Vault returned 403 — JWT valid but role bindings did not match
-        or the role is missing.
+        or the role is missing. A denied *override* role fails closed here
+        with no fallback to ``vault_oidc_role`` (#3274, mirroring the
+        #2757 no-silent-widen rule).
     VaultClientError:
         Any other Vault-side failure (4xx / 5xx that isn't 403, sealed
         Vault, malformed response, etc.).
@@ -247,24 +299,19 @@ async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Cl
     settings = get_settings()
     client = _build_client(settings)
 
-    # #2757 -- only the check-runner's synthetic dispatch operator
-    # (``check_runner_dispatch``) uses the dedicated ``vault_check_runner_role``
-    # when set; every other operator, and the unset case, keeps
-    # ``vault_oidc_role`` byte-for-byte. No fallback on denial: a refused
-    # dedicated-role login surfaces ``VaultRoleDeniedError`` (Sensor ->
-    # ``unknown``), never a silent widen back to the wide role.
-    role = (
-        (settings.vault_check_runner_role or settings.vault_oidc_role)
-        if operator.check_runner_dispatch
-        else settings.vault_oidc_role
-    )
+    resolved_role = _resolve_login_role(operator, settings, role)
+    # The JWT auth-method mount path is likewise per-target overridable
+    # (``extras["vault_mount"]``, #3274) for a role that lives on a non-default
+    # auth mount; absent, the deployment-global ``vault_oidc_mount_path``
+    # stands. The Vault *address* stays global — there is one Vault.
+    resolved_mount_path = mount_path if mount_path is not None else settings.vault_oidc_mount_path
 
     try:
         await _to_thread_jwt_login(
             client,
-            role=role,
+            role=resolved_role,
             jwt=operator.raw_jwt,
-            mount_path=settings.vault_oidc_mount_path,
+            mount_path=resolved_mount_path,
         )
     except VaultClientError:
         # Already a backplane error — propagate verbatim. (Caught by the

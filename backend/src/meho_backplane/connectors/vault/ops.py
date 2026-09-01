@@ -55,12 +55,16 @@ subclasses to "login phase"; everything else is "read phase". The
 :mod:`meho_backplane.api.v1.health` route does exactly this mapping for
 the federation-proof endpoint.
 
-The ``_auth_vault`` module reference is used throughout so that the
-test seam (``monkeypatch.setattr(vault_module, "_build_client", fake)``
-and ``monkeypatch.setattr(vault_module, "vault_client_for_operator",
-fake)``) applies transparently. Binding the helpers by name (``from ...
-import _build_client``) would break the monkeypatch because the local
-name would still point at the original object.
+The handlers open their Vault client through
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`,
+which resolves the per-target role + auth mount (#3274) and forwards them
+to ``vault_client_for_operator`` **through the ``_auth_vault`` module
+reference**, so the test seam
+(``monkeypatch.setattr(vault_module, "_build_client", fake)`` /
+``monkeypatch.setattr(vault_module, "vault_client_for_operator", fake)``)
+still applies transparently across that one extra hop. Binding a helper
+by name (``from ... import _build_client``) would break the monkeypatch
+because the local name would still point at the original object.
 """
 
 from __future__ import annotations
@@ -68,10 +72,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.connectors.vault.ops_auth_write import register_vault_auth_write_operations
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -374,7 +378,7 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     # vault_client_for_operator is accessed via the module reference so
     # test monkeypatches on vault_module._build_client propagate through
     # the call chain. It reads operator.raw_jwt for the JWT/OIDC login.
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         secret_payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_version,
             path=path,
@@ -471,7 +475,7 @@ async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any])
     # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         list_payload = await asyncio.to_thread(
             client.secrets.kv.v2.list_secrets,
             path=path,
@@ -579,7 +583,7 @@ async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) 
     # platform-path allow-list does NOT apply (read-only only, #1725 M1).
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         write_payload = await asyncio.to_thread(
             client.secrets.kv.v2.create_or_update_secret,
             path=path,
@@ -743,7 +747,7 @@ async def vault_kv_patch(operator: Operator, target: Any, params: dict[str, Any]
     # platform-path allow-list does NOT apply (read-only only, #1725 M1).
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         patch_payload = await asyncio.to_thread(
             client.secrets.kv.v2.patch,
             path=path,
@@ -820,7 +824,7 @@ async def vault_kv_versions(
     # Tenant-scope guard (#1643) — see vault_kv_read. Read-only op.
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=True)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         meta_payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_metadata,
             path=path,
@@ -916,7 +920,7 @@ async def vault_kv_delete(
     # platform-path allow-list does NOT apply (read-only only, #1725 M1).
     enforce_tenant_scope(operator, mount=mount, path=path, read_only=False)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         await asyncio.to_thread(
             client.secrets.kv.v2.delete_secret_versions,
             path=path,
@@ -991,6 +995,7 @@ async def vault_kv_write_capability_preflight(
     operator: Operator,
     op_id: str,
     params: dict[str, Any],
+    target: Any = None,
 ) -> dict[str, Any] | None:
     """Check, via ``sys/capabilities-self``, whether a KV-v2 write will be denied.
 
@@ -1000,15 +1005,18 @@ async def vault_kv_write_capability_preflight(
     denied" on the approval row instead of failing only *after* a human
     has spent a four-eyes review approving it.
 
-    The probe logs in exactly as the real write does
-    (:func:`~meho_backplane.auth.vault.vault_client_for_operator`, the
-    ``meho-mcp`` OIDC role) and issues ``POST sys/capabilities-self`` on
-    the op's ``<mount>/data/<path>``. ``sys/capabilities-self`` returns
-    only the *capability names* the calling token holds on the path
-    (``["create", "update"]`` / ``["read"]`` / ``["deny"]``) — **never
-    any secret material** — so it sidesteps the credential-class
-    preview-suppression rule that bars a value-revealing dry-run for a
-    credential write.
+    The probe logs in exactly as the real write does — via
+    :func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`,
+    under the same per-target role the write will use (#3274: the
+    dispatch ``target``'s ``extras["vault_role"]``, or the settings-global
+    ``meho-mcp`` role when the target names none) — and issues ``POST
+    sys/capabilities-self`` on the op's authorization path so the
+    ``will_be_denied`` banner reflects the exact role + path that will
+    execute. ``sys/capabilities-self`` returns only the *capability names*
+    the calling token holds on the path (``["create", "update"]`` /
+    ``["read"]`` / ``["deny"]``) — **never any secret material** — so it
+    sidesteps the credential-class preview-suppression rule that bars a
+    value-revealing dry-run for a credential write.
 
     Identity caveat (documented, not enforced here): this probe runs
     under the **dispatching** operator's token, but an approved
@@ -1036,7 +1044,7 @@ async def vault_kv_write_capability_preflight(
 
     data_path = vault_kv_write_target_path(params)
     try:
-        async with _auth_vault.vault_client_for_operator(operator) as client:
+        async with vault_client_for_target(operator, target) as client:
             response = await asyncio.to_thread(
                 client.sys.get_capabilities,
                 paths=[data_path],

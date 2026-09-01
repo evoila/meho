@@ -385,7 +385,12 @@ async def vault_e2e(
     await register_vault_identity_token_operations(embedding_service=stub_embedding_service)
 
     @asynccontextmanager
-    async def _root_client_cm(_target: Any) -> AsyncIterator[hvac.Client]:
+    async def _root_client_cm(
+        _operator: Any,
+        *,
+        role: str | None = None,
+        mount_path: str | None = None,
+    ) -> AsyncIterator[hvac.Client]:
         # Mirrors the production context manager's contract: yield an
         # authenticated client, no revoke needed for a root token on a
         # throwaway in-memory dev Vault.

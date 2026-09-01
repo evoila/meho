@@ -53,13 +53,16 @@ via the ``VaultClientError`` hierarchy. A missing user/role under a
 *mounted* backend keeps surfacing as the underlying ``InvalidPath`` so
 the two not-found shapes stay distinguishable.
 
-The ``_auth_vault`` module reference (not a ``from ... import`` binding)
-is used so the existing test seam -- ``monkeypatch.setattr(vault_module,
+These handlers open their Vault client through
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`,
+which resolves the per-target role + auth mount (#3274) and forwards them
+to ``vault_client_for_operator`` through the ``_auth_vault`` module
+reference, so the existing test seam -- ``monkeypatch.setattr(vault_module,
 "_build_client", fake)`` driving
 :func:`~meho_backplane.auth.vault.vault_client_for_operator` -- applies
-to these handlers transparently, with no respx/httpx layer: hvac's
-transport is ``requests``, so the canonical Vault unit-test seam in
-this codebase is the in-process fake hvac client, not an httpx mock.
+to these handlers transparently across that hop, with no respx/httpx
+layer: hvac's transport is ``requests``, so the canonical Vault unit-test
+seam in this codebase is the in-process fake hvac client, not an httpx mock.
 
 The JSON Schema + ``llm_instructions`` constants live in
 :mod:`meho_backplane.connectors.vault.ops_auth_schemas` to keep this
@@ -76,7 +79,6 @@ from typing import Any
 
 import hvac.exceptions
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors.vault.ops_auth_schemas import (
@@ -93,6 +95,7 @@ from meho_backplane.connectors.vault.ops_auth_schemas import (
     VAULT_AUTH_USERPASS_READ_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_READ_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -153,7 +156,7 @@ async def vault_auth_userpass_list(
         branch surfaces ``extras["exception_class"]``.
     """
     mount: str = str(params.get("mount", "userpass")).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.userpass.list_user, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
@@ -184,7 +187,7 @@ async def vault_auth_userpass_read(
     """
     username: str = str(params["username"]).strip()
     mount: str = str(params.get("mount", "userpass")).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(
                 client.auth.userpass.read_user,
@@ -214,7 +217,7 @@ async def vault_auth_approle_list(
         Login-side failure (Vault unreachable, role denied).
     """
     mount: str = str(params.get("mount", "approle")).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.approle.list_roles, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
@@ -242,7 +245,7 @@ async def vault_auth_approle_read(
     """
     role_name: str = str(params["role_name"]).strip()
     mount: str = str(params.get("mount", "approle")).strip()
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(
                 client.auth.approle.read_role,

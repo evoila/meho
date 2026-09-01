@@ -339,6 +339,33 @@ connector-related release-notes line.
   blast-radius block, the fail-closed refusal paths, and the full
   preview → parked approval (hash + blast radius) → **distinct human**
   approve → audited resume flow deleting exactly one record.
+
+### Added — vault-1.x: per-target Vault role resolution (#3274)
+
+- The `vault` connector now resolves its **JWT role per target**, so a governed
+  teardown's `vault.kv.delete` can dispatch under a **dedicated, narrow role**
+  instead of the shared read-only `meho-mcp` identity — closing the
+  credential-retirement ACL gap without widening `meho-mcp`. A vault `Target`
+  carries the role (and, optionally, the JWT auth mount) in its `extras`:
+  `extras["vault_role"]` selects the login role, `extras["vault_mount"]` the
+  auth-method mount. Both ride the existing JSON column — no migration, no new
+  schema field, no CLI-surface change. The Vault **address** stays global.
+- **Backward-compatible + fail-closed.** A target naming no role (and every
+  non-vault caller) keeps the settings-global role byte-for-byte; a resolved
+  role Vault denies surfaces `VaultRoleDeniedError` with no silent fallback to
+  `meho-mcp` (mirroring the #2757 rule). Selection precedence is per-target
+  override → check-runner role (#2757) → deployment-global `vault_oidc_role`.
+  The park-time write-capability preflight runs under the resolved role too, so
+  the approval banner reflects the role that will execute.
+- Threaded through the KV (`ops.py`) and auth (`ops_auth.py`,
+  `ops_auth_write.py`) handler groups via a single `target_auth.py`
+  resolver (`resolve_vault_target_auth` / `vault_client_for_target`);
+  `vault_client_for_operator` gains keyword-only `role` / `mount_path`
+  overrides. The live `rdc-vault-teardown` target ships `version=null` and
+  resolves via the connector's wildcard registration. Consumer-side
+  provisioning is documented in `docs/cross-repo/vault-provisioning.md` §8;
+  lab-verified in `claude-rdc-hetzner-dc#2814` (PR `#2815`).
+
 ### Added — satellite write path: per-runner capability allowlist (#3190)
 
 - Mechanism 2 of the composed write-tier gate: a per-runner-principal

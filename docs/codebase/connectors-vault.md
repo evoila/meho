@@ -15,12 +15,72 @@ to generic-ingested is a v0.2.next consideration if Vault's surface
 grows substantially.
 
 Auth model: `shared_service_account`. Every operator's Keycloak JWT is
-forwarded to Vault's JWT/OIDC auth method (bound to the `meho-mcp`
-role); the resulting per-request Vault token is revoked on context
-exit. The unauthenticated `/sys/health` endpoint is the one exception —
-it needs no token.
+forwarded to Vault's JWT/OIDC auth method; the resulting per-request
+Vault token is revoked on context exit. The unauthenticated
+`/sys/health` endpoint is the one exception — it needs no token. The JWT
+**role** defaults to the deployment-global `meho-mcp` but is
+**per-target overridable** (#3274) — see
+[Per-target role resolution](#per-target-role-resolution-3274).
 
 Source: `backend/src/meho_backplane/connectors/vault/`.
+
+## Per-target role resolution (#3274)
+
+The connector is **JWT-federated**: the operator's runtime JWT is
+forwarded to Vault's JWT auth method under a **role**, and that role's
+policy *is* the ACL for the dispatch. There is no stored per-target
+credential — a vault `Target`'s `secret_ref` stays `NULL`. Before #3274
+there was exactly one role for all vault dispatch (`meho-mcp`, the #2757
+seam keyed only the check-runner). That made a governed teardown's
+`vault.kv.delete` run under the read-only `meho-mcp` role and
+fail-closed; the only alternatives were widening `meho-mcp` (grants every
+operator standing delete) or a dispatch-flag the human/blueprint-initiated
+delete does not carry.
+
+#3274 makes the **role target-derived**. A vault `Target` may carry, in
+its `extras`, the role — and optionally the JWT auth mount the role lives
+on:
+
+| `extras` key | required | meaning | fallback when absent |
+|---|---|---|---|
+| `vault_role` | selector | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
+| `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
+
+The Vault **address** stays global (`settings.vault_addr`) — there is one
+Vault. Only role + auth-mount are per-target.
+
+`target_auth.py` owns the resolution: `resolve_vault_target_auth(target)`
+reads the two keys (product-gated to `product == "vault"`; a blank /
+whitespace / non-string value normalises to "no override"), and
+`vault_client_for_target(operator, target)` forwards them to
+`auth.vault.vault_client_for_operator(operator, role=…, mount_path=…)`.
+Every KV handler (`ops.py`) and auth handler (`ops_auth.py`,
+`ops_auth_write.py`) opens its client through that one helper, so a target
+naming a role governs its whole KV/auth dispatch. Role selection
+precedence at the login site is: **per-target override → check-runner
+role (#2757) → deployment-global `vault_oidc_role`**.
+
+Guarantees:
+
+- **Backward-compatible.** A target naming no role (and every non-vault
+  caller — `_shared/vault_creds.py`, `wrapped_creds.py`, the federation
+  read) passes `role=None` / `mount_path=None`, so the login resolves the
+  settings-global role byte-for-byte. Existing deployments are unchanged.
+- **Fail-closed.** A resolved role Vault denies surfaces
+  `VaultRoleDeniedError` from the login with **no** fallback to the wide
+  role — the #2757 no-silent-widen rule, extended to the per-target role.
+- **Null-version safe.** The live `rdc-vault-teardown` target ships
+  `version=null`; it resolves to the connector via the wildcard
+  registration (G0.15-T6 #1215), and role resolution keys on `product` +
+  `extras` alone, never `version`.
+- **Preflight-consistent.** The park-time write-capability preflight runs
+  under the resolved role too (it takes the dispatch `target`), so the
+  approval banner reflects the role that will execute.
+
+Consumer-side provisioning (the `meho-teardown` role + `rdc-vault-teardown`
+target registration) is documented in
+[`docs/cross-repo/vault-provisioning.md`](../cross-repo/vault-provisioning.md)
+§8; lab-verified in `claude-rdc-hetzner-dc#2814` (PR `#2815`).
 
 ## Key types
 

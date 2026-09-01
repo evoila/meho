@@ -667,3 +667,122 @@ async def test_check_runner_role_denial_fails_closed_without_falling_back(
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-check-runner", "jwt": "runner-jwt", "path": "jwt"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# #3274 — per-target role / auth-mount override
+# ---------------------------------------------------------------------------
+
+
+async def test_explicit_role_override_wins_over_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``role`` logs in under that role, not ``vault_oidc_role``.
+
+    This is the per-target selector (#3274): the vault connector resolves a
+    target's ``extras["vault_role"]`` and passes it here so a governed
+    teardown's ``vault.kv.delete`` runs under the dedicated ``meho-teardown``
+    role instead of the shared ``meho-mcp`` identity. The auth-mount defaults
+    to ``vault_oidc_mount_path`` when no mount override is given.
+    """
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt")
+
+    async with vault_client_for_operator(operator, role="meho-teardown"):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-teardown", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_explicit_mount_path_override_wins_over_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``mount_path`` logs in against that JWT auth mount.
+
+    The ``rdc-vault-teardown`` target's role lives on the ``jwt-meho`` auth
+    mount (``extras["vault_mount"]``); absent, the settings-global mount
+    stands. The role is untouched when only the mount is overridden.
+    """
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt")
+
+    async with vault_client_for_operator(operator, mount_path="jwt-meho"):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt-meho"},
+    ]
+
+
+async def test_no_overrides_keep_settings_role_and_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``role=None, mount_path=None`` is today's behaviour byte-for-byte.
+
+    A target that names no role/mount (or a non-vault caller) leaves both
+    ``None`` so the login resolves the settings-global role + mount exactly
+    as before #3274 — the backward-compatibility guarantee for every existing
+    deployment.
+    """
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt")
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_explicit_role_override_wins_over_check_runner_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``role`` outranks the check-runner's dedicated role (#2757).
+
+    Precedence is: per-target override → ``vault_check_runner_role`` → wide
+    role. So even a synthetic check-runner dispatch that also names a target
+    role logs in under the target role — the most specific signal wins.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", check_runner_dispatch=True)
+
+    async with vault_client_for_operator(operator, role="meho-teardown"):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-teardown", "jwt": "runner-jwt", "path": "jwt"},
+    ]
+
+
+async def test_explicit_role_denial_fails_closed_without_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denied per-target role surfaces ``VaultRoleDeniedError``, no fallback.
+
+    The security core of #3274 (mirroring the #2757 rule): a mis-scoped target
+    role must fail closed rather than silently widening the dispatch back to
+    ``vault_oidc_role``. The single login call, pinned to the override role,
+    is the proof there is no retry under the wide role.
+    """
+    get_settings.cache_clear()
+    fake = _install_fake_client(
+        monkeypatch,
+        login_exc=hvac.exceptions.Forbidden("role denied"),
+    )
+    operator = _make_operator(jwt="op-jwt")
+
+    with pytest.raises(VaultRoleDeniedError):
+        async with vault_client_for_operator(operator, role="meho-teardown"):
+            pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-teardown", "jwt": "op-jwt", "path": "jwt"},
+    ]

@@ -140,8 +140,10 @@ connector-related release-notes line.
 - **Probe distinguishes `hyperv_module_absent` from `hypervisor_role_absent`**
   (module present but the hypervisor not running). Operator strings are
   single-quote-escaped into `-EncodedCommand` scripts; no op carries a
-  secret-value parameter. CLI grows the `meho hyperv ...` verbs (the
-  `TargetCreate.product` enum + generated client were regenerated). Consumer
+  secret-value parameter. No dedicated `meho hyperv` verb package (the SSH-typed
+  connector precedent) — CLI parity is the generic dispatch path (`meho operation
+  call hyperv-ssh-2022.x <op_id> ...`), and the `TargetCreate.product` enum +
+  generated Go client were regenerated for the new token. Consumer
   proof against the lab's nested Hyper-V cluster c1hv1
   (`evoila-bosnia/claude-rdc-hetzner-dc#2802`) is tracked open — the estate
   precedent (winsrv / msad / mssql shipped the same way). See

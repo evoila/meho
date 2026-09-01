@@ -230,12 +230,14 @@ shared seam.
 
 ## CLI
 
-Every op is reachable as a `meho hyperv <verb>` command through the same dispatch
-path (the CLI and the agent are dual front-ends on one backplane). Adding the
-`hyperv` product token grew the `TargetCreate.product` enum, so the committed CLI
-OpenAPI snapshot (`cli/api/openapi.json`) and the generated Go client
-(`cli/internal/api/client.gen.go`) were regenerated via `cd cli && make
-snapshot-openapi && make generate`.
+No dedicated `meho hyperv` verb package (the windows_dns / winsrv / wsfc / msad /
+rke2 precedent for SSH-typed connectors). CLI parity is the generic dispatch path
+— `meho operation call hyperv-ssh-2022.x <op_id> --params-json '{...}'` — plus the
+`hyperv` product token added to the OpenAPI `TargetCreate.product` enum
+(regenerated from the live registry, so `meho targets create --product hyperv ...`
+validates and the generated Go client knows the token). The CLI OpenAPI snapshot
+(`cli/api/openapi.json` + the generated `cli/internal/api/client.gen.go`) is
+regenerated in this PR via `cd cli && make snapshot-openapi && make generate`.
 
 ## Known issues / scope
 

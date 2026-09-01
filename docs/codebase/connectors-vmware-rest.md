@@ -80,9 +80,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — fifteen module-level
+- **Write composites** (`composites/_write.py`) — sixteen module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
-  `vm_deploy_from_library_composite`,
+  `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
   `vm_power_composite`, `vm_power_bulk_composite`,
   `vm_resize_composite`, `vm_nic_repoint_composite`,
@@ -641,6 +641,7 @@ enum) are:
 | `vm.create` | `created`, `rolled_back` (the optional `nested_hv` VHV leg (#3093) is a vim `ReconfigVM_Task` through the governed vmomi seam, task-polled, applied after NIC attach and before any power-on; a leg failure — transport fault, task fault, or poll timeout — rolls back like the other post-create steps. The `created` envelope echoes the applied `nested_hv` state only when the param was supplied, so a param-absent call keeps the pre-#3093 envelope byte-identical. Optional placement pins — `resource_pool` / `datastore` / `host` moids, #3096 — thread into the CreateSpec `placement` alongside the resolved folder moid; absent pins keep the create body byte-identical and never echo into the envelope. **Data disks (#3117):** the optional `disks` param (`[{capacity_gb}]`) lands data disks in the one create — REST arm threads each into the CreateSpec `disks` as a SCSI `new_vmdk` (vCenter fabricates the controller), pre-9.0 vim arm ALWAYS folds a `VirtualLsiLogicSASController` (so a fresh VM is disk-add-ready even with no `disks`, closing the `500 UNABLE_TO_ALLOCATE_RESOURCE` on the documented governed disk-add) plus one `VirtualDisk` (`fileOperation: create`) per entry bound to it; `disk_attach` rides `steps_succeeded` when disks were requested, an invalid `capacity_gb` fails closed with `disk_spec`, and empty `disks` keeps the REST create byte-identical. **Folder resolution (#3115, both arms):** an explicit `folder` moid pin skips the display-name lookup entirely (`folder_lookup` omitted from the ledger; one of `folder`/`folder_name` required via `anyOf`); a `folder_name` matching more than one folder — every datacenter ships a default VM folder named `vm`, so multi-DC collisions are the norm — reverse-maps a placement pin to its datacenter (datacenter listing + one identity∩`datacenters` intersection probe per DC, host → resource-pool → datastore priority) and re-issues the lookup scoped via `filter.datacenters`; residual ambiguity refuses with a `rolled_back` carrying `candidate_folders` instead of silently taking the first row (which created VMs in the wrong datacenter, proven live). Unique-name lookups stay byte-identical (zero extra reads). **Version-conditional create transport (#3099):** on a live pre-9.0 `about.version` major the whole create rides vim `Folder.CreateVM_Task` through the governed vmomi seam, task-polled — bare REST `POST /api/vcenter/vm` is vendor-defective on vCenter 8.0.x (opaque `500 UNABLE_TO_ALLOCATE_RESOURCE` for every spec shape/placement, proven live) — with the always-folded SCSI controller + disks (#3117), NICs (vmxnet3; DVPG backing resolved via portgroup-key + switch-uuid vmomi reads, standard-portgroup backing via the network display name) and `nested_hv` folded into the one ConfigSpec; `resource_pool`/`datastore` are required there (`placement_params` fail-closed), the `guest_os` enum maps through a curated spec-grounded guestId table (`guest_id_mapping` fail-closed), and 9.0+/unresolved keep the REST path byte-identical) |
 | `vm.clone` | `completed` (the pinned deploy operation is synchronous — its 200 body is the new VM id, #2970; deploy failures raise `connector_error`) |
 | `vm.deploy_from_library` | `deployed`, `deploy_failed`, `deploy_error`, `invalid_reference`, `library_not_found`, `ambiguous_library`, `item_not_found`, `ambiguous_item`, `resolve_error` (OVF/OVA deploy, #2909; the synchronous deploy's 200 body is a `DeploymentResult` — `succeeded=false` → `deploy_failed` with the report's per-issue messages, an HTTP 400/404 for an invalid/missing placement resource → `deploy_error`, and a faulted content-library `find` during name resolution → `resolve_error` (#3071), both with a structured message carrying the vCenter status — so a placement/mapping/resolution error is a structured status, never a raw vendor fault) |
+| `vm.import_from_library` | `deployed`, `deploy_failed`, `deploy_error`, plus the same resolution statuses as `vm.deploy_from_library` (typed HttpNfcLease OVF import, #3229; the deploy-envelope family is reused — `CreateImportSpec` descriptor rejection → `deploy_failed`, a vim control-plane / lease / disk-upload fault → `deploy_error` — plus a per-disk `transfer` manifest; see the dedicated section) |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found`, `timeout` (vim `RevertToSnapshot_Task` polled; a task fault raises `connector_error`, #2970) |
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
@@ -1074,9 +1075,11 @@ handle (`GET /api/v1/operations/runs/{handle}` polls it, and the completed
 is spawned via `asyncio.create_task` — independent of the request handler
 task — a dropped caller no longer propagates cancellation into the in-flight
 copy. The synchronous path stays the default for small items but is bounded by
-the ceiling above; an item large enough to outrun even 3 h needs the durable
-typed `HttpNfcLease` import (#2890), which streams disks against a lease with
-progress instead of coupling completion to one blocking read.
+the ceiling above; an item large enough to outrun even 3 h uses the durable
+typed `HttpNfcLease` import `vm.import_from_library` (#3229; shipped, see the
+next section) — MEHO drives the disk transfer itself, so completion is bounded
+only by the transfer's own duration and there is no single blocking read to
+outrun at all.
 
 **204 / empty-body write acks (#3082).** Several vCenter write endpoints
 acknowledge success with **204 No Content** and no body — the power actions
@@ -1101,6 +1104,79 @@ payloads) are byte-identical. Every `_write_sub_op` call site inherits the
 guard because `vmware_rest` does not override the transport helpers; the
 `vcf_automation` connector *does* override them and applies the same guard
 for contract parity.
+
+### Typed HttpNfcLease OVF import (`vm.import_from_library`, #3229)
+
+The durable, transfer-window-decoupled sibling of `vm.deploy_from_library`.
+The deploy composite's REST deploy is *synchronous* — one POST is held open
+for the whole server-side copy, so completion is bounded by the client
+read-timeout, not the operation's real duration; a 4.7 GB installer OVA to an
+NFS datastore outran even the 3 h mitigation ceiling live (#3176). Rather than
+widen a fixed window further, `vm.import_from_library` **drives the disk
+transfer itself** over a typed vim `HttpNfcLease` import, so completion is
+bounded only by the transfer's own duration and there is no single blocking
+read to outrun. Per postulate 1 a typed path is the sanctioned durable fix
+when the REST spec is inadequate — the pinned `vcenter.yaml` serves no `$Task`
+variant of the library-item deploy (#2970), and the only async REST OVF deploy
+(`Vcenter.Ovfs_deploy$Task`) is URL-sourced + 9.0-only.
+
+**Mechanism** (vim25 over the VI-JSON `_post_vmomi_json` seam / #2466, split
+across `ovf_import.py` / `ovf_import_control.py` / `ovf_transfer.py`, with the
+content-library byte source in `library_download.py`):
+
+1. `ServiceInstance.RetrieveServiceContent` → the `OvfManager` + `rootFolder`
+   MoRefs (resolved off ServiceContent, never a guessed singleton moid).
+2. `OvfManager.CreateImportSpec` (a read: `System.View`) validates the OVF
+   descriptor against the target and returns an `importSpec` + the `fileItem`
+   disk list. A descriptor error short-circuits to `deploy_failed` before any
+   mutation.
+3. `ResourcePool.ImportVApp` — the one governed *write* (gated through the same
+   `enforce_subop_policy` seam as every composite write) — creates the
+   inventory objects and returns an `HttpNfcLease`. The `importSpec` is
+   round-tripped **verbatim** into `ImportVApp` (never funnelled through
+   `unwrap_vim_value`, which would strip the `_typeName` tags an `Any` request
+   field needs — the response-consumption-only contract of that helper).
+4. Poll `HttpNfcLease.state` to `ready`; `ready` carries the per-device upload
+   URLs in `HttpNfcLease.info.deviceUrl`.
+5. Stream each disk from the content library (client-side download-session:
+   create → prepare → poll `PREPARED` → GET the `download_endpoint.uri`)
+   straight to its device URL, matched by `deviceUrl.importKey ==
+   fileItem.deviceId`, with a background `HttpNfcLeaseProgress` heartbeat that
+   both keeps the lease + download session alive and surfaces percent. Nothing
+   buffers a whole disk — the download stream feeds the lease PUT directly, and
+   the PUT's `Content-Length` is the download response's own `Content-Length`
+   (the `File.Info.size` is not guaranteed set before the download completes).
+   A `*` device-URL host is substituted with the host the client connected to
+   (the `HttpNfcLeaseDeviceUrl.url` spec contract).
+6. `HttpNfcLeaseComplete` on success; `HttpNfcLeaseAbort` on any failure after
+   the lease exists — vCenter then removes the half-created inventory objects,
+   so a failed import never leaves a partial VM behind.
+
+**Version-agnostic (AC5).** Every schema + method is core vim25 (`OvfManager`
+/ `HttpNfcLease` predate 9.0), and the engine reads only the pre-9.0
+`HttpNfcLeaseDeviceUrl` fields (`key` / `importKey` / `url`) — never the
+9.0-only `sslCertificate` — so it works on the VCF 5.x migration-source fleet
+(#3056) as well as 9.0+.
+
+**Envelope.** Item resolution (id passthrough or name find, ambiguity-refusing)
+reuses `_resolve_deploy_library_item`, and the outcome maps onto the **same**
+`deployed` / `deploy_failed` / `deploy_error` family (#3071) as the deploy
+composite, plus a per-disk `transfer` manifest (`{path, device_id,
+size_bytes}`). `datastore` is **required** (the vim `CreateImportSpec` request
+takes an explicit placement datastore, unlike the REST deploy which derives
+it). As with the deploy composite, multi-GB imports should ride **async
+governed dispatch** (#3079) so a dropped caller cannot cancel the in-flight
+transfer.
+
+**Live-appliance verification is deferred** (no lab access at implementation
+time): the deliverable is the implementation + full conformance/unit coverage,
+consistent with how every recent connector task shipped. The vim methods,
+content-library download-session paths, and every emitted `_typeName` are
+grounded against the pinned `vcenter.yaml` / `vi-json.yaml` by the reconcile
+lanes (`..._l2_ingest_reconcile` + `..._write_body_reconcile`); the engine +
+source mechanics are proven by mock-transport unit tests
+(`test_connectors_vmware_rest_ovf_import.py` /
+`test_connectors_vmware_rest_library_download.py`).
 
 ### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
 

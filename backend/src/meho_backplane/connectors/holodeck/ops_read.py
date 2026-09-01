@@ -127,7 +127,7 @@ import re
 import shlex
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
+from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:

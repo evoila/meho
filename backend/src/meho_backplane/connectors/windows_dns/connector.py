@@ -12,7 +12,7 @@ mirrors bind9's identity + zone + record op surface and safety levels)
 built on the PowerShell-over-SSH transport
 :class:`~meho_backplane.connectors.holodeck.connector.HolodeckConnector`
 established (base64 UTF-16LE ``-EncodedCommand`` + stdlib JSON parse, via
-:mod:`meho_backplane.connectors.windows_dns._pwsh`).
+:mod:`meho_backplane.connectors._shared.pwsh`).
 
 This module ships:
 
@@ -54,6 +54,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.schemas import (
@@ -61,7 +62,6 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
-from meho_backplane.connectors.windows_dns._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.windows_dns.ops import WINDOWS_DNS_OPS
 
 __all__ = ["WindowsDnsConnector"]
@@ -162,7 +162,7 @@ class WindowsDnsConnector(SshConnector):
     **Transport: PowerShell-over-SSH.** DnsServer cmdlets reach the host
     through ``powershell -EncodedCommand <base64-utf16le>`` (Windows
     PowerShell 5.1 -- see :attr:`POWERSHELL_EXECUTABLE`) routed by
-    :func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run`; output
+    :func:`~meho_backplane.connectors._shared.pwsh.pwsh_run`; output
     is parsed via stdlib :mod:`json` from the cmdlet's ``ConvertTo-Json``
     pipe.
     """
@@ -171,13 +171,28 @@ class WindowsDnsConnector(SshConnector):
     version = "2016.x"
     impl_id = "windns-ssh"
 
-    #: The PowerShell executable the ``_pwsh`` transport invokes on the
-    #: remote host. ``powershell`` (Windows PowerShell 5.1) rather than
-    #: ``pwsh`` (PS7), which is absent by default on a Windows Server DC --
-    #: verified 2026-08-03 against a live WS2022 DC (``pwsh`` → "not
-    #: recognized"; ``powershell`` → DnsServer module 2.0.0.0). Override
-    #: on a subclass / future impl if a target ships PS7.
+    #: The PowerShell executable the shared ``_shared.pwsh`` transport
+    #: invokes on the remote host. ``powershell`` (Windows PowerShell 5.1)
+    #: rather than ``pwsh`` (PS7), which is absent by default on a Windows
+    #: Server DC -- verified 2026-08-03 against a live WS2022 DC (``pwsh``
+    #: → "not recognized"; ``powershell`` → DnsServer module 2.0.0.0).
+    #: Override on a subclass / future impl if a target ships PS7.
     POWERSHELL_EXECUTABLE = "powershell"
+
+    #: Prepended to every script before encoding so the ``DnsServer``
+    #: module's first-use progress stream ("Preparing modules for first
+    #: use") does not CLIXML-serialise onto the remote streams. Windows
+    #: PowerShell emits that progress to stderr; suppressing it at source
+    #: keeps a :class:`~meho_backplane.connectors._shared.pwsh.PwshRunError`'s
+    #: stderr fragment free of CLIXML noise (the transport's
+    #: :func:`~meho_backplane.connectors._shared.pwsh.strip_clixml` net is a
+    #: belt-and-braces backstop). Holodeck sets no prefix (its PS7 appliance
+    #: uses per-op ``$WarningPreference`` instead).
+    POWERSHELL_SCRIPT_PREFIX = "$ProgressPreference = 'SilentlyContinue'; "
+
+    #: The structured-log event name the shared transport emits per run,
+    #: kept connector-scoped so log queries stay per-connector.
+    POWERSHELL_LOG_EVENT = "windows_dns_pwsh_executed"
 
     async def fingerprint(
         self,

@@ -2958,6 +2958,224 @@ VM_DEPLOY_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.vm.import_from_library`` parameter schema.
+#:
+#: The typed ``HttpNfcLease`` OVF import (#3229): the durable counterpart to
+#: ``deploy_from_library`` for items whose transfer outruns a single HTTP
+#: read-timeout (#3176). Same name-resolution surface as the deploy composite,
+#: but ``datastore`` is **required** (the vim ``OvfManager.CreateImportSpec``
+#: request requires the inventory-placement datastore MoRef, unlike the REST
+#: deploy which can derive it) and ``accept_all_eula`` / ``storage_profile`` are
+#: dropped (the ``OvfCreateImportSpecParams`` cisp does not carry them).
+VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_item": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Content-library OVF/OVA item id (passthrough). Supply this **or** "
+                "``library_item_name``; ``library_item`` wins when both are present."
+            ),
+        },
+        "library_item_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "OVF/OVA item display name, resolved to an id via "
+                "``POST:/content/library/item?action=find`` (filtered to "
+                "``type='ovf'``). No match returns ``status='item_not_found'``, more "
+                "than one ``status='ambiguous_item'`` with candidate ids — no import "
+                "fires. Ignored when ``library_item`` is given."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional library display name scoping the ``library_item_name`` "
+                "lookup to one library (via ``POST:/content/library?action=find``); "
+                "an unknown name returns ``status='library_not_found'`` and an "
+                "ambiguous one ``status='ambiguous_library'``."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Target ``ResourcePool`` moid the entity is imported into "
+                "(``ResourcePool.ImportVApp`` receiver + ``CreateImportSpec`` "
+                "resourcePool)."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Target ``Datastore`` moid for the imported inventory objects "
+                "(``CreateImportSpec.datastore``). Required for the lease import — "
+                "the vim import spec is built against an explicit datastore."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional target ``HostSystem`` moid (``ImportVApp.host``). For a "
+                "stand-alone host or a DRS cluster it may be omitted."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional destination VM ``Folder`` moid (``ImportVApp.folder``); the "
+                "datacenter's VM root folder is used when omitted."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional display name for the imported VM "
+                "(``OvfCreateImportSpecParams.entityName``); the OVF descriptor's "
+                "product name is used when omitted."
+            ),
+        },
+        "network_mappings": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Map of OVF NetworkSection identifier → target ``Network`` moid "
+                "(portgroup). Folded into ``OvfCreateImportSpecParams.networkMapping``. "
+                "A key the OVF descriptor does not declare comes back as a structured "
+                "``deploy_failed`` issue, not a raw fault."
+            ),
+        },
+        "storage_provisioning": {
+            "type": "string",
+            "enum": ["thin", "thick"],
+            "description": (
+                "Optional disk provisioning applied to all disks "
+                "(``OvfCreateImportSpecParams.diskProvisioning``)."
+            ),
+        },
+        "ovf_properties": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Optional OVF product-section properties as ``{property_id: value}``, "
+                "folded into ``OvfCreateImportSpecParams.propertyMapping``. Values may "
+                "be secret (appliance passwords), so the park-time preview echoes only "
+                "the property **ids**, never the values."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "description": (
+                "Power the imported VM on afterward via "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` (the import itself never "
+                "powers on). Best-effort: a power-on fault leaves ``status='deployed'`` "
+                "with ``powered_on=false`` and an issue."
+            ),
+        },
+    },
+    "required": ["resource_pool", "datastore"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.import_from_library`` response schema.
+VM_IMPORT_FROM_LIBRARY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "deployed",
+                "deploy_failed",
+                "deploy_error",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "item_not_found",
+                "ambiguous_item",
+                "resolve_error",
+            ],
+            "description": (
+                "The ``deploy_from_library`` envelope family (#3071), reused so the "
+                "import and deploy paths share one contract: ``'deployed'`` — the "
+                "lease import completed and the VM was created; ``'deploy_failed'`` — "
+                "``OvfManager.CreateImportSpec`` rejected the descriptor (bad network "
+                "mapping / property / placement), with per-issue messages under "
+                "``issues``; ``'deploy_error'`` — a vim control-plane call, the lease "
+                "state, or a disk upload faulted (surfaced as a structured message, "
+                "never a raw vendor fault); the resolution statuses "
+                "(``'invalid_reference'`` / ``'library_not_found'`` / "
+                "``'ambiguous_library'`` / ``'item_not_found'`` / ``'ambiguous_item'`` "
+                "/ ``'resolve_error'``) are reached before any mutation, identical to "
+                "the deploy composite."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Imported VM moid (``HttpNfcLeaseInfo.entity``); ``null`` unless "
+                "``status='deployed'``."
+            ),
+        },
+        "resource_type": {
+            "type": ["string", "null"],
+            "description": (
+                "``'VirtualMachine'`` or ``'VirtualApp'`` "
+                "(``HttpNfcLeaseInfo.entity`` type); ``null`` unless imported."
+            ),
+        },
+        "library_item_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The library-item id the import used — the passthrough id, or the id "
+                "resolved from ``library_item_name``. ``null`` when resolution failed "
+                "before import."
+            ),
+        },
+        "powered_on": {
+            "type": "boolean",
+            "description": (
+                "Whether the follow-on power-on succeeded. Always ``false`` when "
+                "``power_on`` was not requested or the import did not succeed."
+            ),
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Per-issue projections ``{category, severity, message}`` from the OVF "
+                "descriptor validation, lease fault, disk-upload fault, resolution, or "
+                "power-on. Empty on a clean import with no descriptor warnings."
+            ),
+        },
+        "transfer": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Per-disk transfer manifest ``{path, device_id, size_bytes}`` for the "
+                "files streamed to the lease. Empty unless ``status='deployed'``."
+            ),
+        },
+        "candidates": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "Candidate ids on ``ambiguous_item`` (library-item ids) or "
+                "``ambiguous_library`` (library ids); ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm_id", "powered_on", "issues", "transfer"],
+}
+
+
 # ===========================================================================
 # Host-domain write composites (#3182) -- dangerous / requires approval
 # ===========================================================================

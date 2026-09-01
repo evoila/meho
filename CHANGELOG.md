@@ -114,6 +114,36 @@ connector-related release-notes line.
   human-only (console / CLI / REST), and the 25-tool working surface + 78-tool
   inventory are unchanged. No schema change / no migration.
 
+### Added — typed HttpNfcLease OVF import: `vm.import_from_library` (#3229)
+
+- The durable, transfer-window-decoupled sibling of `vm.deploy_from_library`.
+  The REST deploy holds one POST open for the whole server-side copy, so
+  completion is bounded by the client read-timeout — a 4.7 GB installer OVA
+  outran even the 3 h mitigation ceiling live (#3176 / stopgap PR #3234). The
+  new composite drives the disk transfer itself over a typed vim `HttpNfcLease`
+  import (`ServiceContent` resolve → `OvfManager.CreateImportSpec` → the governed
+  `ResourcePool.ImportVApp` write → lease-ready poll → stream each disk from the
+  content library straight to the lease device URLs with an
+  `HttpNfcLeaseProgress` heartbeat → `HttpNfcLeaseComplete`), so completion is
+  bounded only by the transfer's own duration and there is no single blocking
+  read to outrun. Any failure after the lease exists aborts it, so vCenter
+  removes the half-created VM.
+- Version-agnostic (core vim25 `OvfManager` / `HttpNfcLease`; only pre-9.0
+  device-URL fields read — never the 9.0-only `sslCertificate`), so it covers
+  the pre-9.0 VCF 5.x migration-source fleet (#3056) as well as 9.0+. Item
+  resolution reuses `deploy_from_library`'s name-find; the outcome maps onto the
+  same `deployed` / `deploy_failed` / `deploy_error` envelope family (#3071) plus
+  a per-disk `transfer` manifest. `datastore` is required (the vim import spec is
+  built against an explicit placement datastore).
+- New modules `ovf_import.py` / `ovf_import_control.py` / `ovf_transfer.py`
+  (the lease engine) + `library_download.py` (the content-library
+  download-session byte source). The vim methods, download-session REST paths,
+  and every emitted `_typeName` are grounded against the pinned `vcenter.yaml` /
+  `vi-json.yaml` by the reconcile lanes; the mechanics are proven by
+  mock-transport unit tests. Live-appliance verification is deferred (no lab
+  access) — implementation + full conformance/unit coverage is the deliverable,
+  consistent with recent connector tasks.
+
 ### Added — surface an approved dispatch's result to the originating consumer (#3209)
 
 - A paired, out-of-process consumer that parks a **non-idempotent** governed op
@@ -232,7 +262,6 @@ connector-related release-notes line.
   blast-radius block, the fail-closed refusal paths, and the full
   preview → parked approval (hash + blast radius) → **distinct human**
   approve → audited resume flow deleting exactly one record.
-
 ### Added — satellite write path: per-runner capability allowlist (#3190)
 
 - Mechanism 2 of the composed write-tier gate: a per-runner-principal

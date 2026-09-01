@@ -62,13 +62,19 @@ a precision-delete `record_data` parameter is a known follow-up.
   (same shape as bind9 / Holodeck). Inherits the per-target asyncssh
   connection pool, `_auth_config`, `_run_command`, `_assert_reachable`,
   and `aclose()` from the adapter.
-- **pwsh transport helper** (`_pwsh.py`) — `pwsh_run` (the single seam
-  every handler routes its script through), `encode_pwsh_command` (the
-  base64/UTF-16LE encoder), `PwshRunError` (structured failure carrying
-  `exit_status` + truncated `stderr`, never the script body or auth
-  material), `PWSH_DEFAULT_DEPTH` (=4). Package-local sibling of
-  `holodeck/_pwsh` per the per-connector-transport-helper convention
-  (a shared `_shared/_pwsh` hoist is noted in #2759).
+- **Shared pwsh transport** (`_shared/pwsh.py`) — `pwsh_run` (the single
+  seam every handler routes its script through), `encode_pwsh_command`
+  (the base64/UTF-16LE encoder), `ps_single_quote` (the `shlex.quote`
+  analogue), `strip_clixml` (the CLIXML-warning net), `PwshRunError`
+  (structured failure carrying `exit_status` + truncated `stderr`, never
+  the script body or auth material), `PWSH_DEFAULT_DEPTH` (=4). Hoisted
+  out of the former package-local `windows_dns/_pwsh` + `holodeck/_pwsh`
+  copies (#3260, executing the #2759 note) once the Microsoft-estate
+  program (#3259) pushed the consumer count past the ≥3 sharing
+  threshold. Per-connector wire variation is three class-level seams on
+  the connector: `POWERSHELL_EXECUTABLE` (`powershell` here),
+  `POWERSHELL_SCRIPT_PREFIX` (the `$ProgressPreference` guard here),
+  `POWERSHELL_LOG_EVENT` (`windows_dns_pwsh_executed`).
 - **Op metadata** (`ops.py`) — `WindowsDnsOp` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`) and `WINDOWS_DNS_OPS` (`about` + `ZONE_OPS` +
   `RECORD_OPS`).
@@ -76,8 +82,8 @@ a precision-delete `record_data` parameter is a known follow-up.
   `normalise_json_rows` (collapses `ConvertTo-Json`'s dict / list / null
   shapes to `list[dict]`).
 - **Record ops** (`ops_record.py`) — `windows_dns_record_get` / `_add` /
-  `_remove`, `ps_single_quote` (the PowerShell analogue of `shlex.quote`),
-  and the supported-`RRType` frozensets.
+  `_remove` and the supported-`RRType` frozensets. `ps_single_quote` (the
+  PowerShell analogue of `shlex.quote`) is imported from `_shared/pwsh`.
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck:
   synchronous `register_connector_v2` at import time (versioned triple +
   wildcard row); async `register_windows_dns_typed_operations` queued onto
@@ -202,8 +208,12 @@ round-trip + safety-level invariants.
 - Host-key checking is disabled (`known_hosts=None`) at the adapter level
   for v0.2, shared across the whole SSH family; pinning is deferred
   repo-wide.
-- The transport helper is package-local by convention; hoisting a shared
-  `_pwsh` into `_shared` is noted in #2759.
+- The transport helper was hoisted from the package-local `_pwsh.py` to
+  the shared `_shared/pwsh.py` (#3260, executing the #2759 note) — one
+  copy now serves windows_dns, holodeck, and the incoming Microsoft-estate
+  connectors (#3259). Per-connector wire differences ride three
+  class-level seams (`POWERSHELL_EXECUTABLE` / `POWERSHELL_SCRIPT_PREFIX`
+  / `POWERSHELL_LOG_EVENT`).
 
 ## References
 

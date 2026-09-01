@@ -108,6 +108,32 @@ connector-related release-notes line.
   path, so it composes with the existing resume claim rather than duplicating
   it. Unblocks `meho-automation`#76's resume-in-place for `bringup`-class ops.
 
+### Changed — required PR unit lane sharded 3 ways (#3251)
+
+- The required unit lane (branch-protection context `Python (ruff + mypy +
+  pytest)`) was one monolithic job running ruff + ruff format + mypy + the
+  whole ~13k-test unit sweep serially (~19-min wall) — the single biggest
+  contributor to PR wall-time. It is now three cooperating jobs mirroring the
+  #3177 coverage-sweep shape (deterministic file-stride matrix + fan-in):
+  `python-lint` (ruff + ruff format + mypy, once), `python-unit-shard` (the
+  pytest sweep as a 3-way stride matrix over the sorted test-file list), and
+  `python-unit-lane` (the fan-in). Expected wall drops from ~19 min to
+  ~6-8 min per shard in parallel — roughly a 3x cut to the dominant lane.
+- **Branch protection is untouched.** The fan-in job carries the *exact*
+  required-context string `Python (ruff + mypy + pytest)`, so the `main`
+  ruleset and the merge-queue required-check list need no edit — the required
+  name simply moved from the old monolithic job onto the fan-in. The fan-in
+  uses `if: always()` + explicit `needs.*.result` inspection so a failed or
+  hung shard FAILS the gate rather than being silently skipped-as-Success.
+- Only pytest fans out: ruff/ruff-format/mypy are whole-tree, unshardable by
+  test file, and cost ~1-2 min, so they run once in `python-lint` instead of
+  N times per shard. The `tests/integration` / `tests/migrations` exclusions
+  and the G0.7 canary `MEHO_SKIP_SPEC_INGEST_TESTS` opt-out (#2980) are
+  preserved on every shard; coverage stays in the separate non-blocking
+  `python-coverage` jobs. No new escape-hatch label is needed — unlike the
+  push-only coverage lane, the unit lane runs on every PR, so a sharding PR
+  self-validates through its own `pull_request` run.
+
 ### Added — governed delete: pfSense NAT-rule + alias delete on the destructive tier + conformance (#3232)
 
 - Registers the pfSense connector's first two `safety_level="destructive"` +

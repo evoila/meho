@@ -7,14 +7,19 @@
 # Locked matrix (Goal #11 DoD bullet 4 — every PR runs lint + tests on
 # every toolchain that has source code in the repo):
 #
-#   python-lint-test  : ruff check + ruff format --check + mypy + pytest on backend/
+#   Python (ruff + mypy + pytest) on backend/ — SHARDED (#3251) into:
+#     python-lint       : ruff check + ruff format --check + mypy (once)
+#     python-unit-shard : the pytest unit sweep as a 3-way file-stride matrix
+#     python-unit-lane  : fan-in carrying the branch-protection required
+#                         context `Python (ruff + mypy + pytest)`
 #   go-lint-test      : golangci-lint + go build + go test on cli/
 #   helm-lint-template: helm lint + helm template + kubeconform on deploy/charts/meho/
 #
-# Each job runs on its own meho-runners-ci runner in parallel; total wall
-# clock for a green PR is well below the 10-minute Goal #11 budget
-# because the three jobs never block each other. Per-job
-# `timeout-minutes` caps a runaway gate at twice its observed cost.
+# Each job runs on its own runner in parallel; total wall clock for a green PR
+# is the slowest job's elapsed time because the jobs never block each other.
+# Sharding the unit lane (#3251) turned its ~19-min serial pytest wall into
+# ~6-8-min parallel shards, cutting the dominant PR-wall contributor. Per-job
+# `timeout-minutes` caps a runaway gate at roughly twice its observed cost.
 #
 # Out of scope (deliberately delegated to existing workflows; do not
 # duplicate here):
@@ -45,9 +50,10 @@
 # main only) uploads `coverage.xml` as a `python-coverage` artifact so
 # the downstream SonarCloud scan can ingest it — quality-gate.yml's
 # `actions/download-artifact` step references that exact name. The
-# required unit lane (`python-lint-test`) is intentionally NO-cov: see
-# that job and #1982 — running the unit suite under coverage OOM-kills
-# the memory-limited heavy runner, so coverage was split into its own
+# required unit lane (the `python-unit-shard` matrix behind the
+# `python-unit-lane` fan-in) is intentionally NO-cov: see those jobs and
+# #1982 — running the unit suite under coverage OOM-kills the
+# memory-limited heavy runner, so coverage was split into its own
 # push-only, non-required, continue-on-error job (#1987).
 #
 # Fail-loud posture (per Goal #11 + devops_best_practices "no
@@ -162,38 +168,117 @@ jobs:
             echo "migrations=false" >> "$GITHUB_OUTPUT"
           fi
 
-  python-lint-test:
-    name: Python (ruff + mypy + pytest)
-    # Fork-PR guard: never execute project code from a fork on the
-    # self-hosted runner pool. Mirrors image.yml + chart.yml's stance —
-    # `runs-on: meho-runners-ci` is internal infra, so fork PRs skip
-    # entirely. Push events (main) short-circuit the OR via
-    # github.event_name != 'pull_request'. Job-level (not step-level)
-    # so no step ever starts on a fork PR.
+  # ---------------------------------------------------------------------------
+  # Required unit lane, sharded (#3251). The pre-#3251 monolithic
+  # `python-lint-test` job (ruff + ruff format + mypy + the whole ~13k-test
+  # unit sweep, serial, ~19-min wall) was the single biggest contributor to
+  # PR wall-time. It is now three cooperating jobs, mirroring the #3172/#3177
+  # coverage-sweep shape (deterministic file-stride matrix + fan-in):
+  #
+  #   python-lint       — ruff check + ruff format --check + mypy. Whole-tree,
+  #                       unshardable-by-file, ~1-2 min; runs ONCE on the light
+  #                       pool. Non-required check.
+  #   python-unit-shard — the pytest unit sweep as a 3-way stride matrix over
+  #                       the sorted test-file list (heavy pool, in parallel).
+  #                       Non-required checks (`Python unit shard N/3`).
+  #   python-unit-lane  — FAN-IN carrying the EXACT branch-protection required
+  #                       context `Python (ruff + mypy + pytest)`; fails iff
+  #                       python-lint or ANY shard did not pass. Branch
+  #                       protection / the ruleset are UNTOUCHED — the required
+  #                       name simply moved from the old monolithic job to this
+  #                       fan-in (the `python-coverage-combine` shape #3177 used
+  #                       to keep quality-gate.yml's contract byte-identical).
+  #
+  # Only pytest fans out: ruff + ruff format + mypy are whole-tree checks that
+  # cannot be split by test file and cost ~1-2 min, so duplicating them per
+  # shard would be pure waste — they run exactly once in python-lint.
+  # ---------------------------------------------------------------------------
+  python-lint:
+    name: Python lint + typecheck (ruff + mypy)
+    # Non-required check — the branch-protection required context lives on the
+    # python-unit-lane fan-in below. Whole-tree ruff + ruff format + mypy: none
+    # of it is shardable by test file, none of it needs testcontainers / the
+    # vendor spec-shelf / the embedding or spaCy models, and it is CPU-cheap
+    # (~1-2 min), so it runs ONCE here on the dense light pool rather than N
+    # times inside every pytest shard. Same fork-PR guard as every other job.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods)
-    # for the unit suite only — #761. The other jobs (Go, Helm,
-    # integration) stay on the 4-core `meho-runners-ci` pool; only the
-    # pytest sweep is CPU-bound enough to want the extra cores. Heavy
-    # pool scales from 0, so an idle period costs one cold-start on the
-    # next run. Provisioned RDC-side in rdc-gitops#55.
+    runs-on: meho-runners-ci
+    # Twice the ~1-2 min observed cost, per the file's per-job cap convention.
+    timeout-minutes: 10
+    defaults:
+      run:
+        # backend/ is the only Python project today; pyproject.toml
+        # and uv.lock both live here.
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        # uv is the project's canonical Python toolchain (pyproject.toml locks
+        # a uv.lock). enable-cache keys the uv download cache on uv.lock, shared
+        # with every sibling Python job.
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        # --locked refuses to update uv.lock; if pyproject.toml drifted from the
+        # lock, CI fails here rather than silently bumping deps. --all-groups
+        # pulls the dev tools (ruff, mypy) declared in [dependency-groups.dev].
+        run: uv sync --locked --all-groups
+
+      - name: Ruff check (lint)
+        # ruff config lives in backend/pyproject.toml [tool.ruff.lint].
+        # Targets the src/ + tests/ trees the project ships.
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format --check
+        # Format gate — non-zero exit if any file would be reformatted.
+        # Authors run `uv run ruff format` locally before pushing.
+        run: uv run ruff format --check src/ tests/
+
+      - name: Mypy (strict)
+        # [tool.mypy] in pyproject.toml is `strict = true` against
+        # files = ["src"]. Per-dep ignores (authlib, hvac, requests)
+        # are already declared there.
+        run: uv run mypy src/
+
+  python-unit-shard:
+    name: Python unit shard ${{ matrix.shard }}/3
+    # Non-required checks (one per matrix leg: `Python unit shard 1/3`,
+    # `.../2/3`, `.../3/3`) — the required context is carried by the
+    # python-unit-lane fan-in below. This is the pytest half of the old
+    # required lane, split into a deterministic 3-way file-stride matrix
+    # (#3251) so its ~15-18-min serial wall runs as ~6-min parallel shards.
+    #
+    # Fork-PR guard: never execute project code from a fork on the self-hosted
+    # runner pool. Same stance as the old lane — job-level so no step ever
+    # starts on a fork PR. On a fork PR all three legs skip (→ reported
+    # Success), which the fan-in's own fork guard mirrors.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods) — #761.
+    # Three shards fit inside the 5-pod ceiling. Only the pytest sweep is
+    # CPU/memory-bound enough to want the extra cores; ruff/mypy stayed on the
+    # light pool in python-lint.
     runs-on: meho-runners-ci-heavy
-    # 25-min cap (raised from 20): the unit lane was OOM-killed on the heavy
-    # runner near end-of-run (null Pytest step, no log, `failure`, ~17-21 min,
-    # NOT reproducible locally, worker-count-independent). Root cause + fix are
-    # detailed in the perf-budget `run:` block: coverage's combine peaked the
-    # pytest tree at 13.67 GiB (vs 7.86 GiB without), over the pod's memory
-    # limit; the fix drops `--cov` from this gate and keeps -n 3 (lower base
-    # memory). No-cov -n 3 wall is ~13-18 min, so 25 min keeps a hang-backstop
-    # margin above the budget_s early-warning gate. ~8m33s with --cov+sysmon was
-    # the pre-growth -n 4 wall (run 26245676016).
-    # History: the combined serial sweep once blew the 10→20→40→50-min caps
-    # (runs 25910787068, 25970564527, 25972807988, 25987329377,
-    # 25992737115) before the integration split (#570), xdist
-    # (#585/#603), and the #799 re-embed fix landed; the 50-min cap was
-    # generous headroom from that era. Job name is intentionally unchanged so
-    # the existing branch-protection required check stays satisfied.
-    timeout-minutes: 25
+    strategy:
+      # 3 stride shards (#3251), sized off the pre-shard ~19-min lane so each
+      # shard lands ~6-8 min. fail-fast: false — one shard's red tests must NOT
+      # cancel the others, so a broad breakage surfaces every failing shard in
+      # one run (the fan-in still fails if ANY leg fails). To rebalance, change
+      # the shard count in BOTH the matrix and the `TOTAL` in the pytest step,
+      # in lockstep.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    # 20-min cap: hang backstop only. Expected job wall is ~8 min (setup ~2 min
+    # + pytest ~6 min); the perf-budget step below is the PR-level early-warning
+    # gate that fires well before this cap. The pre-shard lane's 25-min cap
+    # covered a ~18-min serial pytest wall; a ~6-min shard needs far less. The
+    # old lane's OOM/heartbeat history (why the whole-suite lane dropped --cov
+    # and pinned -n 3) is preserved verbatim in the pytest step comment below.
+    timeout-minutes: 20
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
       # step can test it in an `if:`. The `secrets` context is NOT
@@ -288,6 +373,13 @@ jobs:
         # runs). Dependabot runs read the Dependabot secret store,
         # where this secret is deliberately not mirrored, so they skip
         # too.
+        #
+        # Sharded (#3251): every shard runs this checkout, because each
+        # shard's stride slice may include the spec-backed reconcile
+        # lanes; the cone-mode sparse + blob:none filter keeps it cheap
+        # (~0.4 MB argocd-3.3 + … a few tens of MB total), and the
+        # SPEC_SHELF_TOKEN PAT is read-only, so the parallel fetches are
+        # safe.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -413,9 +505,10 @@ jobs:
         # locks a uv.lock, not a requirements.txt). enable-cache: true
         # opts into the action's built-in cache for the uv download
         # cache directory, keyed by uv.lock — repeat installs on the
-        # same lockfile are near-instant. version unset -> latest, which
-        # is fine because uv ships a strict resolver and the lockfile
-        # pins every transitive dep.
+        # same lockfile are near-instant, so the three shards share one
+        # warm uv cache. version unset -> latest, which is fine because
+        # uv ships a strict resolver and the lockfile pins every
+        # transitive dep.
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           enable-cache: true
@@ -427,22 +520,6 @@ jobs:
         # declared in [dependency-groups.dev].
         run: uv sync --locked --all-groups
 
-      - name: Ruff check (lint)
-        # ruff config lives in backend/pyproject.toml [tool.ruff.lint].
-        # Targets the src/ + tests/ trees the project ships.
-        run: uv run ruff check src/ tests/
-
-      - name: Ruff format --check
-        # Format gate — non-zero exit if any file would be reformatted.
-        # Authors run `uv run ruff format` locally before pushing.
-        run: uv run ruff format --check src/ tests/
-
-      - name: Mypy (strict)
-        # [tool.mypy] in pyproject.toml is `strict = true` against
-        # files = ["src"]. Per-dep ignores (authlib, hvac, requests)
-        # are already declared there.
-        run: uv run mypy src/
-
       - name: Cache fastembed model (drift-guard + slow-lane)
         # The drift-guard below downloads the ~67 MB default ONNX model
         # from HuggingFace. Without this cache every run re-fetches it
@@ -452,7 +529,9 @@ jobs:
         # pinned there, so a fastembed bump (which can remap the HF
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
-        # lock change still reuse the prior model blob.
+        # lock change still reuse the prior model blob. All three shards
+        # share this one cache entry (same key), so steady-state only the
+        # first cold run pays the download.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ${{ github.workspace }}/.fastembed-cache
@@ -493,7 +572,9 @@ jobs:
         # middleware test gate on ``spacy.util.is_package(...)``,
         # accepting either model -- so this step suffices for the
         # unit lane's correctness signal without paying the ``lg``
-        # download wall every run.
+        # download wall every run. Each shard provisions the sm model
+        # (its stride slice may include the Tier-2 lanes); the ~12 MB
+        # download is cheap enough to not warrant caching.
         #
         # ``MEHO_REDACTION_SPACY_MODEL`` is the runtime override the
         # presidio.py adapter reads; setting it here pins the unit
@@ -507,7 +588,12 @@ jobs:
           MEHO_REDACTION_SPACY_MODEL=en_core_web_sm \
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
-      - name: Pytest (unit + coverage)
+      - name: Pytest (unit shard ${{ matrix.shard }}/3)
+        # `shell: bash` for `mapfile` + arrays (and the pipefail/-e the
+        # default self-hosted shell does not enable — #2865). Under -e a
+        # failing `uv run pytest` exits the step immediately, so the
+        # perf-budget check below can never mask a red suite.
+        shell: bash
         env:
           # Pin Tier-2's spaCy model to the unit-lane choice so the
           # acceptance tests in test_redaction_presidio.py + the
@@ -523,9 +609,7 @@ jobs:
           # ingest (~3,470 ops through parse + register + embedding +
           # grouping — the fixture is function-scoped by design), which
           # took the whole sweep from 478 s (2026-08-17 16:57Z, canary
-          # still erroring fast) past this job's 25-min cap (four
-          # consecutive timeout kills on head eaccb895, the last on a
-          # quiet cluster with pytest at 81% and progressing). Per this
+          # still erroring fast) past this job's cap. Per this
           # workflow's perf-budget discipline (#898/#793/#827): the slow
           # path is relocated, not the cap raised. The canary's
           # full-ingest tests run armed in the python-integration job
@@ -535,127 +619,156 @@ jobs:
           # collection-time skipif marker in tests/acceptance/
           # test_g07_vsphere_canary.py (fixture-level backstop in
           # vcenter_spec_path); rule of record in
-          # docs/decisions/spec-reconcile-guards-standard.md.
+          # docs/decisions/spec-reconcile-guards-standard.md. The
+          # canary module lands in exactly one shard's stride slice, so
+          # this opt-out must stay on every shard.
           MEHO_SKIP_SPEC_INGEST_TESTS: "1"
-        # PARALLELIZED via pytest-xdist (#585 unblocked this). The
-        # serial sweep was the job's dominant cost (~49 min in CI vs
-        # ~5 min local). #585 added process-wide global-registry
-        # snapshot/restore + deterministic MCP-module import in
-        # tests/conftest.py, eliminating the cross-module isolation
-        # leaks that previously made `-n auto` red on
-        # test_mcp_registry / test_audit_middleware. Controlled
-        # same-commit proof (acceptance of #585): serial 2007/0/0 and
-        # `-n auto --dist loadscope` 2007/0/0 — identical, empty
-        # failure set; local wall-clock serial 10:18 → xdist 6:14
-        # (limited by core count; CI multi-core gets the ~49→~10 min).
+        # PARALLELIZED two ways now (#3251): file-STRIDE across shards
+        # (this matrix) AND pytest-xdist WITHIN each shard. #585 unblocked
+        # xdist by adding process-wide global-registry snapshot/restore +
+        # deterministic MCP-module import in tests/conftest.py, eliminating
+        # the cross-module isolation leaks that made `-n auto` red.
+        # File-level sharding is strictly COARSER than what xdist
+        # --dist loadscope already does across workers (whole modules stay
+        # together, conftest semantics are identical to a full run), so a
+        # suite that is xdist-safe is shard-safe — proven live by the
+        # #3172/#3177 python-coverage sweep, which runs the identical
+        # file-stride split (over a superset of these files) green.
         # Worker count is -n 3 (lowered -n 6 → -n 4 per #1901 for CPU starvation,
-        # then -n 4 → -n 3 for MEMORY headroom when the lane OOM-killed the pod —
-        # see the root-cause analysis in the perf-budget `run:` block below; fewer
-        # workers => lower base memory). The original -n 6 reasoning, kept
-        # for context: pinned, matched to the dedicated `meho-runners-ci-heavy`
-        # scale set's 6000m guaranteed cores (#761). History: -n auto
-        # was inconsistent on the shared 4-core pool (run 26164020459
-        # reported 4 workers, a later same-day push reported 8 — cgroup
-        # detection drift), so #726 pinned -n 3 (N-1, leaving a core for
-        # the coordinator + DinD on the burstable 4-core pool). The heavy
-        # pool is QoS Guaranteed (requests=limits=6000m), so the
-        # host-core-detection ambiguity is gone and the headroom math
-        # changes: 6 workers fully subscribe the pod. The xdist
-        # coordinator is mostly IPC-blocked and DinD is near-idle during
-        # pure-CPU test execution (testcontainers pgvector/valkey only
-        # burst at spin-up — see MEHO_TEST_PGVECTOR_IMAGE env above), so
-        # full subscription is the intended trade. If the #761 wall/
-        # variance measurement shows oversubscription symptoms (high
-        # variance, wall not improving vs -n 3), drop to -n 5 (N-1) as
-        # the fallback.
+        # then -n 4 → -n 3 for MEMORY headroom when the whole-suite lane OOM-killed
+        # the pod — see #1982). Kept at -n 3 per shard: a shard runs ~1/3 the
+        # tests so its base memory is well under the pod limit even without --cov,
+        # and -n 3 stays inside the #1983 heartbeat-safe worker count on the
+        # 6-core cap. History: -n auto was inconsistent on the shared 4-core pool
+        # (cgroup detection drift), so #726 pinned -n 3.
         # RULE — pytest-xdist -n vs runner CPU (#1983): -n must stay BELOW
         # the runner container's usable cores, leaving at least one core for
         # the GHA agent + xdist coordinator. The fix for "runner lost
         # communication" / heartbeat starvation is burst headroom on the
         # pod's CPU *limit* (rke2-ci heavy pool target: request 4000m /
         # limit 7000m, pending evoila-bosnia/rdc-gitops#70 — currently
-        # 6000m requests=limits), not a smaller -n. That is why
-        # -n 6 → 4 → 3 never fixed the heartbeat failures against the hard
-        # 6-core cap: the pod had no burst slack, and with requests=limits
-        # the kernel enforces the cap via cgroup CPU quota (100% throttle),
-        # so the GHA agent misses its heartbeat and GitHub kills the job
-        # even though the nodes were at ~0% CPU. Until rdc-gitops#70 lands,
-        # do not raise -n above the current value to chase wall-clock
-        # improvements — the symptom will return. Raise the CPU *limit*
-        # instead.
-        # --dist loadscope: a module's
-        # tests stay on one worker so module-/session-scoped fixtures
-        # (testcontainers PG, embedding service) instantiate per
-        # worker, not per test. --maxfail=1 preserves the old `-x`
-        # fast-fail (xdist ignores `-x`). --ignore=tests/integration →
-        # the container-heavy subtree runs in the sibling
-        # `python-integration` job.
-        # COVERAGE REMOVED from this required gate (was `COVERAGE_CORE=sysmon
-        # ... --cov=meho_backplane --cov-report=xml`). The xdist coverage combine
-        # peaked the pytest tree at 13.67 GiB (vs 7.86 GiB without — measured via
-        # cgroup memory.peak at -n 3, 8243 passed), OOM-killing the heavy runner
-        # pod near end-of-run and leaving the lane red on main for every PR. The
-        # +5.8 GiB is coverage's session-end merge (all workers' data + the
-        # controller's combine, co-resident); the coverage config has no
-        # per-test contexts to trim (only `[tool.coverage.run] relative_files`).
-        # Coverage was non-blocking anyway — quality-gate.yml is whole-job
-        # continue-on-error and a missing/late artifact never blocks merge — so
-        # dropping it to keep this gate GREEN is the right priority over the
-        # SonarCloud Clean-as-You-Code decoration it fed. FOLLOW-UP: restore that
-        # decoration memory-safely (offline `coverage combine`+`xml` after the
-        # xdist workers exit; a push-only serial-cov job; or a larger-memory
-        # pool). History (for whoever restores it): cov on PR+push came from
-        # #726/#771/#793/#799 after the #799 re-embed fix made --cov ~+1 min, and
-        # COVERAGE_CORE=sysmon (PEP 669, coverage.py 7.4+, lock 7.14) halved the
-        # tracer tax with line counts matching the C tracer (2913/11832).
+        # 6000m requests=limits), not a smaller -n. Do not raise -n above
+        # the current value to chase wall-clock; raise the CPU *limit* instead.
+        # --dist loadscope: a module's tests stay on one worker so
+        # module-/session-scoped fixtures (testcontainers PG, embedding
+        # service) instantiate per worker, not per test. --maxfail=1
+        # preserves the old `-x` fast-fail per shard (xdist ignores `-x`);
+        # with fail-fast: false one red shard still lets the others run,
+        # so a broad breakage surfaces every failing shard at once.
+        # COVERAGE stays OUT of this required gate (was `COVERAGE_CORE=sysmon
+        # ... --cov=meho_backplane --cov-report=xml`): the xdist coverage combine
+        # peaked the whole-suite pytest tree at 13.67 GiB (vs 7.86 GiB without),
+        # OOM-killing the heavy runner. Coverage is produced by the dedicated,
+        # non-blocking, sharded `python-coverage` + `python-coverage-combine`
+        # jobs below (#1982/#1987/#3172).
         run: |
-          # Perf-budget guard — early warning for CI-perf creep (the #898 / G3.6
-          # timeout class). The Goal #11 unit budget is 10 min, but it was
-          # aspirational (comment-only): the G3.6 batch crept 9.3 -> 19 min and
-          # nothing failed until the 20-min `timeout-minutes` cliff, blocking a
-          # release. This step measures the pytest wall, always prints it (trend
-          # visibility), and FAILS at the budget — well below the hard cap, so a
-          # regression is caught at the PR that causes it, not at release time.
-          # `timeout-minutes` stays as the hang backstop.
+          # Deterministic stride shard (#3251, mirrors the #3172/#3177
+          # python-coverage split): the sorted test-file list, every
+          # TOTAL-th file to this shard. File-level split keeps conftest /
+          # loadscope semantics identical to a full run; stride (vs
+          # contiguous blocks) spreads the heavyweight suites across shards.
+          # The three shards partition the full set exactly (NR mod 3 hits
+          # each residue once). tests/integration stays out (→ python-
+          # integration) and tests/migrations stays out (→ python-migration-
+          # tests), matching the pre-shard lane's `--ignore` of both.
+          TOTAL=3
+          SHARD="${{ matrix.shard }}"
+          mapfile -t SHARD_FILES < <(find tests -name 'test_*.py' -not -path 'tests/integration/*' -not -path 'tests/migrations/*' | sort | awk -v s="${SHARD}" -v t="${TOTAL}" 'NR % t == s - 1')
+          echo "shard ${SHARD}/${TOTAL}: ${#SHARD_FILES[@]} test files"
+          if [ "${#SHARD_FILES[@]}" -eq 0 ]; then
+            echo "::error::shard ${SHARD} selected 0 test files — stride selection broken"
+            exit 1
+          fi
+          # Per-shard perf-budget guard — early warning for CI-perf creep (the
+          # #898 / G3.6 timeout class), scaled from the pre-shard 1320 s
+          # whole-suite budget to a per-shard wall (~1/3 the suite). 660 s
+          # leaves generous headroom over the expected ~6-min (~360 s) shard
+          # wall + the heaviest stride slice, while still firing well below the
+          # 20-min job `timeout-minutes` hang backstop. This step measures the
+          # pytest wall, always prints it (trend visibility), and FAILS at the
+          # budget so a regression is caught at the PR that causes it.
           # MEASURE before raising budget_s (see #793/#827/#898): re-run with
           #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
           # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
-          # ROOT CAUSE (corrected): the unit lane died with a null Pytest step,
-          # no log, `failure`, at ~17-21min on the heavy runner — NOT reproducible
-          # locally and worker-count-INDEPENDENT (it recurred identically after
-          # -n 4 → -n 3, just ~3min later in wall-clock). That rules out the #1901
-          # CPU-starvation class and points at an OOM kill of the runner pod near
-          # end-of-run. Measured peak memory of the pytest tree (cgroup memory.peak,
-          # -n 3, 8243 passed): 13.67 GiB WITH `--cov`+sysmon vs 7.86 GiB WITHOUT —
-          # coverage's combine (all xdist workers' data + the controller's merge,
-          # co-resident at session end) adds ~5.8 GiB and tips the pod over its
-          # memory limit (<13.67 GiB; the lane passes on a 62 GiB dev box). The
-          # alembic migration round-trip cluster (schema 0048+, each reversibility
-          # test replays the whole upgrade→downgrade chain — ~45 of the slowest 60
-          # tests) plus the new /ui console wave grew both wall AND peak until cov
-          # pushed it over. FIX: drop `--cov` from this required gate (peak 13.67 →
-          # 7.86 GiB) and keep -n 3 (fewer workers => lower base memory: ~7.86 GiB
-          # vs ~10 GiB at -n 4) for headroom. Coverage is non-blocking by design
-          # (quality-gate.yml is whole-job continue-on-error; a missing artifact only
-          # degrades the SonarCloud signal, never blocks merge) — so dropping it to
-          # keep the gate GREEN is the right priority. FOLLOW-UP: restore SonarCloud
-          # coverage memory-safely (offline `coverage combine`+`xml` after workers
-          # exit, a push-only serial-cov job, or a larger-memory pool). budget_s set
-          # to 1320 for the no-cov -n 3 wall (local 816s/13:34; runner expected
-          # ~15-18min) with creep-detection headroom, under the 25-min timeout.
-          budget_s=1320
+          # If ONE shard consistently trips while the others are comfortable, the
+          # stride is unbalanced by a heavy module — rebalance (raise the shard
+          # count in the matrix + TOTAL) rather than bumping only this budget.
+          budget_s=660
           start=$(date +%s)
-          uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration --ignore=tests/migrations tests/
+          uv run pytest -n 3 --dist loadscope --maxfail=1 "${SHARD_FILES[@]}"
           dur=$(( $(date +%s) - start ))
-          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = no-cov -n 3 wall; hard cap = job timeout-minutes)"
+          echo "::notice title=Unit pytest wall (shard ${SHARD}/${TOTAL})::${dur}s (budget ${budget_s}s per shard; hard cap = job timeout-minutes)"
           if [ "$dur" -gt "$budget_s" ]; then
-            echo "::error title=Unit perf budget exceeded::unit pytest ${dur}s > budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s: MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py (#793/#827). Amortize the cost; do not just bump the budget."
+            echo "::error title=Unit perf budget exceeded (shard ${SHARD}/${TOTAL})::shard pytest ${dur}s > per-shard budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s (MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py — #793/#827). Amortize the cost or rebalance the shards; do not just bump the budget."
             exit 1
           fi
-        # NOTE: this required lane no longer uploads a coverage artifact —
-        # #1982 dropped `--cov` here (OOM) and the dead `hashFiles(coverage.xml)`-
-        # guarded upload step was removed in #1987. The SonarCloud coverage
-        # artifact is now produced by the dedicated `python-coverage` job below.
+
+  python-unit-lane:
+    name: Python (ruff + mypy + pytest)
+    # FAN-IN carrying the branch-protection required context (#3251). This job
+    # name is the EXACT string pinned in the `main` ruleset's
+    # required_status_checks, so branch protection / the ruleset are UNTOUCHED
+    # by this change — the required name simply moved off the old monolithic
+    # `python-lint-test` job onto this fan-in (the `python-coverage-combine`
+    # shape #3172/#3177 used to keep the downstream contract byte-identical).
+    #
+    # It depends on python-lint (ruff + ruff format + mypy) and every
+    # python-unit-shard leg, and PASSES iff all of them passed. Two correctness
+    # properties this shape must have:
+    #
+    #  1. NOT fail-open. A required aggregation gate that just `needs:` the
+    #     shards would be SKIPPED when a shard fails (GitHub's default
+    #     skip-on-needs-failure), and a skipped required check counts as
+    #     Success (#2140) — i.e. a red shard would let the PR merge. `always()`
+    #     forces this job to RUN regardless of upstream results, and the step
+    #     below inspects `needs.*.result` and FAILS on anything that is not
+    #     `success`/`skipped`. A shard that hangs → its own timeout-minutes →
+    #     `cancelled` leg → aggregate result `cancelled`/`failure` → this gate
+    #     FAILS (not open). Verified reasoning, not luck.
+    #  2. Clean fork-PR + skip behaviour. The fork guard is AND-ed in, so on a
+    #     fork PR (and only then) this job — like python-lint / python-unit-
+    #     shard — is skipped by its own `if:`, which reports the required
+    #     context as Success exactly as the old single job did (#2140). On
+    #     same-repo PRs / push / merge_group the guard is true and the gate
+    #     evaluates the real results.
+    #
+    # Concurrency: the shards, python-lint and this fan-in all share the
+    # workflow-level concurrency group, so a PR force-push cancels the whole
+    # in-flight run as a SET and a fresh run supersedes it — there is no
+    # partial-cancel path that could leave this gate green on stale shards.
+    # Light pool: this job does no setup and runs one bash step.
+    needs: [python-lint, python-unit-shard]
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: meho-runners-ci
+    timeout-minutes: 5
+    steps:
+      - name: Assert lint + typecheck + every pytest shard passed
+        # needs.<job>.result is one of success / failure / cancelled / skipped.
+        # For the matrix job, needs.python-unit-shard.result is the AGGREGATE:
+        # success only if every leg succeeded, otherwise failure/cancelled.
+        # Pass iff both upstreams are success or skipped (skipped == the
+        # fork-PR path, where this job is itself skipped and never runs this
+        # step); anything else FAILS the required gate.
+        run: |
+          lint='${{ needs.python-lint.result }}'
+          shards='${{ needs.python-unit-shard.result }}'
+          echo "python-lint (ruff + ruff format + mypy): ${lint}"
+          echo "python-unit-shard (aggregate of all 3 stride legs): ${shards}"
+          fail=0
+          for r in "${lint}" "${shards}"; do
+            case "${r}" in
+              success|skipped) ;;
+              *) fail=1 ;;
+            esac
+          done
+          if [ "${fail}" -ne 0 ]; then
+            echo "::error title=Python unit lane red::ruff / ruff format / mypy or one or more pytest stride shards did not pass. This fan-in carries the branch-protection required context 'Python (ruff + mypy + pytest)'; open the 'Python lint + typecheck (ruff + mypy)' / 'Python unit shard N/3' jobs above for the failing detail."
+            exit 1
+          fi
+          echo "Unit lane GREEN — ruff + ruff format + mypy + all 3 pytest stride shards passed."
 
   python-coverage:
     name: Python coverage (SonarCloud, shard ${{ matrix.shard }}/3)
@@ -1123,10 +1236,10 @@ jobs:
 
   python-integration:
     name: Python (integration testcontainers)
-    # Sibling of python-lint-test. Holds the container-heavy
-    # tests/integration/ subtree (pgvector/valkey/k3d/vcsim
+    # Sibling of the sharded unit lane (python-unit-shard). Holds the
+    # container-heavy tests/integration/ subtree (pgvector/valkey/k3d/vcsim
     # testcontainers) that made the combined serial sweep blow every
-    # timeout cap (see python-lint-test comment). Separated so the
+    # timeout cap (see the python-unit-shard comment). Separated so the
     # required lint+mypy+unit gate stays fast and deterministic while
     # integration runs on every PR.
     # **Required merge gate as of 2026-05-20 (#698).** This job's
@@ -1180,7 +1293,7 @@ jobs:
       # #2949 — vendor vCenter spec-shelf wiring; this job runs the
       # tests/integration real-spec ingest lanes
       # (test_operations_ingest_vcenter.py / _vi_json.py). See the
-      # comment on the python-lint-test job's occurrence of these two
+      # comment on the python-unit-shard job's occurrence of these two
       # rows for the full rationale (presence-flag gating; the
       # unconditional docs-root that degrades to lane-skip when the
       # shelf checkout was skipped).
@@ -1194,7 +1307,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Checkout vendor spec-shelf (secret-gated, #2949; nsx #2981)
-        # Same secret-gated sparse checkout as the python-lint-test
+        # Same secret-gated sparse checkout as the python-unit-shard
         # job's spec-shelf step — see that step's comment for the
         # licensing pointer (docs/decisions/vendor-spec-ci-
         # provisioning.md), the secret scope, and the fork/Dependabot
@@ -1224,7 +1337,7 @@ jobs:
 
       - name: Verify spec-shelf provisioned the pinned specs
         # Fail-loud layout guard — same rationale as the
-        # python-lint-test job's occurrence.
+        # python-unit-shard job's occurrence.
         if: env.SPEC_SHELF_TOKEN_PRESENT == 'true'
         working-directory: ${{ github.workspace }}
         run: |
@@ -1255,7 +1368,7 @@ jobs:
           echo "spec-shelf OK: argocd-swagger.json present under spec-shelf/docs/argocd-3.3/; fleet-lcm-openapi.yaml present under spec-shelf/docs/fleet-lcm-9.0/; harbor-swagger.yaml present under spec-shelf/docs/harbor-2.12/; webservice-en.md present under spec-shelf/docs/hetzner-robot-2026-04/; keycloak-admin-openapi.json present under spec-shelf/docs/keycloak-26.3/; loki-http-api.md present under spec-shelf/docs/loki-3.7/; nsx_api.openapi3.json + nsx_policy_api.openapi3.json present under spec-shelf/docs/nsx-9.0/; apidata.js present under spec-shelf/docs/proxmox-8.4/; http-api-index.md + rabbit_shovel_mgmt_shovels.erl present under spec-shelf/docs/rabbitmq-4.3/; sddc-manager-openapi.json present under spec-shelf/docs/sddc-manager-9.0/; vcenter.yaml + vi-json.yaml present under spec-shelf/docs/vcenter-9.0/; vra-iaas.json present under spec-shelf/docs/vcf-automation-9.0/swagger-vra-sdk-go-v0.6.5/; vcf-operations-openapi.ingestable.json + vcf-operations-for-logs-openapi.json present under spec-shelf/docs/vcf-operations-9.0/"
 
       - name: Docker Hub login (for testcontainers pulls)
-        # Same rationale as python-lint-test's login step — the
+        # Same rationale as python-unit-shard's login step — the
         # integration subtree is the heaviest testcontainers consumer
         # (pgvector/valkey/k3d/vcsim), so authenticated pulls are
         # load-bearing here in particular.
@@ -1310,8 +1423,9 @@ jobs:
     # Runs the relocated backend/tests/migrations/ suite: per-migration
     # data-transform assertions, the alembic upgrade/downgrade round-trip,
     # and the 3 pgvector-container forward-compat rollback tests. The
-    # required unit lane (python-lint-test) now --ignore=tests/migrations,
-    # so this job carries the deep per-migration coverage — but only on
+    # required unit lane (the python-unit-shard stride matrix) excludes
+    # tests/migrations from its find, so this job carries the deep
+    # per-migration coverage — but only on
     # migration-touching PRs, gated by the `changes` job.
     #
     # Safety net: the unit lane's session-scoped `_schema_template_db`

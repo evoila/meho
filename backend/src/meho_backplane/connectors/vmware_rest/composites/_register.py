@@ -93,6 +93,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_deploy_from_library_composite,
     vm_destroy_composite,
     vm_device_cdrom_composite,
+    vm_disk_attach_composite,
     vm_disk_grow_composite,
     vm_import_from_library_composite,
     vm_migrate_composite,
@@ -161,6 +162,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_DESTROY_RESPONSE_SCHEMA,
     VM_DEVICE_CDROM_PARAMETER_SCHEMA,
     VM_DEVICE_CDROM_RESPONSE_SCHEMA,
+    VM_DISK_ATTACH_PARAMETER_SCHEMA,
+    VM_DISK_ATTACH_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
     VM_DISK_GROW_RESPONSE_SCHEMA,
     VM_IMPORT_FROM_LIBRARY_PARAMETER_SCHEMA,
@@ -735,6 +738,37 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         ),
         parameter_schema=VM_DISK_GROW_PARAMETER_SCHEMA,
         response_schema=VM_DISK_GROW_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "disk", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.disk.attach",
+        handler=vm_disk_attach_composite,
+        summary="Attach an existing VMDK to a VM at an explicit SCSI controller/unit address.",
+        description=(
+            "Attaches an EXISTING VMDK to a VM at a caller-specified SCSI "
+            "controller_key + unit_number — the shared-attach leg of a Windows "
+            "Server Failover Cluster (WSFC) / SQL FCI or a multi-writer cluster "
+            "(the second node opens the same disk the first node created, at "
+            "the same address). Rides the #2893 mutating VI-JSON substrate: a "
+            "RetrievePropertiesEx read locates the SCSI controller and confirms "
+            "the unit is free, then a single ReconfigVM_Task carries a "
+            "VirtualDeviceConfigSpec add with NO fileOperation (attach, not "
+            "create). Validates vmdk_path ('[datastore] path.vmdk') and the "
+            "unit (0-15, not the reserved 7) before any write; refuses a "
+            "missing/non-SCSI controller or an occupied unit. Optional "
+            "sharing='multi_writer' sets the backing's sharingMultiWriter (for "
+            "application-managed clustering); WSFC instead uses a physical "
+            "bus-sharing controller (vm.create scsi_bus_sharing), not "
+            "multi-writer. The REST Disk.CreateSpec.backing can attach an "
+            "existing VMDK but cannot set the sharing flag, so this path is "
+            "vim-uniform (8.x + 9.x). Equivalent of 'govc device.scsi.add' + "
+            "'govc vm.disk.attach'."
+        ),
+        parameter_schema=VM_DISK_ATTACH_PARAMETER_SCHEMA,
+        response_schema=VM_DISK_ATTACH_RESPONSE_SCHEMA,
         group_key="vm",
         tags=["composite", "write", "vm", "disk", "vi-json"],
         safety_level="dangerous",

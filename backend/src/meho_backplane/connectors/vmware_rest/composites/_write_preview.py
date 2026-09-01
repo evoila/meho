@@ -334,6 +334,18 @@ async def _vm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         for disk in disks
         if isinstance(disk, dict) and "capacity_gb" in disk
     ]
+    # #3256: echo the shared-disk posture so the approver sees a WSFC/FCI node
+    # (eagerzeroedthick disks / multi-writer / a physical bus-shared
+    # controller) rather than a bare sizing list.
+    disks_detail = [
+        {
+            "capacity_gb": disk.get("capacity_gb"),
+            "provisioning": disk.get("provisioning", "thin"),
+            "sharing": disk.get("sharing", "none"),
+        }
+        for disk in disks
+        if isinstance(disk, dict) and "capacity_gb" in disk
+    ]
     return {
         "name": name,
         "guest_os": guest_os,
@@ -346,6 +358,8 @@ async def _vm_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "memory_mib": int(ctx.params.get("memory_mib", 1024)),
         "networks": networks,
         "disks_gb": disk_capacities_gb,
+        "disks": disks_detail,
+        "scsi_bus_sharing": ctx.params.get("scsi_bus_sharing", "none"),
         "nested_hv": bool(ctx.params.get("nested_hv", False)),
         "power_on_after_create": bool(ctx.params.get("power_on_after_create", False)),
     }
@@ -577,6 +591,29 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "current_capacity_bytes": current_bytes,
         "requested_capacity_bytes": capacity_bytes,
         "delta_bytes": (capacity_bytes - current_bytes if current_bytes is not None else None),
+    }
+
+
+async def _vm_disk_attach_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.disk.attach`` — echo the shared-attach coordinates (no I/O).
+
+    The params fully name the blast radius: which existing VMDK attaches to
+    which VM at which SCSI controller/unit, and whether the backing is
+    multi-writer. Param-echo (like ``vm.create``) rather than a live-read
+    diff — the approver decides on the target address + sharing posture, and
+    the ReconfigVM_Task add never fires here. Declines (``None``) on malformed
+    params.
+    """
+    vm = ctx.params.get("vm")
+    vmdk_path = ctx.params.get("vmdk_path")
+    if not isinstance(vm, str) or not isinstance(vmdk_path, str):
+        return None
+    return {
+        "vm": vm,
+        "vmdk_path": vmdk_path,
+        "controller_key": ctx.params.get("controller_key"),
+        "unit_number": ctx.params.get("unit_number"),
+        "sharing": ctx.params.get("sharing", "none"),
     }
 
 
@@ -1064,6 +1101,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
     "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
+    "vmware.composite.vm.disk.attach": _vm_disk_attach_preview,
     "vmware.composite.vm.resize": _vm_resize_preview,
     "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
     "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,

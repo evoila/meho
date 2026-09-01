@@ -82,6 +82,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.power",
         "vmware.composite.vm.power.bulk",
         "vmware.composite.vm.disk.grow",
+        "vmware.composite.vm.disk.attach",
         "vmware.composite.vm.resize",
         "vmware.composite.vm.nic.repoint",
         "vmware.composite.vm.device.cdrom",
@@ -308,14 +309,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 25 write composites register a builder (criterion 4)
+# Wiring — all 26 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 25
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 26
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -411,6 +412,11 @@ async def test_vm_create_preview_echoes_creation_spec() -> None:
         "memory_mib": 8192,
         "networks": ["net-1", "net-2"],
         "disks_gb": [50, 100],
+        "disks": [
+            {"capacity_gb": 50, "provisioning": "thin", "sharing": "none"},
+            {"capacity_gb": 100, "provisioning": "thin", "sharing": "none"},
+        ],
+        "scsi_bus_sharing": "none",
         "nested_hv": True,
         "power_on_after_create": True,
     }
@@ -963,6 +969,8 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
             "memory_mib": 1024,
             "networks": [],
             "disks_gb": [],
+            "disks": [],
+            "scsi_bus_sharing": "none",
             "nested_hv": False,
             "power_on_after_create": False,
         },

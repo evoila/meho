@@ -69,6 +69,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_customize_composite,
     vm_deploy_from_library_composite,
     vm_device_cdrom_composite,
+    vm_disk_attach_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
     vm_nic_repoint_composite,
@@ -1224,6 +1225,7 @@ async def test_vm_create_pre9_rides_create_vm_task(gate: _GateRecorder) -> None:
         "memory_mib": 16384,
         "nics": ["dvportgroup-1015"],
         "disks": [],
+        "scsi_bus_sharing": "none",
         "nested_hv": True,
     }
 
@@ -1610,7 +1612,13 @@ async def test_vm_create_pre9_folds_disks_and_controller(gate: _GateRecorder) ->
             },
         },
     ]
-    assert gate.calls[0]["params"]["disks"] == [10, 20]
+    # #3256: gate params echo the full per-disk posture (capacity +
+    # provisioning + sharing) so the approver sees a shared-disk build.
+    assert gate.calls[0]["params"]["disks"] == [
+        {"capacity_gb": 10, "provisioning": "thin", "sharing": "none"},
+        {"capacity_gb": 20, "provisioning": "thin", "sharing": "none"},
+    ]
+    assert gate.calls[0]["params"]["scsi_bus_sharing"] == "none"
     assert out["status"] == "created"
     assert out["steps_succeeded"] == ["create", "disk_attach"]
 
@@ -4187,6 +4195,440 @@ async def test_vm_disk_grow_reconfig_body_reaches_the_wire_respx(
         assert change["device"]["capacityInBytes"] == _TWENTY_GIB
     finally:
         await connector.aclose()
+
+
+# ===========================================================================
+# vm.disk.attach — shared-attach (attach an existing VMDK, WSFC/FCI, #3256)
+# ===========================================================================
+
+
+_QUORUM_VMDK = "[vsanDatastore] wsfc-quorum/quorum.vmdk"
+
+
+def _scsi_controller(
+    key: int = 1000, type_name: str = "VirtualLsiLogicSASController"
+) -> dict[str, Any]:
+    """A SCSI controller device as ``config.hardware.device`` returns it."""
+    return {"_typeName": type_name, "key": key, "busNumber": 1}
+
+
+class _DiskAttachConnector:
+    """Recording double for the shared-attach VI-JSON sub-ops (mirrors _DiskGrowConnector).
+
+    Serves the ``config.hardware.device`` read (locate the controller +
+    check the unit) and the ``Task.info`` poll — both RetrievePropertiesEx,
+    distinguished by the request body's ``specSet`` object type — and records
+    every ``ReconfigVM_Task`` add so a parked/refused write is provably off
+    the wire.
+    """
+
+    def __init__(
+        self,
+        *,
+        devices: list[Any],
+        task_state: str = "success",
+        task_error: str | None = None,
+        reconfig_task: str = "task-attach-1",
+    ) -> None:
+        self.devices = devices
+        self.task_state = task_state
+        self.task_error = task_error
+        self.reconfig_task = reconfig_task
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ReconfigVM_Task"):
+            return {"type": "Task", "value": self.reconfig_task}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            boxed = {"_typeName": "ArrayOfVirtualDevice", "_value": self.devices}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                        "propSet": [{"name": "config.hardware.device", "val": boxed}],
+                    }
+                ]
+            }
+        if spec_type == "Task":
+            info: dict[str, Any] = {"state": self.task_state}
+            if self.task_error is not None:
+                info["error"] = {"localizedMessage": self.task_error}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": self.reconfig_task},
+                        "propSet": [{"name": "info", "val": info}],
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def reconfig_bodies(self) -> list[Any]:
+        return [body for path, body in self.vmomi_calls if path.endswith("/ReconfigVM_Task")]
+
+
+async def test_vm_disk_attach_happy_path_adds_existing_vmdk(gate: _GateRecorder) -> None:
+    """Attach: read devices -> gated ReconfigVM_Task add (no fileOperation) -> attached."""
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "attached"
+    assert out["task"] == "task-attach-1"
+    assert out["controller_key"] == 1000
+    assert out["unit_number"] == 0
+
+    # The single mutating sub-op was gated with the vi-json governance op_id +
+    # the logical params naming the disk + address the write touches.
+    assert gate.gated_op_ids == ["POST:/VirtualMachine/{moId}/ReconfigVM_Task"]
+    assert gate.calls[0]["safety_level"] == "dangerous"
+    assert gate.calls[0]["requires_approval"] is False
+    assert gate.calls[0]["params"] == {
+        "vm": "vm-1",
+        "vmdk_path": _QUORUM_VMDK,
+        "controller_key": 1000,
+        "unit_number": 0,
+        "sharing": "none",
+    }
+
+    # The ReconfigVM_Task body is a single-device ADD with NO fileOperation
+    # (attach the existing VMDK, not create), at the requested address.
+    assert len(conn.reconfig_bodies) == 1
+    change = conn.reconfig_bodies[0]["spec"]["deviceChange"][0]
+    assert change["operation"] == "add"
+    assert "fileOperation" not in change
+    assert change["device"]["_typeName"] == "VirtualDisk"
+    assert change["device"]["controllerKey"] == 1000
+    assert change["device"]["unitNumber"] == 0
+    assert change["device"]["backing"]["fileName"] == _QUORUM_VMDK
+    # sharing=none omits the multi-writer field (WSFC uses bus-sharing, not this).
+    assert "sharing" not in change["device"]["backing"]
+
+
+async def test_vm_disk_attach_multi_writer_sets_backing_sharing(gate: _GateRecorder) -> None:
+    """sharing='multi_writer' sets the backing's sharingMultiWriter (Oracle-RAC style)."""
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 3,
+            "sharing": "multi_writer",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "attached"
+    change = conn.reconfig_bodies[0]["spec"]["deviceChange"][0]
+    assert change["device"]["backing"]["sharing"] == "sharingMultiWriter"
+    assert gate.calls[0]["params"]["sharing"] == "multi_writer"
+
+
+async def test_vm_disk_attach_rejects_injection_shaped_vmdk_path(gate: _GateRecorder) -> None:
+    """A path not matching '[datastore] path.vmdk' is refused before any I/O (hygiene)."""
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": "quorum.vmdk; rm -rf /",
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "invalid_vmdk_path"
+    # Neither a read nor a write fired, and nothing was gated.
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_attach_rejects_reserved_unit_7(gate: _GateRecorder) -> None:
+    """Unit 7 (controller-reserved) is refused before any I/O."""
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 7,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "invalid_unit"
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_attach_controller_not_found_when_not_scsi(gate: _GateRecorder) -> None:
+    """A device at controller_key that is not a SCSI controller -> controller_not_found."""
+    # A VirtualDisk sits at key 1000, not a SCSI controller.
+    conn = _DiskAttachConnector(devices=[_virtual_disk(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "controller_not_found"
+    # The device read fired; the write was never attempted or gated.
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_attach_unit_in_use(gate: _GateRecorder) -> None:
+    """A device already at (controller, unit) -> unit_in_use, no write."""
+    occupied = {"_typeName": "VirtualDisk", "key": 2000, "controllerKey": 1000, "unitNumber": 0}
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000), occupied])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "unit_in_use"
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_attach_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the ReconfigVM_Task add returns verbatim; no write fires."""
+    op_id = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == op_id
+    # The device read fired; the ReconfigVM_Task add was gated off the wire.
+    assert conn.reconfig_bodies == []
+
+
+async def test_vm_disk_attach_poll_timeout_returns_timeout_status(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A poll that never sees a terminal state returns status=timeout with the task id."""
+    monkeypatch.setattr(_write, "_DISK_ATTACH_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)], task_state="running")
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": _QUORUM_VMDK,
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-attach-1"
+
+
+async def test_vm_disk_attach_task_fault_raises(gate: _GateRecorder) -> None:
+    """A terminal task error raises (the dispatcher wraps it connector_error)."""
+    conn = _DiskAttachConnector(
+        devices=[_scsi_controller(key=1000)],
+        task_state="error",
+        task_error="Cannot open the disk '...' or one of the snapshot disks it depends on.",
+    )
+    with pytest.raises(RuntimeError, match="Cannot open the disk"):
+        await vm_disk_attach_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={
+                "vm": "vm-1",
+                "vmdk_path": _QUORUM_VMDK,
+                "controller_key": 1000,
+                "unit_number": 0,
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+# ===========================================================================
+# vm.create — WSFC/FCI shared-disk knobs (#3256)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_create_shared_disk_knobs_route_9x_to_vim_and_set_backing(
+    gate: _GateRecorder,
+) -> None:
+    """A physical bus + eagerzeroedthick + multi-writer create rides vim even on 9.0 (#3256).
+
+    The pinned REST ``VmdkCreateSpec`` has no provisioning field, and neither
+    controller bus-sharing nor multi-writer has a REST expression, so a
+    non-default knob routes the whole create through vim ``CreateVM_Task``
+    regardless of version, folding the WSFC posture into the one ConfigSpec.
+    """
+    conn = _UnifiedRecordingConnector(
+        {"/api/vcenter/datastore/datastore-11": {"name": "vsanDatastore"}},
+        about_version="9.0.0.24755230",
+        vmomi={
+            "/Folder/folder-7/CreateVM_Task": _task_moref("task-1"),
+            "Task": _task_info_result(
+                "task-1", "success", result={"type": "VirtualMachine", "value": "vm-1"}
+            ),
+        },
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "folder-7",
+            "name": "sql-fci-node-1",
+            "guest_os": "WINDOWS_SERVER_2019",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "disks": [
+                {"capacity_gb": 50, "provisioning": "eagerzeroedthick", "sharing": "multi_writer"}
+            ],
+            "scsi_bus_sharing": "physical",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # Routed to vim despite the 9.0 target — the REST create never fired.
+    assert not any(c["path"] == "/api/vcenter/vm" for c in conn.calls)
+    create_body = next(body for path, body in conn.vmomi_calls if path.endswith("/CreateVM_Task"))
+    device_changes = create_body["config"]["deviceChange"]
+    # The folded controller carries the physical bus-sharing (WSFC SCSI-3 PR).
+    assert device_changes[0]["device"]["_typeName"] == "VirtualLsiLogicSASController"
+    assert device_changes[0]["device"]["sharedBus"] == "physicalSharing"
+    # The disk backing carries eagerzeroedthick + multi-writer.
+    disk_backing = device_changes[1]["device"]["backing"]
+    assert disk_backing["thinProvisioned"] is False
+    assert disk_backing["eagerlyScrub"] is True
+    assert disk_backing["sharing"] == "sharingMultiWriter"
+    # Gate params echo the per-disk posture + the bus-sharing mode.
+    assert gate.calls[0]["params"]["scsi_bus_sharing"] == "physical"
+    assert gate.calls[0]["params"]["disks"] == [
+        {"capacity_gb": 50, "provisioning": "eagerzeroedthick", "sharing": "multi_writer"}
+    ]
+    assert out["status"] == "created"
+
+
+@pytest.mark.asyncio
+async def test_vm_create_default_knobs_stay_on_rest_arm_9x(gate: _GateRecorder) -> None:
+    """Default shared-disk knobs keep a 9.0 create on the REST arm — byte-identical (#3256)."""
+    conn = _UnifiedRecordingConnector(
+        {
+            "/api/vcenter/folder": [{"folder": "folder-7", "name": "Prod"}],
+            "/api/vcenter/vm": {"value": "vm-9"},
+        },
+        about_version="9.0.0.24755230",
+    )
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder_name": "Prod",
+            "name": "web-01",
+            "guest_os": "UBUNTU_64",
+            "datastore": "datastore-11",
+            "disks": [{"capacity_gb": 40}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # No knobs set -> REST arm, no vim create.
+    assert conn.vmomi_calls == []
+    assert out["steps_succeeded"] == ["folder_lookup", "create", "disk_attach"]
+
+
+@pytest.mark.asyncio
+async def test_vm_create_invalid_bus_sharing_fails_closed(gate: _GateRecorder) -> None:
+    """An unknown scsi_bus_sharing enum refuses before any create (handler-side net)."""
+    conn = _UnifiedRecordingConnector({}, about_version="9.0.0.24755230")
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "folder-7",
+            "name": "x",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "scsi_bus_sharing": "bogus",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "scsi_bus_sharing"
+    assert conn.calls == []
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_create_invalid_provisioning_fails_closed(gate: _GateRecorder) -> None:
+    """An unknown disk provisioning enum refuses before any create (handler-side net)."""
+    conn = _UnifiedRecordingConnector({}, about_version="9.0.0.24755230")
+    out = await vm_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "folder": "folder-7",
+            "name": "x",
+            "guest_os": "UBUNTU_64",
+            "resource_pool": "resgroup-8",
+            "datastore": "datastore-11",
+            "disks": [{"capacity_gb": 10, "provisioning": "superthick"}],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "rolled_back"
+    assert out["failed_step"] == "disk_spec"
+    assert conn.calls == []
+    assert conn.vmomi_calls == []
 
 
 # ===========================================================================

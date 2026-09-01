@@ -167,6 +167,39 @@ connector-related release-notes line.
   precedent (winsrv / msad / mssql shipped the same way). See
   `docs/codebase/connectors-hyperv.md`.
 
+### Added — vmware: WSFC shared-disk knobs — SCSI bus-sharing, eagerzeroedthick, shared-VMDK attach (#3256)
+
+- **`vm.create` gains three shared-disk knobs.** A top-level
+  `scsi_bus_sharing` (`none` | `virtual` | `physical`) sets the folded SCSI
+  controller's bus-sharing mode, and each `disks[]` entry gains
+  `provisioning` (`thin` | `thick` | `eagerzeroedthick`) and `sharing`
+  (`none` | `multi_writer`). `physical` bus-sharing + `eagerzeroedthick` is
+  the Windows Server Failover Cluster (WSFC) / SQL FCI floor.
+- **New `vmware.composite.vm.disk.attach`** — attaches an **existing** VMDK
+  to a VM at an explicit SCSI `controller_key` + `unit_number` (the
+  shared-attach leg: the second cluster node opens the same disk the first
+  created, at the same address). Rides vim `ReconfigVM_Task` with a
+  `VirtualDeviceConfigSpec` add carrying **no** `fileOperation` (attach, not
+  create). Validates the `[datastore] path.vmdk` shape + the unit and refuses
+  a missing/non-SCSI controller or an occupied unit before any write.
+- **Vim-uniform by necessity.** The pinned REST `VmdkCreateSpec` has no
+  provisioning field, and neither controller bus-sharing nor multi-writer has
+  a REST expression, so a non-default knob routes `vm.create` through the vim
+  `CreateVM_Task` arm regardless of vCenter version (8.x + 9.x), and the
+  attach op is vim-only — mirroring `vm.disk.grow`. Default knobs keep the
+  9.0+ REST create body byte-identical.
+- **Docs distinguish bus-sharing from multi-writer.** `physical` SCSI
+  bus-sharing (SCSI-3 persistent reservations, for WSFC/FCI) vs per-disk
+  `sharingMultiWriter` (application-managed clustering, e.g. Oracle RAC) — so
+  operators pick correctly per workload. Same `dangerous` +
+  `requires_approval=True` tier as the sibling VM write composites; new op
+  reuses the already-pinned #2893 vim methods (no new reconcile pins).
+- Consumer: c1sql1 T4 (a 2-node SQL FCI on cluster1's vSAN,
+  `evoila-bosnia/claude-rdc-hetzner-dc#2789`); its live proof is deferred —
+  the corresponding acceptance criterion is declared OPEN until the estate
+  replays the shared-disk build through the governed ops.
+- [#3256](https://github.com/evoila/meho/issues/3256).
+
 ### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
 
 - **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based

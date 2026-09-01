@@ -84,7 +84,15 @@ path the acceptance criteria want proven). Taking a production role *offline*
 (`Stop-ClusterGroup`) is a service outage, and forcing one *online*
 (`Start-ClusterGroup`) — e.g. to the wrong node, or while it should stay down —
 can cause split-brain / data issues. Both are `dangerous` + approval per the
-#3259 initiative table.
+#3259 initiative table. This tier is **unconditional for every group**, not
+only "production" roles: `safety_level` is a per-op property, not per-role, so
+MEHO cannot scope "dangerous only for production roles" — the op is one row in
+`endpoint_descriptor` shared by all groups. The conservative blanket (every
+`offline` / `online` parks for approval, even on a scratch role) is deliberate:
+the alternative — trusting a caller-supplied "is this production?" hint — would
+be a trivially-bypassable flag, not a safety boundary. An operator who wants a
+non-parked offline/online on a throwaway role uses the same approval path
+(a human still decides).
 
 ## Key types
 

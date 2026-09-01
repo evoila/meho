@@ -255,6 +255,16 @@ async def test_cluster_test_rejects_bad_include() -> None:
     run_mock.assert_not_awaited()
 
 
+async def test_cluster_test_escapes_report_name() -> None:
+    connector = WsfcConnector()
+    run_mock = _run('{"ok":true,"report_path":"C:\\\\r.mht"}')
+    with patch.object(connector, "_run_command", run_mock):
+        await wsfc_cluster_test(connector, _TARGET, {"report_name": "run o'clock"})
+    # EncodedCommand-decode injection check: the operator report name is escaped
+    # inside a single-quoted literal (embedded quote doubled).
+    assert "-ReportName 'run o''clock'" in _script_from_call(run_mock)
+
+
 # ---------------------------------------------------------------------------
 # nodes group
 # ---------------------------------------------------------------------------
@@ -305,6 +315,18 @@ async def test_node_pause_no_drain_omits_flag() -> None:
     script = _script_from_call(run_mock)
     assert "Suspend-ClusterNode -Name 'SQL01'" in script
     assert "-Drain" not in script
+
+
+async def test_node_pause_rejects_target_node_without_drain() -> None:
+    """``-TargetNode`` is only valid with ``-Drain``; the contradictory combo is
+    rejected fail-closed, never silently dropped."""
+    connector = WsfcConnector()
+    run_mock = _run("{}")
+    with patch.object(connector, "_run_command", run_mock), pytest.raises(ValueError):
+        await wsfc_node_pause(
+            connector, _TARGET, {"name": "SQL01", "target_node": "SQL02", "drain": False}
+        )
+    run_mock.assert_not_awaited()
 
 
 async def test_node_resume_validates_failback() -> None:

@@ -115,15 +115,25 @@ async def wsfc_node_pause(
 
     Suspends (pauses) the node; ``drain=true`` (the default) moves its roles to
     other nodes first (``-Drain``), the safe maintenance path on a running
-    cluster. An optional ``target_node`` names where to drain the roles.
+    cluster. An optional ``target_node`` names where to drain the roles — it
+    requires ``drain=true`` because ``Suspend-ClusterNode`` only honours
+    ``-TargetNode`` alongside ``-Drain``, so a ``target_node`` supplied with
+    ``drain=false`` is rejected fail-closed rather than silently dropped.
     """
     name: str = params["name"]
     quoted = ps_single_quote(name)
+    drain = params.get("drain", True)
+    target_node = params.get("target_node")
+    if target_node and not drain:
+        raise ValueError(
+            "target_node requires drain=true; Suspend-ClusterNode only honors "
+            "-TargetNode with -Drain"
+        )
     clauses = [f"Suspend-ClusterNode -Name {quoted}"]
-    if params.get("drain", True):
+    if drain:
         clauses.append("-Drain")
-        if params.get("target_node"):
-            clauses.append(f"-TargetNode {ps_single_quote(params['target_node'])}")
+        if target_node:
+            clauses.append(f"-TargetNode {ps_single_quote(target_node)}")
     suspend_expr = " ".join(clauses)
     script = (
         "$ErrorActionPreference = 'Stop'; "
@@ -310,7 +320,10 @@ NODE_OPS: tuple[WsfcOp, ...] = (
                 },
                 "target_node": {
                     "type": "string",
-                    "description": "Optional node to drain the roles to (``-TargetNode``).",
+                    "description": (
+                        "Optional node to drain the roles to (``-TargetNode``); "
+                        "requires ``drain=true`` (rejected otherwise)."
+                    ),
                 },
             },
             "required": ["name"],

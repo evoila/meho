@@ -31,8 +31,9 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 24 write composites (G3.1-T6 / #509, the guest-ops write
-  ``vm.guest.file.write`` / #3100, single-VM ``vm.power`` /
+* 28 write composites (G3.1-T6 / #509, the guest-ops writes
+  ``vm.guest.file.write`` / #3100 + ``vm.guest.program.run`` / #3255,
+  single-VM ``vm.power`` /
   #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
   folder-template ``vm.clone_from_template`` / #2894, the vim
   cluster / inventory writes ``cluster.drs_rule.create`` +
@@ -71,6 +72,7 @@ from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_file_write_composite,
     guest_net_show_composite,
     guest_process_list_composite,
+    guest_program_run_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
@@ -141,6 +143,7 @@ __all__ = [
     "guest_file_write_composite",
     "guest_net_show_composite",
     "guest_process_list_composite",
+    "guest_program_run_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "network_portgroup_audit_composite",

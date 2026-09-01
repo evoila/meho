@@ -205,12 +205,13 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # create/apply #2892 + OVF/OVA content-library deploy
     # vm.deploy_from_library #2909 + the three host-domain writes
     # host.datastore_mount_nfs / host.disk_mark_flash / host.service_control
-    # #3182 + the guest-ops write vm.guest.file.write #3100 + the
-    # destructive-tier vm.destroy #3198 + the #3091 vim distributed-portgroup
-    # writes network.portgroup.create + network.portgroup.security.set). (The
-    # former host.network_uplinks / host.vsan_health reads were re-shipped as
-    # typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 36
+    # #3182 + the guest-ops writes vm.guest.file.write #3100 +
+    # vm.guest.program.run #3255 + the destructive-tier vm.destroy #3198 +
+    # the #3091 vim distributed-portgroup writes network.portgroup.create +
+    # network.portgroup.security.set + the content-library import
+    # vm.import_from_library #3229). (The former host.network_uplinks /
+    # host.vsan_health reads were re-shipped as typed ops in #2258.)
+    assert stub_embedding_service.encode_one.call_count == 37
 
 
 @pytest.mark.asyncio
@@ -468,13 +469,15 @@ async def test_register_vmware_composite_operations_is_idempotent(
     folder.create #2895 + the #2891 hardware writes vm.resize /
     vm.nic.repoint / vm.device.cdrom + GOSC create/apply #2892 + OVF/OVA
     content-library deploy vm.deploy_from_library #2909 + the three
-    host-domain writes #3182 + guest-ops write vm.guest.file.write #3100 +
-    the destructive-tier vm.destroy #3198 + the #3091 vim distributed-portgroup
-    writes network.portgroup.create + network.portgroup.security.set).
+    host-domain writes #3182 + guest-ops writes vm.guest.file.write #3100 +
+    vm.guest.program.run #3255 + the destructive-tier vm.destroy #3198 + the
+    #3091 vim distributed-portgroup writes network.portgroup.create +
+    network.portgroup.security.set + the content-library import
+    vm.import_from_library #3229).
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 36
+    assert first_count == 37
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

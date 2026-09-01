@@ -12,7 +12,7 @@ vSphere 8.5+ / ESXi 8.5+ targets, plus 32 hand-authored composites
 that orchestrate cross-spec workflows: 9 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 26 write
+in `#2258`; plus the four guest-operations reads `#3100`) and 28 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
@@ -25,8 +25,10 @@ OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`, and
 the three host-domain writes `host.datastore_mount_nfs` /
 `host.disk_mark_flash` / `host.service_control` / `#3182`, the two vim
 distributed-portgroup writes `network.portgroup.create` +
-`network.portgroup.security.set` / `#3091`, plus the
-governed guest-operations write `vm.guest.file.write` / `#3100` (see
+`network.portgroup.security.set` / `#3091`, the content-library import
+`vm.import_from_library` / `#3229`, plus the two governed
+guest-operations writes `vm.guest.file.write` / `#3100` +
+`vm.guest.program.run` / `#3255` (see
 `connectors-vmware-rest-guest-ops.md`)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
@@ -226,20 +228,29 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `guest_net_show_composite` (Tools-reported `guest.net` / `guest.ipStack`
   via `RetrievePropertiesEx`, needs no guest credential), and
   `guest_file_read_composite` (`InitiateFileTransferFromGuest`, returns the
-  transfer handle) — plus one `dangerous` / approval-gated write,
+  transfer handle) — plus two `dangerous` / approval-gated writes,
   `guest_file_write_composite` (`InitiateFileTransferToGuest` + a direct
-  PUT of the bytes). **Guest OS credentials resolve from the target's
+  PUT of the bytes) and `guest_program_run_composite`
+  (`StartProgramInGuest`, with a `ListProcessesInGuest` exit-code poll when
+  `wait=true`; #3255). **Guest OS credentials resolve from the target's
   Vault `secret_ref` (`guest_username` / `guest_password`) and never
   travel in params** — a stronger posture than GOSC's credential-class
   params. The sub-manager MoRefs are resolved dynamically off the
   overridable `guestOperationsManager` default (no verified literal is
-  hard-coded). The design fork (vim guest-ops over a deferred generic-ssh
-  tier) and the full safety model live in
-  `connectors-vmware-rest-guest-ops.md`; freeform in-guest program exec
-  (`StartProgramInGuest`) is a deliberately deferred tier.
+  hard-coded). `guest.program.run`'s `arguments` / `env` values may carry
+  secrets and are kept off the governed surfaces (result / audit-hash /
+  preview / gate) and clamped to aggregate-only on broadcast via the
+  `_CREDENTIAL_WRITE_OPS` pin; the resume-bound `ApprovalRequest.params` and
+  flight-recorder spans still carry them (same characteristic as
+  `guest.file.write`'s `content`), so operators must not pass bare secrets
+  there. The design fork (vim guest-ops over a
+  still-deferred generic-ssh tier for Tools-less guests) and the full
+  safety model live in `connectors-vmware-rest-guest-ops.md`; the freeform
+  in-guest program-exec tier `StartProgramInGuest` #3100 deferred is now
+  lifted as `guest.program.run` (#3255).
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 33
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 37
   `_CompositeSpec` rows (9 read + 24 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
@@ -467,7 +478,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 33 composites (9 reads + 24 writes) land as `source_kind="composite"`
+The 37 composites (9 reads + 28 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -534,7 +545,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 33 composites are hand-authored aggregators the connector ships as
+The 37 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

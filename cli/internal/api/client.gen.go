@@ -544,6 +544,7 @@ const (
 	TargetCreateProductLoki       TargetCreateProduct = "loki"
 	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
 	TargetCreateProductMsad       TargetCreateProduct = "msad"
+	TargetCreateProductMssql      TargetCreateProduct = "mssql"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"

@@ -109,6 +109,63 @@ connector-related release-notes line.
   rollback note covering the access-token-TTL caveat. Forward-pointers
   added from `docs/codebase/approvals.md` and `docs/codebase/backend.md`.
 
+### Added — mssql: SQL Server typed connector (TDS-direct) (#3264)
+
+- New `mssql` typed connector for Microsoft SQL Server 2022 (registry triple
+  `mssql-2022.x` / `mssql-tds`), a **direct TDS** connector on port 1433 via the
+  pure-Python `python-tds` driver — the postgres/mongodb direct-protocol mold,
+  no unixODBC/msodbcsql or FreeTDS system packages in the backplane image. 14
+  governed ops across four groups: `instance` (about / version / config / logins
+  — safe), `databases` (list / files — safe; create / drop — dangerous +
+  approval), `ha` (availability-groups / fci / sync-health — the safe
+  migration-validation reads), and `backup` (history — safe; database — caution;
+  restore — dangerous + approval). Safety tiers follow the estate satellite
+  table (reads ride satellite runners; destructive writes park for approval and
+  are satellite-excluded).
+- **First two-credential connector on the estate seam:** SQL auth resolves
+  `sql_username` / `sql_password` from the target's Vault secret (the `sql_`
+  prefix reserves room for a later dbatools-over-SSH increment's SSH creds in
+  the same secret); credentials never enter params, logs, or results.
+- **No freeform T-SQL op** (the narrow-waist doctrine): only curated,
+  individually-tiered ops — operator input binds as pyformat values, and
+  database identifiers are QUOTENAME-style bracket-escaped. CLI grows the
+  `meho mssql ...` verbs; consumer proof against the live c1sql1 FCI is tracked
+  open. See `docs/codebase/connectors-mssql.md`.
+
+### Added — vmware: governed in-guest program execution `vm.guest.program.run` (#3255)
+
+- **`vmware.composite.vm.guest.program.run`** — the freeform in-guest
+  program-execution tier the guest-operations channel (#3100) deliberately
+  deferred, now lifted. Runs a program inside a VM's guest OS via the vim
+  `GuestProcessManager.StartProgramInGuest` over the existing VI-JSON seam
+  (no `pyvmomi`, no SSH), the governed replacement for out-of-band
+  `govc guest.run`. Params: `vm`, `program_path`, `arguments`,
+  `working_directory?`, `env?`, `timeout_seconds?`, `wait`.
+- **Exit-code semantics.** `StartProgramInGuest` is fire-and-forget and
+  returns only a PID (no stdout capture). With `wait=true` the op polls
+  `ListProcessesInGuest` (every 2s, up to `timeout_seconds`, default 300s)
+  for the exit code + start/end times. VMware Tools keeps a finished
+  process's exit code listable for only ~5 minutes after completion, so a
+  process no longer listable before an exit code is seen returns
+  `status='exit_unknown'` rather than hanging (alongside `started` /
+  `exited` / `timeout`).
+- **Governance.** `safety_level="dangerous"`, `requires_approval=True` (same
+  tier as `guest.file.write`): the call parks for a human decision unless a
+  standing grant auto-executes it, and gates *first* so a parked / denied
+  approval starts no program. Guest OS credentials resolve from the target's
+  Vault `secret_ref` (`guest_username` / `guest_password`), never in params.
+- **Secret hygiene.** `arguments` and `env` values (which can carry secrets)
+  are kept off the governed surfaces — the approval preview echoes only the
+  program identity + argument byte size + env-var names, the operation
+  result echoes only PID / exit code / times, and the sub-op policy gate
+  never sees them (verified by test); the audit row records a params hash,
+  not raw params; and the op is pinned in `_CREDENTIAL_WRITE_OPS` so its
+  broadcast clamps to aggregate-only (the same remedy `k8s.job.create` and
+  the GOSC create use). The resume-bound `ApprovalRequest.params` row and
+  flight-recorder vendor spans still carry the values, so operators must not
+  pass bare secrets in `arguments` / `env` — same characteristic as
+  `guest.file.write`'s `content`.
+
 ### Added — flight recorder: operator mutation surface for capture policy (#3272)
 
 - The writable path the live-instance verification pass found missing: the

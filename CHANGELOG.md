@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — surface an approved dispatch's result to the originating consumer (#3209)
+
+- A paired, out-of-process consumer that parks a **non-idempotent** governed op
+  for approval (the concrete case: VCF `installer.sddc.bringup.start`) can now,
+  after a human approves, retrieve the result the backplane produced when it
+  re-dispatched the approved op — so it resumes in place by *polling the
+  returned task id* instead of a second submit that would start a second
+  bring-up. New principal-scoped `GET /api/v1/approvals/{id}/result`: only the
+  request owner (`principal_sub`) reads it (any other principal, operator role
+  or not, gets 403 `not_request_owner`), it writes a synchronous
+  `approval.result` audit row, and the payload is the same reduced /
+  handle-shaped `OperationResult` envelope the approver sees inline (a
+  set-shaped response rides a JSONFlux handle, never a raw body). The
+  re-dispatch result is captured onto `approval_request.resume_result`
+  (migration `0096`, `down_revision 0095`) on the exactly-one-resumer winning
+  path, so it composes with the existing resume claim rather than duplicating
+  it. Unblocks `meho-automation`#76's resume-in-place for `bringup`-class ops.
+
 ### Changed — required PR unit lane sharded 3 ways (#3251)
 
 - The required unit lane (branch-protection context `Python (ruff + mypy +
@@ -151,6 +169,7 @@ connector-related release-notes line.
   refused without a matching preview hash, park refused without a blast-radius
   block, the full preview → park → **human** approve → audited resume delete,
   and the not-found / ambiguous / referenced refusal paths.
+
 ### Added — governed delete on bind9: `bind9.record.delete` on the destructive tier + conformance (#3231 / #3198)
 
 - Registers the **second governed delete** — and the first

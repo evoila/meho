@@ -65,16 +65,19 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
     ParamsMismatchError,
     PreviewBindingMissingError,
+    ResultAccessForbiddenError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
     approve_request,
     get_request,
     publish_approval_event,
+    read_approval_result,
     reject_request,
     resume_dispatch_after_approval,
 )
@@ -118,6 +121,31 @@ class ApprovalRequestView(BaseModel):
     created_at: str
     expires_at: str | None
     work_ref: str | None
+
+
+class ApprovalResultView(BaseModel):
+    """Principal-scoped view of an approved dispatch's result (#3209).
+
+    The response body of ``GET /api/v1/approvals/{id}/result``. Surfaces the
+    reduced / handle-shaped :class:`~meho_backplane.connectors.schemas.OperationResult`
+    envelope the backplane produced when it re-dispatched the approved op, so
+    the **originating** consumer that parked a non-idempotent op (VCF
+    ``bringup.start``) can resume by poll instead of a second submit. ``result``
+    is ``None`` until the winning resumer captures it — a ``pending`` /
+    ``rejected`` / ``expired`` request, or an ``approved`` one whose resume has
+    not landed yet — so a consumer polls until ``status == "approved"`` and
+    ``result`` is populated. A set-shaped payload rides a JSONFlux ``handle``
+    inside ``result`` (v0.1-spec §4), never a raw body.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_request_id: uuid.UUID
+    status: ApprovalRequestStatus
+    resumed: bool
+    reviewed_by: str | None
+    decided_at: str | None
+    result: dict[str, Any] | None
 
 
 class ApproveRequestBody(BaseModel):
@@ -390,6 +418,67 @@ async def get_approval_request(
                 detail="approval_request_not_found",
             ) from exc
     return _view(row)
+
+
+@router.get("/{request_id}/result", response_model=ApprovalResultView)
+async def get_approval_result(
+    request_id: Annotated[uuid.UUID, Path()],
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> ApprovalResultView:
+    """Read the approved dispatch's result — originating-principal only (#3209).
+
+    Surfaces the reduced / handle-shaped ``OperationResult`` envelope the
+    backplane produced when it re-dispatched the approved op, so the consumer
+    that parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)
+    can resume in place by poll — read back the resulting task id and continue
+    polling it — instead of a second submit that would start a second
+    bring-up.
+
+    Scope is deliberately narrow (this route is **not** ``operator``-gated like
+    the rest of the approvals surface): any authenticated principal may call
+    it, but :func:`~meho_backplane.operations.approval_queue.read_approval_result`
+    then enforces that only the request's **owner**
+    (``operator.sub == principal_sub``, the party that parked the op) reads the
+    result. This lets a non-operator service/agent principal — the paired
+    add-on that dispatched the op — retrieve its own result, while no other
+    principal (operator role or not) can. The read writes one synchronous
+    ``approval.result`` audit row (v0.1-spec §6).
+
+    HTTP status codes:
+
+    * 200 — the request exists and the caller owns it. ``result`` is the
+      captured envelope when the resume has landed, else ``null`` (poll again).
+    * 403 — the caller is authenticated but is not the request owner.
+    * 404 — request not found (or belongs to another tenant).
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id="approval.result",
+        audit_op_class="read",
+        audit_approval_request_id=str(request_id),
+    )
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            row = await read_approval_result(session, operator=operator, request_id=request_id)
+            await session.commit()
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="approval_request_not_found",
+        ) from exc
+    except ResultAccessForbiddenError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="not_request_owner",
+        ) from exc
+    return ApprovalResultView(
+        approval_request_id=row.id,
+        status=ApprovalRequestStatus(row.status),
+        resumed=row.resumed_at is not None,
+        reviewed_by=row.reviewed_by,
+        decided_at=row.decided_at.isoformat() if row.decided_at else None,
+        result=row.resume_result,
+    )
 
 
 async def _record_approval_decision(

@@ -5937,6 +5937,23 @@ class ApprovalRequest(Base):
       resumed" -- the same claimable starting state a freshly-parked
       request has. No FK, no index. Added by migration ``0055``.
 
+    * ``resume_result`` -- JSON nullable (JSONB on PG). The reduced /
+      handle-shaped :class:`~meho_backplane.connectors.schemas.OperationResult`
+      envelope of the approved re-dispatch (#3209), captured on the
+      exactly-one-resumer winning path
+      (:func:`resume_dispatch_after_approval`). The paired consumer that
+      parked a **non-idempotent** op (VCF ``bringup.start``) reads it back —
+      principal-scoped to the request owner — via
+      ``GET /api/v1/approvals/{id}/result`` to resume by poll instead of a
+      second submit. It is the same reduced envelope the approver already
+      sees inline: a set-shaped response rides a JSONFlux ``handle``
+      (v0.1-spec §4), never a raw body. NULL until captured — a pending /
+      rejected / expired row, an agent-run request resumed in-process (which
+      does not route through the shared operator resume path), and every
+      pre-0096 row keep NULL. Internal to the ``/result`` surface only; like
+      ``params`` it is never projected onto the default read view or a
+      broadcast frame. Added by migration ``0096``.
+
     Indexes
     -------
 
@@ -6070,6 +6087,24 @@ class ApprovalRequest(Base):
     # primary-key-scoped conditional UPDATE). Added by migration 0055.
     resumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Result of the approved re-dispatch (#3209). The reduced / handle-shaped
+    # OperationResult envelope (OperationResult.model_dump(mode="json")) the
+    # backplane produced when it re-executed the approved op, captured on the
+    # exactly-one-resumer winning path (resume_dispatch_after_approval). It is
+    # the same reduced envelope the approver sees inline -- a set-shaped
+    # response rides a JSONFlux handle (v0.1-spec §4), never a raw body -- so
+    # this is not a new raw-payload surface. NULL until the winning resumer
+    # captures it: pending / rejected / expired rows, an agent-run request
+    # resumed in-process (which does not route through the shared operator
+    # resume path), and every pre-0096 row keep NULL. Read only by the
+    # principal-scoped GET /api/v1/approvals/{id}/result surface -- like
+    # ``params`` it is never projected onto the default read view or a
+    # broadcast frame. Added by migration 0096.
+    resume_result: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
         nullable=True,
         default=None,
     )

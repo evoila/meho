@@ -18,9 +18,9 @@ and the GOSC composites ``guest.customization_spec.create`` /
 * Each row's ``handler_ref`` resolves to the module-level dotted path
   in ``composites/_write``.
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster`` /
-  ``guest`` per the canary's stub-LLM taxonomy.
+  ``guest`` / ``networking`` per the canary's stub-LLM taxonomy.
 * Combined with the 9 read composites (#508's 5 + the 4 guest-ops
-  reads / #3100), the registrar produces **34 rows** total. (The former
+  reads / #3100), the registrar produces **36 rows** total. (The former
   host.network_uplinks / host.vsan_health reads were re-shipped as typed
   ops in #2258.)
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
@@ -71,13 +71,14 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 25 write composites (T6 / #509, single-VM vm.power / #2301, the
+# 27 write composites (T6 / #509, single-VM vm.power / #2301, the
 # mutating VI-JSON vm.disk.grow / #2893, the folder-template
 # vm.clone_from_template / #2894, the vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895, the #2891
 # hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom, the
 # GOSC composites guest.customization_spec.create + vm.customize / #2892,
-# and the destructive-tier vm.destroy / #3198).
+# the destructive-tier vm.destroy / #3198, and the vim distributed-portgroup
+# writes network.portgroup.create + network.portgroup.security.set / #3091).
 _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.create",
     "vmware.composite.vm.clone",
@@ -95,6 +96,8 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.device.cdrom",
     "vmware.composite.host.evacuate",
     "vmware.composite.host.detach_from_vds",
+    "vmware.composite.network.portgroup.create",
+    "vmware.composite.network.portgroup.security.set",
     "vmware.composite.cluster.patch",
     "vmware.composite.cluster.drs_rule.create",
     "vmware.composite.folder.create",
@@ -124,12 +127,13 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.file.read",
 )
 
-# 34 total -- 9 read (T5 / #508 + 4 guest-ops reads / #3100) + 25 write
+# 36 total -- 9 read (T5 / #508 + 4 guest-ops reads / #3100) + 27 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
 # writes vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC create/apply / #2892
-# + the destructive-tier vm.destroy / #3198).
+# + the destructive-tier vm.destroy / #3198 + the #3091 vim portgroup writes
+# network.portgroup.create + network.portgroup.security.set).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -172,6 +176,13 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.host.detach_from_vds": (
         "meho_backplane.connectors.vmware_rest.composites._write.host_detach_from_vds_composite"
+    ),
+    "vmware.composite.network.portgroup.create": (
+        "meho_backplane.connectors.vmware_rest.composites._write.network_portgroup_create_composite"
+    ),
+    "vmware.composite.network.portgroup.security.set": (
+        "meho_backplane.connectors.vmware_rest.composites._write."
+        "network_portgroup_security_set_composite"
     ),
     "vmware.composite.cluster.patch": (
         "meho_backplane.connectors.vmware_rest.composites._write.cluster_patch_composite"
@@ -230,6 +241,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.device.cdrom": "vm",
     "vmware.composite.host.evacuate": "host",
     "vmware.composite.host.detach_from_vds": "host",
+    "vmware.composite.network.portgroup.create": "networking",
+    "vmware.composite.network.portgroup.security.set": "networking",
     "vmware.composite.cluster.patch": "cluster",
     "vmware.composite.cluster.drs_rule.create": "cluster",
     "vmware.composite.folder.create": "vm",
@@ -282,7 +295,7 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 # ---------------------------------------------------------------------------
-# 25 write composites land alongside the 9 reads (34 total)
+# 27 write composites land alongside the 9 reads (36 total)
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +303,7 @@ async def session() -> AsyncIterator[AsyncSession]:
 async def test_register_vmware_composite_operations_inserts_all_write_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar lands all 25 write op_ids in ``endpoint_descriptor``."""
+    """Running the registrar lands all 27 write op_ids in ``endpoint_descriptor``."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -310,12 +323,13 @@ async def test_register_vmware_composite_operations_inserts_all_write_rows(
 async def test_full_registration_produces_thirty_three_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """9 reads (#508 + guest-ops reads #3100) + 25 writes (#509 + vm.power #2301 +
+    """9 reads (#508 + guest-ops reads #3100) + 27 writes (#509 + vm.power #2301 +
     vm.disk.grow #2893 + vm.clone_from_template #2894 + cluster.drs_rule.create +
     folder.create #2895 + #2891 hardware writes vm.resize / vm.nic.repoint /
     vm.device.cdrom + GOSC create/apply #2892 + OVF deploy #2909 + host-domain
     writes #3182 + guest-ops write vm.guest.file.write #3100 + destructive-tier
-    vm.destroy #3198) = 34 rows. DoD bar."""
+    vm.destroy #3198 + #3091 portgroup writes network.portgroup.create /
+    network.portgroup.security.set) = 36 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -329,7 +343,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 34
+    assert len(rows) == 36
 
 
 @pytest.mark.asyncio
@@ -359,7 +373,7 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             .scalars()
             .all()
         )
-    # Prove the query actually returned all 25 write rows before iterating —
+    # Prove the query actually returned all 27 write rows before iterating —
     # otherwise the loop is vacuous when the set is empty / partial.
     assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     for row in rows:
@@ -428,7 +442,8 @@ async def test_write_composites_land_in_vm_host_cluster_groups(
     stub_embedding_service: AsyncMock,
 ) -> None:
     """Group distribution: 12 in ``vm`` (11 ``vm.*`` + ``folder.create``),
-    2 ``host.*`` in ``host``, 2 ``cluster.*`` in ``cluster``, 2 GOSC in ``guest``.
+    2 ``host.*`` in ``host``, 2 ``cluster.*`` in ``cluster``, 2 GOSC in ``guest``,
+    2 portgroup writes in ``networking``.
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
@@ -583,6 +598,15 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         "vmware.composite.host.evacuate": {"evacuated", "partial", "aborted"},
         # #2970: the DVS detach is a polled vim ReconfigureDvs_Task.
         "vmware.composite.host.detach_from_vds": {"detached", "incomplete", "timeout"},
+        # #3091: the portgroup writes are polled vim CreateDVPortgroup_Task /
+        # ReconfigureDVPortgroup_Task; a pre-write refusal + poll timeout are
+        # legible statuses.
+        "vmware.composite.network.portgroup.create": {"created", "invalid_vlan_spec", "timeout"},
+        "vmware.composite.network.portgroup.security.set": {
+            "updated",
+            "no_change_requested",
+            "timeout",
+        },
         "vmware.composite.cluster.patch": {"completed", "stopped"},
         "vmware.composite.vm.resize": {"resized", "requires_power_off", "no_change", "partial"},
         "vmware.composite.vm.nic.repoint": {"repointed", "not_found", "ambiguous"},
@@ -638,14 +662,14 @@ async def test_write_composite_tags_include_composite_and_write(
 async def test_register_vmware_composite_operations_is_idempotent_across_thirty_three(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 34 rows total, embedding called 34x once."""
+    """Running the registrar twice -> 36 rows total, embedding called 36x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 34
+    assert first_count == 36
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 33.
+    # pipeline; the row count stays at 36.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -659,7 +683,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 34
+    assert len(rows) == 36
 
 
 # ---------------------------------------------------------------------------

@@ -1357,6 +1357,136 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.network.portgroup.create`` parameter schema.
+#:
+#: Create a distributed portgroup on an existing DVS via the **vim**
+#: ``DistributedVirtualSwitch.CreateDVPortgroup_Task`` (the pinned vcenter.yaml
+#: serves no portgroup-create REST path). ``vds`` is the switch moid (no
+#: portgroup/switch REST list exists to resolve a name against — the moid comes
+#: from the ``networking`` group's ``portgroup.audit`` read). Exactly one VLAN
+#: mode: ``vlan_trunk_ranges`` (trunk — the nested-ESXi substrate case) OR
+#: ``vlan_id`` (a single access VLAN); both set → ``status='invalid_vlan_spec'``.
+NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vds": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DistributedVirtualSwitch moid the portgroup is created on (e.g. "
+                "'dvs-16'). There is no portgroup/switch REST list to resolve a "
+                "display name against, so the moid is passed directly — obtain it "
+                "from the networking group's portgroup.audit read."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new distributed portgroup.",
+        },
+        "vlan_trunk_ranges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                },
+                "required": ["start", "end"],
+                "additionalProperties": False,
+            },
+            "minItems": 1,
+            "description": (
+                "Trunk-mode VLAN ranges (VmwareDistributedVirtualSwitchTrunkVlanSpec "
+                "— a NumericRange[] of inclusive start..end pairs, each 0..4094). "
+                "Use for a nested-ESXi trunk portgroup (e.g. [{start:0,end:4094}] at "
+                "bootstrap). Mutually exclusive with vlan_id."
+            ),
+        },
+        "vlan_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4094,
+            "description": (
+                "Single access VLAN id (VmwareDistributedVirtualSwitchVlanIdSpec); "
+                "0 means no VLAN. Mutually exclusive with vlan_trunk_ranges. Omit "
+                "both to inherit the switch default."
+            ),
+        },
+        "num_ports": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Number of ports in the portgroup (DVPortgroupConfigSpec.numPorts). "
+                "Omit to let the switch pick the default. Ignored for ephemeral "
+                "port_binding."
+            ),
+        },
+        "port_binding": {
+            "type": "string",
+            "enum": ["earlyBinding", "lateBinding", "ephemeral"],
+            "default": "earlyBinding",
+            "description": (
+                "Portgroup binding type (DistributedVirtualPortgroupPortgroupType). "
+                "Defaults to 'earlyBinding' (static) — the right choice for a "
+                "nested-ESXi trunk portgroup."
+            ),
+        },
+    },
+    "required": ["vds", "name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.network.portgroup.security.set`` parameter schema.
+#:
+#: Set any of the security-policy triple (allowPromiscuous / forgedTransmits /
+#: macChanges) on a distributed portgroup via the **vim**
+#: ``DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`` (the pinned
+#: vcenter.yaml serves no security-policy write). Only the booleans supplied
+#: are changed; none supplied → ``status='no_change_requested'`` before any
+#: write. The required ``configVersion`` and the current policy are read first.
+NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "portgroup": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DistributedVirtualPortgroup moid whose security policy is set "
+                "(e.g. 'dvportgroup-42'). Obtain it from the networking group's "
+                "portgroup.audit read."
+            ),
+        },
+        "allow_promiscuous": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.allowPromiscuous. Accept (true) is required "
+                "for a nested-ESXi trunk portgroup so the nested switch sees frames "
+                "for MACs it owns. Governance-sensitive — a promiscuous portgroup "
+                "sees all traffic on its VLANs."
+            ),
+        },
+        "forged_transmits": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.forgedTransmits. Accept (true) lets a nested "
+                "ESXi emit frames with a source MAC other than the vNIC's."
+            ),
+        },
+        "mac_changes": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.macChanges. Accept (true) lets the guest "
+                "change the effective MAC (nested ESXi needs this for its vmks)."
+            ),
+        },
+    },
+    "required": ["portgroup"],
+    "additionalProperties": False,
+}
+
+
 # ---------------------------------------------------------------------------
 # Write composites -- response schemas
 # ---------------------------------------------------------------------------
@@ -2064,6 +2194,100 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "parent_folder", "new_folder_name"],
+}
+
+
+NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "invalid_vlan_spec", "timeout"],
+            "description": (
+                "``'created'`` — the CreateDVPortgroup_Task reached success and the "
+                "new portgroup's config was read back; ``'invalid_vlan_spec'`` — "
+                "both vlan_trunk_ranges and vlan_id were passed (refused before any "
+                "write); ``'timeout'`` — the task did not reach a terminal state "
+                "within the poll bound (it may still complete). A task fault raises "
+                "(the dispatcher wraps it connector_error)."
+            ),
+        },
+        "portgroup": {
+            "type": ["string", "null"],
+            "description": (
+                "The new portgroup's moid (from the task's TaskInfo.result MoRef); "
+                "``null`` on a refusal / timeout."
+            ),
+        },
+        "vds": {"type": "string", "description": "The DVS moid the portgroup was created on."},
+        "name": {"type": "string", "description": "The requested portgroup name."},
+        "task": {
+            "type": ["string", "null"],
+            "description": "The CreateDVPortgroup_Task moid (present once the write fired).",
+        },
+        "observed": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back verification: the created portgroup's config.name and the "
+                "raw config.defaultPortConfig.vlan spec the switch reports. ``null`` "
+                "when no portgroup moid was resolved."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Next-step hint on a non-``created`` status; ``null`` on success.",
+        },
+    },
+    "required": ["status", "vds", "name"],
+}
+
+
+NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["updated", "no_change_requested", "timeout"],
+            "description": (
+                "``'updated'`` — the ReconfigureDVPortgroup_Task reached success and "
+                "the applied policy was read back; ``'no_change_requested'`` — no "
+                "boolean was supplied (refused before any write); ``'timeout'`` — "
+                "the task did not reach a terminal state within the poll bound. A "
+                "task fault raises (the dispatcher wraps it connector_error)."
+            ),
+        },
+        "portgroup": {"type": "string", "description": "The portgroup moid whose policy was set."},
+        "requested": {
+            "type": "object",
+            "description": (
+                "The three security booleans as requested; a ``null`` field was not "
+                "changed (only supplied booleans are written)."
+            ),
+        },
+        "previous": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the effective security triple BEFORE the change (the "
+                "four-eyes reviewer's before-state); ``null`` on a no-change refusal."
+            ),
+        },
+        "observed": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the effective security triple AFTER the change; "
+                "``null`` on a refusal / timeout."
+            ),
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": "The ReconfigureDVPortgroup_Task moid (present once the write fired).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Next-step hint on a non-``updated`` status; ``null`` on success.",
+        },
+    },
+    "required": ["status", "portgroup", "requested"],
 }
 
 

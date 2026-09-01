@@ -12,7 +12,7 @@ vSphere 8.5+ / ESXi 8.5+ targets, plus 32 hand-authored composites
 that orchestrate cross-spec workflows: 9 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 24 write
+in `#2258`; plus the four guest-operations reads `#3100`) and 26 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
@@ -23,7 +23,9 @@ post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
 `guest.customization_spec.create` + `vm.customize` / `#2892`, the
 OVF/OVA content-library deploy `vm.deploy_from_library` / `#2909`, and
 the three host-domain writes `host.datastore_mount_nfs` /
-`host.disk_mark_flash` / `host.service_control` / `#3182`, plus the
+`host.disk_mark_flash` / `host.service_control` / `#3182`, the two vim
+distributed-portgroup writes `network.portgroup.create` +
+`network.portgroup.security.set` / `#3091`, plus the
 governed guest-operations write `vm.guest.file.write` / `#3100` (see
 `connectors-vmware-rest-guest-ops.md`)). The
 write composites cover every state-mutating operator workflow named
@@ -80,7 +82,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — sixteen module-level
+- **Write composites** (`composites/_write.py`) — eighteen module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
@@ -88,6 +90,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `vm_resize_composite`, `vm_nic_repoint_composite`,
   `vm_device_cdrom_composite`,
   `host_evacuate_composite`, `host_detach_from_vds_composite`,
+  `network_portgroup_create_composite`,
+  `network_portgroup_security_set_composite`,
   `cluster_patch_composite`, `guest_customization_spec_create_composite`,
   `vm_customize_composite`). The `vm_resize` / `vm_nic_repoint` /
   `vm_device_cdrom` trio (`#2891`) is the post-clone hardware reconfigure
@@ -653,6 +657,8 @@ enum) are:
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
+| `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`) |
+| `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
 | `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
@@ -1221,6 +1227,54 @@ new_folder_name}` (no I/O — the params fully name the blast radius). Both
 mutating writes flow through the same `enforce_subop_policy` gate the REST
 and disk-grow writes do, so an agent principal without a grant is denied and
 a policy-parked write never reaches the wire.
+
+### vim distributed-portgroup writes (`network.portgroup.create` + `network.portgroup.security.set`, #3091)
+
+Two vim-only distributed-portgroup writes for standing up an L2 substrate —
+the nested-hypervisor lab recipe. Neither surface has a REST write path
+(there is no portgroup-create Automation path, and the security policy lives
+in `DVPortgroupConfigSpec.defaultPortConfig.securityPolicy` with no REST
+expression — both spec-verified against the pinned `vi-json.yaml`), so both
+ride the #2893 governed vmomi substrate (`_write_vmomi_sub_op` →
+`poll_vim_task`) like `host.detach_from_vds` / `cluster.drs_rule.create`.
+Both live in the `networking` operation group beside the `portgroup.audit`
+read (which surfaces the DVS / portgroup moids these writes take — there is
+no portgroup/switch REST list to resolve a display name against, so the moid
+is passed directly, the `host.detach_from_vds` `dvs`-moid convention).
+
+**`network.portgroup.create`** creates a portgroup on an existing DVS through
+vim `DistributedVirtualSwitch.CreateDVPortgroup_Task` with one
+`DVPortgroupConfigSpec` — `name`, binding `type` (default `earlyBinding`, a
+static portgroup), optional `numPorts`, and a `VMwareDVSPortSetting.vlan`
+that is **either** a VLAN trunk
+(`VmwareDistributedVirtualSwitchTrunkVlanSpec` with a `NumericRange[]`
+`vlanId`, e.g. `0..4094` at bootstrap — the nested-ESXi case) **or** a single
+access VLAN (`VmwareDistributedVirtualSwitchVlanIdSpec`). Passing both
+refuses with `status='invalid_vlan_spec'` before any write; passing neither
+inherits the switch default. The returned Task's `TaskInfo.result` MoRef is
+the new portgroup; its `config` (`name` + `defaultPortConfig.vlan`) is read
+back into the response's `observed` verification rows.
+
+**`network.portgroup.security.set`** sets any of the security-policy triple —
+`allowPromiscuous` / `forgedTransmits` / `macChanges` (the knobs a nested-ESXi
+trunk portgroup needs at Accept) — through vim
+`DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task` with a
+`DVPortgroupConfigSpec.defaultPortConfig.securityPolicy` delta. The spec's
+**required `configVersion`** (optimistic-concurrency echo, the
+`host.detach_from_vds` pattern) and the current policy are read off `config`
+first via `RetrievePropertiesEx` (the `previous` verification rows); **only
+the booleans supplied are written**; the applied policy is read back after
+(`observed`). No boolean supplied → `status='no_change_requested'` before any
+read/write. `DVSSecurityPolicy` and each `BoolPolicy` derive from
+`InheritablePolicy`, whose `inherited` field the spec marks required, so both
+carry `inherited: false` ("explicitly set", not inherit). Governance note:
+promiscuous mode makes the portgroup see all traffic on its VLANs, so
+`security.set` is a governance-sensitive write — it rides the same
+`dangerous` / `requires_approval=True` tier and the same `enforce_subop_policy`
+gate as every other write composite (there is no `caution` tier in this
+connector; only `vm.destroy` is `destructive`). Neither composite registers a
+park-time preview builder (matching `vm.import_from_library`); the read-back
+`previous` / `observed` rows in the response are the verification surface.
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 

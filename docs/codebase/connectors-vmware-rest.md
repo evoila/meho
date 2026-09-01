@@ -479,7 +479,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 37 composites (9 reads + 28 writes) land as `source_kind="composite"`
+The 38 composites (9 reads + 29 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -546,7 +546,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 37 composites are hand-authored aggregators the connector ships as
+The 38 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -881,15 +881,21 @@ approver makes; a failing disk read parks with the #1628
 
 A Windows Server Failover Cluster (WSFC) / SQL FCI needs shared disks that
 two nodes open at identical SCSI addresses. Three knobs express the build,
-all on the **vim seam**: the pinned REST `Disk.VmdkCreateSpec` has no
-provisioning field (spec-verified — `eagerzeroedthick` is inexpressible over
-REST), and neither controller bus-sharing nor per-disk multi-writer has a
-REST spelling. So any non-default knob routes `vm.create` through the vim
-`CreateVM_Task` arm regardless of vCenter version (`_shared_disk_knobs_requested`
-generalises the pre-9.0 `_vim_create_required` gate; that arm requires
-`resource_pool` + `datastore` pins), and the shared-attach op is vim-only —
-both mirroring `vm.disk.grow`. All knobs at default keep the 9.0+ REST create
-body byte-identical.
+all on the **vim seam**. Two of the three are genuinely REST-inexpressible:
+the pinned `Disk.VmdkCreateSpec` carries only `name` / `capacity` /
+`storage_policy` (spec-verified — no provisioning field, so `eagerzeroedthick`
+cannot be asked for over REST), and there is no per-disk multi-writer field.
+The third — controller bus-sharing — *is* REST-expressible in principle
+(`Vm.CreateSpec.scsi_adapters[].sharing` accepts `NONE`/`VIRTUAL`/`PHYSICAL`),
+but the composite folds a single fixed SCSI controller and exposes no
+`scsi_adapters` knob, so it has no bus-sharing spelling on the REST arm
+either. Rather than support each knob on a different arm, any non-default
+knob routes `vm.create` uniformly through the vim `CreateVM_Task` arm
+regardless of vCenter version (`_shared_disk_knobs_requested` generalises the
+pre-9.0 `_vim_create_required` gate; that arm requires `resource_pool` +
+`datastore` pins), and the shared-attach op is vim-only — both mirroring
+`vm.disk.grow`. All knobs at default keep the 9.0+ REST create body
+byte-identical.
 
 - **`vm.create` disk/adapter knobs.** Top-level `scsi_bus_sharing`
   (`none`→`noSharing` | `virtual`→`virtualSharing` | `physical`→`physicalSharing`)

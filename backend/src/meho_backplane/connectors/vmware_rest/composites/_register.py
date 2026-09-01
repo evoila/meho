@@ -1439,11 +1439,12 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 37 composites total -- 9 read (T5 / #508 + the 4 guest-ops
-    reads / #3100) + 28 write (T6 / #509 + the destructive-tier
+    Scope: 38 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 29 write (T6 / #509 + the destructive-tier
     ``vm.destroy`` / #3198,
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
-    ``vm.disk.grow`` / #2893, the folder-template
+    ``vm.disk.grow`` / #2893 + the WSFC/FCI shared-attach
+    ``vm.disk.attach`` / #3256, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
     ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
     hardware writes ``vm.resize`` / ``vm.nic.repoint`` /

@@ -4,7 +4,7 @@
 # for every vmware-rest composite (one parameter + response schema per op);
 # the sibling handler modules (_read.py / _write.py) carry the same marker.
 
-"""JSON Schema 2020-12 parameter + response schemas for the 37 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 38 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -1361,9 +1361,11 @@ VM_DISK_ATTACH_PARAMETER_SCHEMA: dict[str, Any] = {
                 "canonical ``[datastore] dir/disk.vmdk`` form (e.g. "
                 "``[vsanDatastore] wsfc-quorum/quorum.vmdk``). Validated "
                 "before any write; a value that does not match the "
-                "``[datastore] path.vmdk`` shape is refused with "
-                "``status='invalid_vmdk_path'`` (no shell/backing injection "
-                "reaches the reconfigure body)."
+                "``[datastore] path.vmdk`` shape, or that carries a ``..`` "
+                "path segment, is refused with ``status='invalid_vmdk_path'`` "
+                "(there is no shell on this path — the check rejects malformed "
+                "shape, control chars, and path traversal before the "
+                "reconfigure body is built)."
             ),
         },
         "controller_key": {
@@ -2262,7 +2264,8 @@ VM_DISK_ATTACH_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "``'attached'`` — the ReconfigVM_Task add reached terminal "
                 "success; ``'invalid_vmdk_path'`` — ``vmdk_path`` did not match "
-                "the ``[datastore] path.vmdk`` shape (refused before any "
+                "the ``[datastore] path.vmdk`` shape or carried a ``..`` path "
+                "segment (refused before any "
                 "write); ``'invalid_unit'`` — ``unit_number`` was out of range "
                 "or the reserved unit 7; ``'controller_not_found'`` — no SCSI "
                 "controller with ``controller_key`` on the VM; "

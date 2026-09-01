@@ -182,12 +182,14 @@ connector-related release-notes line.
   `VirtualDeviceConfigSpec` add carrying **no** `fileOperation` (attach, not
   create). Validates the `[datastore] path.vmdk` shape + the unit and refuses
   a missing/non-SCSI controller or an occupied unit before any write.
-- **Vim-uniform by necessity.** The pinned REST `VmdkCreateSpec` has no
-  provisioning field, and neither controller bus-sharing nor multi-writer has
-  a REST expression, so a non-default knob routes `vm.create` through the vim
-  `CreateVM_Task` arm regardless of vCenter version (8.x + 9.x), and the
-  attach op is vim-only — mirroring `vm.disk.grow`. Default knobs keep the
-  9.0+ REST create body byte-identical.
+- **Vim-uniform by necessity.** The composite's folded SCSI controller
+  exposes no bus-sharing knob (the REST `Vm.CreateSpec.scsi_adapters[].sharing`
+  field could carry it, but the composite folds a single fixed controller),
+  and eagerzeroedthick + multi-writer are REST-inexpressible (`VmdkCreateSpec`
+  carries only name/capacity/storage_policy), so any shared-disk knob routes
+  `vm.create` uniformly through the vim `CreateVM_Task` arm regardless of
+  vCenter version (8.x + 9.x), and the attach op is vim-only — mirroring
+  `vm.disk.grow`. Default knobs keep the 9.0+ REST create body byte-identical.
 - **Docs distinguish bus-sharing from multi-writer.** `physical` SCSI
   bus-sharing (SCSI-3 persistent reservations, for WSFC/FCI) vs per-disk
   `sharingMultiWriter` (application-managed clustering, e.g. Oracle RAC) — so

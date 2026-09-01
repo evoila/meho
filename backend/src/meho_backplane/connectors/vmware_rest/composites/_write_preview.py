@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires 25 of the 28 write composites onto the per-op preview hook
+This wires 26 of the 29 write composites onto the per-op preview hook
 shipped by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops. (The three most recent write ops —
@@ -1086,7 +1086,7 @@ async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 25 write composites. Module-level so the
+#: op_id → builder for the 26 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
@@ -1119,7 +1119,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 25 write-composite park-time preview builders. Import-time.
+    """Wire the 26 write-composite park-time preview builders. Import-time.
 
     The 9 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

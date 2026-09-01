@@ -489,11 +489,15 @@ _GIB_IN_BYTES = 1024**3
 _REST_DISK_TYPE_SCSI = "SCSI"
 
 # WSFC / FCI shared-disk knobs (#3256). All three ride the vim seam: the
-# pinned REST ``VmdkCreateSpec`` has no provisioning field, and neither
-# controller bus-sharing nor per-disk multi-writer has a REST expression, so
-# a non-default knob routes ``vm.create`` through the vim ``CreateVM_Task``
-# arm (like ``vm.disk.grow`` is vim-only) and the shared-attach leg is
-# vim-only. Every literal is spec-grounded against the pinned ``vi-json.yaml``.
+# composite's folded SCSI controller exposes no bus-sharing knob (the REST
+# ``Vm.CreateSpec.scsi_adapters[].sharing`` field could carry it, but the
+# composite folds a single fixed controller with no such knob), and
+# eagerzeroedthick provisioning + per-disk multi-writer are REST-inexpressible
+# (the pinned ``VmdkCreateSpec`` carries only name / capacity / storage_policy).
+# So any shared-disk knob routes ``vm.create`` uniformly through the vim
+# ``CreateVM_Task`` arm (like ``vm.disk.grow`` is vim-only) and the
+# shared-attach leg is vim-only. Every literal is spec-grounded against the
+# pinned ``vi-json.yaml``.
 #
 # ``VirtualSCSISharing`` enum (the controller ``sharedBus``): a bus shared
 # between VMs on the same host (``virtualSharing``) or on different hosts
@@ -543,8 +547,11 @@ _VIM_SCSI_CONTROLLER_TYPES: Final[frozenset[str]] = frozenset(
 )
 # Canonical ``[datastore] dir/disk.vmdk`` datastore-path shape. The
 # shared-attach ``vmdk_path`` is validated against this before any read/write
-# so no malformed / control-char / injection-shaped string reaches the vim
-# backing ``fileName`` (#3256 param hygiene).
+# so no malformed / control-char / ``..``-traversal value reaches the vim
+# backing ``fileName`` (#3256 param hygiene). There is no shell on the vim
+# backing path, so the defence is shape + control-char + ``..``-segment
+# rejection (see :func:`_valid_vmdk_path`), not quoting. The shape check is
+# the regex; the ``..``-segment reject is applied by the helper on top.
 _VALID_VMDK_PATH: Final[re.Pattern[str]] = re.compile(r"\[[^\[\]\r\n]+\]\s[^\r\n]+\.vmdk")
 # Default wall-clock bound for the shared-attach ReconfigVM_Task poll — the
 # 600s convention shared with disk-grow; module-global so tests can zero it.
@@ -1803,10 +1810,12 @@ def _shared_disk_knobs_requested(params: dict[str, Any]) -> bool:
     """Whether any WSFC/FCI shared-disk knob departs from its default (#3256).
 
     ``scsi_bus_sharing`` other than ``none``, or any disk carrying a
-    non-default ``provisioning`` / ``sharing``, has no REST expression and
-    routes ``vm.create`` through the vim ``CreateVM_Task`` arm regardless of
-    the target's vCenter version (mirroring how ``vm.disk.grow`` is vim-only
-    because capacity has no REST path).
+    non-default ``provisioning`` / ``sharing``: the folded controller exposes
+    no bus-sharing knob and eagerzeroedthick + multi-writer are
+    REST-inexpressible, so any such knob routes ``vm.create`` uniformly
+    through the vim ``CreateVM_Task`` arm regardless of the target's vCenter
+    version (mirroring how ``vm.disk.grow`` is vim-only because capacity has
+    no REST path).
     """
     if params.get("scsi_bus_sharing", "none") != "none":
         return True
@@ -2099,7 +2108,8 @@ async def _vm_create_via_vim(
     ``rolled_back``. The #3256 shared-disk knobs (SCSI bus-sharing on the
     folded controller, per-disk eagerzeroedthick provisioning, per-disk
     multi-writer) fold into the one ConfigSpec here — this arm is the sole
-    governed path for them since neither has a REST expression.
+    governed path for them: the folded controller exposes no bus-sharing
+    knob, and eagerzeroedthick + multi-writer are REST-inexpressible.
     """
     folder_name = params.get("folder_name")
     name = params["name"]
@@ -2318,9 +2328,10 @@ async def vm_create_composite(
     WSFC / FCI shared-disk knobs (#3256): when any of ``scsi_bus_sharing``,
     per-disk ``provisioning``, or per-disk ``sharing`` departs from its
     default, the create also rides the vim arm regardless of version — the
-    pinned REST ``VmdkCreateSpec`` has no provisioning field and neither
-    controller bus-sharing nor multi-writer has a REST expression, so vim is
-    the sole governed path (mirroring ``vm.disk.grow``). That arm needs
+    composite's folded controller exposes no bus-sharing knob, and
+    eagerzeroedthick + multi-writer are REST-inexpressible (the pinned
+    ``VmdkCreateSpec`` carries no provisioning field), so vim is the sole
+    governed path (mirroring ``vm.disk.grow``). That arm needs
     ``resource_pool`` + ``datastore`` pins; absent them it refuses with the
     structured ``placement_params`` ``rolled_back`` before any write. All
     knobs at default keep the REST path below byte-identical.
@@ -5015,6 +5026,20 @@ def _scsi_unit_occupied(devices: list[Any], controller_key: int, unit_number: in
     return False
 
 
+def _valid_vmdk_path(path: str) -> bool:
+    """Whether *path* is a safe ``[datastore] dir/disk.vmdk`` value (#3256).
+
+    Shape check (:data:`_VALID_VMDK_PATH` — a bracketed datastore + a ``.vmdk``
+    suffix, no control chars) plus a ``..``-segment reject so a traversal like
+    ``[ds] a/../b.vmdk`` cannot walk outside the intended datastore directory.
+    There is no shell on the vim backing path, so the defence is
+    malformed-shape / control-char / path-traversal rejection, not quoting.
+    """
+    if _VALID_VMDK_PATH.fullmatch(path) is None:
+        return False
+    return not any(segment == ".." for segment in re.split(r"[\\/]", path))
+
+
 def _valid_scsi_unit(unit: int) -> bool:
     """A SCSI unit number in range (0-15) and not the controller-reserved unit 7."""
     return 0 <= unit <= 15 and unit != _VIM_SCSI_CONTROLLER_UNIT
@@ -5096,9 +5121,10 @@ async def vm_disk_attach_composite(
     Flow:
 
     1. Fail-closed param hygiene before any I/O: ``vmdk_path`` must match the
-       ``[datastore] path.vmdk`` shape (``status='invalid_vmdk_path'``);
-       ``unit_number`` must be 0-15 and not the reserved unit 7
-       (``status='invalid_unit'``).
+       ``[datastore] path.vmdk`` shape and carry no ``..`` path segment
+       (``status='invalid_vmdk_path'`` — no shell on this path, so the check
+       is shape + control-char + traversal rejection); ``unit_number`` must be
+       0-15 and not the reserved unit 7 (``status='invalid_unit'``).
     2. Read the VM's ``config.hardware.device`` (``RetrievePropertiesEx``, a
        *read* — no gate) to locate the SCSI controller ``controller_key``
        (``status='controller_not_found'`` when absent / not SCSI) and confirm
@@ -5119,7 +5145,7 @@ async def vm_disk_attach_composite(
     unit_number = _coerce_int(params.get("unit_number"))
     sharing = params.get("sharing", "none")
 
-    if not isinstance(vmdk_path, str) or _VALID_VMDK_PATH.fullmatch(vmdk_path) is None:
+    if not isinstance(vmdk_path, str) or not _valid_vmdk_path(vmdk_path):
         return _attach_result(
             "invalid_vmdk_path",
             vm=vm_moid,
@@ -5129,8 +5155,8 @@ async def vm_disk_attach_composite(
             sharing=sharing,
             guidance=(
                 "vmdk_path must be a datastore path of the form "
-                "'[datastore] dir/disk.vmdk' — the existing shared VMDK created "
-                "on the first cluster node"
+                "'[datastore] dir/disk.vmdk' with no '..' path segment — the "
+                "existing shared VMDK created on the first cluster node"
             ),
         )
     if unit_number is None or not _valid_scsi_unit(unit_number):

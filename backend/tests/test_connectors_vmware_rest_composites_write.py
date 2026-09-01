@@ -4341,8 +4341,14 @@ async def test_vm_disk_attach_multi_writer_sets_backing_sharing(gate: _GateRecor
     assert gate.calls[0]["params"]["sharing"] == "multi_writer"
 
 
-async def test_vm_disk_attach_rejects_injection_shaped_vmdk_path(gate: _GateRecorder) -> None:
-    """A path not matching '[datastore] path.vmdk' is refused before any I/O (hygiene)."""
+async def test_vm_disk_attach_rejects_malformed_vmdk_path(gate: _GateRecorder) -> None:
+    """A value not matching '[datastore] path.vmdk' is refused before any I/O (hygiene).
+
+    There is no shell on the vim backing path — the defence is
+    malformed-shape / control-char rejection, not quoting — but a value that
+    lacks the datastore-bracket + .vmdk shape (here a stray metacharacter
+    string) is still refused before the reconfigure body is built.
+    """
     conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
     out = await vm_disk_attach_composite(
         operator=_make_operator(),
@@ -4358,6 +4364,31 @@ async def test_vm_disk_attach_rejects_injection_shaped_vmdk_path(gate: _GateReco
     assert isinstance(out, dict)
     assert out["status"] == "invalid_vmdk_path"
     # Neither a read nor a write fired, and nothing was gated.
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_attach_rejects_dotdot_path_traversal(gate: _GateRecorder) -> None:
+    """A shape-valid path carrying a '..' segment is refused before any I/O (#3256).
+
+    ``[ds] a/../b.vmdk`` passes the bracket + .vmdk shape regex, so the
+    ``..``-segment reject (defence-in-depth on a dangerous, approval-gated op)
+    is what stops it from walking outside the intended datastore directory.
+    """
+    conn = _DiskAttachConnector(devices=[_scsi_controller(key=1000)])
+    out = await vm_disk_attach_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "vmdk_path": "[vsanDatastore] wsfc-quorum/../../secret/other.vmdk",
+            "controller_key": 1000,
+            "unit_number": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "invalid_vmdk_path"
     assert conn.vmomi_calls == []
     assert gate.calls == []
 

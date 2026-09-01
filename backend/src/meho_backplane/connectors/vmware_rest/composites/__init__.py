@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 37 composites land before
+``endpoint_descriptor`` upserts for the 38 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -31,10 +31,11 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 28 write composites (G3.1-T6 / #509, the guest-ops writes
+* 29 write composites (G3.1-T6 / #509, the guest-ops writes
   ``vm.guest.file.write`` / #3100 + ``vm.guest.program.run`` / #3255,
   single-VM ``vm.power`` /
-  #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, the
+  #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893 + the WSFC/FCI
+  shared-attach ``vm.disk.attach`` / #3256, the
   folder-template ``vm.clone_from_template`` / #2894, the vim
   cluster / inventory writes ``cluster.drs_rule.create`` +
   ``folder.create`` / #2895, the #2891 post-clone hardware

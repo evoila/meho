@@ -10,9 +10,15 @@ PowerShell-over-SSH transport. This is the c1sql1 SQL-FCI shared-disk path:
 attach an iSCSI target, then provision the raw disk into a volume.
 
 ``iscsi.connect`` and ``disk.format`` are ``caution`` (recoverable
-provisioning). ``disk.format`` additionally **fails closed** on a disk that
-already carries a partition table (``PartitionStyle != RAW``) unless
-``force=true`` is passed — it will not silently clobber data.
+provisioning). ``disk.format`` is non-destructive by construction: it
+``Initialize-Disk``s only a ``RAW`` disk and ``New-Partition -UseMaximumSize``
+only allocates **unallocated** space, so it never removes an existing
+partition or its data. It fails closed on a disk that already carries a
+partition table (``PartitionStyle != RAW``) unless ``force=true`` is passed;
+``force=true`` then only provisions the disk's free space (a full disk fails
+at ``New-Partition``), it does **not** wipe. A true data-destroying wipe
+(``Clear-Disk -RemoveData``) is deliberately NOT offered here — it would be a
+separate ``dangerous`` op with its own ticket, per the #3259 tier doctrine.
 
 Deferred: iSCSI CHAP
 --------------------
@@ -45,6 +51,7 @@ References
 
 from __future__ import annotations
 
+import string
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
@@ -171,11 +178,16 @@ async def winsrv_iscsi_connect(
 
 
 def _validate_drive_letter(raw: Any) -> str | None:
-    """Return an uppercased single-letter drive letter, or ``None`` when absent."""
+    """Return an uppercased single-letter drive letter, or ``None`` when absent.
+
+    Accepts only ASCII ``A-Z`` / ``a-z`` (``string.ascii_letters``) — not
+    ``str.isalpha`` (which admits Unicode letters), so the Python check agrees
+    with the schema's ``^[A-Za-z]$`` pattern exactly.
+    """
     if raw is None:
         return None
-    if not isinstance(raw, str) or len(raw) != 1 or not raw.isalpha():
-        raise ValueError(f"drive_letter must be a single letter A-Z; got {raw!r}")
+    if not isinstance(raw, str) or len(raw) != 1 or raw not in string.ascii_letters:
+        raise ValueError(f"drive_letter must be a single ASCII letter A-Z; got {raw!r}")
     return raw.upper()
 
 
@@ -188,10 +200,11 @@ async def winsrv_disk_format(
     """Handler for ``winsrv.storage.disk.format`` (caution) — provision a raw disk.
 
     Initializes disk ``disk_number`` (GPT, only when it is ``RAW``), creates a
-    max-size partition (with ``drive_letter`` or an auto-assigned letter), and
-    formats it (``NTFS`` default / ``ReFS``, optional ``label``). Fails closed
-    on a disk that already carries a partition table unless ``force=true`` —
-    so an accidental format never silently clobbers data.
+    ``-UseMaximumSize`` partition from unallocated space (with ``drive_letter``
+    or an auto-assigned letter), and formats that new volume (``NTFS`` default
+    / ``ReFS``, optional ``label``). Non-destructive: it never removes an
+    existing partition or its data. Fails closed on a non-``RAW`` disk unless
+    ``force=true``, which then only provisions the disk's free space.
     """
     disk_number = params["disk_number"]
     if not isinstance(disk_number, int) or isinstance(disk_number, bool) or disk_number < 0:
@@ -214,7 +227,7 @@ async def winsrv_disk_format(
         f"$d = Get-Disk -Number {disk_number}; "
         f"if ($d.PartitionStyle -ne 'RAW' -and -not {force}) {{ "
         f'throw "disk {disk_number} is not RAW (PartitionStyle=$($d.PartitionStyle)); '
-        'pass force=true to reformat" }; '
+        'pass force=true to provision its free space" }; '
         f"if ($d.PartitionStyle -eq 'RAW') {{ "
         f"Initialize-Disk -Number {disk_number} -PartitionStyle GPT | Out-Null }}; "
         f"$p = New-Partition -DiskNumber {disk_number} -UseMaximumSize {letter_clause}; "
@@ -375,13 +388,15 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
         summary="Initialize + partition + format a raw disk (caution; RAW-guarded).",
         description=(
             "Provisions disk ``disk_number`` into a volume: initializes it "
-            "GPT (only when RAW), creates a max-size partition (with "
-            "``drive_letter`` or an auto-assigned letter), and formats it "
-            "(``NTFS`` default / ``ReFS``, optional ``label``). FAILS CLOSED "
-            "on a disk that already carries a partition table unless "
-            "``force=true`` — it never silently clobbers data. safety_level="
-            "caution — the SQL-FCI shared-disk provisioning step after "
-            "``iscsi.connect``."
+            "GPT (only when RAW), creates a ``-UseMaximumSize`` partition from "
+            "unallocated space (with ``drive_letter`` or an auto-assigned "
+            "letter), and formats that new volume (``NTFS`` default / ``ReFS``, "
+            "optional ``label``). Non-destructive — it never removes an "
+            "existing partition or its data. FAILS CLOSED on a non-RAW disk "
+            "unless ``force=true``, which then only provisions the disk's free "
+            "space (it does NOT wipe; a true wipe would be a separate "
+            "``dangerous`` op). safety_level=caution — the SQL-FCI shared-disk "
+            "provisioning step after ``iscsi.connect``."
         ),
         parameter_schema={
             "type": "object",
@@ -406,9 +421,13 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
                 "force": {
                     "type": "boolean",
                     "description": (
-                        "Reformat a disk that already carries a partition "
-                        "table (DESTROYS its data). Default false — a "
-                        "non-RAW disk is refused without this."
+                        "Allow provisioning on a disk that is already "
+                        "initialized (non-RAW): a new volume is created from "
+                        "the disk's UNALLOCATED space only — existing "
+                        "partitions and their data are left intact (a full "
+                        "disk fails). Default false, so a non-RAW disk is "
+                        "refused. This never wipes; a data-destroying wipe "
+                        "would be a separate dangerous op."
                     ),
                 },
             },
@@ -434,8 +453,10 @@ STORAGE_OPS: tuple[WinsrvOp, ...] = (
         llm_instructions={
             "when_to_use": (
                 "Provision a newly-attached raw disk (e.g. after "
-                "``iscsi.connect``) into a formatted volume. Refuses a disk "
-                "with an existing partition table unless force=true. "
+                "``iscsi.connect``) into a formatted volume. Non-destructive "
+                "— only unallocated space becomes the new volume; existing "
+                "partitions/data are untouched. Refuses a non-RAW disk unless "
+                "force=true (which still only uses free space). "
                 "safety_level=caution. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {

@@ -286,8 +286,14 @@ generated Go client knows the token).
   Vault-minted-password flow (rke2 `token.rotate` mold) is a follow-up.
 - **iSCSI CHAP** is not supported (`iscsi.connect` connects against a trusted
   fabric); a Vault-brokered CHAP flow is a follow-up.
-- **`disk.format`** refuses a disk that already carries a partition table unless
-  `force=true`, so an accidental format never silently clobbers data.
+- **`disk.format`** is non-destructive by construction: it `Initialize-Disk`s
+  only a `RAW` disk and `New-Partition -UseMaximumSize` only allocates
+  **unallocated** space, so it never removes an existing partition or its data.
+  It refuses a non-`RAW` disk unless `force=true`; `force=true` then only
+  provisions the disk's free space (a full disk fails at `New-Partition`) — it
+  does **not** wipe. A true data-destroying wipe (`Clear-Disk -RemoveData`) is
+  deliberately not offered on this `caution` op: per the #3259 tier doctrine a
+  wipe belongs to a separate `dangerous` op with its own ticket.
 - **Consumer proof against a live c1sql1 lab node is an OPEN acceptance
   criterion** — the c1sql1 Windows Server 2022 VMs do not exist yet; the probe +
   feature-install + service-ops proof is deferred to the lab program

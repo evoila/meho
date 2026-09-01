@@ -540,6 +540,8 @@ async def test_disk_format_force_flag_rendered() -> None:
     [
         {"disk_number": 3, "filesystem": "ext4"},
         {"disk_number": 3, "drive_letter": "EE"},
+        {"disk_number": 3, "drive_letter": "Ä"},  # unicode letter — ASCII-only per the schema
+        {"disk_number": 3, "drive_letter": "5"},
         {"disk_number": -1},
     ],
 )

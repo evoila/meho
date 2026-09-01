@@ -136,10 +136,11 @@ connector-related release-notes line.
   approval starts no program. Guest OS credentials resolve from the target's
   Vault `secret_ref` (`guest_username` / `guest_password`), never in params.
 - **Secret hygiene.** `arguments` and `env` values (which can carry secrets)
-  are redacted from every durable surface — the approval preview echoes only
-  the program identity + argument byte size + env-var names, the result
-  echoes only PID / exit code / times, and the audit row stores a params
-  hash — proven by test.
+  are kept off the governed surfaces — the approval preview echoes only the
+  program identity + argument byte size + env-var names, the operation
+  result echoes only PID / exit code / times, and the sub-op policy gate
+  never sees them (verified by test); the audit row records a params hash,
+  not raw params. Mirrors `guest.file.write` excluding `content`.
 
 ### Added — flight recorder: operator mutation surface for capture policy (#3272)
 

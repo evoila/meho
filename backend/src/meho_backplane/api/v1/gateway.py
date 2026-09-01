@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime
 from typing import Annotated, Any, Final, Literal
 
 import structlog
@@ -117,6 +118,12 @@ class GatewayCommandEnvelope(BaseModel):
     # ``None`` for a targetless synthetic op (net.*); a resolved descriptor
     # the runner's handler duck-reads otherwise.
     target_descriptor: dict[str, Any] | None
+    # Remote-write signing (#3189): the centre's Ed25519 ``signature`` over the
+    # canonical work-item payload and the ``expires_at`` freshness bound it
+    # covers, both verified offline at the edge. ``None`` for a ``safe``
+    # capability (the read path, unsigned) — signing is a write-tier property.
+    signature: str | None = None
+    expires_at: datetime | None = None
 
 
 class GatewayResultBody(BaseModel):
@@ -160,6 +167,8 @@ def _envelope(command: GatewayCommand) -> GatewayCommandEnvelope:
         op_id=command.op_id,
         params=command.params,
         target_descriptor=command.target_descriptor,
+        signature=command.signature,
+        expires_at=command.expires_at,
     )
 
 

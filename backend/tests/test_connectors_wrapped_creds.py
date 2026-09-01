@@ -363,10 +363,16 @@ def test_screen_refuses_when_target_descriptor_is_none() -> None:
 async def test_executor_refuses_remote_write_without_wrapped_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # End-to-end edge enforcement: with the composed gate permitting (its real
-    # wiring is #3189), a remote-write item whose target carries a standing
-    # secret_ref is still refused at the edge by the mechanism-3 credential
-    # screen — no standing runner credential ever rides the write tier.
+    # End-to-end edge enforcement: with the mechanism-1 signature check (#3189)
+    # satisfied and the allowlist gate permitting (its real wiring is #3190), a
+    # remote-write item whose target carries a standing secret_ref is still
+    # refused at the edge by the mechanism-3 credential screen — no standing
+    # runner credential ever rides the write tier.
+    import base64
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
     from meho_backplane.runner import executor
     from meho_backplane.runner.satellite_tier import RemoteWriteGateDecision
     from meho_backplane.runner.wire import (
@@ -374,12 +380,24 @@ async def test_executor_refuses_remote_write_without_wrapped_credential(
         RunnerPrincipal,
         RunnerWorkItem,
     )
+    from meho_backplane.runner.work_item_signing import params_digest, sign_remote_write_item
+    from meho_backplane.settings import get_settings
 
     monkeypatch.setattr(
         executor,
         "evaluate_remote_write_gate",
         lambda **_kw: RemoteWriteGateDecision(permitted=True, reason="permitted-in-test"),
     )
+
+    # Provision the verify key + sign the item so it clears the mechanism-1
+    # signature screen and reaches the mechanism-3 credential screen under test.
+    signing_key = Ed25519PrivateKey.generate()
+    verify_b64 = base64.b64encode(signing_key.public_key().public_bytes_raw()).decode("ascii")
+    monkeypatch.setenv("SATELLITE_WRITE_VERIFY_KEY", verify_b64)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
 
     descriptor = ResolvedTargetDescriptor(
         id=uuid.uuid4(),
@@ -388,6 +406,15 @@ async def test_executor_refuses_remote_write_without_wrapped_credential(
         product="vmware",
         host="vc-a.example.internal",
         secret_ref="targets/vc-a",  # standing/broad — not a wrapped token
+    )
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    params: dict[str, object] = {}
+    signature = sign_remote_write_item(
+        signing_key,
+        op_id="vmware.vm.tag_set",
+        params_hash=params_digest(params),
+        target_scope=str(descriptor.id),
+        expires_at=expires_at,
     )
     item = RunnerWorkItem(
         check_ref="chk-rw",
@@ -399,6 +426,9 @@ async def test_executor_refuses_remote_write_without_wrapped_credential(
             sub="runner-svc", tenant_id=uuid.uuid4(), tenant_role=TenantRole.READ_ONLY
         ),
         target_descriptor=descriptor,
+        params=params,
+        signature=signature,
+        expires_at=expires_at,
     )
 
     result = await executor.execute_work_item(item)

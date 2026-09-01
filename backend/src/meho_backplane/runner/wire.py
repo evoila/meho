@@ -29,6 +29,7 @@ treats it purely as a cache key — it never parses it.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -134,6 +135,16 @@ class RunnerWorkItem(BaseModel):
     ``params``, the ``safety_level`` the runner re-checks (defence in
     depth), the principal context, and the resolved target descriptor
     (``None`` for targetless synthetic ops such as ``net.*``).
+
+    Remote-write signing (#3189): a ``caution`` / ``remote-write`` item
+    additionally carries the centre's Ed25519 ``signature`` over its
+    canonical payload and the ``expires_at`` freshness bound the signature
+    covers, both verified in
+    :func:`~meho_backplane.runner.executor._screen_item` before execution.
+    Both are ``None`` for a ``safe`` read item (the recurring assignment
+    path materialises only ``safe`` ops and never signs them) -- signing is
+    a write-tier property, so their absence on a ``safe`` item is correct,
+    not a missing field.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -148,6 +159,8 @@ class RunnerWorkItem(BaseModel):
     safety_level: str
     principal: RunnerPrincipal
     target_descriptor: ResolvedTargetDescriptor | None = None
+    signature: str | None = None
+    expires_at: datetime | None = None
 
 
 class RunnerAssignment(BaseModel):

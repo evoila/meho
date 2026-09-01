@@ -95,6 +95,17 @@ dependencies = [
     # AsyncMongoClient runs commands off the event loop natively (no
     # ``asyncio.to_thread`` wrapper needed).
     "pymongo>=4.13,<5",
+    # TDS wire-protocol driver for the typed ``mssql`` SQL Server connector
+    # (#3264). python-tds (import ``pytds``) is a **pure-Python** TDS
+    # implementation — no unixODBC + msodbcsql (pyodbc) and no FreeTDS
+    # (pymssql) system packages in the backplane image, so it adds a single
+    # pip dependency exactly like ``asyncpg`` does for postgres, not an apt
+    # layer. It is a synchronous DBAPI driver (paramstyle ``pyformat``), run
+    # off the event loop via ``asyncio.to_thread`` (the hvac / mail / rke2
+    # precedent). MIT-licensed; the transport decision + driver comparison
+    # (pyodbc / pymssql / python-tds) is recorded in
+    # ``docs/codebase/connectors-mssql.md``.
+    "python-tds>=1.17,<2",
     # DNS resolver library for the net.dns_lookup diagnostic op (#2409).
     # dnspython drives typed record lookups (A/AAAA/CNAME/MX/TXT/SRV/NS/SOA,
     # reverse PTR) and per-query resolver selection via
@@ -403,6 +414,14 @@ ignore_missing_imports = true
 # later ships stubs.
 [[tool.mypy.overrides]]
 module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true
+
+# python-tds (import ``pytds``) ships no type stubs / ``py.typed`` marker
+# as of 1.17. The typed ``mssql`` connector (#3264) is the only importer;
+# it wraps the untyped driver behind its own typed session layer. Drop this
+# override if upstream later ships stubs.
+[[tool.mypy.overrides]]
+module = ["pytds", "pytds.*"]
 ignore_missing_imports = true
 
 # pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.

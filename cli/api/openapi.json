@@ -32443,6 +32443,7 @@
               "loki",
               "mongodb",
               "msad",
+              "mssql",
               "nsx",
               "pfsense",
               "postgres",

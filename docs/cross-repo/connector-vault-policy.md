@@ -326,20 +326,30 @@ path **before** an operator approves the parked write.
 ### 6.1 Write-capability policy stanza
 
 Like the §2 reads, KV-v2 writes are scoped per operator through ACL
-policy templating. KV-v2 authorizes a write against the **`/data/`**
-path (the value path); `vault.kv.delete`'s version soft-delete
-(`POST <mount>/delete/<path>`) is likewise authorized by `update` on the
-data path. Add this stanza alongside the §2 read grants (it is
-*additive* — keep both):
+policy templating. KV-v2 authorizes each write against a **different**
+path prefix: `vault.kv.put` / `vault.kv.patch` write the value under
+`<mount>/data/<path>` (`create`/`update` there), while `vault.kv.delete`'s
+version soft-delete (`POST <mount>/delete/<path>`) is authorized by
+`update` on the **`/delete/`** path — *not* the data path (evoila/meho#3274,
+lab-verified in claude-rdc-hetzner-dc#2814). Add **both** stanzas below
+alongside the §2 read grants (they are *additive* — keep all):
 
 ```hcl
 # Per-target connector secret WRITES, scoped to the operator's own
 # identity. <ACCESSOR> is the JWT mount accessor (resolve it as in §2).
 # `create` covers a first write to a path; `update` covers a subsequent
-# write (new version) and the version soft-delete. Vault requires BOTH
-# for an unconditional `vault.kv.put` / `vault.kv.patch`.
+# write (new version). Vault requires BOTH for an unconditional
+# `vault.kv.put` / `vault.kv.patch` on the /data/ path.
 path "secret/data/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
   capabilities = ["create", "read", "update"]
+}
+
+# The version soft-delete (`vault.kv.delete`) POSTs to <mount>/delete/<path>
+# and Vault authorizes it with `update` on that /delete/ path — a SEPARATE
+# grant from the /data/ stanza above. Omit this and every delete is denied
+# post-approval even though /data/ carries `update` (evoila/meho#3274).
+path "secret/delete/targets/{{identity.entity.aliases.<ACCESSOR>.name}}/*" {
+  capabilities = ["update"]
 }
 ```
 
@@ -354,13 +364,16 @@ Notes:
   into one stanza if you prefer (the connector's write path does not
   itself read the value, but keeping `read` here is harmless and avoids
   two near-identical path blocks).
-- **`vault.kv.delete` needs only `update`** on the data path — the
-  soft-delete is a write against the version metadata, not a separate
-  `delete` capability on `/data/`. The `["create", "read", "update"]`
-  grant above already covers it.
-- **No `/metadata/` write grant is needed** for these three ops. They
-  operate on `/data/` (and the version soft-delete endpoint, authorized
-  by `update` on `/data/`); destroying versions or deleting all metadata
+- **`vault.kv.delete` needs `update` on the `/delete/` path** — the
+  version soft-delete POSTs to `<mount>/delete/<path>`, which Vault
+  authorizes with `update` on *that* path, **not** `/data/`
+  (evoila/meho#3274). This is why the second stanza above is required; the
+  `/data/` grant alone does **not** authorize a soft-delete, so a policy
+  that ships only `/data/` denies every delete post-approval. It is not a
+  `delete` capability and not a `/metadata/` grant.
+- **No `/metadata/` write grant is needed** for these three ops. `put` /
+  `patch` operate on `/data/`; the version soft-delete operates on
+  `/delete/`. Destroying versions or deleting all metadata
   (`vault kv metadata delete`) is **not** a wired op and deliberately
   needs no grant.
 - The **same per-operator templating constraints** from §2 apply: no
@@ -371,10 +384,12 @@ Notes:
 
 The backplane runs this exact check at **park time** — when a
 `vault.kv.put`/`patch`/`delete` parks for approval, the dispatcher
-probes `POST sys/capabilities-self` on the target `secret/data/<path>`
-and surfaces a `permission_preflight` banner on the approval row
-(`will_be_denied: true` when the token lacks `create`/`update`), so an
-operator is **not** asked to approve a write that Vault will then reject
+probes `POST sys/capabilities-self` on the path the op authorizes
+against (`secret/data/<path>` for `put`/`patch`, `secret/delete/<path>`
+for `delete` — evoila/meho#3274) and surfaces a `permission_preflight`
+banner on the approval row (`will_be_denied: true` when the token lacks
+the required capability), so an operator is **not** asked to approve a
+write that Vault will then reject
 ([`operations/dispatcher.py`](../../backend/src/meho_backplane/operations/dispatcher.py)
 `_handle_needs_approval` →
 [`connectors/vault/ops.py`](../../backend/src/meho_backplane/connectors/vault/ops.py)
@@ -389,9 +404,12 @@ would mask a missing operator grant):
 
 ```bash
 # Replace <op-sub> with the operator's JWT `sub` and <target> with the
-# target name; this is the exact `/data/` path the connector writes.
+# target name. put/patch authorize on the /data/ path; the soft-delete
+# authorizes on the /delete/ path (evoila/meho#3274).
 vault token capabilities "secret/data/targets/<op-sub>/<target>"
-# Expect for a writable path: create read update
+# Expect for a writable put/patch path: create read update
+vault token capabilities "secret/delete/targets/<op-sub>/<target>"
+# Expect for a soft-delete-capable path: update
 ```
 
 Or, equivalently, against the raw API (what the backplane preflight

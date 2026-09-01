@@ -366,6 +366,22 @@ connector-related release-notes line.
   provisioning is documented in `docs/cross-repo/vault-provisioning.md` §8;
   lab-verified in `claude-rdc-hetzner-dc#2814` (PR `#2815`).
 
+### Fixed — vault-1.x: park-time capability preflight probes the KV-v2 `delete/` path for `vault.kv.delete` (#3274)
+
+- The park-time write-capability preflight probed `sys/capabilities-self` on
+  `<mount>/data/<path>` for **every** KV write — but a version soft-delete
+  (`delete_secret_versions`) `POST`s to `<mount>/delete/<path>` and Vault
+  authorizes it with `update` on that **delete** path, not the data path. The
+  preflight therefore gave a false `will_be_denied` verdict for
+  `vault.kv.delete` — the exact "wasted approval" failure the preflight
+  (#1504) exists to prevent. `vault_kv_write_target_path` is now op-aware:
+  `vault.kv.delete` renders the `delete/` path, `put`/`patch` keep the `data/`
+  path. The same error is corrected in
+  `docs/cross-repo/connector-vault-policy.md` §6.1 — the `meho-mcp` write
+  policy needs an `update` grant on `secret/delete/…` (a second stanza), not
+  just `secret/data/…`, to authorize a soft-delete. Found during the #3274
+  lab verification (`claude-rdc-hetzner-dc#2814`).
+
 ### Added — satellite write path: per-runner capability allowlist (#3190)
 
 - Mechanism 2 of the composed write-tier gate: a per-runner-principal

@@ -518,13 +518,20 @@ post-approval.
 To surface that **before** parking, `_handle_needs_approval`
 (`operations/dispatcher.py`) runs a permission preflight for the KV write
 ops. The preflight is `vault_kv_write_capability_preflight` (`ops.py`):
-it logs in exactly as the real write does
-(`vault_client_for_operator`, the `meho-mcp` role) and issues
-`POST sys/capabilities-self` on the op's `<mount>/data/<path>`
-(`client.sys.get_capabilities(paths=[...])`). It compares the granted
-capabilities against the per-op requirement in
-`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update`;
-`delete` needs `update`) and returns a redaction-safe summary:
+it logs in exactly as the real write does (through
+`vault_client_for_target`, under the **resolved per-target role** — the
+target's `extras["vault_role"]` or the settings-global `meho-mcp`, #3274 —
+so the banner reflects the role that will execute) and issues
+`POST sys/capabilities-self` on the exact path the op authorizes against
+(`client.sys.get_capabilities(paths=[...])`). That path is op-aware
+(`vault_kv_write_target_path`): `put`/`patch` render `<mount>/data/<path>`,
+but `vault.kv.delete`'s version soft-delete POSTs to `<mount>/delete/<path>`
+and Vault authorizes it with `update` on that **`/delete/`** path — not the
+data path (#3274; probing `/data/` for a delete gave a false pass). It
+compares the granted capabilities against the per-op requirement in
+`VAULT_KV_WRITE_CAPABILITIES` (`put`/`patch` need `create`+`update` on the
+data path; `delete` needs `update` on the delete path) and returns a
+redaction-safe summary:
 
 ```python
 {"check": "vault.capabilities-self", "path": "secret/data/...",

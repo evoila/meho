@@ -1208,17 +1208,27 @@ def test_kv_read_ops_do_not_require_approval(op_id: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("params", "expected"),
+    ("op_id", "params", "expected"),
     [
-        ({"path": "meho/test/x"}, "secret/data/meho/test/x"),
-        ({"mount": "kv", "path": "meho/y"}, "kv/data/meho/y"),
+        # put / patch authorize on the data path.
+        ("vault.kv.put", {"path": "meho/test/x"}, "secret/data/meho/test/x"),
+        ("vault.kv.patch", {"mount": "kv", "path": "meho/y"}, "kv/data/meho/y"),
         # The handler-mirroring strip: leading slash + surrounding space.
-        ({"path": "  /meho/z  "}, "secret/data/meho/z"),
+        ("vault.kv.put", {"path": "  /meho/z  "}, "secret/data/meho/z"),
+        # #3274: the version soft-delete authorizes on the DELETE path,
+        # not the data path — mirroring hvac's POST <mount>/delete/<path>.
+        ("vault.kv.delete", {"path": "meho/test/x"}, "secret/delete/meho/test/x"),
+        ("vault.kv.delete", {"mount": "kv", "path": "meho/y"}, "kv/delete/meho/y"),
     ],
 )
-def test_write_target_path_renders_data_path(params: dict[str, Any], expected: str) -> None:
-    """The preflight probes ``<mount>/data/<path>`` — the KV-v2 write path."""
-    assert vault_kv_write_target_path(params) == expected
+def test_write_target_path_renders_authorization_path(
+    op_id: str, params: dict[str, Any], expected: str
+) -> None:
+    """The preflight probes the path the op authorizes against, per op-id.
+
+    put/patch -> ``<mount>/data/<path>``; delete -> ``<mount>/delete/<path>``.
+    """
+    assert vault_kv_write_target_path(op_id, params) == expected
 
 
 def test_write_capabilities_cover_every_write_op() -> None:
@@ -1286,20 +1296,54 @@ async def test_preflight_passes_for_role_with_write(
 
 
 @pytest.mark.asyncio
-async def test_preflight_delete_needs_only_update(
+async def test_preflight_delete_probes_delete_path_needs_only_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``vault.kv.delete`` authorizes against ``update`` on the data path."""
+    """``vault.kv.delete`` probes ``update`` on the DELETE path, not data (#3274).
+
+    hvac's ``delete_secret_versions`` POSTs to ``<mount>/delete/<path>`` and
+    Vault authorizes it with ``update`` there — so the preflight must probe
+    that path. A token holding ``update`` on ``secret/delete/meho/v`` passes;
+    the old code probed ``secret/data/meho/v`` and would have missed the grant.
+    """
     fake = install_fake_vault(monkeypatch)
-    fake.sys.capabilities_by_path = {"secret/data/meho/v": ["read", "update"]}
+    fake.sys.capabilities_by_path = {"secret/delete/meho/v": ["read", "update"]}
 
     result = await vault_kv_write_capability_preflight(
         _make_operator(), "vault.kv.delete", {"path": "meho/v", "versions": [1]}
     )
 
     assert result is not None
+    assert result["path"] == "secret/delete/meho/v"
     assert result["required"] == ["update"]
     assert result["will_be_denied"] is False
+    # The probe queried the delete path, never the data path.
+    assert fake.sys.get_capabilities_calls == [
+        {"paths": ["secret/delete/meho/v"], "token": None, "accessor": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preflight_delete_denied_when_only_data_path_granted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant on ``data/`` but not ``delete/`` flags the delete as denied (#3274).
+
+    The regression this fix prevents: a token with ``update`` on the data
+    path (but nothing on the delete path) would have falsely passed the old
+    preflight, wasting a four-eyes approval on a delete Vault then rejects.
+    """
+    fake = install_fake_vault(monkeypatch)
+    fake.sys.capabilities_by_path = {"secret/data/meho/v": ["create", "read", "update"]}
+
+    result = await vault_kv_write_capability_preflight(
+        _make_operator(), "vault.kv.delete", {"path": "meho/v", "versions": [1]}
+    )
+
+    assert result is not None
+    assert result["path"] == "secret/delete/meho/v"
+    assert result["granted"] == []
+    assert result["will_be_denied"] is True
 
 
 @pytest.mark.asyncio

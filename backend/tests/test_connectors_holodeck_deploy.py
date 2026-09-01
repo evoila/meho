@@ -50,8 +50,8 @@ import pytest
 import meho_backplane.connectors.holodeck  # noqa: F401 -- registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
+from meho_backplane.connectors._shared.pwsh import PwshRunError
 from meho_backplane.connectors.holodeck import HolodeckConnector
-from meho_backplane.connectors.holodeck._pwsh import PwshRunError
 from meho_backplane.connectors.holodeck.connector import _WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.holodeck.ops_deploy import (
     DEPLOY_OPS,

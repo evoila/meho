@@ -16,7 +16,7 @@ G3.8-T1 (#853) skeleton -- the tier-4 closer in the SSH-transport
 family (after bind9 G3.4 and pfSense G3.7). HoloRouter exposes no
 REST API; the connector's only transport is SSH-to-root driving
 ``pwsh -EncodedCommand`` for Holodeck cmdlets, mediated by
-:mod:`meho_backplane.connectors.holodeck._pwsh`.
+:mod:`meho_backplane.connectors._shared.pwsh`.
 
 This module ships:
 
@@ -70,9 +70,9 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
-from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
 from meho_backplane.connectors.holodeck.ops_deploy import (
     HOLODECK_WHEN_TO_USE_DEPLOY_BY_GROUP,
@@ -246,7 +246,7 @@ class HolodeckConnector(SshConnector):
 
     **Transport: PowerShell-over-SSH.** Holodeck cmdlets reach the
     appliance through ``pwsh -EncodedCommand <base64-utf16le>``
-    routed by :func:`~meho_backplane.connectors.holodeck._pwsh.pwsh_run`.
+    routed by :func:`~meho_backplane.connectors._shared.pwsh.pwsh_run`.
     Output is parsed via stdlib :mod:`json` from the cmdlet's
     ``ConvertTo-Json`` pipe -- the #371 design correction (2026-05-21)
     supersedes the original CliXml note.
@@ -255,6 +255,17 @@ class HolodeckConnector(SshConnector):
     product = "holodeck"
     version = "9.0"
     impl_id = "holodeck-ssh"
+
+    #: The PowerShell executable the shared ``_shared.pwsh`` transport
+    #: invokes on the remote host. ``pwsh`` (PowerShell 7) -- the
+    #: Photon-OS HoloRouter appliance ships PS7, unlike a Windows Server
+    #: host (which has ``powershell`` 5.1). This is the transport
+    #: default, set explicitly here for self-documentation.
+    POWERSHELL_EXECUTABLE = "pwsh"
+
+    #: The structured-log event name the shared transport emits per run,
+    #: kept connector-scoped so log queries stay per-connector.
+    POWERSHELL_LOG_EVENT = "holodeck_pwsh_executed"
 
     async def fingerprint(
         self,

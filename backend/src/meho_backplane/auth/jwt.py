@@ -933,6 +933,50 @@ def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _extract_approver(claims: Any, settings: Settings) -> bool:
+    """Extract the approve-only ``approver`` capability flag from *claims* (#3243).
+
+    The ``approver`` claim is **optional** and **fail-closed**: a token
+    that carries no claim — every pre-existing token, and every principal
+    whose Keycloak client does not emit it — resolves to ``False``. The
+    flag is orthogonal to
+    :class:`~meho_backplane.auth.operator.TenantRole`; it grants the
+    approvals plane (list / show / approve / reject / decide) **without**
+    granting ``call_operation`` dispatch, so a dedicated approver
+    principal can be provisioned as ``read_only`` role + ``approver=true``
+    and clear a four-eyes gate while remaining unable to dispatch ops
+    (:func:`~meho_backplane.auth.rbac.require_approvals_access`).
+
+    Accepted shapes mirror :func:`_extract_platform_admin`: a JSON boolean
+    ``true`` / ``false`` (the canonical Keycloak boolean protocol-mapper
+    output) or the strings ``"true"`` / ``"false"`` (case-insensitive) for
+    realms whose mapper emits the claim as a string. Only an explicit
+    truthy value grants the flag; every other shape (absent, ``null``, a
+    number, an object, an unrecognised string) fails closed to ``False`` —
+    a malformed claim must never *grant* the approvals capability. A
+    present-but-malformed value is logged under ``malformed_approver_claim``.
+
+    The claim name is configurable via ``JWT_APPROVER_CLAIM_NAME`` (default
+    ``approver``) so realms that surface the flag under a different
+    attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_approver_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        return raw.strip().lower() == "true"
+    log = structlog.get_logger(__name__)
+    log.warning(
+        "malformed_approver_claim",
+        claim_name=claim_name,
+        reason="not_a_boolean",
+    )
+    return False
+
+
 def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
     """Extract the optional ``runner_id`` claim as a :class:`UUID`.
 
@@ -1024,6 +1068,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     capabilities = _extract_capabilities(claims, settings)
     scopes = _extract_scopes(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
+    approver = _extract_approver(claims, settings)
     runner_id = _extract_runner_id(claims, settings)
     if principal_kind is PrincipalKind.RUNNER and runner_id is None:
         # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
@@ -1048,6 +1093,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             capabilities=capabilities,
             scopes=scopes,
             platform_admin=platform_admin,
+            approver=approver,
             runner_id=runner_id,
         )
     except pydantic.ValidationError as exc:

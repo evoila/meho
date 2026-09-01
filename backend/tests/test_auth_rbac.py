@@ -60,7 +60,11 @@ from fastapi.testclient import TestClient
 from meho_backplane.api.v1.rbac_test import router as rbac_test_router
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import authorize_tenant_scope, require_role
+from meho_backplane.auth.rbac import (
+    authorize_tenant_scope,
+    require_approvals_access,
+    require_role,
+)
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -249,6 +253,97 @@ def test_require_role_read_only_passes_read_only_gate() -> None:
     for role in (TenantRole.READ_ONLY, TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
         op = _make_operator(role)
         assert dep(operator=op) is op
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b — require_approvals_access: approve-only, decoupled from dispatch
+# (#3243)
+# ---------------------------------------------------------------------------
+
+
+def _approver_operator(role: TenantRole, *, approver: bool, sub: str = "op-appr") -> Operator:
+    """A synthetic :class:`Operator` carrying the orthogonal ``approver`` flag."""
+    return Operator(
+        sub=sub,
+        name="Approver",
+        email="approver@example.com",
+        raw_jwt="unit-fake-jwt",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=role,
+        approver=approver,
+    )
+
+
+def test_approvals_access_operator_passes() -> None:
+    """An ``operator`` (no flag) is admitted — pre-#3243 behaviour unchanged."""
+    op = _make_operator(TenantRole.OPERATOR)
+    assert require_approvals_access(operator=op) is op
+
+
+def test_approvals_access_tenant_admin_passes() -> None:
+    """A ``tenant_admin`` (no flag) is admitted — pre-#3243 behaviour unchanged."""
+    op = _make_operator(TenantRole.TENANT_ADMIN)
+    assert require_approvals_access(operator=op) is op
+
+
+def test_approvals_access_read_only_without_flag_rejected() -> None:
+    """A plain ``read_only`` (no flag) is refused — ``read_only`` unchanged."""
+    op = _approver_operator(TenantRole.READ_ONLY, approver=False)
+    with pytest.raises(HTTPException) as excinfo:
+        require_approvals_access(operator=op)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "insufficient_role"
+
+
+def test_approvals_access_read_only_with_approver_passes() -> None:
+    """The approve-only principal — ``read_only`` + ``approver`` — is admitted."""
+    op = _approver_operator(TenantRole.READ_ONLY, approver=True)
+    assert require_approvals_access(operator=op) is op
+
+
+def test_approver_flag_does_not_grant_dispatch() -> None:
+    """The decoupling contract: an approve-only principal clears the approvals
+    gate but is denied ``call_operation`` — the ``operator``-gated dispatch
+    route rejects ``read_only`` + ``approver`` with 403.
+
+    This is the load-bearing assertion of #3243: the orthogonal capability
+    must never leak into the linear-role dispatch gate.
+    """
+    op = _approver_operator(TenantRole.READ_ONLY, approver=True)
+    # Passes the approvals plane.
+    assert require_approvals_access(operator=op) is op
+    # Denied at the dispatch gate (POST /api/v1/operations/call).
+    dispatch_gate = require_role(TenantRole.OPERATOR)
+    with pytest.raises(HTTPException) as excinfo:
+        dispatch_gate(operator=op)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "insufficient_role"
+
+
+def test_approver_flag_does_not_grant_admin() -> None:
+    """The flag never widens the lattice: it does not confer ``tenant_admin``."""
+    op = _approver_operator(TenantRole.READ_ONLY, approver=True)
+    admin_gate = require_role(TenantRole.TENANT_ADMIN)
+    with pytest.raises(HTTPException) as excinfo:
+        admin_gate(operator=op)
+    assert excinfo.value.status_code == 403
+
+
+def test_approvals_access_logs_insufficient_event(log_buffer: io.StringIO) -> None:
+    """A refused approvals-access attempt emits the structured on-call event."""
+    op = _approver_operator(TenantRole.READ_ONLY, approver=False, sub="op-denied")
+    with pytest.raises(HTTPException):
+        require_approvals_access(operator=op)
+    events = [
+        line
+        for line in _read_log_lines(log_buffer)
+        if line.get("event") == "insufficient_approvals_access"
+    ]
+    assert len(events) == 1
+    payload = events[0]
+    assert payload["operator_sub"] == "op-denied"
+    assert payload["actual_role"] == "read_only"
+    assert payload["approver"] is False
 
 
 # ---------------------------------------------------------------------------

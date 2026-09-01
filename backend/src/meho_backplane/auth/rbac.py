@@ -48,7 +48,7 @@ from fastapi import Depends, HTTPException, status
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.middleware import verify_jwt_and_bind
 
-__all__ = ["authorize_tenant_scope", "require_role"]
+__all__ = ["authorize_tenant_scope", "require_approvals_access", "require_role"]
 
 #: Linear role ordering. Index = rank; ``read_only`` is rank 0,
 #: ``tenant_admin`` is rank 2. The dependency compares the actual
@@ -161,6 +161,67 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
         return operator
 
     return _checker
+
+
+#: Rank of ``operator`` in :data:`_ROLE_ORDER`, resolved once at import.
+#: The approvals plane admits ``operator``-or-higher; below that rank a
+#: principal needs the orthogonal ``approver`` capability (#3243).
+#: Resolving at import (rather than per-request) gives the same fail-fast
+#: property :func:`require_role` gets from factory-time resolution — an
+#: enum widening that misses :data:`_ROLE_ORDER` surfaces as an import-time
+#: :class:`ValueError`, not a per-request 500.
+_OPERATOR_RANK: Final[int] = _ROLE_ORDER.index(TenantRole.OPERATOR)
+
+
+def require_approvals_access(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> Operator:
+    """FastAPI dependency gating the approvals plane (#3243).
+
+    The approvals plane — ``list`` / ``show`` / ``approve`` / ``reject`` /
+    ``decide`` (``/api/v1/approvals*`` except the principal-scoped
+    ``/result`` read) — is reachable by a principal that is **either**:
+
+    * ``operator``-or-higher on the linear :class:`TenantRole` lattice
+      (the pre-#3243 behaviour — ``operator`` and ``tenant_admin`` keep
+      approvals access unchanged), **or**
+    * carries the orthogonal ``approver`` capability
+      (``operator.approver``), regardless of tenant role.
+
+    This **decouples the decide right from the dispatch right**. A
+    dedicated approver principal provisioned as ``read_only`` role +
+    ``approver=true`` clears this gate yet is denied
+    ``POST /api/v1/operations/call`` — dispatch stays
+    ``Depends(require_role(TenantRole.OPERATOR))`` and ``read_only`` ranks
+    below ``operator`` — so it can clear a four-eyes gate without holding
+    execution rights. The flag never widens the linear lattice: dispatch,
+    admin, and every other ``require_role``-gated surface are untouched,
+    and the ``sub``-keyed self-approval refusal (#1401) still applies
+    (an approver cannot approve a request it parked).
+
+    A principal below ``operator`` **and** lacking the flag is rejected
+    with HTTP 403 ``insufficient_role`` — the same wire token
+    :func:`require_role` returns, so clients matching on it keep working —
+    plus a structured ``insufficient_approvals_access`` log line carrying
+    ``operator_sub``, ``actual_role``, and ``approver``.
+
+    Unlike :func:`require_role` this is a plain dependency (no minimum-role
+    parameter to bind), so it is used directly as
+    ``Depends(require_approvals_access)`` rather than via a factory call.
+    """
+    actual_rank = _ROLE_ORDER.index(operator.tenant_role)
+    if actual_rank >= _OPERATOR_RANK or operator.approver:
+        return operator
+    structlog.get_logger(__name__).warning(
+        "insufficient_approvals_access",
+        operator_sub=operator.sub,
+        actual_role=operator.tenant_role.value,
+        approver=operator.approver,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="insufficient_role",
+    )
 
 
 def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:

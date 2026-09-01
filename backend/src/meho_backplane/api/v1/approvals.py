@@ -12,16 +12,34 @@ Route inventory
 ---------------
 
 * ``GET /api/v1/approvals`` — list pending requests for the operator's
-  tenant. Optional ``?status=`` filter (default ``pending``). Role:
-  ``operator``.
+  tenant. Optional ``?status=`` filter (default ``pending``). Access:
+  approvals-plane (see below).
 * ``POST /api/v1/approvals/{request_id}/approve`` — approve a pending
   request and re-dispatch the original call with the original params.
   Body: :class:`ApproveRequestBody` (``params`` dict + optional
-  ``reason`` string). Role: ``operator``.
+  ``reason`` string). Access: approvals-plane.
 * ``POST /api/v1/approvals/{request_id}/reject`` — reject a pending
   request; the original dispatch is not executed. Body:
-  :class:`RejectRequestBody` (optional ``reason`` string). Role:
-  ``operator``.
+  :class:`RejectRequestBody` (optional ``reason`` string). Access:
+  approvals-plane.
+
+Access model — approve-only, decoupled from dispatch (#3243)
+------------------------------------------------------------
+
+Every route above (plus ``/{id}`` show and ``/{id}/decide``) is gated by
+:func:`~meho_backplane.auth.rbac.require_approvals_access`, which admits a
+principal that is **either** ``operator``-or-higher on the linear tenant
+role lattice (``operator`` and ``tenant_admin`` retain access unchanged)
+**or** carries the orthogonal ``approver`` capability
+(``Operator.approver``). This decouples the *decide* right from the
+*dispatch* right: a dedicated approver provisioned as ``read_only`` role +
+``approver=true`` can clear a four-eyes gate here yet is denied
+``POST /api/v1/operations/call`` (still ``operator``-gated). The
+``sub``-keyed self-approval refusal (#1401) is unchanged — an approver
+still cannot approve a request it parked. The principal-scoped
+``GET /{id}/result`` read (#3209) is deliberately **not** on this gate: it
+uses ``verify_jwt_and_bind`` and enforces request ownership, so an
+approve-only principal that did not park the op cannot read its result.
 
 Tenant scoping
 --------------
@@ -61,8 +79,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.rbac import require_approvals_access
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -89,10 +107,16 @@ _log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 
-#: Module-level Depends closures -- avoids ruff B008 (mutable call in
-#: default-argument position). Same pattern as
-#: :mod:`meho_backplane.api.v1.operations`.
-_require_operator = Depends(require_role(TenantRole.OPERATOR))
+#: Module-level Depends closure for the approvals-plane gate -- avoids
+#: ruff B008 (call in default-argument position). Admits an
+#: ``operator``-or-higher principal **or** one carrying the orthogonal
+#: ``approver`` capability (#3243) — decoupling the decide right from the
+#: dispatch right. The principal-scoped ``/result`` read (#3209) is
+#: deliberately *not* gated here: it uses ``verify_jwt_and_bind`` directly
+#: and enforces request ownership, so an approve-only principal that did
+#: not park the op still cannot read its result. See
+#: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
+_require_approvals_access = Depends(require_approvals_access)
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +376,7 @@ async def list_approvals(
             "(work_ref I2-T1 #1659). Omit for no work_ref filter."
         ),
     ),
-    operator: Operator = _require_operator,
+    operator: Operator = _require_approvals_access,
 ) -> list[ApprovalRequestView]:
     """List approval requests for the operator's tenant.
 
@@ -394,7 +418,7 @@ async def list_approvals(
 @router.get("/{request_id}", response_model=ApprovalRequestView)
 async def get_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
-    operator: Operator = _require_operator,
+    operator: Operator = _require_approvals_access,
 ) -> ApprovalRequestView:
     """Inspect a single approval request by id (G11.2-T5 / #818).
 
@@ -562,7 +586,7 @@ async def _record_approval_decision(
 async def approve_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: ApproveRequestBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_approvals_access,
 ) -> ApproveResponseBody | JSONResponse:
     """Approve a pending request and re-dispatch the original operation.
 
@@ -583,7 +607,8 @@ async def approve_approval_request(
 
     * 200 — approved + re-dispatched successfully (sync).
     * 202 — approved; resume launched in the background (``async: true``).
-    * 403 — operator lacks ``operator`` role, **or** the approver is the
+    * 403 — caller lacks approvals-plane access (neither ``operator`` role
+      nor the ``approver`` capability, #3243), **or** the approver is the
       requester and self-approval break-glass is disabled (G11.7-T1 #1401).
     * 404 — request not found (or belongs to another tenant).
     * 409 — request is already decided.
@@ -646,14 +671,15 @@ async def approve_approval_request(
 async def reject_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: RejectRequestBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_approvals_access,
 ) -> RejectResponseBody:
     """Reject a pending request; the original operation is not executed.
 
     HTTP status codes:
 
     * 200 — rejected successfully.
-    * 403 — operator lacks ``operator`` role.
+    * 403 — caller lacks approvals-plane access (neither ``operator`` role
+      nor the ``approver`` capability, #3243).
     * 404 — request not found (or belongs to another tenant).
     * 409 — request is already decided.
     """
@@ -759,7 +785,7 @@ class DecideResponseBody(BaseModel):
 async def decide_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
     body: DecideRequestBody,
-    operator: Operator = _require_operator,
+    operator: Operator = _require_approvals_access,
 ) -> DecideResponseBody:
     """Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).
 

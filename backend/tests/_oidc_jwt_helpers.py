@@ -76,6 +76,7 @@ def mint_token(
     capabilities: list[str] | None = None,
     scopes: list[str] | None = None,
     platform_admin: bool | None = None,
+    approver: bool | None = None,
     principal_kind: str | None = None,
     runner_id: str | None = None,
 ) -> str:
@@ -109,6 +110,13 @@ def mint_token(
     ``None`` so every existing call site is unchanged; pass
     ``principal_kind="runner"`` + ``runner_id="<uuid>"`` to mint a
     satellite-runner token.
+
+    ``approver`` populates the ``approver`` JWT claim the backend's
+    ``_extract_approver`` reads onto ``Operator.approver`` (#3243) — the
+    approve-only capability. ``None`` omits the claim so every existing
+    call site is unchanged; pass ``approver=True`` alongside
+    ``tenant_role="read_only"`` to mint a dedicated approver principal that
+    can decide approvals but cannot dispatch.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -134,6 +142,8 @@ def mint_token(
             payload["scope"] = " ".join(scopes)
         if platform_admin is not None:
             payload["platform_admin"] = platform_admin
+        if approver is not None:
+            payload["approver"] = approver
         if principal_kind is not None:
             payload["principal_kind"] = principal_kind
         if runner_id is not None:

@@ -450,3 +450,118 @@ async def test_approve_async_returns_202_and_run_handle(
     assert response.json() == {"run_id": str(fixed), "status": "pending", "async": True}
     # The decision was handed to the background substrate for this request.
     assert fake.resumed == [request_id]
+
+
+# ---------------------------------------------------------------------------
+# #3243 — approve-only capability: approvals-plane access decoupled from
+# dispatch. A ``read_only`` + ``approver=true`` principal is admitted to the
+# approvals plane, denied ``call_operation``, and — crucially — cannot read
+# the result of a request it did not park (#3209's principal-scoped read is
+# untouched).
+# ---------------------------------------------------------------------------
+
+
+def _approve_only_token(key: Any, *, sub: str = "approve-only") -> str:
+    """Mint a dedicated approver: ``read_only`` role + the ``approver`` flag."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.READ_ONLY.value,
+        tenant_id=str(_TENANT_A),
+        approver=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_only_principal_admitted_to_approvals_list() -> None:
+    """A ``read_only`` + ``approver`` token clears the approvals-plane gate.
+
+    The list route is ``operator``-gated for the linear lattice, so a
+    ``read_only`` token without the flag 403s (the parametrised negative
+    test above). With the orthogonal ``approver`` capability the same
+    ``read_only`` principal is admitted — 200 + the (empty) tenant queue.
+    """
+    key = make_rsa_keypair("kid-appr-list")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.get(
+                "/api/v1/approvals",
+                headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
+            )
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+def test_approve_only_principal_denied_call_operation_dispatch(client: TestClient) -> None:
+    """The decoupling contract, end-to-end: the approver cannot dispatch.
+
+    ``POST /api/v1/operations/call`` stays ``Depends(require_role(OPERATOR))``,
+    so a ``read_only`` + ``approver`` token is refused 403 ``insufficient_role``
+    — the orthogonal capability never leaks into the dispatch gate (#3243). A
+    valid body is sent so the role gate, not body validation, owns the 403.
+    """
+    key = make_rsa_keypair("kid-appr-dispatch")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/call",
+            json={"connector_id": "vault-1.x", "op_id": "vault.kv.put"},
+            headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
+        )
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "insufficient_role"}
+
+
+@pytest.mark.asyncio
+async def test_approve_only_principal_cannot_read_result_it_did_not_park() -> None:
+    """An approver is not the request owner, so it cannot read the result.
+
+    #3209's ``GET /{id}/result`` is principal-scoped on ``principal_sub``
+    (the party that parked the op), independent of role/approver. An
+    approve-only principal deciding a request it did not park must NOT gain
+    result-read rights through #3243 — it gets 403 ``not_request_owner``.
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    owner = Operator(
+        sub="agent-requester",
+        name=None,
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.OPERATOR,
+        principal_kind=PrincipalKind.AGENT,
+    )
+    params = {"k": "v"}
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=owner,
+            connector_id="some-1.x",
+            op_id="some.op",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
+        request_id = request.id
+
+    key = make_rsa_keypair("kid-appr-result")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.get(
+                f"/api/v1/approvals/{request_id}/result",
+                headers={"Authorization": f"Bearer {_approve_only_token(key)}"},
+            )
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "not_request_owner"}

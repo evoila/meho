@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — approve-only RBAC capability: decouple the approvals plane from the dispatch gate (#3243)
+
+- A principal can now be granted the ability to **decide** approvals
+  (`GET/POST /api/v1/approvals/*` — list / show / approve / reject / decide)
+  **without** also holding the dispatch right (`POST /api/v1/operations/call`).
+  A new orthogonal `approver` capability — lifted from an optional, fail-closed
+  JWT claim (default `approver`, override `JWT_APPROVER_CLAIM_NAME`) onto
+  `Operator.approver`, exactly like `platform_admin` — admits a principal to
+  the approvals plane via the new `require_approvals_access` dependency, which
+  passes an `operator`-or-higher principal **or** one carrying the flag. A
+  dedicated approver can therefore be provisioned as `read_only` role +
+  `approver=true`: it clears a four-eyes gate yet is denied `call_operation`
+  (dispatch stays `operator`-gated, and `read_only` ranks below `operator`), so
+  the two-hat separation for the governed-delete flow (v0.1-spec §7) no longer
+  rests on operator discipline alone.
+- Existing tokens are unchanged: `operator` and `tenant_admin` retain approvals
+  access, `read_only` without the flag is still refused, and the `sub`-keyed
+  self-approval refusal (#1401) is untouched — an approver still cannot approve
+  a request it parked. The principal-scoped `GET /{id}/result` read (#3209)
+  stays owner-only, so an approver deciding a request it did not park gains no
+  result-read rights. No MCP tool was added — the approval-decision verbs remain
+  human-only (console / CLI / REST), and the 25-tool working surface + 78-tool
+  inventory are unchanged. No schema change / no migration.
+
 ### Added — `winsrv` connector: Windows Server core over PowerShell-5.1-over-SSH (#3261 / #3271)
 
 - **`winsrv` connector** — typed connector for Windows Server core management

@@ -322,6 +322,19 @@ class Settings(BaseModel):
         token and every agent / service principal is non-platform-admin
         unless a realm explicitly grants the claim. Override only when
         the realm exposes the flag under a different attribute.
+    jwt_approver_claim_name:
+        Name of the JWT claim that carries the approve-only ``approver``
+        capability flag (a JSON boolean) added by #3243. Default
+        ``approver``. The flag is orthogonal to
+        :class:`~meho_backplane.auth.operator.TenantRole`; it admits a
+        principal to the approvals plane (list / show / approve / reject /
+        decide) **without** granting ``call_operation`` dispatch, so a
+        dedicated approver can be provisioned as ``read_only`` role + this
+        flag. The claim is **optional** and **fail-closed** — tokens that
+        carry no claim (or a malformed value) resolve to ``False``, so
+        every existing token is unaffected unless a realm explicitly
+        grants the claim. Override only when the realm exposes the flag
+        under a different attribute.
     jwt_runner_id_claim_name:
         Name of the JWT claim that carries a satellite runner principal's
         row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
@@ -1028,6 +1041,7 @@ class Settings(BaseModel):
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_scopes_claim_name: str = Field(default="scope", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
+    jwt_approver_claim_name: str = Field(default="approver", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
@@ -1909,6 +1923,10 @@ def get_settings() -> Settings:
         jwt_platform_admin_claim_name=os.environ.get(
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",
             "platform_admin",
+        ),
+        jwt_approver_claim_name=os.environ.get(
+            "JWT_APPROVER_CLAIM_NAME",
+            "approver",
         ),
         jwt_runner_id_claim_name=os.environ.get(
             "JWT_RUNNER_ID_CLAIM_NAME",

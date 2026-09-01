@@ -156,11 +156,14 @@ def _make_operator(
     role: TenantRole = TenantRole.OPERATOR,
     tenant_id: uuid.UUID = _TENANT_ID,
     principal_kind: PrincipalKind = PrincipalKind.AGENT,
+    approver: bool = False,
 ) -> Operator:
     # Defaults to an AGENT principal: the approval queue only fires for
     # agent principals (the G11.2-T3 gate hard-denies requires_approval
     # for human/service principals). Service-level tests that call the
-    # approval API directly are unaffected by the kind.
+    # approval API directly are unaffected by the kind. ``approver`` carries
+    # the orthogonal approve-only capability (#3243) so a ``read_only``
+    # reviewer can still decide.
     return Operator(
         sub=sub,
         name="Test Reviewer",
@@ -169,6 +172,7 @@ def _make_operator(
         tenant_id=tenant_id,
         tenant_role=role,
         principal_kind=principal_kind,
+        approver=approver,
     )
 
 
@@ -986,6 +990,109 @@ async def test_read_only_operator_cannot_reject(session: AsyncSession) -> None:
     async with get_sessionmaker()() as s2:
         with pytest.raises(UnauthorizedApprovalError):
             await reject_request(s2, pending.id, operator=read_only_op)
+
+
+# ---------------------------------------------------------------------------
+# Approve-only capability — decoupled from dispatch (#3243)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_only_with_approver_can_approve(session: AsyncSession) -> None:
+    """A ``read_only`` reviewer carrying ``approver`` may approve (#3243).
+
+    The service-layer half of the decoupled gate: the orthogonal
+    ``approver`` capability clears :func:`_check_reviewer_role` even though
+    the tenant role is ``read_only``. The requester (an agent) has a
+    distinct ``sub``, so the self-approval guard is not in play here.
+    """
+    owner_op = _make_operator(sub="agent-requester")
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=owner_op,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    approver_op = _make_operator(
+        sub="approve-only-principal", role=TenantRole.READ_ONLY, approver=True
+    )
+    async with get_sessionmaker()() as s2:
+        decided = await approve_request(s2, pending.id, operator=approver_op, params=params)
+        await s2.commit()
+    assert decided.status == ApprovalRequestStatus.APPROVED.value
+    assert decided.reviewed_by == "approve-only-principal"
+
+
+@pytest.mark.asyncio
+async def test_read_only_with_approver_can_reject(session: AsyncSession) -> None:
+    """A ``read_only`` reviewer carrying ``approver`` may reject (#3243)."""
+    owner_op = _make_operator(sub="agent-requester")
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=owner_op,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    approver_op = _make_operator(
+        sub="approve-only-principal", role=TenantRole.READ_ONLY, approver=True
+    )
+    async with get_sessionmaker()() as s2:
+        decided = await reject_request(s2, pending.id, operator=approver_op)
+        await s2.commit()
+    assert decided.status == ApprovalRequestStatus.REJECTED.value
+    assert decided.reviewed_by == "approve-only-principal"
+
+
+@pytest.mark.asyncio
+async def test_approver_still_cannot_self_approve(session: AsyncSession) -> None:
+    """The ``sub``-keyed self-approval refusal is unchanged for an approver.
+
+    Defense in depth (#1401) is *not* replaced by the approve-only role:
+    even an ``approver`` principal cannot approve a request it parked. The
+    requester and approver share a ``sub`` here, so the guard fires past
+    the (now-passing) role check.
+    """
+    approver_op = _make_operator(
+        sub="approve-only-principal", role=TenantRole.READ_ONLY, approver=True
+    )
+    params = {"name": "test"}
+    params_hash = compute_params_hash(params)
+
+    pending = await create_pending_request(
+        session,
+        operator=approver_op,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=params_hash,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, pending.id, operator=approver_op, params=params)
+
+    async with get_sessionmaker()() as s3:
+        row = await s3.get(ApprovalRequest, pending.id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
 
 
 # ---------------------------------------------------------------------------

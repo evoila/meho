@@ -1361,6 +1361,60 @@
         }
       }
     },
+    "/api/v1/tenants/flight-recorder-policy": {
+      "patch": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Update Flight Recorder Policy",
+        "description": "Partially update the caller's tenant flight-recorder policy (#3272).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible). Applies only the fields present in the body; each field whose\nvalue actually changes is folded into this request's ``audit_log`` row\n(field / old / new) and, once any change lands, the resolver's per-tenant\ncache is evicted so the next dispatch sees the new policy without a restart.",
+        "operationId": "update_flight_recorder_policy_api_v1_tenants_flight_recorder_policy_patch",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantFlightRecorderPolicyUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantFlightRecorderPolicy"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/event-sources": {
       "get": {
         "tags": [
@@ -32309,6 +32363,11 @@
             "nullable": true,
             "title": "Preferred Impl Id"
           },
+          "flight_recorder_capture": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Capture"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -32383,6 +32442,8 @@
               "keycloak",
               "loki",
               "mongodb",
+              "msad",
+              "mssql",
               "nsx",
               "pfsense",
               "postgres",
@@ -32473,6 +32534,11 @@
             "maxLength": 200,
             "nullable": true,
             "title": "Preferred Impl Id"
+          },
+          "flight_recorder_capture": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Capture"
           }
         },
         "additionalProperties": false,
@@ -32590,6 +32656,11 @@
             "type": "string",
             "nullable": true,
             "title": "Preferred Impl Id"
+          },
+          "flight_recorder_capture": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Capture"
           },
           "created_at": {
             "type": "string",
@@ -32716,6 +32787,11 @@
             "maxLength": 200,
             "nullable": true,
             "title": "Preferred Impl Id"
+          },
+          "flight_recorder_capture": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Capture"
           }
         },
         "additionalProperties": false,
@@ -32793,6 +32869,63 @@
         ],
         "title": "TemplateSummary",
         "description": "Operator-readable summary row surfaced by ``meho_runbook_list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+      },
+      "TenantFlightRecorderPolicy": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "flight_recorder_enabled": {
+            "type": "boolean",
+            "title": "Flight Recorder Enabled"
+          },
+          "flight_recorder_agent_readable": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Agent Readable"
+          },
+          "flight_recorder_retention_days": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Flight Recorder Retention Days"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "flight_recorder_enabled",
+          "flight_recorder_agent_readable",
+          "flight_recorder_retention_days"
+        ],
+        "title": "TenantFlightRecorderPolicy",
+        "description": "Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.\n\nFrozen; maps 1:1 to the three ``tenant`` policy columns plus the tenant id.\n``flight_recorder_agent_readable`` and ``flight_recorder_retention_days``\nare nullable: ``None`` means \"inherit\" (agent-read follows the capture\ndefault) / \"use the global default\" (retention) respectively."
+      },
+      "TenantFlightRecorderPolicyUpdate": {
+        "properties": {
+          "flight_recorder_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Enabled"
+          },
+          "flight_recorder_agent_readable": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Flight Recorder Agent Readable"
+          },
+          "flight_recorder_retention_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Flight Recorder Retention Days"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TenantFlightRecorderPolicyUpdate",
+        "description": "``PATCH /api/v1/tenants/flight-recorder-policy`` body.\n\nAll three fields are optional-partial: only fields the client actually\nsends are applied (``model_dump(exclude_unset=True)`` in the handler keys\noff ``model_fields_set``, so a JSON ``null`` is distinguished from an\nabsent key). ``extra='forbid'`` rejects unknown keys with a 422.\n\n* ``flight_recorder_enabled`` (F1) -- Boolean, ``NOT NULL`` at the DB\n  layer. Absent = leave unchanged; ``true`` / ``false`` flips the\n  per-tenant capture default. An explicit ``null`` is rejected (the column\n  has no inherit state) -- the validator fires only when the key is\n  present, so an absent field never trips it.\n* ``flight_recorder_agent_readable`` (F5) -- **tri-state**. Absent = leave\n  unchanged; ``true`` / ``false`` force the agent-read override on / off;\n  ``null`` clears it back to inherit (follow the capture default). This is\n  the JSON-``null``-vs-absent distinction the tri-state needs.\n* ``flight_recorder_retention_days`` (F4) -- nullable, bounded ``1..365``\n  (the reaper window; matches ``Settings.flight_recorder_retention_days_default``'s\n  ``ge=1, le=365``). Absent = leave unchanged; an int sets the per-tenant\n  window; ``null`` clears it back to the global default. The bound applies\n  only to the int arm -- a ``null`` clear is always legal."
       },
       "TenantRole": {
         "type": "string",
@@ -33937,6 +34070,10 @@
     },
     {
       "name": "targets",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "tenants",
       "x-maturity": "ga"
     },
     {

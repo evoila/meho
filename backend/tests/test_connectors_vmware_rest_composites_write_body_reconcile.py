@@ -236,6 +236,17 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     ovf_import_control.OVF_CREATE_IMPORT_SPEC_PARAMS_TYPE,
     ovf_import_control.OVF_NETWORK_MAPPING_TYPE,
     ovf_import_control.KEY_VALUE_TYPE,
+    # Distributed-portgroup writes (#3091) -- the CreateDVPortgroup_Task /
+    # ReconfigureDVPortgroup_Task DVPortgroupConfigSpec + its VMwareDVSPortSetting
+    # default-port-config, the security-policy triple (DVSSecurityPolicy /
+    # BoolPolicy) and the trunk / access VLAN specs.
+    _write._DVPORTGROUP_CONFIG_SPEC_TYPE,
+    _write._VMWARE_DVS_PORT_SETTING_TYPE,
+    _write._DVS_SECURITY_POLICY_TYPE,
+    _write._BOOL_POLICY_TYPE,
+    _write._TRUNK_VLAN_SPEC_TYPE,
+    _write._VLAN_ID_SPEC_TYPE,
+    _write._NUMERIC_RANGE_TYPE,
 }
 
 

@@ -61,6 +61,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    network_portgroup_create_composite,
+    network_portgroup_security_set_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
@@ -3263,6 +3265,425 @@ async def test_host_detach_from_vds_incomplete_on_nic_failure(gate: _GateRecorde
     assert len(out["vm_migration_failures"]) == 1
     # No vim DVS reconfigure fired -- the detach was skipped.
     assert conn.vmomi_calls == []
+
+
+# ===========================================================================
+# network.portgroup.create + network.portgroup.security.set (#3091)
+# ===========================================================================
+
+
+def _dvpg_multi_prop_result(moid: str, props: dict[str, Any]) -> dict[str, Any]:
+    """A ``RetrievePropertiesEx`` result for one portgroup carrying several props.
+
+    ``_typeName``-tagged like a live VI-JSON response (#3103 tolerance); the
+    portgroup writes read ``config.configVersion`` / ``config.name`` /
+    ``config.defaultPortConfig`` off one object.
+    """
+    return {
+        "_typeName": "RetrieveResult",
+        "objects": [
+            {
+                "_typeName": "ObjectContent",
+                "obj": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "DistributedVirtualPortgroup",
+                    "value": moid,
+                },
+                "propSet": [
+                    {"_typeName": "DynamicProperty", "name": name, "val": val}
+                    for name, val in props.items()
+                ],
+            }
+        ],
+    }
+
+
+def _dvpg_moref(moid: str) -> dict[str, str]:
+    """A new-portgroup MoRef as ``CreateDVPortgroup_Task``'s ``TaskInfo.result`` carries it."""
+    return {
+        "_typeName": "ManagedObjectReference",
+        "type": "DistributedVirtualPortgroup",
+        "value": moid,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_trunk_happy_path(gate: _GateRecorder) -> None:
+    """Trunk-mode create: CreateDVPortgroup_Task body + poll + config read-back; status=created."""
+    trunk_vlan = {
+        "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+        "vlanId": [{"_typeName": "NumericRange", "start": 0, "end": 4094}],
+    }
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualSwitch/dvs-16/CreateDVPortgroup_Task": _task_moref("task-pg-1"),
+            "Task": _task_info_result("task-pg-1", "success", result=_dvpg_moref("dvportgroup-99")),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-99",
+                {
+                    "config.name": "nested-trunk",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": trunk_vlan,
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vds": "dvs-16",
+            "name": "nested-trunk",
+            "vlan_trunk_ranges": [{"start": 0, "end": 4094}],
+            "num_ports": 8,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["portgroup"] == "dvportgroup-99"
+    assert out["task"] == "task-pg-1"
+    # Read-back verification rows: the created portgroup's name + vlan spec.
+    assert out["observed"] == {"name": "nested-trunk", "vlan": trunk_vlan}
+    # The CreateDVPortgroup_Task body: one DVPortgroupConfigSpec with the
+    # trunk VLAN NumericRange[] and numPorts, every DataObject _typeName-tagged.
+    create = [(p, b) for p, b in conn.vmomi_calls if p.endswith("/CreateDVPortgroup_Task")]
+    assert create == [
+        (
+            "/DistributedVirtualSwitch/dvs-16/CreateDVPortgroup_Task",
+            {
+                "spec": {
+                    "_typeName": "DVPortgroupConfigSpec",
+                    "name": "nested-trunk",
+                    "type": "earlyBinding",
+                    "numPorts": 8,
+                    "defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "vlan": {
+                            "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+                            "vlanId": [{"_typeName": "NumericRange", "start": 0, "end": 4094}],
+                        },
+                    },
+                }
+            },
+        )
+    ]
+    # Only the vim create is gated; the read-back is not.
+    assert gate.gated_op_ids == ["POST:/DistributedVirtualSwitch/{moId}/CreateDVPortgroup_Task"]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_access_vlan_spec(gate: _GateRecorder) -> None:
+    """Access-mode create sends a single-VLAN VmwareDistributedVirtualSwitchVlanIdSpec."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualSwitch/dvs-16/CreateDVPortgroup_Task": _task_moref("task-pg-2"),
+            "Task": _task_info_result("task-pg-2", "success", result=_dvpg_moref("dvportgroup-7")),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-7", {"config.name": "mgmt", "config.defaultPortConfig": {}}
+            ),
+        },
+    )
+    out = await network_portgroup_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vds": "dvs-16", "name": "mgmt", "vlan_id": 4003},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "created"
+    create_body = next(b for p, b in conn.vmomi_calls if p.endswith("/CreateDVPortgroup_Task"))
+    assert create_body["spec"]["defaultPortConfig"]["vlan"] == {
+        "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        "vlanId": 4003,
+    }
+    # numPorts omitted when not supplied.
+    assert "numPorts" not in create_body["spec"]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_invalid_vlan_spec_refuses(gate: _GateRecorder) -> None:
+    """Trunk + access both set -> status=invalid_vlan_spec, no write, no gate."""
+    conn = _RecordingConnector({}, vmomi={})
+    out = await network_portgroup_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vds": "dvs-16",
+            "name": "bad",
+            "vlan_trunk_ranges": [{"start": 0, "end": 4094}],
+            "vlan_id": 10,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_vlan_spec"
+    assert out["portgroup"] is None
+    assert conn.vmomi_calls == []
+    assert gate.gated_op_ids == []
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_gated_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An awaiting-approval gate returns the OperationResult verbatim; no task fires."""
+    op_id = "POST:/DistributedVirtualSwitch/{moId}/CreateDVPortgroup_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _RecordingConnector({}, vmomi={})
+    out = await network_portgroup_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vds": "dvs-16", "name": "pg", "vlan_id": 10},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    # The write was gated, so no poll / read-back followed.
+    assert not any(p.endswith("/CreateDVPortgroup_Task") for p, _ in conn.vmomi_calls)
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_poll_timeout(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A still-running task times out -> status=timeout with the task id, no read-back."""
+    monkeypatch.setattr(_write, "_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualSwitch/dvs-16/CreateDVPortgroup_Task": _task_moref("task-pg-3"),
+            "Task": _task_info_result("task-pg-3", "running"),
+        },
+    )
+    out = await network_portgroup_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vds": "dvs-16", "name": "pg", "vlan_id": 10},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-pg-3"
+    assert out["portgroup"] is None
+    assert out["observed"] is None
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_create_task_fault_raises(gate: _GateRecorder) -> None:
+    """A CreateDVPortgroup_Task fault raises (the dispatcher wraps connector_error)."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualSwitch/dvs-16/CreateDVPortgroup_Task": _task_moref("task-pg-4"),
+            "Task": _task_info_result("task-pg-4", "error", "DuplicateName"),
+        },
+    )
+    with pytest.raises(RuntimeError, match="CreateDVPortgroup_Task"):
+        await network_portgroup_create_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"vds": "dvs-16", "name": "dupe", "vlan_id": 10},
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_security_set_happy_path(gate: _GateRecorder) -> None:
+    """Pre-read configVersion + current policy, reconfigure with only the supplied
+    booleans, read the applied policy back; status=updated."""
+    policy = {
+        "_typeName": "DVSSecurityPolicy",
+        "inherited": False,
+        "allowPromiscuous": {"_typeName": "BoolPolicy", "inherited": False, "value": True},
+        "forgedTransmits": {"_typeName": "BoolPolicy", "inherited": False, "value": True},
+        "macChanges": {"_typeName": "BoolPolicy", "inherited": False, "value": True},
+    }
+    # The pre-read and post-read both key on type DistributedVirtualPortgroup;
+    # the stub serves the same payload for both, so seed a config that carries
+    # configVersion + the policy (a superset of what each read needs). previous
+    # and observed both flatten from this payload.
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-42/ReconfigureDVPortgroup_Task": _task_moref(
+                "task-sec-1"
+            ),
+            "Task": _task_info_result("task-sec-1", "success"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-42",
+                {
+                    "config.configVersion": "7",
+                    "config.defaultPortConfig": {
+                        "_typeName": "VMwareDVSPortSetting",
+                        "securityPolicy": policy,
+                    },
+                },
+            ),
+        },
+    )
+    out = await network_portgroup_security_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "portgroup": "dvportgroup-42",
+            "allow_promiscuous": True,
+            "forged_transmits": True,
+            "mac_changes": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "updated"
+    assert out["task"] == "task-sec-1"
+    assert out["requested"] == {
+        "allow_promiscuous": True,
+        "forged_transmits": True,
+        "mac_changes": True,
+    }
+    # previous (pre-write read-back) + observed (post-write read-back) both
+    # flatten the seeded DVSSecurityPolicy to the effective boolean triple.
+    assert out["previous"] == {
+        "allow_promiscuous": True,
+        "forged_transmits": True,
+        "mac_changes": True,
+    }
+    assert out["observed"] == {
+        "allow_promiscuous": True,
+        "forged_transmits": True,
+        "mac_changes": True,
+    }
+    # The ReconfigureDVPortgroup_Task body: configVersion echoed, security
+    # triple as BoolPolicy(inherited=false), every DataObject _typeName-tagged.
+    reconfig = next(b for p, b in conn.vmomi_calls if p.endswith("/ReconfigureDVPortgroup_Task"))
+    assert reconfig == {
+        "spec": {
+            "_typeName": "DVPortgroupConfigSpec",
+            "configVersion": "7",
+            "defaultPortConfig": {
+                "_typeName": "VMwareDVSPortSetting",
+                "securityPolicy": {
+                    "_typeName": "DVSSecurityPolicy",
+                    "inherited": False,
+                    "allowPromiscuous": {
+                        "_typeName": "BoolPolicy",
+                        "inherited": False,
+                        "value": True,
+                    },
+                    "forgedTransmits": {
+                        "_typeName": "BoolPolicy",
+                        "inherited": False,
+                        "value": True,
+                    },
+                    "macChanges": {"_typeName": "BoolPolicy", "inherited": False, "value": True},
+                },
+            },
+        }
+    }
+    assert gate.gated_op_ids == [
+        "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_security_set_partial_booleans(gate: _GateRecorder) -> None:
+    """Only the supplied boolean lands in the securityPolicy delta."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-42/ReconfigureDVPortgroup_Task": _task_moref(
+                "task-sec-2"
+            ),
+            "Task": _task_info_result("task-sec-2", "success"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-42",
+                {"config.configVersion": "3", "config.defaultPortConfig": {}},
+            ),
+        },
+    )
+    out = await network_portgroup_security_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-42", "allow_promiscuous": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "updated"
+    reconfig = next(b for p, b in conn.vmomi_calls if p.endswith("/ReconfigureDVPortgroup_Task"))
+    policy = reconfig["spec"]["defaultPortConfig"]["securityPolicy"]
+    assert set(policy) == {"_typeName", "inherited", "allowPromiscuous"}
+    assert policy["allowPromiscuous"] == {
+        "_typeName": "BoolPolicy",
+        "inherited": False,
+        "value": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_security_set_no_change_refuses(gate: _GateRecorder) -> None:
+    """No boolean supplied -> status=no_change_requested, no read, no write, no gate."""
+    conn = _RecordingConnector({}, vmomi={})
+    out = await network_portgroup_security_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-42"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "no_change_requested"
+    assert conn.vmomi_calls == []
+    assert gate.gated_op_ids == []
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_security_set_gated_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An awaiting-approval gate returns the OperationResult verbatim; no reconfigure fires."""
+    op_id = "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-42",
+                {"config.configVersion": "9", "config.defaultPortConfig": {}},
+            ),
+        },
+    )
+    out = await network_portgroup_security_set_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"portgroup": "dvportgroup-42", "mac_changes": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert not any(p.endswith("/ReconfigureDVPortgroup_Task") for p, _ in conn.vmomi_calls)
+
+
+@pytest.mark.asyncio
+async def test_network_portgroup_security_set_task_fault_raises(gate: _GateRecorder) -> None:
+    """A ReconfigureDVPortgroup_Task fault raises (the dispatcher wraps connector_error)."""
+    conn = _RecordingConnector(
+        {},
+        vmomi={
+            "/DistributedVirtualPortgroup/dvportgroup-42/ReconfigureDVPortgroup_Task": _task_moref(
+                "task-sec-3"
+            ),
+            "Task": _task_info_result("task-sec-3", "error", "DvsFault"),
+            "DistributedVirtualPortgroup": _dvpg_multi_prop_result(
+                "dvportgroup-42",
+                {"config.configVersion": "5", "config.defaultPortConfig": {}},
+            ),
+        },
+    )
+    with pytest.raises(RuntimeError, match="ReconfigureDVPortgroup_Task"):
+        await network_portgroup_security_set_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"portgroup": "dvportgroup-42", "allow_promiscuous": True},
+            connector=conn,  # type: ignore[arg-type]
+        )
 
 
 # ===========================================================================

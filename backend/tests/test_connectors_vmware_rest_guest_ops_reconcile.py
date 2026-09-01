@@ -53,6 +53,7 @@ def test_guest_op_constants_are_all_vmomi_post_legs() -> None:
         "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
         "POST:/GuestProcessManager/{moId}/ListProcessesInGuest",
         "POST:/GuestProcessManager/{moId}/ReadEnvironmentVariableInGuest",
+        "POST:/GuestProcessManager/{moId}/StartProgramInGuest",
         "POST:/GuestFileManager/{moId}/InitiateFileTransferFromGuest",
         "POST:/GuestFileManager/{moId}/InitiateFileTransferToGuest",
     }

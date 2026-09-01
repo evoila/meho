@@ -1357,6 +1357,136 @@ FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.network.portgroup.create`` parameter schema.
+#:
+#: Create a distributed portgroup on an existing DVS via the **vim**
+#: ``DistributedVirtualSwitch.CreateDVPortgroup_Task`` (the pinned vcenter.yaml
+#: serves no portgroup-create REST path). ``vds`` is the switch moid (no
+#: portgroup/switch REST list exists to resolve a name against — the moid comes
+#: from the ``networking`` group's ``portgroup.audit`` read). Exactly one VLAN
+#: mode: ``vlan_trunk_ranges`` (trunk — the nested-ESXi substrate case) OR
+#: ``vlan_id`` (a single access VLAN); both set → ``status='invalid_vlan_spec'``.
+NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vds": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DistributedVirtualSwitch moid the portgroup is created on (e.g. "
+                "'dvs-16'). There is no portgroup/switch REST list to resolve a "
+                "display name against, so the moid is passed directly — obtain it "
+                "from the networking group's portgroup.audit read."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new distributed portgroup.",
+        },
+        "vlan_trunk_ranges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "integer", "minimum": 0, "maximum": 4094},
+                    "end": {"type": "integer", "minimum": 0, "maximum": 4094},
+                },
+                "required": ["start", "end"],
+                "additionalProperties": False,
+            },
+            "minItems": 1,
+            "description": (
+                "Trunk-mode VLAN ranges (VmwareDistributedVirtualSwitchTrunkVlanSpec "
+                "— a NumericRange[] of inclusive start..end pairs, each 0..4094). "
+                "Use for a nested-ESXi trunk portgroup (e.g. [{start:0,end:4094}] at "
+                "bootstrap). Mutually exclusive with vlan_id."
+            ),
+        },
+        "vlan_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4094,
+            "description": (
+                "Single access VLAN id (VmwareDistributedVirtualSwitchVlanIdSpec); "
+                "0 means no VLAN. Mutually exclusive with vlan_trunk_ranges. Omit "
+                "both to inherit the switch default."
+            ),
+        },
+        "num_ports": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Number of ports in the portgroup (DVPortgroupConfigSpec.numPorts). "
+                "Omit to let the switch pick the default. Ignored for ephemeral "
+                "port_binding."
+            ),
+        },
+        "port_binding": {
+            "type": "string",
+            "enum": ["earlyBinding", "lateBinding", "ephemeral"],
+            "default": "earlyBinding",
+            "description": (
+                "Portgroup binding type (DistributedVirtualPortgroupPortgroupType). "
+                "Defaults to 'earlyBinding' (static) — the right choice for a "
+                "nested-ESXi trunk portgroup."
+            ),
+        },
+    },
+    "required": ["vds", "name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.network.portgroup.security.set`` parameter schema.
+#:
+#: Set any of the security-policy triple (allowPromiscuous / forgedTransmits /
+#: macChanges) on a distributed portgroup via the **vim**
+#: ``DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`` (the pinned
+#: vcenter.yaml serves no security-policy write). Only the booleans supplied
+#: are changed; none supplied → ``status='no_change_requested'`` before any
+#: write. The required ``configVersion`` and the current policy are read first.
+NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "portgroup": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DistributedVirtualPortgroup moid whose security policy is set "
+                "(e.g. 'dvportgroup-42'). Obtain it from the networking group's "
+                "portgroup.audit read."
+            ),
+        },
+        "allow_promiscuous": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.allowPromiscuous. Accept (true) is required "
+                "for a nested-ESXi trunk portgroup so the nested switch sees frames "
+                "for MACs it owns. Governance-sensitive — a promiscuous portgroup "
+                "sees all traffic on its VLANs."
+            ),
+        },
+        "forged_transmits": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.forgedTransmits. Accept (true) lets a nested "
+                "ESXi emit frames with a source MAC other than the vNIC's."
+            ),
+        },
+        "mac_changes": {
+            "type": "boolean",
+            "description": (
+                "Set DVSSecurityPolicy.macChanges. Accept (true) lets the guest "
+                "change the effective MAC (nested ESXi needs this for its vmks)."
+            ),
+        },
+    },
+    "required": ["portgroup"],
+    "additionalProperties": False,
+}
+
+
 # ---------------------------------------------------------------------------
 # Write composites -- response schemas
 # ---------------------------------------------------------------------------
@@ -2064,6 +2194,100 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "parent_folder", "new_folder_name"],
+}
+
+
+NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "invalid_vlan_spec", "timeout"],
+            "description": (
+                "``'created'`` — the CreateDVPortgroup_Task reached success and the "
+                "new portgroup's config was read back; ``'invalid_vlan_spec'`` — "
+                "both vlan_trunk_ranges and vlan_id were passed (refused before any "
+                "write); ``'timeout'`` — the task did not reach a terminal state "
+                "within the poll bound (it may still complete). A task fault raises "
+                "(the dispatcher wraps it connector_error)."
+            ),
+        },
+        "portgroup": {
+            "type": ["string", "null"],
+            "description": (
+                "The new portgroup's moid (from the task's TaskInfo.result MoRef); "
+                "``null`` on a refusal / timeout."
+            ),
+        },
+        "vds": {"type": "string", "description": "The DVS moid the portgroup was created on."},
+        "name": {"type": "string", "description": "The requested portgroup name."},
+        "task": {
+            "type": ["string", "null"],
+            "description": "The CreateDVPortgroup_Task moid (present once the write fired).",
+        },
+        "observed": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back verification: the created portgroup's config.name and the "
+                "raw config.defaultPortConfig.vlan spec the switch reports. ``null`` "
+                "when no portgroup moid was resolved."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Next-step hint on a non-``created`` status; ``null`` on success.",
+        },
+    },
+    "required": ["status", "vds", "name"],
+}
+
+
+NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["updated", "no_change_requested", "timeout"],
+            "description": (
+                "``'updated'`` — the ReconfigureDVPortgroup_Task reached success and "
+                "the applied policy was read back; ``'no_change_requested'`` — no "
+                "boolean was supplied (refused before any write); ``'timeout'`` — "
+                "the task did not reach a terminal state within the poll bound. A "
+                "task fault raises (the dispatcher wraps it connector_error)."
+            ),
+        },
+        "portgroup": {"type": "string", "description": "The portgroup moid whose policy was set."},
+        "requested": {
+            "type": "object",
+            "description": (
+                "The three security booleans as requested; a ``null`` field was not "
+                "changed (only supplied booleans are written)."
+            ),
+        },
+        "previous": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the effective security triple BEFORE the change (the "
+                "four-eyes reviewer's before-state); ``null`` on a no-change refusal."
+            ),
+        },
+        "observed": {
+            "type": ["object", "null"],
+            "description": (
+                "Read-back of the effective security triple AFTER the change; "
+                "``null`` on a refusal / timeout."
+            ),
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": "The ReconfigureDVPortgroup_Task moid (present once the write fired).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Next-step hint on a non-``updated`` status; ``null`` on success.",
+        },
+    },
+    "required": ["status", "portgroup", "requested"],
 }
 
 
@@ -3482,7 +3706,8 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # Guest OS credentials are NEVER a parameter of these ops: they resolve
 # from the target's Vault ``secret_ref`` (the ``guest_username`` /
 # ``guest_password`` fields). The reads are ``safe``; ``guest.file.write``
-# is the single ``dangerous`` / ``requires_approval`` write.
+# (#3100) and ``guest.program.run`` (#3255) are the ``dangerous`` /
+# ``requires_approval`` writes.
 
 
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
@@ -3816,4 +4041,170 @@ GUEST_FILE_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "guest_path", "size_bytes", "overwrite"],
+}
+
+
+#: ``vmware.composite.vm.guest.program.run`` parameter schema (#3255).
+#:
+#: The freeform in-guest program-execution write #3100 deferred. ``dangerous``
+#: / ``requires_approval``. ``arguments`` and ``env`` values may carry secrets
+#: (a password on a command line, a token in an env var); they are redacted
+#: from the approval preview, never echoed into the result, and never logged
+#: (guest credentials themselves resolve from ``secret_ref``, never params).
+GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Managed-object ID of the VM whose guest OS runs the program (e.g. 'vm-42')."
+            ),
+        },
+        "program_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute path of the program to start inside the guest (vim "
+                "GuestProgramSpec.programPath), e.g. '/usr/bin/systemctl' or a "
+                "Windows 'powershell.exe'. On Linux/Solaris the program is "
+                "launched via a guest shell."
+            ),
+        },
+        "arguments": {
+            "type": "string",
+            "description": (
+                "Command-line arguments for the program as a single shell string "
+                "(vim GuestProgramSpec.arguments) -- e.g. '-Command "
+                '"Install-WindowsFeature AD-Domain-Services"\'. On Linux/Solaris '
+                "the guest shell interprets it (stdio redirection works; shell "
+                "metacharacters must be escaped). Defaults to an empty string. "
+                "MAY carry secrets: the value is redacted from the approval "
+                "preview and never appears in the result, the audit row, or logs."
+            ),
+        },
+        "working_directory": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute working directory for the program (vim "
+                "GuestProgramSpec.workingDirectory). Omit to use the guest "
+                "default (the auth user's home directory on Linux)."
+            ),
+        },
+        "env": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Environment variables for the program, a NAME->value map "
+                "serialised to vim GuestProgramSpec.envVariables 'NAME=value' "
+                "entries. WARNING: vim REPLACES the guest's whole environment "
+                "with this set -- it is not additive, so an incomplete map can "
+                "drop PATH and system variables the program needs. Omit to "
+                "inherit the guest default environment. MAY carry secrets: "
+                "values are redacted from the approval preview and never appear "
+                "in the result, the audit row, or logs (only the variable NAMES "
+                "reach the reviewer)."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When false (default), return as soon as the program is started "
+                "-- StartProgramInGuest is fire-and-forget and yields only a PID "
+                "(no output is captured). When true, poll ListProcessesInGuest "
+                "until the process exits or ``timeout_seconds`` elapses, "
+                "returning the exit code and start/end times."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 300,
+            "description": (
+                "Only used when ``wait`` is true: the wall-clock ceiling for the "
+                "exit-code poll. VMware Tools keeps a finished process's exit "
+                "code listable for only ~5 minutes after completion (and not "
+                "across a Tools restart), so the default matches that window; a "
+                "program running longer may return status 'exit_unknown' if its "
+                "exit info ages out before a poll observes it."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton (see process.list)."
+            ),
+        },
+    },
+    "required": ["vm", "program_path"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.program.run`` response schema (#3255).
+GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["started", "exited", "timeout", "exit_unknown"],
+            "description": (
+                "``'started'`` -- wait=false: the program was launched (PID "
+                "returned, no exit code polled). ``'exited'`` -- wait=true: the "
+                "process completed and its exit code was captured. ``'timeout'`` "
+                "-- wait=true: ``timeout_seconds`` elapsed while the process was "
+                "still running (exit_code null). ``'exit_unknown'`` -- wait=true: "
+                "the process was no longer listable before an exit code was seen "
+                "(it finished and aged out of VMware Tools' ~5-minute window, or "
+                "Tools restarted); exit_code null. (A parked / denied approval "
+                "returns the governance OperationResult verbatim, not this "
+                "envelope.)"
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the program ran in."},
+        "process_manager_moid": {
+            "type": "string",
+            "description": (
+                "Resolved GuestProcessManager MoId the StartProgramInGuest call targeted."
+            ),
+        },
+        "program_path": {
+            "type": "string",
+            "description": (
+                "Absolute program path started (echoed; ``arguments`` / ``env`` "
+                "are never echoed back)."
+            ),
+        },
+        "pid": {
+            "type": "integer",
+            "description": "The process ID StartProgramInGuest returned.",
+        },
+        "exit_code": {
+            "type": ["integer", "null"],
+            "description": (
+                "The process exit code when ``status='exited'``; null for "
+                "'started' / 'timeout' / 'exit_unknown'."
+            ),
+        },
+        "start_time": {
+            "type": ["string", "null"],
+            "description": "GuestProcessInfo.startTime (ISO-8601) when captured; else null.",
+        },
+        "end_time": {
+            "type": ["string", "null"],
+            "description": (
+                "GuestProcessInfo.endTime (ISO-8601) when the process completed; else null."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "description": "Whether the caller requested the exit-code poll.",
+        },
+    },
+    "required": ["status", "vm", "process_manager_moid", "program_path", "pid", "wait"],
 }

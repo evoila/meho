@@ -117,6 +117,104 @@ connector-related release-notes line.
   registration-constant value, re-registered on startup). CLI OpenAPI snapshot
   unchanged (no per-op safety metadata in the REST surface).
 
+### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
+
+- **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based
+  protocol-mapper recipe that provisions the approve-only `approver` JWT
+  claim the backplane started reading in #3270 — closing the "capability
+  that reads a claim nothing mints" gap. `kcadm.sh` is the primary path
+  (Admin Console steps follow as version-tolerant notes): create an
+  `approvers` group and a Script Mapper that emits `approver: true` for
+  its members (Shape A), or a script-free per-user **User Attribute**
+  mapper (Shape B); both emit **Claim JSON Type boolean** on the access
+  token, aligned with `JWT_APPROVER_CLAIM_NAME` (default `approver`), and
+  fail closed for everyone else. Includes decode + live decouple
+  verification (a `read_only + approver` principal clears
+  `POST /api/v1/approvals/{id}/decide` but is refused 403 on
+  `POST /api/v1/operations/call`), a note that the operator console
+  `/ui/approvals*` admits the same capability (#3282 / #3285), and a
+  rollback note covering the access-token-TTL caveat. Forward-pointers
+  added from `docs/codebase/approvals.md` and `docs/codebase/backend.md`.
+
+### Added — mssql: SQL Server typed connector (TDS-direct) (#3264)
+
+- New `mssql` typed connector for Microsoft SQL Server 2022 (registry triple
+  `mssql-2022.x` / `mssql-tds`), a **direct TDS** connector on port 1433 via the
+  pure-Python `python-tds` driver — the postgres/mongodb direct-protocol mold,
+  no unixODBC/msodbcsql or FreeTDS system packages in the backplane image. 14
+  governed ops across four groups: `instance` (about / version / config / logins
+  — safe), `databases` (list / files — safe; create / drop — dangerous +
+  approval), `ha` (availability-groups / fci / sync-health — the safe
+  migration-validation reads), and `backup` (history — safe; database — caution;
+  restore — dangerous + approval). Safety tiers follow the estate satellite
+  table (reads ride satellite runners; destructive writes park for approval and
+  are satellite-excluded).
+- **First two-credential connector on the estate seam:** SQL auth resolves
+  `sql_username` / `sql_password` from the target's Vault secret (the `sql_`
+  prefix reserves room for a later dbatools-over-SSH increment's SSH creds in
+  the same secret); credentials never enter params, logs, or results.
+- **No freeform T-SQL op** (the narrow-waist doctrine): only curated,
+  individually-tiered ops — operator input binds as pyformat values, and
+  database identifiers are QUOTENAME-style bracket-escaped. CLI grows the
+  `meho mssql ...` verbs; consumer proof against the live c1sql1 FCI is tracked
+  open. See `docs/codebase/connectors-mssql.md`.
+
+### Added — vmware: governed in-guest program execution `vm.guest.program.run` (#3255)
+
+- **`vmware.composite.vm.guest.program.run`** — the freeform in-guest
+  program-execution tier the guest-operations channel (#3100) deliberately
+  deferred, now lifted. Runs a program inside a VM's guest OS via the vim
+  `GuestProcessManager.StartProgramInGuest` over the existing VI-JSON seam
+  (no `pyvmomi`, no SSH), the governed replacement for out-of-band
+  `govc guest.run`. Params: `vm`, `program_path`, `arguments`,
+  `working_directory?`, `env?`, `timeout_seconds?`, `wait`.
+- **Exit-code semantics.** `StartProgramInGuest` is fire-and-forget and
+  returns only a PID (no stdout capture). With `wait=true` the op polls
+  `ListProcessesInGuest` (every 2s, up to `timeout_seconds`, default 300s)
+  for the exit code + start/end times. VMware Tools keeps a finished
+  process's exit code listable for only ~5 minutes after completion, so a
+  process no longer listable before an exit code is seen returns
+  `status='exit_unknown'` rather than hanging (alongside `started` /
+  `exited` / `timeout`).
+- **Governance.** `safety_level="dangerous"`, `requires_approval=True` (same
+  tier as `guest.file.write`): the call parks for a human decision unless a
+  standing grant auto-executes it, and gates *first* so a parked / denied
+  approval starts no program. Guest OS credentials resolve from the target's
+  Vault `secret_ref` (`guest_username` / `guest_password`), never in params.
+- **Secret hygiene.** `arguments` and `env` values (which can carry secrets)
+  are kept off the governed surfaces — the approval preview echoes only the
+  program identity + argument byte size + env-var names, the operation
+  result echoes only PID / exit code / times, and the sub-op policy gate
+  never sees them (verified by test); the audit row records a params hash,
+  not raw params; and the op is pinned in `_CREDENTIAL_WRITE_OPS` so its
+  broadcast clamps to aggregate-only (the same remedy `k8s.job.create` and
+  the GOSC create use). The resume-bound `ApprovalRequest.params` row and
+  flight-recorder vendor spans still carry the values, so operators must not
+  pass bare secrets in `arguments` / `env` — same characteristic as
+  `guest.file.write`'s `content`.
+
+### Added — flight recorder: operator mutation surface for capture policy (#3272)
+
+- The writable path the live-instance verification pass found missing: the
+  flight-recorder capture policy (#3212/#3216) resolved per dispatch but could
+  only be seeded by direct DB writes. New `PATCH
+  /api/v1/tenants/flight-recorder-policy` (`meho tenants flight-recorder-policy
+  set`) flips the three per-tenant fields — `flight_recorder_enabled` (F1),
+  `flight_recorder_agent_readable` (F5, tri-state), and
+  `flight_recorder_retention_days` (F4, bounded 1..365). The route is
+  **tenant-scoped to the caller's own tenant** (from the JWT — no tenant id is
+  accepted, so no cross-tenant write is expressible) and gated at
+  `tenant_admin`.
+- The per-target override `flight_recorder_capture` (tri-state: force on / force
+  off / `null` inherit) now rides the existing `PATCH /api/v1/targets/{name}`
+  and `POST /api/v1/targets` (and `meho targets import --update`), preserving the
+  JSON-null-vs-absent distinction via `exclude_unset`.
+- Operator-plane only — REST + CLI, no MCP tool (the 25-tool agent surface is
+  unchanged): enabling capture is a governance decision. Every applied change
+  writes an `audit_log` row naming field / old / new, and the route evicts the
+  resolver's 60s per-tenant / per-target cache so the flip takes effect on the
+  next dispatch without a restart.
+
 ### Added — `wsfc` connector: Windows Server Failover Clustering over PowerShell-5.1-over-SSH (#3263)
 
 - **`wsfc` connector** — typed connector for Windows Server Failover Clustering
@@ -147,7 +245,6 @@ connector-related release-notes line.
   regenerated. Live c1sql1 consumer proof (probe + governed failover + live
   Sensor) is deferred (lab cluster not yet built); scripted-transport unit suite
   + injection-safety + secret-leak guard are the deliverable.
-
 ### Changed — docs-only CI fast path (#3252)
 
 - A PR whose diff is **purely documentation** — every changed path under
@@ -200,6 +297,36 @@ connector-related release-notes line.
   `merge_queue` rule on the `protect main` ruleset is an operator action;
   no repo setting is changed by this PR. Includes the DCO-App and
   approval-ratchet caveats to verify before enabling.
+### Added — vmware network write composites: dvPG create (VLAN trunk) + security-policy set (#3091)
+
+- Two vim-typed distributed-portgroup writes on the `vmware-rest-9.0` connector
+  for standing up an L2 substrate — the nested-hypervisor lab recipe.
+  `network.portgroup.create` creates a portgroup on an existing DVS via vim
+  `DistributedVirtualSwitch.CreateDVPortgroup_Task` with a VLAN **trunk**
+  (`VmwareDistributedVirtualSwitchTrunkVlanSpec`, a `NumericRange[]`, e.g.
+  0–4094 at bootstrap) or a single access VLAN; the returned task's new
+  portgroup MoRef is read back (`name` + `vlan`) for verification.
+  `network.portgroup.security.set` sets any of the security-policy triple —
+  `allowPromiscuous` / `forgedTransmits` / `macChanges` — via vim
+  `DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`, reading the
+  required `configVersion` + the current policy first (the `previous`
+  before-state) and the applied policy after (`observed`). Neither surface has
+  a REST write path (the security policy lives in
+  `DVPortgroupConfigSpec.defaultPortConfig.securityPolicy`), so both ride the
+  governed vmomi seam like `host.detach_from_vds` / `cluster.drs_rule.create`.
+- Both are `safety_level="dangerous"` / `requires_approval=True` (the tier every
+  write composite in this connector uses — there is no `caution` tier; only
+  `vm.destroy` is `destructive`). `security.set` touching promiscuous mode is
+  governance-sensitive and pops the same top-level approval gate. Both land in
+  the `networking` operation group beside the `portgroup.audit` read (which
+  surfaces the DVS / portgroup moids the writes take).
+- Every vim method (`CreateDVPortgroup_Task` / `ReconfigureDVPortgroup_Task`)
+  and every emitted `_typeName` (`DVPortgroupConfigSpec`, `VMwareDVSPortSetting`,
+  `DVSSecurityPolicy`, `BoolPolicy`, the trunk / access VLAN specs, `NumericRange`)
+  is grounded against the pinned `vi-json.yaml` by the reconcile lanes; the
+  mechanics are proven by mock-transport unit tests. Live-appliance verification
+  is deferred (no lab access) — implementation + full conformance/unit coverage
+  is the deliverable, consistent with recent connector tasks.
 
 ### Added — approve-only RBAC capability: decouple the approvals plane from the dispatch gate (#3243)
 
@@ -225,6 +352,40 @@ connector-related release-notes line.
   human-only (console / CLI / REST), and the 25-tool working surface + 78-tool
   inventory are unchanged. No schema change / no migration.
 
+### Added — `msad` connector: Active Directory over PowerShell-5.1-over-SSH (#3262)
+
+- **`msad` connector** — typed connector for Active Directory day-2 management
+  over SSH → PowerShell 5.1 (the `ActiveDirectory` module on a domain
+  controller), on the shared `_shared/pwsh` transport (#3260) + `SshConnector`
+  base, registered as `("msad", "2022.x", "msad-ssh")` (+ wildcard). 27 ops
+  across five groups — `domain` (about / info / forest / controllers /
+  replication — FSMO holders + functional level + inbound-replication summary),
+  `users` (list / get / search / create / set / enable / disable / delete),
+  `groups` (list / get / members / add-member / remove-member / delete),
+  `computers` (list / get / join-prestage / unjoin / delete), `ou` (list /
+  create / move). Complements `windows_dns` on the same DC; copies the `winsrv`
+  estate mold (#3261).
+- Safety tiers per the Initiative #3259 satellite table: reads `safe`;
+  recoverable writes `caution`; `user.delete` / `group.delete` /
+  `computer.delete` are `dangerous` + `requires_approval` (the rke2
+  approval-parked-write mold, satellite-excluded by the tier ladder).
+  `computer.unjoin` disables the account (recoverable), distinct from the
+  destructive `computer.delete`.
+- Secret hygiene: no credential rides the `-EncodedCommand` argv — `user.create`
+  is passwordless (created disabled until a password is set out of band) and
+  there is **no `password-reset` op** (a Vault-brokered follow-up); a schema-level
+  test proves no op exposes a secret-value parameter. Every operator string is
+  escaped via `ps_single_quote`; the `user.search` query is bound through a
+  script-block `-Filter` (the AD injection-safe form). In-task decision:
+  DC-targeting assumes the SSH host IS a domain controller (`-Server`/jump-host
+  with a second credential deferred).
+- The new `msad` product token extends the OpenAPI `TargetCreate.product` enum,
+  so the CLI snapshot (`cli/api/openapi.json` + generated client) is regenerated.
+  Live `c1sql-dc1` consumer proof is deferred (lab DC not yet reachable from this
+  build); scripted-transport unit suite + injection-safety + secret-leak guard +
+  six-reason probe matrix are the deliverable, consistent with recent connector
+  tasks.
+
 ### Added — `winsrv` connector: Windows Server core over PowerShell-5.1-over-SSH (#3261 / #3271)
 
 - **`winsrv` connector** — typed connector for Windows Server core management
@@ -248,7 +409,6 @@ connector-related release-notes line.
   `hyperv` connectors. Live c1sql1 consumer proof is deferred (lab VMs not yet
   built); scripted-transport unit suite + injection-safety + secret-leak guard
   are the deliverable, consistent with recent connector tasks.
-
 ### Added — typed HttpNfcLease OVF import: `vm.import_from_library` (#3229)
 
 - The durable, transfer-window-decoupled sibling of `vm.deploy_from_library`.

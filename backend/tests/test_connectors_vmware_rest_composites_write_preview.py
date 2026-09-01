@@ -96,6 +96,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.disk_mark_flash",
         "vmware.composite.host.service_control",
         "vmware.composite.vm.guest.file.write",
+        "vmware.composite.vm.guest.program.run",
     }
 )
 
@@ -307,14 +308,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 24 write composites register a builder (criterion 4)
+# Wiring — all 25 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 24
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 25
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -1479,3 +1480,58 @@ async def test_vm_resize_preview_failure_parks_with_unavailable_marker(
     assert effect["preview_unavailable"] is True
     assert "GET:/vcenter/vm/vm-1" in effect["preview_error"]
     assert "preview" not in effect
+
+
+# ===========================================================================
+# guest.program.run preview — argument/env values are never echoed (#3255)
+# ===========================================================================
+
+
+async def test_guest_program_run_preview_echoes_shape_never_secret_values() -> None:
+    """The park preview shows the program identity + shape, never arguments/env values.
+
+    ``arguments`` (a command line) and ``env`` values can carry secrets, so
+    the durable ``proposed_effect`` row must echo only what a reviewer needs
+    to judge the blast radius -- VM, program path, working directory, the wait
+    flag, the argument *byte size*, and the env-var *names* -- and never the
+    argument string or any env value.
+    """
+    preview = await _write_preview._guest_program_run_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-42",
+                "program_path": "/usr/bin/psql",
+                "arguments": "-c 'ALTER USER svc PASSWORD hunter2'",
+                "working_directory": "/root",
+                "env": {"PGPASSWORD": "hunter2", "PATH": "/usr/bin"},
+                "wait": True,
+            }
+        )
+    )
+    assert preview is not None
+    assert preview == {
+        "vm": "vm-42",
+        "program_path": "/usr/bin/psql",
+        "wait": True,
+        "working_directory": "/root",
+        "argument_bytes": len(b"-c 'ALTER USER svc PASSWORD hunter2'"),
+        "env_var_names": ["PATH", "PGPASSWORD"],
+    }
+    # The secret argument/env VALUES never reach the durable approval row.
+    serialised = json.dumps(preview)
+    assert "hunter2" not in serialised
+    assert "ALTER USER" not in serialised
+
+
+async def test_guest_program_run_preview_minimal_and_declines_on_bad_params() -> None:
+    """Preview omits absent optionals; declines (None) without vm/program_path."""
+    minimal = await _write_preview._guest_program_run_preview(
+        _make_preview_ctx({"vm": "vm-7", "program_path": "/bin/true"})
+    )
+    assert minimal == {"vm": "vm-7", "program_path": "/bin/true", "wait": False}
+    assert (
+        await _write_preview._guest_program_run_preview(
+            _make_preview_ctx({"program_path": "/bin/true"})
+        )
+        is None
+    )

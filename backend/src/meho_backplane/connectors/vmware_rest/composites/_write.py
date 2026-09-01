@@ -123,6 +123,8 @@ __all__ = [
     "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
+    "network_portgroup_create_composite",
+    "network_portgroup_security_set_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
@@ -704,6 +706,81 @@ _VIM_SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
 _VIM_SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
     _OP_RETRIEVE_PROPERTIES,
     _OP_RECONFIGURE_DVS_TASK,
+)
+
+# ===========================================================================
+# network.portgroup.create + network.portgroup.security.set (#3091)
+# ===========================================================================
+#
+# Two vim-typed distributed-portgroup writes for standing up an L2 substrate
+# (the nested-hypervisor lab recipe): create a portgroup on an existing DVS
+# with a VLAN trunk (or single access VLAN) spec, and set its security-policy
+# triple -- allowPromiscuous / forgedTransmits / macChanges -- the knobs a
+# nested-ESXi trunk portgroup requires. The pinned vcenter.yaml serves NO REST
+# write for either surface (there is no portgroup-create Automation path and no
+# security-policy write; the security policy lives in
+# ``DVPortgroupConfigSpec.defaultPortConfig.securityPolicy``, i.e. vim
+# territory -- the long-documented consumer-side gap the issue cites), so both
+# ride the governed vmomi seam like host.detach_from_vds / drs_rule.create:
+#
+# * ``CreateDVPortgroup_Task`` on the owning DistributedVirtualSwitch -- the
+#   spec's ``CreateDVPortgroupRequestType`` wraps one ``DVPortgroupConfigSpec``;
+#   the returned Task's ``TaskInfo.result`` is a MoRef to the new portgroup.
+# * ``ReconfigureDVPortgroup_Task`` on the DistributedVirtualPortgroup -- the
+#   ``ReconfigureDVPortgroupRequestType`` wraps a ``DVPortgroupConfigSpec``
+#   whose ``configVersion`` is required and read off ``config.configVersion``
+#   first (optimistic-concurrency echo, the host.detach_from_vds pattern).
+_OP_CREATE_DVPORTGROUP_TASK = "POST:/DistributedVirtualSwitch/{moId}/CreateDVPortgroup_Task"
+_OP_RECONFIGURE_DVPORTGROUP_TASK = (
+    "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task"
+)
+
+# ``_typeName`` discriminators for the two portgroup writes' request bodies
+# (every one is a spec-verified component schema in the pinned vi-json.yaml,
+# and every one is pinned in the write_body_reconcile lane's
+# ``_EMITTED_VIM_TYPE_NAMES``). ``DVSSecurityPolicy`` and ``BoolPolicy`` both
+# derive from ``InheritablePolicy``, whose ``inherited`` field the spec marks
+# required -- so both carry ``inherited=false`` ("explicitly set", not inherit).
+_DVPORTGROUP_CONFIG_SPEC_TYPE = "DVPortgroupConfigSpec"
+_VMWARE_DVS_PORT_SETTING_TYPE = "VMwareDVSPortSetting"
+_DVS_SECURITY_POLICY_TYPE = "DVSSecurityPolicy"
+_BOOL_POLICY_TYPE = "BoolPolicy"
+_TRUNK_VLAN_SPEC_TYPE = "VmwareDistributedVirtualSwitchTrunkVlanSpec"
+_VLAN_ID_SPEC_TYPE = "VmwareDistributedVirtualSwitchVlanIdSpec"
+_NUMERIC_RANGE_TYPE = "NumericRange"
+
+# vim portgroup properties: the required reconfigure ``configVersion`` echo and
+# the read-back verification rows. ``config.defaultPortConfig`` is read as the
+# whole (VMware)DVSPortSetting DataObject -- ``vlan`` / ``securityPolicy`` are
+# pulled client-side, avoiding a deep nested-subtype pathSet.
+_PROP_DVPG_CONFIG_VERSION = "config.configVersion"
+_PROP_DVPG_CONFIG_NAME = "config.name"
+_PROP_DVPG_DEFAULT_PORT_CONFIG = "config.defaultPortConfig"
+
+# Default portgroup binding type when the caller does not pin one
+# (DistributedVirtualPortgroupPortgroupType_enum -- earlyBinding / lateBinding
+# / ephemeral, enforced by the parameter schema's enum); a static trunk PG is
+# earlyBinding. The VLAN-id bounds (0..4094) are enforced by the schema too.
+_DVPG_DEFAULT_PORT_BINDING = "earlyBinding"
+
+# Wall-clock bound for the portgroup task polls -- the 600s convention shared
+# by disk-grow / clone / drs_rule / detach.
+_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS = 600.0
+
+#: vi-json sub-op manifests for the #3091 portgroup writes (parallel to
+#: ``_VIM_SUB_OPS_HOST_DETACH_FROM_VDS``; named out of the ``_SUB_OPS_*``
+#: namespace so the vcenter.yaml ingest-reconcile sweep skips them). create
+#: posts ``CreateDVPortgroup_Task`` then reads the new portgroup's config back
+#: (``RetrievePropertiesEx``); security.set reads ``config.configVersion`` +
+#: the current securityPolicy first, then posts ``ReconfigureDVPortgroup_Task``
+#: (and reads the applied policy back through the same RetrievePropertiesEx op).
+_VIM_SUB_OPS_NETWORK_PORTGROUP_CREATE: tuple[str, ...] = (
+    _OP_CREATE_DVPORTGROUP_TASK,
+    _OP_RETRIEVE_PROPERTIES,
+)
+_VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIGURE_DVPORTGROUP_TASK,
 )
 
 # Hardware write ops (#2891). Post-clone reconfigure of a VM's virtual
@@ -3888,6 +3965,382 @@ async def host_detach_from_vds_composite(
         "host": host_moid,
         "vm_migration_failures": [],
         "vms_migrated": vms_migrated,
+    }
+
+
+# ===========================================================================
+# network.portgroup.create + network.portgroup.security.set (#3091)
+# ===========================================================================
+
+
+def _build_portgroup_vlan_spec(
+    *, vlan_trunk_ranges: list[dict[str, int]] | None, vlan_id: int | None
+) -> dict[str, Any] | None:
+    """Build the VI-JSON VLAN spec for a new portgroup's default port config.
+
+    Trunk mode (``VmwareDistributedVirtualSwitchTrunkVlanSpec`` with a
+    ``NumericRange[]`` ``vlanId``) when *vlan_trunk_ranges* is set, single
+    access VLAN (``VmwareDistributedVirtualSwitchVlanIdSpec``) when *vlan_id*
+    is set, or ``None`` when neither is given (the portgroup inherits the
+    switch default). The caller enforces mutual exclusivity before calling.
+    """
+    if vlan_trunk_ranges is not None:
+        return {
+            _VMOMI_TYPE_NAME_KEY: _TRUNK_VLAN_SPEC_TYPE,
+            "vlanId": [
+                {
+                    _VMOMI_TYPE_NAME_KEY: _NUMERIC_RANGE_TYPE,
+                    "start": rng["start"],
+                    "end": rng["end"],
+                }
+                for rng in vlan_trunk_ranges
+            ],
+        }
+    if vlan_id is not None:
+        return {_VMOMI_TYPE_NAME_KEY: _VLAN_ID_SPEC_TYPE, "vlanId": vlan_id}
+    return None
+
+
+async def _read_portgroup_config(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_moid: str | None,
+) -> dict[str, Any] | None:
+    """Read a portgroup's ``config`` (name + ``defaultPortConfig.vlan``) for verification.
+
+    Best-effort read-back: ``None`` when the create's ``TaskInfo.result``
+    yielded no moid. The whole ``config.defaultPortConfig`` DataObject is
+    read and ``vlan`` pulled client-side (avoiding a deep nested-subtype
+    pathSet). ``vlan`` is the raw VI-JSON VLAN spec the switch reports.
+    """
+    if portgroup_moid is None:
+        return None
+    result = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _DVPG_MO_TYPE,
+            [portgroup_moid],
+            [_PROP_DVPG_CONFIG_NAME, _PROP_DVPG_DEFAULT_PORT_CONFIG],
+        ),
+    )
+    port_setting = _extract_single_prop(result, _PROP_DVPG_DEFAULT_PORT_CONFIG)
+    vlan = port_setting.get("vlan") if isinstance(port_setting, dict) else None
+    return {"name": _extract_single_prop(result, _PROP_DVPG_CONFIG_NAME), "vlan": vlan}
+
+
+async def network_portgroup_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Create a distributed portgroup on a DVS with a VLAN trunk (or access) spec.
+
+    Op-id: ``vmware.composite.network.portgroup.create``. The pinned
+    vcenter.yaml serves no portgroup-create REST path, so the create rides
+    vim ``DistributedVirtualSwitch.CreateDVPortgroup_Task`` with a single
+    ``DVPortgroupConfigSpec`` (name, binding ``type``, optional ``numPorts``,
+    and a ``VMwareDVSPortSetting.vlan`` -- a trunk ``NumericRange[]`` or a
+    single access VLAN). The returned Task's ``TaskInfo.result`` MoRef is the
+    new portgroup; its ``config`` (name + ``defaultPortConfig.vlan``) is read
+    back for the response's verification rows. A trunk+access clash refuses
+    before any write (``status='invalid_vlan_spec'``); a task fault raises
+    (the dispatcher wraps ``connector_error``); a poll timeout returns
+    ``status='timeout'`` with the task id.
+
+    *vds* is the DistributedVirtualSwitch moid (the ``host.detach_from_vds``
+    moid convention -- there is no portgroup/switch REST list to resolve a
+    name against; the moid comes from the ``networking`` group's
+    ``portgroup.audit`` read).
+    """
+    vds_moid = params["vds"]
+    name = params["name"]
+    vlan_trunk_ranges = params.get("vlan_trunk_ranges")
+    vlan_id = params.get("vlan_id")
+    num_ports = params.get("num_ports")
+    port_binding = params.get("port_binding", _DVPG_DEFAULT_PORT_BINDING)
+
+    if vlan_trunk_ranges is not None and vlan_id is not None:
+        return {
+            "status": "invalid_vlan_spec",
+            "portgroup": None,
+            "vds": vds_moid,
+            "name": name,
+            "task": None,
+            "observed": None,
+            "guidance": (
+                "pass either vlan_trunk_ranges (trunk mode) or vlan_id (a single "
+                "access VLAN), not both -- they are mutually exclusive port VLAN modes"
+            ),
+        }
+
+    config_spec: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _DVPORTGROUP_CONFIG_SPEC_TYPE,
+        "name": name,
+        "type": port_binding,
+    }
+    if num_ports is not None:
+        config_spec["numPorts"] = num_ports
+    vlan_spec = _build_portgroup_vlan_spec(vlan_trunk_ranges=vlan_trunk_ranges, vlan_id=vlan_id)
+    if vlan_spec is not None:
+        config_spec["defaultPortConfig"] = {
+            _VMOMI_TYPE_NAME_KEY: _VMWARE_DVS_PORT_SETTING_TYPE,
+            "vlan": vlan_spec,
+        }
+
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_CREATE_DVPORTGROUP_TASK,
+        vmomi_path=f"/{_DVS_MO_TYPE}/{vds_moid}/CreateDVPortgroup_Task",
+        body={"spec": config_spec},
+        params={"vds": vds_moid, "name": name},
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            f"network.portgroup.create: CreateDVPortgroup_Task on dvs {vds_moid!r} "
+            f"(portgroup {name!r}) faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "portgroup": None,
+            "vds": vds_moid,
+            "name": name,
+            "task": outcome.task,
+            "observed": None,
+            "guidance": (
+                f"CreateDVPortgroup_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
+                "switch's portgroups -- the create may still complete in the background"
+            ),
+        }
+
+    portgroup_moid = _moref_value(outcome.result)
+    observed = await _read_portgroup_config(
+        connector=connector, target=target, operator=operator, portgroup_moid=portgroup_moid
+    )
+    return {
+        "status": "created",
+        "portgroup": portgroup_moid,
+        "vds": vds_moid,
+        "name": name,
+        "task": outcome.task,
+        "observed": observed,
+        "guidance": None,
+    }
+
+
+def _bool_policy(value: bool) -> dict[str, Any]:
+    """A VI-JSON ``BoolPolicy`` with an explicit (non-inherited) value.
+
+    ``InheritablePolicy.inherited`` is required by the pinned spec;
+    ``inherited=false`` means "explicitly set this value" (rather than
+    inheriting the switch/uplink default) -- the intent of a security override.
+    """
+    return {_VMOMI_TYPE_NAME_KEY: _BOOL_POLICY_TYPE, "inherited": False, "value": value}
+
+
+def _flatten_security_policy(policy: Any) -> dict[str, bool | None]:
+    """Flatten a VI-JSON ``DVSSecurityPolicy`` to the three effective booleans.
+
+    Each field is a ``BoolPolicy`` whose ``value`` is the effective boolean,
+    or ``None`` when the policy omits it (inheriting). Tolerates a missing /
+    non-dict policy (``None`` for every field).
+    """
+
+    def _val(node: Any) -> bool | None:
+        if isinstance(node, dict):
+            value = node.get("value")
+            return value if isinstance(value, bool) else None
+        return None
+
+    if not isinstance(policy, dict):
+        return {"allow_promiscuous": None, "forged_transmits": None, "mac_changes": None}
+    return {
+        "allow_promiscuous": _val(policy.get("allowPromiscuous")),
+        "forged_transmits": _val(policy.get("forgedTransmits")),
+        "mac_changes": _val(policy.get("macChanges")),
+    }
+
+
+async def _read_portgroup_security_policy(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_moid: str,
+) -> dict[str, bool | None]:
+    """Read a portgroup's effective security-policy triple (the read-back verification)."""
+    result = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _DVPG_MO_TYPE, [portgroup_moid], [_PROP_DVPG_DEFAULT_PORT_CONFIG]
+        ),
+    )
+    port_setting = _extract_single_prop(result, _PROP_DVPG_DEFAULT_PORT_CONFIG)
+    return _flatten_security_policy(
+        port_setting.get("securityPolicy") if isinstance(port_setting, dict) else None
+    )
+
+
+async def network_portgroup_security_set_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Set a distributed portgroup's security-policy triple via ReconfigureDVPortgroup_Task.
+
+    Op-id: ``vmware.composite.network.portgroup.security.set``. Sets any of
+    ``allowPromiscuous`` / ``forgedTransmits`` / ``macChanges`` -- the knobs a
+    nested-ESXi trunk portgroup needs at Accept. The pinned vcenter.yaml
+    serves no security-policy write, so the change rides vim
+    ``DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`` with a
+    ``DVPortgroupConfigSpec.defaultPortConfig.securityPolicy`` delta. The
+    spec's required ``configVersion`` and the current policy are read off
+    ``config`` first (the ``previous`` verification rows), and the applied
+    policy is read back after the write (``observed``). No boolean provided
+    refuses before any write (``status='no_change_requested'``); a task fault
+    raises (the dispatcher wraps ``connector_error``); a poll timeout returns
+    ``status='timeout'``.
+    """
+    portgroup_moid = params["portgroup"]
+    requested: dict[str, bool | None] = {
+        "allow_promiscuous": params.get("allow_promiscuous"),
+        "forged_transmits": params.get("forged_transmits"),
+        "mac_changes": params.get("mac_changes"),
+    }
+    if all(value is None for value in requested.values()):
+        return {
+            "status": "no_change_requested",
+            "portgroup": portgroup_moid,
+            "requested": requested,
+            "previous": None,
+            "observed": None,
+            "task": None,
+            "guidance": (
+                "pass at least one of allow_promiscuous / forged_transmits / mac_changes -- "
+                "the composite sets only the booleans you provide"
+            ),
+        }
+
+    pre_read = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _DVPG_MO_TYPE,
+            [portgroup_moid],
+            [_PROP_DVPG_CONFIG_VERSION, _PROP_DVPG_DEFAULT_PORT_CONFIG],
+        ),
+    )
+    config_version = _extract_single_prop(pre_read, _PROP_DVPG_CONFIG_VERSION)
+    if not isinstance(config_version, str):
+        raise RuntimeError(
+            "network.portgroup.security.set: could not read config.configVersion off "
+            f"portgroup {portgroup_moid!r} (payload={pre_read!r})"
+        )
+    previous_port_setting = _extract_single_prop(pre_read, _PROP_DVPG_DEFAULT_PORT_CONFIG)
+    previous = _flatten_security_policy(
+        previous_port_setting.get("securityPolicy")
+        if isinstance(previous_port_setting, dict)
+        else None
+    )
+
+    security_policy: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _DVS_SECURITY_POLICY_TYPE,
+        "inherited": False,
+    }
+    if requested["allow_promiscuous"] is not None:
+        security_policy["allowPromiscuous"] = _bool_policy(bool(requested["allow_promiscuous"]))
+    if requested["forged_transmits"] is not None:
+        security_policy["forgedTransmits"] = _bool_policy(bool(requested["forged_transmits"]))
+    if requested["mac_changes"] is not None:
+        security_policy["macChanges"] = _bool_policy(bool(requested["mac_changes"]))
+
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIGURE_DVPORTGROUP_TASK,
+        vmomi_path=f"/{_DVPG_MO_TYPE}/{portgroup_moid}/ReconfigureDVPortgroup_Task",
+        body={
+            "spec": {
+                _VMOMI_TYPE_NAME_KEY: _DVPORTGROUP_CONFIG_SPEC_TYPE,
+                "configVersion": config_version,
+                "defaultPortConfig": {
+                    _VMOMI_TYPE_NAME_KEY: _VMWARE_DVS_PORT_SETTING_TYPE,
+                    "securityPolicy": security_policy,
+                },
+            }
+        },
+        params={
+            "portgroup": portgroup_moid,
+            **{key: value for key, value in requested.items() if value is not None},
+        },
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            "network.portgroup.security.set: ReconfigureDVPortgroup_Task on portgroup "
+            f"{portgroup_moid!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "portgroup": portgroup_moid,
+            "requested": requested,
+            "previous": previous,
+            "observed": None,
+            "task": outcome.task,
+            "guidance": (
+                f"ReconfigureDVPortgroup_Task {outcome.task} did not reach a terminal state "
+                f"within {int(_NETWORK_PORTGROUP_TASK_TIMEOUT_SECONDS)}s; poll the task or "
+                "re-read the portgroup's security policy -- the change may still complete "
+                "in the background"
+            ),
+        }
+
+    observed = await _read_portgroup_security_policy(
+        connector=connector, target=target, operator=operator, portgroup_moid=portgroup_moid
+    )
+    return {
+        "status": "updated",
+        "portgroup": portgroup_moid,
+        "requested": requested,
+        "previous": previous,
+        "observed": observed,
+        "task": outcome.task,
+        "guidance": None,
     }
 
 

@@ -283,13 +283,21 @@ def _operator(
     tenant_id: uuid.UUID,
     sub: str = _REVIEWER_SUB,
     role: TenantRole = TenantRole.OPERATOR,
+    approver: bool = False,
 ) -> Operator:
-    """Build an :class:`Operator` the patched ``_resolve_operator`` returns."""
+    """Build an :class:`Operator` the patched ``_resolve_operator`` returns.
+
+    ``approver`` sets the orthogonal approve-only capability (#3243) that
+    ``_operator_from_claims`` lifts from the JWT ``approver`` claim, so a
+    dedicated approver principal is expressed as ``role=READ_ONLY`` +
+    ``approver=True`` — the parity fixture #3282 pins for the console BFF.
+    """
     return Operator(
         sub=sub,
         raw_jwt="header.payload.signature",
         tenant_id=tenant_id,
         tenant_role=role,
+        approver=approver,
     )
 
 
@@ -737,6 +745,221 @@ def test_self_approve_allowed_when_break_glass_enabled(
     assert "Request approved" in response.text
     assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
     resume_mock.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Approver capability parity (#3282 — console parity with the #3243/#3270
+# REST decoupling). The console decide path runs the same shared service
+# gate ``_check_reviewer_role`` the REST plane does, so it admits a
+# principal that is operator-or-higher OR carries the orthogonal
+# ``approver`` capability, refuses ``read_only`` without it, and keeps the
+# self-approval refusal (#1401) orthogonal to the capability.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("role", "approver"),
+    [
+        (TenantRole.OPERATOR, False),
+        (TenantRole.READ_ONLY, True),
+    ],
+    ids=["operator", "read_only+approver"],
+)
+def test_console_decide_admits_operator_or_approver(role: TenantRole, approver: bool) -> None:
+    """A console approve succeeds for either principal the #3243 gate admits.
+
+    Parity with the REST decoupling: the BFF's approve path runs the shared
+    service gate ``_check_reviewer_role``, which admits ``operator``-or-higher
+    OR a ``read_only`` principal carrying the ``approver`` capability. The row
+    flips to approved and the parked op re-dispatches identically for both — so
+    a dedicated approver (``read_only`` role + ``approver=true``) clears a
+    four-eyes gate through the console exactly as an operator does.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=role, approver=approver)
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "Request approved" in response.text
+    assert _request_status(rid) == ApprovalRequestStatus.APPROVED.value
+    resume_mock.assert_awaited_once()
+
+
+def test_approver_read_only_can_reject_via_bff() -> None:
+    """A ``read_only`` + ``approver`` principal can reject via the console.
+
+    Reject runs the same ``_check_reviewer_role`` gate as approve, so the
+    approver capability clears it; the row flips to rejected and — as for any
+    reject — the parked op is never re-dispatched.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.READ_ONLY, approver=True
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/reject",
+                data={"reason": "not now"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "Request denied" in response.text
+    assert _request_status(rid) == ApprovalRequestStatus.REJECTED.value
+    resume_mock.assert_not_awaited()
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+def test_console_decide_refuses_read_only_without_approver(action: str) -> None:
+    """A ``read_only`` principal WITHOUT ``approver`` cannot decide on the console.
+
+    The service ``_check_reviewer_role`` raises ``UnauthorizedApprovalError``,
+    which the BFF maps to a 403 re-rendered in the modal banner naming *both*
+    levers (operator role OR the approver capability). The row stays pending
+    and nothing re-dispatches — fail-closed, unchanged by #3243. Covers both
+    decision verbs since each runs the gate on its own service call.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.READ_ONLY, approver=False
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/{action}",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "403" in body
+    assert "approver capability" in body
+    assert "Request approved" not in body
+    assert "Request denied" not in body
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
+def test_approver_read_only_cannot_self_approve_via_bff() -> None:
+    """The ``approver`` capability does NOT bypass the self-approval refusal (#1401).
+
+    An approver who parked the request (``operator.sub == principal_sub``) is
+    still refused a forged self-approve — the ``sub``-keyed guard is orthogonal
+    to the role/approver gate, exactly as the REST plane enforces. The row
+    stays pending; nothing re-dispatches; break-glass is the only override.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    # Requester == the approver-capable reviewer; break-glass OFF (default).
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REVIEWER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.READ_ONLY, approver=True
+    )
+    resume_mock = AsyncMock(return_value=_dispatch_result())
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RESUME_DISPATCH, resume_mock),
+        ):
+            response = client.post(
+                f"/ui/approvals/{rid}/approve",
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    assert "cannot approve your own request" in response.text.lower()
+    assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
+    resume_mock.assert_not_awaited()
+
+
+def test_detail_modal_approve_enabled_for_approver() -> None:
+    """The detail modal shows an ENABLED Approve button for an approver principal.
+
+    Button visibility is computed from the self-approval guard alone, never the
+    tenant role, so a ``read_only`` + ``approver`` reviewer (not the requester)
+    sees an actionable Approve control — the console UX matches the capability
+    rather than hiding the action behind an operator-role assumption.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=_REQUESTER_SUB)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(
+        tenant_id=_TENANT_A, sub=_REVIEWER_SUB, role=TenantRole.READ_ONLY, approver=True
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    approve_button = response.text.split('data-action="approve"')[1].split("</button>")[0]
+    assert "disabled" not in approve_button
+
+
+def test_approver_read_only_sees_badge_and_history() -> None:
+    """A ``read_only`` + ``approver`` session reaches the read surfaces (AC1).
+
+    The read surfaces (badge / panel / history / detail) gate on the BFF
+    session alone, so an approver-provisioned principal reaches the same
+    tenant-scoped queue the REST list/show routes return. This also pins that
+    the read surfaces stay session-open — a future over-tightening to an
+    operator-role gate would regress here (and would wrongly hide the queue
+    from an approver whose role is ``read_only``).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_request(tenant_id=_TENANT_A, op_id="vsphere.vm.create")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        badge = client.get("/ui/approvals/badge")
+        history = client.get("/ui/approvals/list", headers=_HX_HEADERS)
+
+    assert badge.status_code == 200, badge.text
+    assert 'data-pending-count="1"' in " ".join(badge.text.split())
+    assert history.status_code == 200, history.text
+    assert "vsphere.vm.create" in history.text
 
 
 # ---------------------------------------------------------------------------

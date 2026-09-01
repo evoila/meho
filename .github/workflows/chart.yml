@@ -68,6 +68,18 @@ on:
     # mirrors the same decision documented in image.yml.
     branches: [main]
     tags: ['v*']
+  # Fires when a PR enters the GitHub merge queue. Required so the
+  # `helm install + helm test (pgvector preflight)` status context — a
+  # required check in branch protection (#349) — reports against the
+  # synthesised merge commit, not just the PR head. Without this, the
+  # merge queue would hang forever on the missing required context.
+  # The `changes` job emits `chart=true` on any non-`pull_request`
+  # event, so a queue admission runs the full kind-based helm-test (same
+  # depth as a push to `main`) — validating the actual merge result.
+  # `publish` + `verify-anonymous-pull` are guarded to `push` only, so a
+  # queue entry never packages or pushes a chart to GHCR. Same rationale
+  # as ci.yml's merge_group trigger (#769).
+  merge_group:
 
 permissions:
   contents: read
@@ -80,17 +92,27 @@ permissions:
 concurrency:
   # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
   # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
-  group: chart-${{ github.ref }}
-  cancel-in-progress: true
+  # The `${{ github.event_name }}` suffix keeps pull_request / push /
+  # merge_group runs in distinct cancellation domains (mirrors ci.yml,
+  # security-scan.yml, secret-scan.yml, dependency-license-check.yml).
+  #
+  # IMPORTANT: already-running merge_group jobs must NEVER be cancelled — a
+  # cancelled queue check fails the merge attempt and drops the PR out of the
+  # queue, defeating the queue's purpose (#769). cancel-in-progress is
+  # therefore scoped OFF for merge_group and stays ON for pull_request / push.
+  group: chart-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   changes:
     name: Detect chart-relevant changes
     # Gate-keeper for the required `helm-test` check (see the `on:` note above).
     # Runs on every PR; the expensive jobs read `outputs.chart` in their `if:`.
-    # On push (main / v* tags) the chart jobs always run — their `if:`
+    # On any non-`pull_request` event (push to main / v* tags, or a
+    # `merge_group` queue admission) the chart jobs always run — their `if:`
     # short-circuits on `github.event_name != 'pull_request'` before reading
-    # this output — so we just emit `true` to satisfy their `needs`.
+    # this output — so we just emit `true` to satisfy their `needs`. That
+    # makes a queue admission validate the merge result at full depth.
     permissions:
       contents: read
       pull-requests: read
@@ -1131,10 +1153,13 @@ jobs:
 
   publish:
     name: Package + push + sign chart
-    # Skip on pull_request entirely — PRs don't push. The same fork-PR guard
-    # would never fire here because the trigger above already filters PRs,
-    # but the explicit `if` makes intent visible.
-    if: github.event_name != 'pull_request'
+    # Push events only (main / v* tags). PRs don't push, and a `merge_group`
+    # queue entry must NOT package/push/sign a chart to GHCR — the merge has
+    # not happened yet and the PR may still fall out of the queue. `== 'push'`
+    # is behaviour-preserving for the pre-merge_group trigger set (where
+    # `!= 'pull_request'` meant exactly `push`) while cleanly excluding the
+    # new `merge_group` event.
+    if: github.event_name == 'push'
     needs: validate
     runs-on: meho-runners-ci
     timeout-minutes: 15
@@ -1358,7 +1383,9 @@ jobs:
     # state from the push step cannot accidentally satisfy the pull. A fresh
     # job ships a clean filesystem with no GHCR credentials anywhere — a
     # successful `helm pull` here can only mean the GHCR package is public.
-    if: github.event_name != 'pull_request'
+    # Push events only — same rationale as `publish` above: a `merge_group`
+    # queue entry never publishes, so there is nothing for it to pull.
+    if: github.event_name == 'push'
     needs: publish
     runs-on: meho-runners-ci
     timeout-minutes: 10

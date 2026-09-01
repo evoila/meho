@@ -90,6 +90,32 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — merge-queue readiness: every required check now reports on `merge_group` refs (#3253)
+
+- `chart.yml` — the last required-check workflow without a `merge_group`
+  trigger — now subscribes to `merge_group`, closing the gap #769 left
+  after landing the trigger in `ci.yml`, `security-scan.yml`,
+  `secret-scan.yml`, and `dependency-license-check.yml`. Its required
+  context `helm install + helm test (pgvector preflight)` (the
+  `always()` `helm-test-gate` aggregator) now reports against the
+  synthesised merge commit, so a future merge queue does not hang
+  forever on a missing required status.
+- `chart.yml` concurrency is scoped like the sibling workflows —
+  `group` suffixed with `${{ github.event_name }}` and
+  `cancel-in-progress: ${{ github.event_name != 'merge_group' }}` — so a
+  queued check is never cancelled (a cancelled queue check drops the PR
+  out of the queue). Its `publish` and `verify-anonymous-pull` jobs are
+  guarded to `push` events only, so a queue admission validates the
+  merge result at full depth without packaging or pushing a chart to
+  GHCR.
+- `docs/codebase/devops.md` merge-queue section rewritten: the full
+  required-context → workflow map (all 11 contexts across five workflows
+  plus the external DCO App), the changelog-churn / full-relap win the
+  queue buys, and the **operator** steps to enable it — enabling the
+  `merge_queue` rule on the `protect main` ruleset is an operator action;
+  no repo setting is changed by this PR. Includes the DCO-App and
+  approval-ratchet caveats to verify before enabling.
+
 ### Added — approve-only RBAC capability: decouple the approvals plane from the dispatch gate (#3243)
 
 - A principal can now be granted the ability to **decide** approvals

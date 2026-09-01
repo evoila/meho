@@ -35,14 +35,13 @@ names/IPs.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.connectors.bind9  # noqa: F401 -- registers the connector at import
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -76,7 +75,6 @@ _CONNECTOR_ID = "bind9-ssh-9.x"
 _TENANT_ID = UUID("00000000-0000-0000-0000-000000003247")
 _OP_ID = "bind9.record.remove"
 _ZONE = "example.test"
-_ZONEFILE_PATH = "/etc/bind/db.example.test"
 _TARGET_NAME = "test-dns"
 
 # `named-checkconf -p` declaring one writable master zone.
@@ -125,12 +123,6 @@ def _reset_caches() -> Iterator[None]:
     reset_dispatcher_caches()
     yield
     reset_dispatcher_caches()
-
-
-@pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    async with get_sessionmaker()() as s:
-        yield s
 
 
 def _proc(stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:

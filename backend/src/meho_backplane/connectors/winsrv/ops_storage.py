@@ -213,8 +213,8 @@ async def winsrv_disk_format(
         "$ErrorActionPreference = 'Stop'; "
         f"$d = Get-Disk -Number {disk_number}; "
         f"if ($d.PartitionStyle -ne 'RAW' -and -not {force}) {{ "
-        f"throw 'disk {disk_number} is not RAW (PartitionStyle=' + $d.PartitionStyle + "
-        "'); pass force=true to reformat' }; "
+        f'throw "disk {disk_number} is not RAW (PartitionStyle=$($d.PartitionStyle)); '
+        'pass force=true to reformat" }; '
         f"if ($d.PartitionStyle -eq 'RAW') {{ "
         f"Initialize-Disk -Number {disk_number} -PartitionStyle GPT | Out-Null }}; "
         f"$p = New-Partition -DiskNumber {disk_number} -UseMaximumSize {letter_clause}; "

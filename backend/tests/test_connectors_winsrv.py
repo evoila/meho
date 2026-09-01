@@ -306,11 +306,26 @@ async def test_feature_remove_builds_uninstall() -> None:
     connector = WinsrvConnector()
     run_mock = _run('{"success":true,"exit_code":"Success","restart_needed":false}')
     with patch.object(connector, "_run_command", run_mock):
-        result = await winsrv_feature_remove(connector, _TARGET, {"name": "Web-Server"})
+        result = await winsrv_feature_remove(
+            connector, _TARGET, {"name": "Web-Server", "include_management_tools": True}
+        )
     script = _script_from_call(run_mock)
     assert "Uninstall-WindowsFeature -Name 'Web-Server'" in script
+    # The management-tools toggle wires to -IncludeManagementTools (name matches wiring).
+    assert "-IncludeManagementTools:$true" in script
     assert "-Restart" not in script
     assert result["action"] == "remove"
+
+
+def test_feature_remove_toggle_param_name_matches_wiring() -> None:
+    """Guard against the misleading-param-name regression: the remove op's
+    management-tools toggle is named ``include_management_tools`` (matching the
+    install op + the ``-IncludeManagementTools`` it drives), not
+    ``include_all_sub_feature``."""
+    by_id = {op.op_id: op for op in WINSRV_OPS}
+    props = by_id["winsrv.feature.remove"].parameter_schema["properties"]
+    assert "include_management_tools" in props
+    assert "include_all_sub_feature" not in props
 
 
 async def test_feature_list_builds_envelope() -> None:
@@ -505,6 +520,8 @@ async def test_disk_format_provisions_raw_disk() -> None:
     assert "-FileSystem 'NTFS'" in script
     assert "-NewFileSystemLabel 'sql''data'" in script
     assert "-not $false" in script  # force defaults to $false → non-RAW disk refused
+    # The RAW-guard throw uses an unambiguous double-quoted subexpression.
+    assert 'throw "disk 3 is not RAW (PartitionStyle=$($d.PartitionStyle))' in script
     assert result["drive_letter"] == "E"
 
 

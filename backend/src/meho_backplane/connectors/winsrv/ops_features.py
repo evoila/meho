@@ -135,12 +135,12 @@ async def winsrv_feature_remove(
     reboot to the approval-gated ``winsrv.power.reboot``.
     """
     name: str = params["name"]
-    sub_features = _ps_bool(params.get("include_all_sub_feature"))
+    mgmt_tools = _ps_bool(params.get("include_management_tools"))
     quoted = ps_single_quote(name)
     script = (
         "$ErrorActionPreference = 'Stop'; "
         f"$r = Uninstall-WindowsFeature -Name {quoted} "
-        f"-IncludeManagementTools:{sub_features}; "
+        f"-IncludeManagementTools:{mgmt_tools}; "
         "ConvertTo-Json -Depth 3 -Compress -InputObject @{ "
         "ok = [bool]$r.Success; success = [bool]$r.Success; "
         "exit_code = $r.ExitCode.ToString(); "
@@ -301,7 +301,7 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
             "type": "object",
             "properties": {
                 "name": _FEATURE_NAME_PROP,
-                "include_all_sub_feature": {
+                "include_management_tools": {
                     "type": "boolean",
                     "description": (
                         "Also remove the feature's management tools "
@@ -325,7 +325,7 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
             ),
             "parameter_hints": {
                 "name": "Required. The feature short name.",
-                "include_all_sub_feature": "Optional bool; default false.",
+                "include_management_tools": "Optional bool; default false.",
             },
             "output_shape": (
                 "{'name', 'action': 'remove', 'success', 'exit_code', "

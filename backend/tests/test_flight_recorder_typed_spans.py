@@ -433,6 +433,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "mail-smtp",
         "mongodb-wire",
         "msad-ssh",
+        "mssql-tds",
         "net-probe",
         "nsx-rest",
         "pfsense-ssh",

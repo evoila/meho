@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — mssql: SQL Server typed connector (TDS-direct) (#3264)
+
+- New `mssql` typed connector for Microsoft SQL Server 2022 (registry triple
+  `mssql-2022.x` / `mssql-tds`), a **direct TDS** connector on port 1433 via the
+  pure-Python `python-tds` driver — the postgres/mongodb direct-protocol mold,
+  no unixODBC/msodbcsql or FreeTDS system packages in the backplane image. 14
+  governed ops across four groups: `instance` (about / version / config / logins
+  — safe), `databases` (list / files — safe; create / drop — dangerous +
+  approval), `ha` (availability-groups / fci / sync-health — the safe
+  migration-validation reads), and `backup` (history — safe; database — caution;
+  restore — dangerous + approval). Safety tiers follow the estate satellite
+  table (reads ride satellite runners; destructive writes park for approval and
+  are satellite-excluded).
+- **First two-credential connector on the estate seam:** SQL auth resolves
+  `sql_username` / `sql_password` from the target's Vault secret (the `sql_`
+  prefix reserves room for a later dbatools-over-SSH increment's SSH creds in
+  the same secret); credentials never enter params, logs, or results.
+- **No freeform T-SQL op** (the narrow-waist doctrine): only curated,
+  individually-tiered ops — operator input binds as pyformat values, and
+  database identifiers are QUOTENAME-style bracket-escaped. CLI grows the
+  `meho mssql ...` verbs; consumer proof against the live c1sql1 FCI is tracked
+  open. See `docs/codebase/connectors-mssql.md`.
+
 ### Added — flight recorder: operator mutation surface for capture policy (#3272)
 
 - The writable path the live-instance verification pass found missing: the

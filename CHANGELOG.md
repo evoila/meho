@@ -113,6 +113,34 @@ connector-related release-notes line.
   `meho mssql ...` verbs; consumer proof against the live c1sql1 FCI is tracked
   open. See `docs/codebase/connectors-mssql.md`.
 
+### Added — vmware: governed in-guest program execution `vm.guest.program.run` (#3255)
+
+- **`vmware.composite.vm.guest.program.run`** — the freeform in-guest
+  program-execution tier the guest-operations channel (#3100) deliberately
+  deferred, now lifted. Runs a program inside a VM's guest OS via the vim
+  `GuestProcessManager.StartProgramInGuest` over the existing VI-JSON seam
+  (no `pyvmomi`, no SSH), the governed replacement for out-of-band
+  `govc guest.run`. Params: `vm`, `program_path`, `arguments`,
+  `working_directory?`, `env?`, `timeout_seconds?`, `wait`.
+- **Exit-code semantics.** `StartProgramInGuest` is fire-and-forget and
+  returns only a PID (no stdout capture). With `wait=true` the op polls
+  `ListProcessesInGuest` (every 2s, up to `timeout_seconds`, default 300s)
+  for the exit code + start/end times. VMware Tools keeps a finished
+  process's exit code listable for only ~5 minutes after completion, so a
+  process no longer listable before an exit code is seen returns
+  `status='exit_unknown'` rather than hanging (alongside `started` /
+  `exited` / `timeout`).
+- **Governance.** `safety_level="dangerous"`, `requires_approval=True` (same
+  tier as `guest.file.write`): the call parks for a human decision unless a
+  standing grant auto-executes it, and gates *first* so a parked / denied
+  approval starts no program. Guest OS credentials resolve from the target's
+  Vault `secret_ref` (`guest_username` / `guest_password`), never in params.
+- **Secret hygiene.** `arguments` and `env` values (which can carry secrets)
+  are redacted from every durable surface — the approval preview echoes only
+  the program identity + argument byte size + env-var names, the result
+  echoes only PID / exit code / times, and the audit row stores a params
+  hash — proven by test.
+
 ### Added — flight recorder: operator mutation surface for capture policy (#3272)
 
 - The writable path the live-instance verification pass found missing: the

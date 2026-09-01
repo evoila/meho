@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Governed guest-operations channel handlers (``vmware.composite.vm.guest.*``, #3100).
+"""Governed guest-operations channel handlers (``vmware.composite.vm.guest.*``, #3100 / #3255).
 
 A governed way to reach *inside* an arbitrary VM's guest OS -- list
 processes, read environment variables, inspect guest network state, read
-and write files -- riding **VMware Tools guest operations** (the vim
-``GuestOperationsManager`` family) over the existing VI-JSON write seam
+and write files, and run a program -- riding **VMware Tools guest
+operations** (the vim ``GuestOperationsManager`` family) over the existing
+VI-JSON write seam
 (:meth:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector._post_vmomi_json`),
 the same substrate the #2890 mutating-vmomi wave used. No ``pyvmomi``, no
 SSH, no in-guest agent of MEHO's own.
@@ -23,13 +24,19 @@ Design (see ``docs/codebase/connectors-vmware-rest-guest-ops.md``):
   ``NamePasswordAuthentication`` object the vim request body carries; it
   never enters params, a result, an audit row, a preview, or a log line.
 * **Structured sub-ops, not freeform shell.** Each op is a discrete
-  typed verb. There is no ``run(cmd)`` -- freeform in-guest program
-  execution (``StartProgramInGuest``) is a deliberately deferred tier.
+  typed verb. ``program.run`` *does* run an arbitrary program
+  (``StartProgramInGuest``, #3255 -- the freeform-exec tier #3100
+  deferred, now lifted), but through an explicit ``program_path`` /
+  ``arguments`` / ``env`` contract with the same ``dangerous`` /
+  ``requires_approval`` governance as the file write, not an open
+  ``run(cmd)`` shell endpoint. Its ``arguments`` / ``env`` values may
+  carry secrets and are kept off every durable surface, mirroring
+  ``file.write`` excluding ``content``.
 * **Read/write split.** ``process.list`` / ``env.read`` / ``net.show`` /
-  ``file.read`` are ``safety_level="safe"`` reads; ``file.write`` is the
-  single ``dangerous`` / ``requires_approval`` write, gated through the
-  same #2254 :func:`enforce_subop_policy` seam the other write composites
-  use.
+  ``file.read`` are ``safety_level="safe"`` reads; ``file.write`` and
+  ``program.run`` are the ``dangerous`` / ``requires_approval`` writes,
+  gated through the same #2254 :func:`enforce_subop_policy` seam the other
+  write composites use.
 
 Guest-operations manager MoRefs
 -------------------------------
@@ -48,6 +55,8 @@ An operator whose deployment names the top manager differently overrides
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors import OperationResult
@@ -69,6 +78,7 @@ __all__ = [
     "guest_file_write_composite",
     "guest_net_show_composite",
     "guest_process_list_composite",
+    "guest_program_run_composite",
 ]
 
 # --- governance facts (mirror the write-composite substrate, #2254) ---------
@@ -93,6 +103,7 @@ _DEFAULT_GUEST_OPS_MANAGER_MOID = "guestOperationsManager"
 _OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
 _OP_LIST_PROCESSES = "POST:/GuestProcessManager/{moId}/ListProcessesInGuest"
 _OP_READ_ENV = "POST:/GuestProcessManager/{moId}/ReadEnvironmentVariableInGuest"
+_OP_START_PROGRAM = "POST:/GuestProcessManager/{moId}/StartProgramInGuest"
 _OP_FILE_TRANSFER_FROM = "POST:/GuestFileManager/{moId}/InitiateFileTransferFromGuest"
 _OP_FILE_TRANSFER_TO = "POST:/GuestFileManager/{moId}/InitiateFileTransferToGuest"
 
@@ -101,6 +112,7 @@ _VIRTUAL_MACHINE_MO_TYPE = "VirtualMachine"
 _GUEST_OPS_MANAGER_MO_TYPE = "GuestOperationsManager"
 _NAME_PASSWORD_AUTH_TYPE = "NamePasswordAuthentication"
 _GUEST_FILE_ATTRIBUTES_TYPE = "GuestFileAttributes"
+_GUEST_PROGRAM_SPEC_TYPE = "GuestProgramSpec"
 _PROP_PROCESS_MANAGER = "processManager"
 _PROP_FILE_MANAGER = "fileManager"
 _PROP_GUEST_NET = "guest.net"
@@ -109,6 +121,18 @@ _PROP_GUEST_IP_STACK = "guest.ipStack"
 #: Cap on the number of processes returned inline before the list is
 #: JSONFlux-handled by the dispatcher.
 _DEFAULT_MAX_PROCESSES = 200
+
+#: Default wall-clock ceiling (seconds) for the ``guest.program.run``
+#: exit-code poll. Matches VMware Tools' ~5-minute retention of a finished
+#: process's exit code (``StartProgramInGuest`` doc: "its exit code and end
+#: time will be available for 5 minutes after completion") -- polling past
+#: that window risks the exit info ageing out.
+_DEFAULT_RUN_TIMEOUT_SECONDS = 300
+
+#: Interval (seconds) between ``ListProcessesInGuest`` polls while waiting
+#: for a started program's exit code. Well inside the ~5-minute exit-info
+#: window, so a fast-finishing process is still observed with its exit code.
+_RUN_POLL_INTERVAL_SECONDS = 2.0
 
 
 def _unwrap_envelope(payload: Any) -> Any:
@@ -522,3 +546,284 @@ async def _put_guest_file_bytes(
     client = await connector._http_client(target)
     response = await client.put(resolved, content=content)
     response.raise_for_status()
+
+
+async def guest_program_run_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Run a program in a VM's guest OS via ``StartProgramInGuest`` (#3255).
+
+    Op-id: ``vmware.composite.vm.guest.program.run``. The freeform in-guest
+    program-execution tier #3100 deliberately deferred, now lifted:
+    ``dangerous`` / ``requires_approval``, same governance shape as
+    ``guest.file.write``. Flow:
+
+    1. **Gate first** through the #2254 :func:`enforce_subop_policy` seam with
+       the ``StartProgramInGuest`` governance op_id. The gate params carry
+       only ``vm`` / ``program_path`` / ``working_directory`` -- never
+       ``arguments`` or ``env``, whose values may embed secrets (a password
+       on a command line, a token in an env var) and are redacted from every
+       durable surface. A parked / denied gate returns the
+       :class:`OperationResult` verbatim and nothing else runs -- no guest
+       credential is resolved, no program is started.
+    2. On a cleared gate, resolve the guest credential (from ``secret_ref``)
+       and the GuestProcessManager MoRef, then ``StartProgramInGuest`` starts
+       the program and returns its PID. It is fire-and-forget: **no output is
+       captured** (vim's only exec primitive returns a PID, not stdout).
+    3. When ``wait`` is true, :func:`_poll_for_exit` polls
+       ``ListProcessesInGuest`` (filtered to the PID) every
+       :data:`_RUN_POLL_INTERVAL_SECONDS` until the exit code is available or
+       ``timeout_seconds`` elapses. VMware Tools keeps a finished process's
+       exit code listable for only ~5 minutes after completion (and not
+       across a Tools restart), so a process no longer listed before an exit
+       code is seen yields ``status='exit_unknown'`` rather than a hang.
+
+    ``arguments`` / ``env`` never enter the result, the gate params, the
+    approval preview
+    (:func:`~meho_backplane.connectors.vmware_rest.composites._write_preview._guest_program_run_preview`),
+    or a log line -- only the PID, exit code, and start/end times surface.
+    """
+    vm_moid = params["vm"]
+    program_path = params["program_path"]
+    arguments = params.get("arguments", "")
+    working_directory = params.get("working_directory")
+    env = params.get("env")
+    wait = bool(params.get("wait", False))
+    timeout_seconds = int(params.get("timeout_seconds", _DEFAULT_RUN_TIMEOUT_SECONDS))
+    top_moid = params.get("guest_ops_manager_moid", _DEFAULT_GUEST_OPS_MANAGER_MOID)
+
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_START_PROGRAM,
+        safety_level=_WRITE_SAFETY_LEVEL,
+        requires_approval=_WRITE_REQUIRES_APPROVAL,
+        target=target,
+        params=_run_gate_params(vm_moid, program_path, working_directory),
+    )
+    if gate is not None:
+        return gate
+
+    manager_moid, auth, pid = await _start_guest_program(
+        connector,
+        target,
+        operator,
+        vm_moid=vm_moid,
+        program_path=program_path,
+        arguments=arguments,
+        working_directory=working_directory,
+        env=env,
+        top_moid=top_moid,
+    )
+    result: dict[str, Any] = {
+        "status": "started",
+        "vm": vm_moid,
+        "process_manager_moid": manager_moid,
+        "program_path": program_path,
+        "pid": pid,
+        "exit_code": None,
+        "start_time": None,
+        "end_time": None,
+        "wait": wait,
+    }
+    if not wait:
+        return result
+
+    result.update(
+        await _poll_for_exit(
+            connector,
+            target,
+            operator,
+            manager_moid=manager_moid,
+            vm_moid=vm_moid,
+            auth=auth,
+            pid=pid,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    return result
+
+
+async def _start_guest_program(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm_moid: str,
+    program_path: str,
+    arguments: str,
+    working_directory: Any,
+    env: Any,
+    top_moid: str,
+) -> tuple[str, dict[str, Any], int]:
+    """Resolve guest creds + the GuestProcessManager, then ``StartProgramInGuest``.
+
+    Returns ``(manager_moid, auth, pid)`` -- the resolved GuestProcessManager
+    MoId, the ephemeral guest auth object (reused by the exit-code poll), and
+    the started process's PID. Raises :class:`RuntimeError` if the vim call
+    returns no usable PID.
+    """
+    auth = await _guest_auth(connector, target, operator)
+    manager_moid = await _resolve_guest_manager_moid(
+        connector, target, operator, top_moid=top_moid, property_name=_PROP_PROCESS_MANAGER
+    )
+    raw_pid = await _vm_guest_method(
+        connector,
+        target,
+        operator,
+        op_id=_OP_START_PROGRAM,
+        manager_moid=manager_moid,
+        body={
+            "vm": vim_moref(_VIRTUAL_MACHINE_MO_TYPE, vm_moid),
+            "auth": auth,
+            "spec": _guest_program_spec(program_path, arguments, working_directory, env),
+        },
+    )
+    pid = _coerce_int(_unwrap_envelope(raw_pid))
+    if pid is None:
+        raise RuntimeError(
+            f"guest.program.run: {_OP_START_PROGRAM!r} returned no PID for "
+            f"{program_path!r} on vm {vm_moid!r}"
+        )
+    return manager_moid, auth, pid
+
+
+def _run_gate_params(vm_moid: str, program_path: str, working_directory: Any) -> dict[str, Any]:
+    """Build the redaction-safe gate/preview params for ``guest.program.run``.
+
+    Carries the program identity + working directory only. ``arguments`` and
+    ``env`` are deliberately excluded so their (possibly secret) values never
+    reach the sub-op policy gate, the durable approval row, or the audit
+    preview -- mirroring ``guest.file.write`` excluding ``content``.
+    """
+    gate_params: dict[str, Any] = {"vm": vm_moid, "program_path": program_path}
+    if working_directory is not None:
+        gate_params["working_directory"] = working_directory
+    return gate_params
+
+
+def _guest_program_spec(
+    program_path: str, arguments: str, working_directory: Any, env: Any
+) -> dict[str, Any]:
+    """Build the vim ``GuestProgramSpec`` body for ``StartProgramInGuest``.
+
+    ``programPath`` + ``arguments`` are required by the pinned spec
+    (``arguments`` defaults to an empty string). ``envVariables`` is the
+    ``NAME=value`` array vim expects; per the vim contract it **replaces**
+    the guest's whole environment rather than augmenting it.
+    """
+    spec: dict[str, Any] = {
+        "_typeName": _GUEST_PROGRAM_SPEC_TYPE,
+        "programPath": program_path,
+        "arguments": arguments,
+    }
+    if working_directory is not None:
+        spec["workingDirectory"] = working_directory
+    if env:
+        spec["envVariables"] = [f"{name}={value}" for name, value in env.items()]
+    return spec
+
+
+async def _poll_for_exit(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    manager_moid: str,
+    vm_moid: str,
+    auth: dict[str, Any],
+    pid: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Poll ``ListProcessesInGuest`` for ``pid``'s exit code until it exits or times out.
+
+    Returns the completion fields to merge into the result (``status`` +
+    ``exit_code`` / ``start_time`` / ``end_time``). Terminal cases:
+
+    * the process reports an ``exitCode`` (an int, including ``0``) ->
+      ``'exited'`` with the code + start/end times;
+    * ``timeout_seconds`` elapses while the process is still running ->
+      ``'timeout'`` (``exit_code`` null);
+    * the process is no longer listable before an exit code is seen -- it
+      finished and its exit info aged out of VMware Tools' ~5-minute window,
+      or Tools restarted -> ``'exit_unknown'`` (``exit_code`` null).
+
+    The loop is bounded by wall-clock ``timeout_seconds``: it always polls at
+    least once and never blocks indefinitely on a process that neither exits
+    nor disappears.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    body = {
+        "vm": vim_moref(_VIRTUAL_MACHINE_MO_TYPE, vm_moid),
+        "auth": auth,
+        "pids": [pid],
+    }
+    seen_running = False
+    while True:
+        raw = await _vm_guest_method(
+            connector,
+            target,
+            operator,
+            op_id=_OP_LIST_PROCESSES,
+            manager_moid=manager_moid,
+            body=body,
+        )
+        info = _process_info_for_pid(_unwrap_envelope(raw), pid)
+        if info is not None:
+            exit_code = _coerce_int(info.get("exitCode"))
+            if exit_code is not None:
+                return {
+                    "status": "exited",
+                    "exit_code": exit_code,
+                    "start_time": _as_str(info.get("startTime")),
+                    "end_time": _as_str(info.get("endTime")),
+                }
+            seen_running = True
+        elif seen_running:
+            # Was listable, now gone before an exit code surfaced: the exit
+            # info aged out of the ~5-minute window (or Tools restarted).
+            return _exit_unknown()
+        if time.monotonic() >= deadline:
+            return {"status": "timeout", "exit_code": None} if seen_running else _exit_unknown()
+        await asyncio.sleep(_RUN_POLL_INTERVAL_SECONDS)
+
+
+def _exit_unknown() -> dict[str, Any]:
+    """Completion fields for a process whose exit code could not be determined."""
+    return {"status": "exit_unknown", "exit_code": None, "start_time": None, "end_time": None}
+
+
+def _process_info_for_pid(payload: Any, pid: int) -> dict[str, Any] | None:
+    """Return the ``GuestProcessInfo`` entry matching ``pid``, or ``None``."""
+    if not isinstance(payload, list):
+        return None
+    for entry in payload:
+        if isinstance(entry, dict) and _coerce_int(entry.get("pid")) == pid:
+            return entry
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Unwrap a vim-boxed value to an ``int`` (PID / exit code), else ``None``.
+
+    ``bool`` is excluded (``isinstance(True, int)`` is truthy in Python) and a
+    numeric string is accepted -- VI-JSON may box an ``int64`` as a string.
+    """
+    unwrapped = unwrap_vim_value(value)
+    if isinstance(unwrapped, bool):
+        return None
+    if isinstance(unwrapped, int):
+        return unwrapped
+    if isinstance(unwrapped, str) and unwrapped.lstrip("-").isdigit():
+        return int(unwrapped)
+    return None
+
+
+def _as_str(value: Any) -> str | None:
+    """Unwrap a vim-boxed value to a ``str`` (a timestamp), else ``None``."""
+    unwrapped = unwrap_vim_value(value)
+    return unwrapped if isinstance(unwrapped, str) else None

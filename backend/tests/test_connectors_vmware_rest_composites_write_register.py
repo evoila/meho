@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the 25 vmware-rest write composites.
+"""Registration tests for the 28 vmware-rest write composites.
 
 Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
 ``vm.power`` / #2301, the vim writes ``vm.disk.grow`` / #2893 +
@@ -10,7 +10,7 @@ hardware writes ``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``,
 and the GOSC composites ``guest.customization_spec.create`` /
 ``vm.customize`` / #2892):
 
-* All 25 expected write ``op_id`` rows land in ``endpoint_descriptor``
+* All 28 expected write ``op_id`` rows land in ``endpoint_descriptor``
   with ``source_kind="composite"``, ``requires_approval=True``, and
   ``safety_level="dangerous"`` (T4's defaults intentionally inherited) —
   except the destructive-tier ``vm.destroy`` / #3198, which is
@@ -20,7 +20,7 @@ and the GOSC composites ``guest.customization_spec.create`` /
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster`` /
   ``guest`` / ``networking`` per the canary's stub-LLM taxonomy.
 * Combined with the 9 read composites (#508's 5 + the 4 guest-ops
-  reads / #3100), the registrar produces **36 rows** total. (The former
+  reads / #3100), the registrar produces **37 rows** total. (The former
   host.network_uplinks / host.vsan_health reads were re-shipped as typed
   ops in #2258.)
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
@@ -71,14 +71,16 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 27 write composites (T6 / #509, single-VM vm.power / #2301, the
+# 28 write composites (T6 / #509, single-VM vm.power / #2301, the
 # mutating VI-JSON vm.disk.grow / #2893, the folder-template
 # vm.clone_from_template / #2894, the vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895, the #2891
 # hardware writes vm.resize / vm.nic.repoint / vm.device.cdrom, the
 # GOSC composites guest.customization_spec.create + vm.customize / #2892,
-# the destructive-tier vm.destroy / #3198, and the vim distributed-portgroup
-# writes network.portgroup.create + network.portgroup.security.set / #3091).
+# the destructive-tier vm.destroy / #3198, the vim distributed-portgroup
+# writes network.portgroup.create + network.portgroup.security.set / #3091,
+# the content-library import vm.import_from_library / #3229, and the
+# guest-ops writes vm.guest.file.write / #3100 + vm.guest.program.run / #3255).
 _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.create",
     "vmware.composite.vm.clone",
@@ -106,8 +108,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.host.datastore_mount_nfs",
     "vmware.composite.host.disk_mark_flash",
     "vmware.composite.host.service_control",
-    # Guest-ops channel write (#3100).
+    # Guest-ops channel writes (#3100 / #3255).
     "vmware.composite.vm.guest.file.write",
+    "vmware.composite.vm.guest.program.run",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -127,13 +130,15 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.file.read",
 )
 
-# 36 total -- 9 read (T5 / #508 + 4 guest-ops reads / #3100) + 27 write
+# 37 total -- 9 read (T5 / #508 + 4 guest-ops reads / #3100) + 28 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
 # writes vm.resize / vm.nic.repoint / vm.device.cdrom + GOSC create/apply / #2892
 # + the destructive-tier vm.destroy / #3198 + the #3091 vim portgroup writes
-# network.portgroup.create + network.portgroup.security.set).
+# network.portgroup.create + network.portgroup.security.set + the
+# content-library import vm.import_from_library / #3229 + the guest-ops
+# program-exec write vm.guest.program.run / #3255).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -221,6 +226,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.file.write": (
         "meho_backplane.connectors.vmware_rest.composites._guest.guest_file_write_composite"
     ),
+    "vmware.composite.vm.guest.program.run": (
+        "meho_backplane.connectors.vmware_rest.composites._guest.guest_program_run_composite"
+    ),
 }
 
 
@@ -252,6 +260,7 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.host.disk_mark_flash": "host",
     "vmware.composite.host.service_control": "host",
     "vmware.composite.vm.guest.file.write": "guest_ops",
+    "vmware.composite.vm.guest.program.run": "guest_ops",
 }
 
 
@@ -323,13 +332,14 @@ async def test_register_vmware_composite_operations_inserts_all_write_rows(
 async def test_full_registration_produces_thirty_three_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """9 reads (#508 + guest-ops reads #3100) + 27 writes (#509 + vm.power #2301 +
+    """9 reads (#508 + guest-ops reads #3100) + 28 writes (#509 + vm.power #2301 +
     vm.disk.grow #2893 + vm.clone_from_template #2894 + cluster.drs_rule.create +
     folder.create #2895 + #2891 hardware writes vm.resize / vm.nic.repoint /
     vm.device.cdrom + GOSC create/apply #2892 + OVF deploy #2909 + host-domain
-    writes #3182 + guest-ops write vm.guest.file.write #3100 + destructive-tier
-    vm.destroy #3198 + #3091 portgroup writes network.portgroup.create /
-    network.portgroup.security.set) = 36 rows. DoD bar."""
+    writes #3182 + guest-ops writes vm.guest.file.write #3100 +
+    vm.guest.program.run #3255 + destructive-tier vm.destroy #3198 + #3091
+    portgroup writes network.portgroup.create / network.portgroup.security.set +
+    content-library import vm.import_from_library #3229) = 37 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -343,7 +353,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 36
+    assert len(rows) == 37
 
 
 @pytest.mark.asyncio
@@ -662,14 +672,14 @@ async def test_write_composite_tags_include_composite_and_write(
 async def test_register_vmware_composite_operations_is_idempotent_across_thirty_three(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 36 rows total, embedding called 36x once."""
+    """Running the registrar twice -> 37 rows total, embedding called 37x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 36
+    assert first_count == 37
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 36.
+    # pipeline; the row count stays at 37.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -683,7 +693,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 36
+    assert len(rows) == 37
 
 
 # ---------------------------------------------------------------------------

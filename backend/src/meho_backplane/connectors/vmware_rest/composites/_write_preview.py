@@ -943,6 +943,41 @@ async def _guest_file_write_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     }
 
 
+async def _guest_program_run_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.guest.program.run`` — echo the program identity, never arguments/env (#3255).
+
+    The reviewer must see *which program* runs in *which guest*, its working
+    directory, and whether the call waits for an exit code — but never the
+    ``arguments`` string or ``env`` values, which can carry secrets (a
+    password on a command line, a token in an env var) and must not land on
+    the durable approval row. ``argument_bytes`` and ``env_var_names`` echo
+    the *shape* (how many argument bytes, which env-var NAMES) so the reviewer
+    judges blast radius without seeing any value. Declines (``None``) on
+    malformed params.
+    """
+    vm = ctx.params.get("vm")
+    program_path = ctx.params.get("program_path")
+    if not isinstance(vm, str) or not isinstance(program_path, str):
+        return None
+    preview: dict[str, Any] = {
+        "vm": vm,
+        "program_path": program_path,
+        "wait": bool(ctx.params.get("wait", False)),
+    }
+    working_directory = ctx.params.get("working_directory")
+    if isinstance(working_directory, str) and working_directory:
+        preview["working_directory"] = working_directory
+    arguments = ctx.params.get("arguments")
+    if isinstance(arguments, str) and arguments:
+        # Value withheld: may carry secrets. Echo only the byte magnitude.
+        preview["argument_bytes"] = len(arguments.encode("utf-8"))
+    env = ctx.params.get("env")
+    if isinstance(env, dict) and env:
+        # Names are not secret; values are. Echo only the variable names.
+        preview["env_var_names"] = sorted(str(name) for name in env)
+    return preview
+
+
 async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vm.destroy`` — the mandatory destructive-tier blast radius (#3198).
 
@@ -1011,10 +1046,11 @@ async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 24 write composites. Module-level so the
+#: op_id → builder for the 25 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
+    "vmware.composite.vm.guest.program.run": _guest_program_run_preview,
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.destroy": _vm_destroy_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
@@ -1042,7 +1078,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 24 write-composite park-time preview builders. Import-time.
+    """Wire the 25 write-composite park-time preview builders. Import-time.
 
     The 9 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

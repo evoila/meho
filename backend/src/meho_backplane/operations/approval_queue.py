@@ -233,10 +233,12 @@ class SelfApprovalForbiddenError(ApprovalError):
 
 
 class UnauthorizedApprovalError(ApprovalError):
-    """The operator lacks the role required to approve / reject a request.
+    """The operator lacks the access required to approve / reject a request.
 
-    Raised when the operator's ``tenant_role`` is ``read_only``. The
-    route layer maps this to 403.
+    Raised when the operator's ``tenant_role`` is ``read_only`` **and** it
+    does not carry the orthogonal ``approver`` capability (#3243). An
+    ``operator``-or-higher principal, or a ``read_only`` principal with
+    ``approver=true``, passes. The route layer maps this to 403.
     """
 
     def __init__(self, *, operator_sub: str, role: str) -> None:
@@ -577,7 +579,9 @@ async def approve_request(
     Loads the :class:`ApprovalRequest` row, verifies:
 
     1. The row exists and belongs to ``operator.tenant_id`` (else 404).
-    2. The operator holds at least the ``operator`` role (else 403).
+    2. The operator may decide — ``operator``-or-higher, or a
+       ``read_only`` principal carrying the ``approver`` capability
+       (#3243); else 403.
     3. The row is still ``pending`` (else 409).
     4. The approver is not the requester — ``operator.sub !=
        request.principal_sub`` — unless the deployment enabled the
@@ -627,7 +631,8 @@ async def approve_request(
 
     Raises:
         ApprovalNotFoundError: No row for *request_id* in this tenant.
-        UnauthorizedApprovalError: Operator lacks ``operator`` role.
+        UnauthorizedApprovalError: Operator lacks approvals access
+            (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
         SelfApprovalForbiddenError: Approver is the requester and
             break-glass is disabled (G11.7-T1 #1401).
@@ -699,7 +704,8 @@ async def reject_request(
 
     Raises:
         ApprovalNotFoundError: No row for *request_id* in this tenant.
-        UnauthorizedApprovalError: Operator lacks ``operator`` role.
+        UnauthorizedApprovalError: Operator lacks approvals access
+            (``read_only`` without the ``approver`` capability, #3243).
         ApprovalRequestAlreadyDecidedError: Row is not ``pending``.
     """
     _check_reviewer_role(operator)
@@ -1307,10 +1313,21 @@ async def expire_stale_requests(
 
 
 def _check_reviewer_role(operator: Operator) -> None:
-    """Raise :class:`UnauthorizedApprovalError` if the operator is read_only."""
+    """Raise :class:`UnauthorizedApprovalError` unless the operator may decide.
+
+    The service-layer half of the two-layer approvals gate (the REST
+    dependency :func:`~meho_backplane.auth.rbac.require_approvals_access` is
+    the other). A principal may decide an approval when it is
+    ``operator``-or-higher **or** carries the orthogonal ``approver``
+    capability (#3243); only a ``read_only`` principal *without* the
+    ``approver`` flag is refused. This mirrors the route gate so a
+    caller reaching the service directly (agent runtime, tests) sees the
+    same decoupled-from-dispatch access model, and keeps ``read_only``
+    (no flag) failing closed exactly as before.
+    """
     from meho_backplane.auth.operator import TenantRole
 
-    if operator.tenant_role == TenantRole.READ_ONLY:
+    if operator.tenant_role == TenantRole.READ_ONLY and not operator.approver:
         raise UnauthorizedApprovalError(
             operator_sub=operator.sub,
             role=operator.tenant_role.value,

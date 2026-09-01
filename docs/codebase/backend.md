@@ -79,6 +79,31 @@ this stage it exposes:
   primitive is what downstream Goals (G3 / G4 / G5 / G7 / G8 / G9)
   apply to write/admin handlers as they land — T4 only ships the
   primitive plus the verification surface.
+* Approve-only capability, decoupled from dispatch (#3243) — `auth/rbac.py`
+  also ships `require_approvals_access`, a plain dependency (no
+  minimum-role parameter) that gates the approvals plane
+  (`/api/v1/approvals*` except the principal-scoped `/result` read). It
+  admits a principal that is **either** `operator`-or-higher on the linear
+  `_ROLE_ORDER` lattice **or** carries the orthogonal `approver` capability
+  (`Operator.approver`, lifted from the optional fail-closed `approver` JWT
+  claim by `jwt._extract_approver`, mirroring `platform_admin`). This
+  decouples the *decide* right from the *dispatch* right: a dedicated
+  approver provisioned as `read_only` role + `approver=true` clears a
+  four-eyes gate yet is refused `POST /api/v1/operations/call` (still
+  `require_role(TenantRole.OPERATOR)`, and `read_only` ranks below
+  `operator`). The flag never widens the linear lattice — dispatch, admin,
+  and every other `require_role`-gated surface are untouched. A refused
+  attempt returns HTTP 403 `insufficient_role` (the same wire token
+  `require_role` returns) plus a structured `insufficient_approvals_access`
+  log line carrying `operator_sub`, `actual_role`, and `approver`. The gate
+  has a service-layer twin — `operations/approval_queue.py::_check_reviewer_role`
+  applies the same "operator-or-approver" rule so a caller reaching the
+  queue directly (agent runtime, tests) sees the same access model — and
+  the `sub`-keyed self-approval refusal (#1401) is unchanged (an approver
+  cannot approve a request it parked). No new MCP tool: the
+  approval-decision verbs stay human-only (console / CLI / REST), so the
+  25-tool working surface and the 78-tool inventory are untouched. See
+  [`approvals.md`](approvals.md) "Access model".
 * Vault forward-auth — `VaultConnector` (`connectors/vault/connector.py`,
   Task #244 G0.2-T5, refactored under G0.6-T-Refactor-Vault #390) is
   the canonical abstraction for the Vault integration. It wraps

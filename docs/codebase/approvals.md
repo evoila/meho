@@ -839,14 +839,33 @@ the same grant.
 
 ### REST (`backend/src/meho_backplane/api/v1/approvals.py`)
 
-| Verb | Path | Role | Purpose |
+**Access model — approve-only, decoupled from dispatch (#3243).** Every
+row below except `/result` is gated by `require_approvals_access`
+(`auth/rbac.py`), which admits a principal that is **either**
+`operator`-or-higher on the linear tenant-role lattice **or** carries the
+orthogonal `approver` capability (`Operator.approver`, lifted from the
+optional fail-closed `approver` JWT claim). This lets a dedicated approver
+be provisioned as `read_only` role + `approver=true`: it can clear a
+four-eyes gate here yet is denied `POST /api/v1/operations/call` (still
+`require_role(TenantRole.OPERATOR)`, and `read_only` ranks below
+`operator`), so "approve but never operate" is now expressible at the role
+layer instead of resting on operator discipline. The gate has a
+service-layer twin (`_check_reviewer_role`) applying the same rule for
+direct queue callers, and the `sub`-keyed self-approval refusal (#1401) is
+unchanged — an approver cannot approve a request it parked. A refused
+attempt is 403 `insufficient_role` + an `insufficient_approvals_access` log
+line. The `/result` read is deliberately **not** on this gate: it is
+principal-scoped on `principal_sub`, so an approver deciding a request it
+did not park gains no result-read rights.
+
+| Verb | Path | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/api/v1/approvals` | operator | List, filtered by `status` (default: `pending`). |
-| `GET` | `/api/v1/approvals/{id}` | operator | **Inspect one request** (T5). 404 on cross-tenant. |
+| `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |
+| `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
-| `POST` | `/api/v1/approvals/{id}/decide` | operator | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
-| `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject. The op never executes. |
+| `POST` | `/api/v1/approvals/{id}/approve` | operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
+| `POST` | `/api/v1/approvals/{id}/decide` | operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
+| `POST` | `/api/v1/approvals/{id}/reject` | operator **or** approver | Reject. The op never executes. |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 

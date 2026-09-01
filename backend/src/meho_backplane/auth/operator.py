@@ -53,6 +53,21 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   this field yet; it is the substrate a later cross-tenant authorization
   gate will check, so that a ``tenant_admin`` cannot be mistaken for a
   platform operator on the strength of role rank alone.
+* ``approver`` — whether this principal holds the **approve-only**
+  capability: the right to decide (list / show / approve / reject /
+  decide) parked approval requests, orthogonal to :class:`TenantRole`
+  and deliberately *decoupled from dispatch* (#3243). Lifted from a
+  configurable JWT claim (default ``approver``) and defaults to
+  ``False`` so every pre-existing token is unaffected (fail-closed).
+  The approvals plane admits a principal that is **either**
+  ``operator``-or-higher **or** carries this flag
+  (:func:`~meho_backplane.auth.rbac.require_approvals_access`), so a
+  dedicated approver can be provisioned with ``read_only`` role + this
+  flag — able to clear a four-eyes gate yet denied ``call_operation``
+  dispatch (which stays ``operator``-gated). The flag never widens the
+  linear role lattice and never grants dispatch; it only unlocks the
+  approvals plane. The ``sub``-keyed self-approval refusal (#1401) is
+  unchanged — an approver still cannot approve a request it parked.
 * ``scopes`` — the OAuth 2.0 scopes granted to *this session*, lifted
   from the standard ``scope`` claim (RFC 9068 §2.2.3; space-delimited,
   configurable via ``JWT_SCOPES_CLAIM_NAME``). Drives the MCP
@@ -208,5 +223,6 @@ class Operator(BaseModel):
     capabilities: frozenset[str] = frozenset()
     scopes: frozenset[str] = frozenset()
     platform_admin: bool = False
+    approver: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False

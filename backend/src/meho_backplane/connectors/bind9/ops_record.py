@@ -726,8 +726,10 @@ def _remove_record_from_zonefile(
 # record scoped by (zone, name, type, and — where the name carries more than
 # one value of that type — rdata). It is deliberately narrower than
 # ``bind9.record.remove`` (which clears every A + AAAA at a name in one
-# caution-tier write): a governed delete on the destructive tier must name
-# the single record that dies, never a zone-wide or multi-value sweep.
+# write): a governed delete on the destructive tier must name the single
+# record that dies, never a zone-wide or multi-value sweep. Both now sit on
+# the destructive tier (``record.remove`` promoted by #3247) — ``delete`` is
+# the scalpel, ``remove`` the whole-name shear.
 
 
 def _canon_rdata(record_type: str, value: str) -> str:
@@ -1814,7 +1816,8 @@ _DELETE_WARNING = (
     "back byte-identical on any failure. Prefer ``bind9.record.delete`` over "
     "``bind9.record.remove`` when a shared zone must retire a single record "
     "under governance (environment teardown); ``record.remove`` is the "
-    "un-governed caution-tier both-families clear."
+    "governed destructive-tier whole-name clear (every A + AAAA at the name, "
+    "#3247) — same gate, broader blast radius."
 )
 
 

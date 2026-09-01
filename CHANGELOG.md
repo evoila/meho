@@ -120,6 +120,50 @@ connector-related release-notes line.
   access) — implementation + full conformance/unit coverage is the deliverable,
   consistent with recent connector tasks.
 
+### Added — surface an approved dispatch's result to the originating consumer (#3209)
+
+- A paired, out-of-process consumer that parks a **non-idempotent** governed op
+  for approval (the concrete case: VCF `installer.sddc.bringup.start`) can now,
+  after a human approves, retrieve the result the backplane produced when it
+  re-dispatched the approved op — so it resumes in place by *polling the
+  returned task id* instead of a second submit that would start a second
+  bring-up. New principal-scoped `GET /api/v1/approvals/{id}/result`: only the
+  request owner (`principal_sub`) reads it (any other principal, operator role
+  or not, gets 403 `not_request_owner`), it writes a synchronous
+  `approval.result` audit row, and the payload is the same reduced /
+  handle-shaped `OperationResult` envelope the approver sees inline (a
+  set-shaped response rides a JSONFlux handle, never a raw body). The
+  re-dispatch result is captured onto `approval_request.resume_result`
+  (migration `0096`, `down_revision 0095`) on the exactly-one-resumer winning
+  path, so it composes with the existing resume claim rather than duplicating
+  it. Unblocks `meho-automation`#76's resume-in-place for `bringup`-class ops.
+
+### Changed — required PR unit lane sharded 3 ways (#3251)
+
+- The required unit lane (branch-protection context `Python (ruff + mypy +
+  pytest)`) was one monolithic job running ruff + ruff format + mypy + the
+  whole ~13k-test unit sweep serially (~19-min wall) — the single biggest
+  contributor to PR wall-time. It is now three cooperating jobs mirroring the
+  #3177 coverage-sweep shape (deterministic file-stride matrix + fan-in):
+  `python-lint` (ruff + ruff format + mypy, once), `python-unit-shard` (the
+  pytest sweep as a 3-way stride matrix over the sorted test-file list), and
+  `python-unit-lane` (the fan-in). Expected wall drops from ~19 min to
+  ~6-8 min per shard in parallel — roughly a 3x cut to the dominant lane.
+- **Branch protection is untouched.** The fan-in job carries the *exact*
+  required-context string `Python (ruff + mypy + pytest)`, so the `main`
+  ruleset and the merge-queue required-check list need no edit — the required
+  name simply moved from the old monolithic job onto the fan-in. The fan-in
+  uses `if: always()` + explicit `needs.*.result` inspection so a failed or
+  hung shard FAILS the gate rather than being silently skipped-as-Success.
+- Only pytest fans out: ruff/ruff-format/mypy are whole-tree, unshardable by
+  test file, and cost ~1-2 min, so they run once in `python-lint` instead of
+  N times per shard. The `tests/integration` / `tests/migrations` exclusions
+  and the G0.7 canary `MEHO_SKIP_SPEC_INGEST_TESTS` opt-out (#2980) are
+  preserved on every shard; coverage stays in the separate non-blocking
+  `python-coverage` jobs. No new escape-hatch label is needed — unlike the
+  push-only coverage lane, the unit lane runs on every PR, so a sharding PR
+  self-validates through its own `pull_request` run.
+
 ### Added — governed delete: pfSense NAT-rule + alias delete on the destructive tier + conformance (#3232)
 
 - Registers the pfSense connector's first two `safety_level="destructive"` +
@@ -155,6 +199,7 @@ connector-related release-notes line.
   refused without a matching preview hash, park refused without a blast-radius
   block, the full preview → park → **human** approve → audited resume delete,
   and the not-found / ambiguous / referenced refusal paths.
+
 ### Added — governed delete on bind9: `bind9.record.delete` on the destructive tier + conformance (#3231 / #3198)
 
 - Registers the **second governed delete** — and the first

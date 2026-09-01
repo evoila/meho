@@ -9457,6 +9457,60 @@
         }
       }
     },
+    "/api/v1/approvals/{request_id}/result": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "Get Approval Result",
+        "description": "Read the approved dispatch's result \u2014 originating-principal only (#3209).\n\nSurfaces the reduced / handle-shaped ``OperationResult`` envelope the\nbackplane produced when it re-dispatched the approved op, so the consumer\nthat parked a **non-idempotent** op (VCF ``installer.sddc.bringup.start``)\ncan resume in place by poll \u2014 read back the resulting task id and continue\npolling it \u2014 instead of a second submit that would start a second\nbring-up.\n\nScope is deliberately narrow (this route is **not** ``operator``-gated like\nthe rest of the approvals surface): any authenticated principal may call\nit, but :func:`~meho_backplane.operations.approval_queue.read_approval_result`\nthen enforces that only the request's **owner**\n(``operator.sub == principal_sub``, the party that parked the op) reads the\nresult. This lets a non-operator service/agent principal \u2014 the paired\nadd-on that dispatched the op \u2014 retrieve its own result, while no other\nprincipal (operator role or not) can. The read writes one synchronous\n``approval.result`` audit row (v0.1-spec \u00a76).\n\nHTTP status codes:\n\n* 200 \u2014 the request exists and the caller owns it. ``result`` is the\n  captured envelope when the resume has landed, else ``null`` (poll again).\n* 403 \u2014 the caller is authenticated but is not the request owner.\n* 404 \u2014 request not found (or belongs to another tenant).",
+        "operationId": "get_approval_result_api_v1_approvals__request_id__result_get",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Request Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResultView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{request_id}/approve": {
       "post": {
         "tags": [
@@ -21907,6 +21961,49 @@
         ],
         "title": "ApprovalRequestView",
         "description": "Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."
+      },
+      "ApprovalResultView": {
+        "properties": {
+          "approval_request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Approval Request Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ApprovalRequestStatus"
+          },
+          "resumed": {
+            "type": "boolean",
+            "title": "Resumed"
+          },
+          "reviewed_by": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reviewed By"
+          },
+          "decided_at": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided At"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_request_id",
+          "status",
+          "resumed",
+          "reviewed_by",
+          "decided_at",
+          "result"
+        ],
+        "title": "ApprovalResultView",
+        "description": "Principal-scoped view of an approved dispatch's result (#3209).\n\nThe response body of ``GET /api/v1/approvals/{id}/result``. Surfaces the\nreduced / handle-shaped :class:`~meho_backplane.connectors.schemas.OperationResult`\nenvelope the backplane produced when it re-dispatched the approved op, so\nthe **originating** consumer that parked a non-idempotent op (VCF\n``bringup.start``) can resume by poll instead of a second submit. ``result``\nis ``None`` until the winning resumer captures it \u2014 a ``pending`` /\n``rejected`` / ``expired`` request, or an ``approved`` one whose resume has\nnot landed yet \u2014 so a consumer polls until ``status == \"approved\"`` and\n``result`` is populated. A set-shaped payload rides a JSONFlux ``handle``\ninside ``result`` (v0.1-spec \u00a74), never a raw body."
       },
       "ApproveRequestBody": {
         "properties": {

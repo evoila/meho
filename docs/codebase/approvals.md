@@ -395,6 +395,75 @@ to re-dispatch, so `resume_dispatch_after_approval` **fails closed** with
 a structured `denied` result naming the gap — the operator resumes it via
 REST `/approve` + params, exactly as before 0036.
 
+## Surfacing the approved dispatch's result to the originating consumer (#3209)
+
+Before #3209 the result of the approved re-dispatch was visible **only** in
+the approver's inline HTTP response (the `dispatch_*` fields on `/approve` /
+`/decide`). A paired, out-of-process consumer that parks an op for approval
+and then *waits* on the decision could not retrieve it: `ApprovalRequestView`
+carries no execution result, and `GET /api/v1/audit/by-work-ref` reduces
+params to a hash and exposes no response body. For a **non-idempotent** op
+that is a hard block — the concrete case is VCF
+`installer.sddc.bringup.start`, where resuming in place means *polling the
+SDDC task id the re-dispatch returned*, not re-submitting (a second submit
+starts a second bring-up). So `meho-automation`'s resume-in-place engine
+(#76) had to **re-park** non-idempotent ops instead of resuming them.
+
+The fix is a durable capture + a principal-scoped read, both composing with
+the existing exactly-one-resumer substrate rather than duplicating it:
+
+1. **Capture at the winning resume path.** `resume_dispatch_after_approval`
+   — the single execute-after-approve entry point shared by REST `/approve`
+   \+ `/decide`, MCP by-id approve, and the async approve background task
+   (#3079) — persists the re-dispatch's reduced result envelope onto
+   `approval_request.resume_result` (nullable JSON, migration `0096`) right
+   after the dispatch returns. Only the resumer that **won**
+   `claim_resume` (#2293) reaches the capture (`_persist_resume_result`), so
+   it runs at most once per approved request; a loser that no-ops
+   `already_resumed` leaves the winner's result untouched. The stored value
+   is `OperationResult.model_dump(mode="json")` — the **same** reduced /
+   handle-shaped envelope the approver sees inline, so a set-shaped response
+   rides a JSONFlux `handle` (v0.1-spec §4), never a raw body. The capture is
+   **fail-soft**: the dispatch's own synchronous audit row already committed
+   inside `dispatch()` (the v0.1-spec §6 record of what executed), so a
+   capture-write failure logs `approval_resume_result_persist_failed` and is
+   swallowed rather than breaking the approve path. NULL until captured: a
+   `pending` / `rejected` / `expired` row, an **agent-run** request resumed
+   in-process (the in-process waiter re-dispatches on the agent's own task and
+   does not route through this helper — the agent already consumes the result
+   in-loop, so it needs no surfacing), and every pre-0096 row all keep NULL.
+
+2. **Principal-scoped read.** `GET /api/v1/approvals/{id}/result`
+   (`read_approval_result`) returns the captured envelope, but — unlike the
+   rest of the approvals surface — it is **not** `operator`-gated. Any
+   authenticated principal may call it, and the service then enforces that
+   only the request's **owner** (`operator.sub == principal_sub`, the party
+   that parked the op) reads it; every other principal, operator role or not,
+   gets `ResultAccessForbiddenError` → 403 `not_request_owner`. This is what
+   lets a non-operator service/agent principal — the paired add-on that
+   dispatched the op — retrieve *its own* result while no one else can.
+   Tenant isolation is upstream (`get_request` → 404 on a cross-tenant id,
+   never reaching the owner guard). The read writes one synchronous
+   `approval.result` audit row (`method='APPROVAL'`, `status_code=200`,
+   parent-linked into the request's replay subtree #2086), recording the
+   request `status` and `resume_result_present` so a poll-until-ready pattern
+   is visible on the ledger without the payload ever landing on it.
+
+The response (`ApprovalResultView`) carries `status`, `resumed`
+(`resumed_at is not None`), `reviewed_by` / `decided_at`, and `result` (the
+captured envelope, or `null` while unready). A consumer polls until
+`status == "approved"` and `result` is populated, then resumes by poll on the
+returned task id. `resume_result` is **internal to this surface** — like
+`params` it is never projected onto the default read view (`_view`) or a
+broadcast frame.
+
+**Relation to the #3027 add-on step event.** `publish_approval_event`
+already durably records the *decision* (`approval.approved` / `.rejected`)
+for the paired add-on that requested the approval
+(`AddonStepEventService.record_if_owned_committed`). That answers "was it
+approved?"; the `/result` surface answers "what did the approved re-dispatch
+produce?" — complementary, not a duplicate.
+
 ## `proposed_effect` builder hook (#1437)
 
 `ApprovalRequest.proposed_effect` holds what the reviewer sees in the
@@ -774,6 +843,7 @@ the same grant.
 |---|---|---|---|
 | `GET` | `/api/v1/approvals` | operator | List, filtered by `status` (default: `pending`). |
 | `GET` | `/api/v1/approvals/{id}` | operator | **Inspect one request** (T5). 404 on cross-tenant. |
+| `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
 | `POST` | `/api/v1/approvals/{id}/approve` | operator | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
 | `POST` | `/api/v1/approvals/{id}/decide` | operator | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
 | `POST` | `/api/v1/approvals/{id}/reject` | operator | Reject. The op never executes. |
@@ -1011,6 +1081,9 @@ Full design: [`service-principal-grants.md`](service-principal-grants.md).
 - `backend/alembic/versions/0023_create_approval_request.py` — schema.
 - `backend/alembic/versions/0036_add_approval_request_params.py` — `params` column for direct-op approve re-dispatch (#1503).
 - `backend/alembic/versions/0053_add_approval_request_session_lineage.py` — `agent_session_id` + `request_audit_id` lineage columns for session replay (#2086).
+- `backend/alembic/versions/0096_add_approval_request_resume_result.py` — `resume_result` column: the reduced result envelope of the approved re-dispatch, surfaced to the originating consumer (#3209).
+- `backend/src/meho_backplane/operations/approval_queue.py::read_approval_result` — principal-scoped result read + `approval.result` audit row (#3209).
+- `backend/src/meho_backplane/api/v1/approvals.py::get_approval_result` — `GET /api/v1/approvals/{id}/result` (#3209).
 - `backend/src/meho_backplane/operations/approval_queue.py::resume_dispatch_after_approval` — the single execute-after-approve entry point shared by every operator surface (#1503).
 - `backend/src/meho_backplane/agent/approval_wait.py` — agent-runtime resume substrate (T9 #1117): broadcast subscription + re-dispatch on approval.
 - `backend/src/meho_backplane/operations/meta_tools.py` — `call_operation_with_approval` (the gate-bypass re-dispatch entry point).

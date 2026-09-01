@@ -104,6 +104,7 @@ __all__ = [
     "ApprovalRequestAlreadyDecidedError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
+    "ResultAccessForbiddenError",
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
@@ -115,6 +116,7 @@ __all__ = [
     "get_request",
     "list_pending",
     "publish_approval_event",
+    "read_approval_result",
     "reject_request",
     "resume_dispatch_after_approval",
 ]
@@ -243,6 +245,28 @@ class UnauthorizedApprovalError(ApprovalError):
         super().__init__(
             f"operator {operator_sub!r} with role {role!r} may not approve/reject "
             "an approval request (requires at least 'operator')"
+        )
+
+
+class ResultAccessForbiddenError(ApprovalError):
+    """A principal other than the request owner tried to read its result.
+
+    Raised by :func:`read_approval_result` when
+    ``operator.sub != request.principal_sub``. The approved re-dispatch's
+    result is surfaced only to the **originating** principal — the consumer
+    that parked the op (#3209) — so it can resume a non-idempotent parked op
+    (VCF ``bringup.start``) by poll instead of a second submit. Any other
+    principal, including an operator who could approve the request, is refused;
+    the route layer maps this to 403. Tenant isolation is handled upstream by
+    :func:`get_request` (a cross-tenant id is a 404, never reaching this guard).
+    """
+
+    def __init__(self, *, request_id: uuid.UUID, principal_sub: str) -> None:
+        self.request_id = request_id
+        self.principal_sub = principal_sub
+        super().__init__(
+            f"principal {principal_sub!r} is not the owner of approval_request "
+            f"{request_id}; its result is readable only by the originating principal"
         )
 
 
@@ -969,6 +993,67 @@ async def resume_dispatch_after_approval(
     )
 
 
+def _dump_result_envelope(result: Any) -> dict[str, Any] | None:
+    """Project a re-dispatch result into a JSON dict for durable storage (#3209).
+
+    The winning resume path returns an
+    :class:`~meho_backplane.connectors.schemas.OperationResult` (a Pydantic
+    model). ``model_dump(mode="json")`` yields the reduced / handle-shaped
+    envelope — the same one the approver sees inline, so a set-shaped response
+    is already a JSONFlux ``handle`` (v0.1-spec §4), never a raw body. Returns
+    ``None`` when the value is not a dumpable model (defence-in-depth; a
+    non-model result is simply not captured rather than raising).
+    """
+    dump = getattr(result, "model_dump", None)
+    if dump is None:
+        return None
+    projection = dump(mode="json")
+    return projection if isinstance(projection, dict) else None
+
+
+async def _persist_resume_result(request_id: uuid.UUID, result: Any) -> None:
+    """Store the approved re-dispatch's reduced result envelope on the row (#3209).
+
+    Called on the exactly-one-resumer winning path only, so it runs at most
+    once per approved request. The stored value is the reduced /
+    handle-shaped ``OperationResult`` envelope; the originating consumer reads
+    it back — principal-scoped — via ``GET /api/v1/approvals/{id}/result`` to
+    resume a non-idempotent parked op (VCF ``bringup.start``) by poll.
+
+    Fail-soft: the dispatch's own synchronous audit row already committed
+    inside :func:`~meho_backplane.operations.dispatcher.dispatch` (the
+    v0.1-spec §6 record of what executed), so this convenience-durability write
+    must never break the approve path. A failure is logged and swallowed; the
+    approver still receives the result inline and the consumer can re-poll. Runs
+    in its own committed transaction — the decision and the dispatch already
+    committed in separate sessions.
+    """
+    dumped = _dump_result_envelope(result)
+    if dumped is None:
+        return
+    from meho_backplane.db.engine import get_sessionmaker
+
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            await session.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id)
+                .values(resume_result=dumped)
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+    except Exception:
+        # Fail-soft convenience write (see docstring): the dispatch's own
+        # synchronous audit row already committed, so a capture failure must
+        # not break the approve path.
+        _log.warning(
+            "approval_resume_result_persist_failed",
+            approval_request_id=str(request_id),
+            exc_info=True,
+        )
+
+
 def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
     """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
 
@@ -1021,7 +1106,7 @@ async def _dispatch_resume_with_bound_context(
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
     try:
-        return await dispatch(
+        result = await dispatch(
             operator=operator,
             connector_id=request.connector_id,
             op_id=request.op_id,
@@ -1033,6 +1118,13 @@ async def _dispatch_resume_with_bound_context(
         parent_audit_id_var.reset(parent_token)
         agent_session_id_var.reset(session_token)
         work_ref_var.reset(work_ref_token)
+    # Persist the reduced result envelope so the originating consumer can read it
+    # back (principal-scoped) and resume a non-idempotent parked op by poll
+    # instead of a second submit (#3209). Reached only by the exactly-one-resumer
+    # winner, so the capture runs at most once; fail-soft, never breaks the
+    # approve path.
+    await _persist_resume_result(request.id, result)
+    return result
 
 
 async def _rehydrate_resume_target(
@@ -1383,6 +1475,55 @@ async def get_request(
     access (indistinguishable to the caller).
     """
     return await _load_for_tenant(session, request_id, tenant_id)
+
+
+async def read_approval_result(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    request_id: uuid.UUID,
+) -> ApprovalRequest:
+    """Load a request for its owner + write the ``approval.result`` audit row (#3209).
+
+    The principal-scoped result-retrieval surface behind
+    ``GET /api/v1/approvals/{id}/result``. Two gates, in order:
+
+    1. **Tenant isolation** via :func:`get_request` — a cross-tenant or
+       missing id both raise :class:`ApprovalNotFoundError` (→ 404), so the
+       existence of another tenant's request never leaks.
+    2. **Principal scope** — only the request's owner
+       (``operator.sub == request.principal_sub``, the party that parked the
+       op) may read the re-dispatch result. Any other principal, operator role
+       or not, gets :class:`ResultAccessForbiddenError` (→ 403). The result is
+       otherwise visible only in the approver's inline response, so this is the
+       surface that lets the *originating* consumer retrieve it.
+
+    Writes one synchronous ``approval.result`` audit row (``method='APPROVAL'``,
+    ``status_code=200``) in the caller's transaction before returning — the
+    result surfacing is an auditable data egress (v0.1-spec §6), so the read
+    leaves a ledger row like every other governed access, anchored in the
+    request's replay subtree (#2086). The row records the request ``status``
+    and whether a result was present (``resume_result_present``) so a
+    poll-until-ready read pattern is visible on the ledger without the payload
+    ever landing on it. The caller owns the commit.
+    """
+    request = await get_request(session, tenant_id=operator.tenant_id, request_id=request_id)
+    if operator.sub != request.principal_sub:
+        raise ResultAccessForbiddenError(request_id=request_id, principal_sub=operator.sub)
+    await _write_audit_row(
+        session,
+        audit_id=uuid.uuid4(),
+        operator=operator,
+        request=request,
+        path="approval.result",
+        status_code=_DECISION_STATUS_CODE_APPROVED,
+        duration_ms=0.0,
+        extra_payload={
+            "status": request.status,
+            "resume_result_present": request.resume_result is not None,
+        },
+    )
+    return request
 
 
 # ---------------------------------------------------------------------------

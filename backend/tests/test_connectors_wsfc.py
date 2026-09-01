@@ -207,7 +207,10 @@ async def test_cluster_get_builds_health_rollup() -> None:
     assert "Get-ClusterNode" in script
     assert "Get-ClusterGroup" in script
     assert "Get-ClusterResource" in script
-    assert "nodes_up = _count $nodes 'Up'" in script
+    # Hashtable values are plain expressions (no inline-function calls), and the
+    # per-state maps are precomputed variables.
+    assert "nodes_up = @($nodes | Where-Object { \"$($_.State)\" -eq 'Up' }).Count" in script
+    assert "nodes_by_state = $nbs" in script
     assert result["nodes_up"] == 2
     assert result["groups_failed"] == 0
 

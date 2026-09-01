@@ -77,36 +77,43 @@ _TEST_TIMEOUT: float = 900.0
 
 #: The cluster health rollup script. One round-trip: reads the cluster, its
 #: nodes, groups, and resources, and computes per-state count maps plus the
-#: common health scalars. The ``"$($_.State)" -eq 'Up'`` form compares the
-#: stringified state (case-insensitive in PowerShell), so a rendering / casing
-#: difference in the ``ClusterNodeState`` / ``ClusterGroupState`` /
-#: ``ClusterResourceState`` enum cannot silently zero a count.
+#: common health scalars. Every hashtable value is a plain PowerShell
+#: *expression* (a ``@(... | Where-Object {...}).Count`` array-count or a
+#: precomputed ``$*bs`` map variable) — no inline function calls as hashtable
+#: values, which keeps the one-liner unambiguous to parse (the whole script is
+#: assembled and executed remotely, never run through a local interpreter, so
+#: the construct must be plainly correct by inspection). The
+#: ``"$($_.State)" -eq 'Up'`` form compares the stringified state
+#: (case-insensitive in PowerShell), so a rendering / casing difference in the
+#: ``ClusterNodeState`` / ``ClusterGroupState`` / ``ClusterResourceState`` enum
+#: cannot silently zero a count; the ``$*bs`` maps carry every state verbatim so
+#: a state the scalars don't name still surfaces. ``$m[$k] = 1 + $m[$k]``
+#: relies on ``1 + $null == 1`` for a first-seen key.
 _CLUSTER_GET_SCRIPT: str = (
     "$ErrorActionPreference = 'Stop'; "
     "$c = Get-Cluster; "
     "$nodes = @(Get-ClusterNode); "
     "$groups = @(Get-ClusterGroup); "
     "$res = @(Get-ClusterResource); "
-    "function _bystate($items) { $m = @{}; foreach ($i in $items) { "
-    '$k = "$($i.State)"; if ($m.ContainsKey($k)) { $m[$k]++ } else { $m[$k] = 1 } }; return $m }; '
-    "function _count($items, $state) { return @($items | "
-    'Where-Object { "$($_.State)" -eq $state }).Count }; '
+    '$nbs = @{}; foreach ($i in $nodes) { $k = "$($i.State)"; $nbs[$k] = 1 + $nbs[$k] }; '
+    '$gbs = @{}; foreach ($i in $groups) { $k = "$($i.State)"; $gbs[$k] = 1 + $gbs[$k] }; '
+    '$rbs = @{}; foreach ($i in $res) { $k = "$($i.State)"; $rbs[$k] = 1 + $rbs[$k] }; '
     "ConvertTo-Json -Depth 4 -Compress -InputObject @{ "
     'name = "$($c.Name)"; '
     "nodes_total = $nodes.Count; "
-    "nodes_up = _count $nodes 'Up'; "
-    "nodes_down = _count $nodes 'Down'; "
-    "nodes_paused = _count $nodes 'Paused'; "
-    "nodes_by_state = _bystate $nodes; "
+    "nodes_up = @($nodes | Where-Object { \"$($_.State)\" -eq 'Up' }).Count; "
+    "nodes_down = @($nodes | Where-Object { \"$($_.State)\" -eq 'Down' }).Count; "
+    "nodes_paused = @($nodes | Where-Object { \"$($_.State)\" -eq 'Paused' }).Count; "
+    "nodes_by_state = $nbs; "
     "groups_total = $groups.Count; "
-    "groups_online = _count $groups 'Online'; "
-    "groups_offline = _count $groups 'Offline'; "
-    "groups_failed = _count $groups 'Failed'; "
-    "groups_by_state = _bystate $groups; "
+    "groups_online = @($groups | Where-Object { \"$($_.State)\" -eq 'Online' }).Count; "
+    "groups_offline = @($groups | Where-Object { \"$($_.State)\" -eq 'Offline' }).Count; "
+    "groups_failed = @($groups | Where-Object { \"$($_.State)\" -eq 'Failed' }).Count; "
+    "groups_by_state = $gbs; "
     "resources_total = $res.Count; "
-    "resources_online = _count $res 'Online'; "
-    "resources_failed = _count $res 'Failed'; "
-    "resources_by_state = _bystate $res }"
+    "resources_online = @($res | Where-Object { \"$($_.State)\" -eq 'Online' }).Count; "
+    "resources_failed = @($res | Where-Object { \"$($_.State)\" -eq 'Failed' }).Count; "
+    "resources_by_state = $rbs }"
 )
 
 #: Get-ClusterQuorum → the quorum model + witness resource name. Constant.

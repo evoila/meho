@@ -34071,6 +34071,10 @@
       "x-maturity": "ga"
     },
     {
+      "name": "tenants",
+      "x-maturity": "ga"
+    },
+    {
       "name": "topology",
       "x-maturity": "beta"
     }

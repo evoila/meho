@@ -34,12 +34,15 @@ Coverage matrix (per Task #847 acceptance criteria):
 * ``PFSENSE_OPS`` registration shape -- every op carries
   ``additionalProperties=False`` on the parameter schema, non-empty
   ``llm_instructions``, and a pfsense-namespace op_id; the read /
-  identity ops are ``safety_level='safe'`` and the two write ops
-  (#3090) are ``safety_level='caution'``; ``firewall``, ``nat``,
-  ``network``, ``config``, ``dhcp``, ``routing`` groups are present.
-* Registration count -- the ``PFSENSE_OPS`` tuple length matches 11
-  (T2 read ops + ``pfsense.dhcp.leases`` #2849 + the two write ops
-  #3090); the ``pfsense.about`` canary remains at index 0.
+  identity ops are ``safety_level='safe'``, the two write ops (#3090)
+  are ``safety_level='caution'``, and the two delete ops (#3232) are
+  ``safety_level='destructive'`` / ``requires_approval=True``;
+  ``firewall``, ``nat``, ``network``, ``config``, ``dhcp``, ``routing``,
+  ``alias`` groups are present.
+* Registration count -- the ``PFSENSE_OPS`` tuple length matches 13
+  (T2 read ops + ``pfsense.dhcp.leases`` #2849 + the two write ops #3090
+  + the two governed deletes #3232); the ``pfsense.about`` canary remains
+  at index 0.
 
 The ``pfsense.gateway.add`` / ``pfsense.route.static.add`` write-op
 behaviour (validation, idempotency guards, config-write failure
@@ -1037,9 +1040,9 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_eleven_entries() -> None:
-    """T1 canary + 7 T2 read ops + pfsense.dhcp.leases (#2849) + 2 write ops (#3090) = 11."""
-    assert len(PFSENSE_OPS) == 11
+def test_pfsense_ops_has_thirteen_entries() -> None:
+    """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232) = 13."""
+    assert len(PFSENSE_OPS) == 13
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1055,10 +1058,18 @@ def test_pfsense_ops_all_have_pfsense_namespace() -> None:
 #: write), unlike the read/identity surface which is ``safe``.
 _WRITE_OP_IDS = {"pfsense.gateway.add", "pfsense.route.static.add"}
 
+#: The governed destructive deletes (#3232) -- classified ``destructive``
+#: and the only ops that require approval.
+_DELETE_OP_IDS = {"pfsense.nat.delete", "pfsense.alias.delete"}
 
-def test_pfsense_read_ops_safe_write_ops_caution() -> None:
+
+def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
     for op in PFSENSE_OPS:
-        if op.op_id in _WRITE_OP_IDS:
+        if op.op_id in _DELETE_OP_IDS:
+            assert op.safety_level == "destructive", (
+                f"{op.op_id!r} delete op should be safety_level='destructive'"
+            )
+        elif op.op_id in _WRITE_OP_IDS:
             assert op.safety_level == "caution", (
                 f"{op.op_id!r} write op should be safety_level='caution'"
             )
@@ -1095,6 +1106,8 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.dhcp.leases",
         "pfsense.gateway.add",
         "pfsense.route.static.add",
+        "pfsense.nat.delete",
+        "pfsense.alias.delete",
     }
     assert op_ids == expected
 
@@ -1108,6 +1121,7 @@ def test_pfsense_ops_group_keys_include_new_groups() -> None:
     assert "config" in group_keys
     assert "dhcp" in group_keys
     assert "routing" in group_keys
+    assert "alias" in group_keys
 
 
 def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
@@ -1118,6 +1132,10 @@ def test_pfsense_ops_handler_attrs_exist_on_connector() -> None:
         )
 
 
-def test_pfsense_ops_no_requires_approval() -> None:
+def test_pfsense_ops_requires_approval_only_for_destructive_deletes() -> None:
+    """Only the #3232 governed destructive deletes require approval; all else don't."""
     for op in PFSENSE_OPS:
-        assert not op.requires_approval, f"{op.op_id!r} has requires_approval=True"
+        if op.op_id in _DELETE_OP_IDS:
+            assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"
+        else:
+            assert not op.requires_approval, f"{op.op_id!r} has requires_approval=True"

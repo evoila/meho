@@ -90,6 +90,41 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — governed delete: pfSense NAT-rule + alias delete on the destructive tier + conformance (#3232)
+
+- Registers the pfSense connector's first two `safety_level="destructive"` +
+  `requires_approval=True` typed ops (`pfsense.nat.delete`,
+  `pfsense.alias.delete`) on the governed-delete tier (decision
+  `docs/decisions/governed-delete-operations.md`; precedent #3198). Both fold
+  into the **existing single-source** delete-shaped classifier — the default
+  `*.delete` glob (`Settings.service_grant_delete_shaped_patterns`) **and** the
+  `destructive` tag — with no new pattern list; each rides the full gate
+  (mandatory human approval, no agent path, no standing grant, no self-approval
+  even under break-glass, no satellite mint, #3197 preview-hash binding, and a
+  mandatory blast-radius statement).
+- **`pfsense.nat.delete`** deletes exactly ONE port-forward NAT rule
+  (`config.xml` `<nat><rule>`) by its stable `<tracker>` id — never by position
+  or description. Fail-closed on 0 matches (`not_found`) or >1 (`ambiguous`).
+  The blast radius names the rule (interface / proto / source / destination /
+  target / port) and enumerates the associated filter rule (left in place).
+- **`pfsense.alias.delete`** deletes exactly ONE firewall alias by exact name,
+  with a fail-closed dependency check: refused (`referenced`, naming every
+  referrer) when still used by any filter rule, NAT rule (port-forward /
+  outbound / 1:1), or other alias — mirroring pfSense's own in-use guard.
+- **Surgical single-object contract** on a shared perimeter firewall (decision
+  requirement 3): a Python pre-check (exactly one match), a PHP fragment that
+  `write_config()`s only on a single removal, and a post-delete read-back that
+  verifies the object is gone **and** the count dropped by exactly one — no
+  bulk, no device-wide. Identity is re-matched at dispatch time (post-approval),
+  so a rule recreated with a new tracker between park and approval is a
+  different object and resolves to `not_found`. Applied via the connector's
+  existing `pfSsh.php playback` idiom (`write_config` + `filter_configure`).
+- Conformance (`tests/test_connectors_pfsense_delete_ops.py`): agent `DENY`,
+  `ServicePrincipalGrant` refusal (both classifier single-sources),
+  no self-approval under break-glass, satellite mint `OP_NOT_SAFE`, dispatch
+  refused without a matching preview hash, park refused without a blast-radius
+  block, the full preview → park → **human** approve → audited resume delete,
+  and the not-found / ambiguous / referenced refusal paths.
 ### Added — governed delete on bind9: `bind9.record.delete` on the destructive tier + conformance (#3231 / #3198)
 
 - Registers the **second governed delete** — and the first

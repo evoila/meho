@@ -470,6 +470,11 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   ``REFERENCES tenant(id)`` FK and ``dispatch_trace_span`` a real
         #   ``REFERENCES dispatch_trace(id) ON DELETE CASCADE`` FK; both must be
         #   listed alongside ``tenant`` or PG rejects the per-test TRUNCATE.
+        # * ``runner_effect_chain`` — migration 0094 (#3193 satellite effect
+        #   audit): a real ``REFERENCES tenant(id)`` FK (the per-runner
+        #   effect-chain head), so it must be truncated in the same statement as
+        #   ``tenant`` or PG rejects the per-test TRUNCATE with ``cannot truncate
+        #   a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
@@ -477,7 +482,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
-                "event_outbox, event_source, gateway_command, "
+                "event_outbox, event_source, gateway_command, runner_effect_chain, "
                 "service_principal_grant, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, addon_pairing, addon_step_event, "
@@ -551,7 +556,7 @@ async def pg_engine_empty_tenant(
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, "
-                "event_outbox, event_source, gateway_command, "
+                "event_outbox, event_source, gateway_command, runner_effect_chain, "
                 "service_principal_grant, addon_pairing, operation_run, "
                 "addon_capability, addon_orchestration_run, "
                 "service_principal_grant, addon_pairing, addon_step_event, "

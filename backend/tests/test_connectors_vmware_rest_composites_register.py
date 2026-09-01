@@ -196,7 +196,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 33 total: 9 reads
+    # Embedding service called once per composite -- 34 total: 9 reads
     # (T5 #508's 5 + the 4 guest-ops reads #3100) + 24 writes (T6 #509 +
     # single-VM vm.power #2301 + mutating VI-JSON vm.disk.grow #2893 +
     # folder-template vm.clone_from_template #2894 + vim cluster/inventory
@@ -209,7 +209,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # destructive-tier vm.destroy #3198). (The former
     # host.network_uplinks / host.vsan_health reads were re-shipped as typed
     # ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 33
+    assert stub_embedding_service.encode_one.call_count == 34
 
 
 @pytest.mark.asyncio
@@ -456,7 +456,7 @@ async def test_tags_include_composite_and_read_only(
 async def test_register_vmware_composite_operations_is_idempotent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> read rows persist; embedding stays at 33.
+    """Running the registrar twice -> read rows persist; embedding stays at 34.
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
@@ -472,7 +472,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 33
+    assert first_count == 34
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

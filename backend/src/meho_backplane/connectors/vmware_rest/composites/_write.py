@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 19 protocol-driven composite handlers for the
+# code-quality-allow: 21 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
@@ -9,10 +9,10 @@
 # from #2893, the folder-template clone from #2894, the vim cluster /
 # inventory writes — DRS-rule + folder create — from #2895, the #2891
 # hardware writes — vm.resize / vm.nic.repoint / vm.device.cdrom, the
-# GOSC create/apply from #2892, and the OVF/OVA content-library deploy
-# from #2909).
+# GOSC create/apply from #2892, the OVF/OVA content-library deploy
+# from #2909, and the typed HttpNfcLease OVF import from #3229).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (19 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (21 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -96,6 +96,12 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest import library_download, ovf_import_control
+from meho_backplane.connectors.vmware_rest.ovf_import import (
+    ImportPlacement,
+    LeaseImportResult,
+    import_ovf_from_source,
+)
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
     retrieve_properties_body,
@@ -106,6 +112,8 @@ from meho_backplane.connectors.vmware_rest.vim_task import TASK_STATE_ERROR, pol
 from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
@@ -122,6 +130,7 @@ __all__ = [
     "vm_deploy_from_library_composite",
     "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
+    "vm_import_from_library_composite",
     "vm_migrate_composite",
     "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
@@ -835,6 +844,36 @@ _SUB_OPS_VM_DEPLOY_FROM_LIBRARY: tuple[str, ...] = (
     _OP_FIND_LIBRARY_ITEM,
     _OP_DEPLOY_OVF_LIBRARY_ITEM,
     _power_vm_op_id("start"),
+)
+# vm.import_from_library (#3229) REST sub-ops: the shared name-resolution find
+# actions, the optional power-on, and the content-library download-session flow
+# the typed HttpNfcLease source reads the OVF descriptor + disks through (all
+# vcenter.yaml-served REST paths, so they reconcile through the generic
+# ``_SUB_OPS_*`` sweep). The vim control-plane sub-ops are the separate
+# ``_VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY`` manifest below.
+_SUB_OPS_VM_IMPORT_FROM_LIBRARY: tuple[str, ...] = (
+    _OP_FIND_LIBRARY,
+    _OP_FIND_LIBRARY_ITEM,
+    library_download.OP_DOWNLOAD_SESSION_CREATE,
+    library_download.OP_DOWNLOAD_SESSION_LIST_FILES,
+    library_download.OP_DOWNLOAD_SESSION_PREPARE_FILE,
+    library_download.OP_DOWNLOAD_SESSION_KEEP_ALIVE,
+    library_download.OP_DOWNLOAD_SESSION_CANCEL,
+    _power_vm_op_id("start"),
+)
+# vm.import_from_library (#3229) vim (VI-JSON) sub-ops: the ServiceContent
+# resolve, the OVF CreateImportSpec read, the governed ImportVApp write, the
+# lease-state poll, and the lease progress/complete/abort lifecycle. Declared
+# out of the ``_SUB_OPS_*`` namespace (uppercase MoType path roots) so the
+# vcenter.yaml sweep skips them; reconciled against vi-json.yaml below.
+_VIM_SUB_OPS_VM_IMPORT_FROM_LIBRARY: tuple[str, ...] = (
+    ovf_import_control.OP_RETRIEVE_SERVICE_CONTENT,
+    ovf_import_control.OP_CREATE_IMPORT_SPEC,
+    ovf_import_control.OP_IMPORT_VAPP,
+    ovf_import_control.OP_RETRIEVE_PROPERTIES,
+    ovf_import_control.OP_LEASE_PROGRESS,
+    ovf_import_control.OP_LEASE_COMPLETE,
+    ovf_import_control.OP_LEASE_ABORT,
 )
 _SUB_OPS_VM_MIGRATE: tuple[str, ...] = (_OP_RELOCATE_VM,)
 _SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
@@ -2682,6 +2721,184 @@ async def vm_deploy_from_library_composite(
         "issues": issues,
         "candidates": None,
     }
+
+
+# ===========================================================================
+# vm.import_from_library (typed HttpNfcLease OVF import -- #3229)
+# ===========================================================================
+#
+# The durable, transfer-window-decoupled sibling of vm.deploy_from_library.
+# That composite's synchronous REST deploy holds one POST open for the whole
+# server-side copy, so completion is bounded by the client read-timeout, not
+# the operation's real duration -- a multi-GB installer OVA outran even the 3 h
+# mitigation ceiling live (#3176 / stopgap PR #3234). This composite drives the
+# transfer itself via a typed vim HttpNfcLease import: it reads the OVF
+# descriptor + disks from the content library client-side (the download-session
+# source, :mod:`..library_download`) and streams each disk straight to the
+# lease's device URLs with a progress heartbeat (:mod:`..ovf_import`), so
+# completion is bounded only by the transfer's own duration and, under async
+# governed dispatch (#3079), a dropped caller no longer aborts it. Version-
+# agnostic (core vim25 OvfManager / HttpNfcLease; no 9.0-only fields), so it
+# also covers the pre-9.0 VCF 5.x migration-source fleet (#3056).
+#
+# Item resolution (id passthrough or name find, ambiguity-refusing) reuses
+# ``_resolve_deploy_library_item``; the outcome maps onto the same
+# ``deployed`` / ``deploy_failed`` / ``deploy_error`` envelope family (#3071)
+# the deploy composite uses, plus a per-disk ``transfer`` manifest.
+
+# The vim ImportVApp governance op_id + shared write posture the ImportVApp
+# gate evaluates (the one governed write in the import flow; the lease
+# lifecycle + reads ride the already-approved composite).
+_OP_IMPORT_VAPP_GOVERNANCE = ovf_import_control.OP_IMPORT_VAPP
+
+
+def _import_vapp_gate(
+    connector: VmwareRestConnector, target: Any, operator: Operator
+) -> Callable[[dict[str, Any]], Awaitable[OperationResult | None]]:
+    """Build the ImportVApp gate closure the engine calls before the write.
+
+    Runs the same :func:`enforce_subop_policy` seam every composite write uses,
+    under the shared ``dangerous`` / ``requires_approval=False`` posture (the
+    top-level composite is the single approval gate). Returns an
+    ``OperationResult`` when the gate parks / denies -- the engine returns it
+    verbatim so a policy-denied import never reaches ``ImportVApp``.
+    """
+
+    async def _gate(params: dict[str, Any]) -> OperationResult | None:
+        return await enforce_subop_policy(
+            operator=operator,
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_IMPORT_VAPP_GOVERNANCE,
+            safety_level=_WRITE_SAFETY_LEVEL,
+            requires_approval=_WRITE_REQUIRES_APPROVAL,
+            target=target,
+            params=params,
+        )
+
+    return _gate
+
+
+#: ``LeaseImportResult.status`` -> the deploy-envelope status family (#3071).
+_IMPORT_STATUS_TO_ENVELOPE = {
+    "imported": "deployed",
+    "import_failed": "deploy_failed",
+    "import_error": "deploy_error",
+    "lease_error": "deploy_error",
+    "lease_timeout": "deploy_error",
+}
+
+
+def _import_placement(item_name: str, params: dict[str, Any]) -> ImportPlacement:
+    """Build the :class:`ImportPlacement` from the composite params."""
+    network_mappings = params.get("network_mappings")
+    ovf_properties = params.get("ovf_properties")
+    return ImportPlacement(
+        resource_pool=params["resource_pool"],
+        datastore=params["datastore"],
+        entity_name=params.get("name") or "",
+        host=params.get("host"),
+        folder=params.get("folder"),
+        network_mappings=(
+            {str(k): str(v) for k, v in network_mappings.items()}
+            if isinstance(network_mappings, dict)
+            else {}
+        ),
+        ovf_properties=(
+            {str(k): str(v) for k, v in ovf_properties.items()}
+            if isinstance(ovf_properties, dict)
+            else {}
+        ),
+        disk_provisioning=params.get("storage_provisioning"),
+    )
+
+
+def _import_envelope(result: LeaseImportResult, item_id: str) -> dict[str, Any]:
+    """Map a :class:`LeaseImportResult` onto the deploy-envelope response shape."""
+    return {
+        "status": _IMPORT_STATUS_TO_ENVELOPE.get(result.status, "deploy_error"),
+        "vm_id": result.vm_id,
+        "resource_type": result.resource_type,
+        "library_item_id": item_id,
+        "powered_on": False,
+        "issues": list(result.issues),
+        "transfer": list(result.transfer),
+        "candidates": None,
+    }
+
+
+async def vm_import_from_library_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Import an OVF/OVA content-library item to a new VM via a typed HttpNfcLease.
+
+    Op-id: ``vmware.composite.vm.import_from_library``. The durable counterpart
+    to ``vm.deploy_from_library`` for items whose transfer outruns a single
+    HTTP read-timeout (#3176): MEHO drives the disk transfer itself over an
+    ``HttpNfcLease`` rather than blocking on one server-side-copy POST, so
+    completion is bounded only by the transfer's real duration. Resolves the
+    library item (id passthrough or name lookup, ambiguity-refusing), streams
+    the OVF from the content library to the lease, and maps the outcome to the
+    structured ``deployed`` / ``deploy_failed`` / ``deploy_error`` envelope
+    (#3071) plus a per-disk ``transfer`` manifest. With ``power_on`` the
+    imported VM is started best-effort.
+
+    **Calling convention.** Multi-GB imports should be dispatched in async mode
+    (``call_operation`` with ``async=true`` -> HTTP 202 + a durable run handle,
+    #3079): the import then runs on a background task, so a caller that
+    disconnects mid-transfer no longer cancels it -- and, unlike the sync REST
+    deploy, there is no single blocking read to bound completion at all.
+    """
+    try:
+        item_id, resolution_error = await _resolve_deploy_library_item(
+            connector=connector, target=target, operator=operator, params=params
+        )
+    except httpx.HTTPError as exc:
+        return _deploy_failure(
+            "resolve_error",
+            issues=[
+                _deploy_issue(
+                    "resolve",
+                    "error",
+                    f"content-library lookup faulted: {_vsphere_fault_detail(exc)}",
+                )
+            ],
+        )
+    if resolution_error is not None:
+        return resolution_error
+    assert item_id is not None  # resolution_error is None => item_id resolved
+
+    placement = _import_placement(item_id, params)
+    source = library_download.LibraryDownloadSource(
+        connector=connector, target=target, operator=operator, library_item_id=item_id
+    )
+    try:
+        result = await import_ovf_from_source(
+            connector=connector,
+            target=target,
+            operator=operator,
+            source=source,
+            placement=placement,
+            gate=_import_vapp_gate(connector, target, operator),
+        )
+    finally:
+        await source.aclose()
+
+    if isinstance(result, OperationResult):  # ImportVApp gate parked / denied
+        return result
+
+    envelope = _import_envelope(result, item_id)
+    if result.status == "imported" and result.vm_id and bool(params.get("power_on", False)):
+        powered_on, power_issue = await _power_on_deployed_vm(
+            connector, target, operator, result.vm_id
+        )
+        envelope["powered_on"] = powered_on
+        if power_issue is not None:
+            envelope["issues"].append(power_issue)
+    return envelope
 
 
 # ===========================================================================

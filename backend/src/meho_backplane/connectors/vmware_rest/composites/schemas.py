@@ -3706,7 +3706,8 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
 # Guest OS credentials are NEVER a parameter of these ops: they resolve
 # from the target's Vault ``secret_ref`` (the ``guest_username`` /
 # ``guest_password`` fields). The reads are ``safe``; ``guest.file.write``
-# is the single ``dangerous`` / ``requires_approval`` write.
+# (#3100) and ``guest.program.run`` (#3255) are the ``dangerous`` /
+# ``requires_approval`` writes.
 
 
 #: ``vmware.composite.vm.guest.process.list`` parameter schema.
@@ -4040,4 +4041,170 @@ GUEST_FILE_WRITE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "guest_path", "size_bytes", "overwrite"],
+}
+
+
+#: ``vmware.composite.vm.guest.program.run`` parameter schema (#3255).
+#:
+#: The freeform in-guest program-execution write #3100 deferred. ``dangerous``
+#: / ``requires_approval``. ``arguments`` and ``env`` values may carry secrets
+#: (a password on a command line, a token in an env var); they are redacted
+#: from the approval preview, never echoed into the result, and never logged
+#: (guest credentials themselves resolve from ``secret_ref``, never params).
+GUEST_PROGRAM_RUN_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Managed-object ID of the VM whose guest OS runs the program (e.g. 'vm-42')."
+            ),
+        },
+        "program_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute path of the program to start inside the guest (vim "
+                "GuestProgramSpec.programPath), e.g. '/usr/bin/systemctl' or a "
+                "Windows 'powershell.exe'. On Linux/Solaris the program is "
+                "launched via a guest shell."
+            ),
+        },
+        "arguments": {
+            "type": "string",
+            "description": (
+                "Command-line arguments for the program as a single shell string "
+                "(vim GuestProgramSpec.arguments) -- e.g. '-Command "
+                '"Install-WindowsFeature AD-Domain-Services"\'. On Linux/Solaris '
+                "the guest shell interprets it (stdio redirection works; shell "
+                "metacharacters must be escaped). Defaults to an empty string. "
+                "MAY carry secrets: the value is redacted from the approval "
+                "preview and never appears in the result, the audit row, or logs."
+            ),
+        },
+        "working_directory": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Absolute working directory for the program (vim "
+                "GuestProgramSpec.workingDirectory). Omit to use the guest "
+                "default (the auth user's home directory on Linux)."
+            ),
+        },
+        "env": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Environment variables for the program, a NAME->value map "
+                "serialised to vim GuestProgramSpec.envVariables 'NAME=value' "
+                "entries. WARNING: vim REPLACES the guest's whole environment "
+                "with this set -- it is not additive, so an incomplete map can "
+                "drop PATH and system variables the program needs. Omit to "
+                "inherit the guest default environment. MAY carry secrets: "
+                "values are redacted from the approval preview and never appear "
+                "in the result, the audit row, or logs (only the variable NAMES "
+                "reach the reviewer)."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When false (default), return as soon as the program is started "
+                "-- StartProgramInGuest is fire-and-forget and yields only a PID "
+                "(no output is captured). When true, poll ListProcessesInGuest "
+                "until the process exits or ``timeout_seconds`` elapses, "
+                "returning the exit code and start/end times."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600,
+            "default": 300,
+            "description": (
+                "Only used when ``wait`` is true: the wall-clock ceiling for the "
+                "exit-code poll. VMware Tools keeps a finished process's exit "
+                "code listable for only ~5 minutes after completion (and not "
+                "across a Tools restart), so the default matches that window; a "
+                "program running longer may return status 'exit_unknown' if its "
+                "exit info ages out before a poll observes it."
+            ),
+        },
+        "guest_ops_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "guestOperationsManager",
+            "description": (
+                "MoId of the top-level GuestOperationsManager singleton (see process.list)."
+            ),
+        },
+    },
+    "required": ["vm", "program_path"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.guest.program.run`` response schema (#3255).
+GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["started", "exited", "timeout", "exit_unknown"],
+            "description": (
+                "``'started'`` -- wait=false: the program was launched (PID "
+                "returned, no exit code polled). ``'exited'`` -- wait=true: the "
+                "process completed and its exit code was captured. ``'timeout'`` "
+                "-- wait=true: ``timeout_seconds`` elapsed while the process was "
+                "still running (exit_code null). ``'exit_unknown'`` -- wait=true: "
+                "the process was no longer listable before an exit code was seen "
+                "(it finished and aged out of VMware Tools' ~5-minute window, or "
+                "Tools restarted); exit_code null. (A parked / denied approval "
+                "returns the governance OperationResult verbatim, not this "
+                "envelope.)"
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the program ran in."},
+        "process_manager_moid": {
+            "type": "string",
+            "description": (
+                "Resolved GuestProcessManager MoId the StartProgramInGuest call targeted."
+            ),
+        },
+        "program_path": {
+            "type": "string",
+            "description": (
+                "Absolute program path started (echoed; ``arguments`` / ``env`` "
+                "are never echoed back)."
+            ),
+        },
+        "pid": {
+            "type": "integer",
+            "description": "The process ID StartProgramInGuest returned.",
+        },
+        "exit_code": {
+            "type": ["integer", "null"],
+            "description": (
+                "The process exit code when ``status='exited'``; null for "
+                "'started' / 'timeout' / 'exit_unknown'."
+            ),
+        },
+        "start_time": {
+            "type": ["string", "null"],
+            "description": "GuestProcessInfo.startTime (ISO-8601) when captured; else null.",
+        },
+        "end_time": {
+            "type": ["string", "null"],
+            "description": (
+                "GuestProcessInfo.endTime (ISO-8601) when the process completed; else null."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "description": "Whether the caller requested the exit-code poll.",
+        },
+    },
+    "required": ["status", "vm", "process_manager_moid", "program_path", "pid", "wait"],
 }

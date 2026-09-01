@@ -63,6 +63,7 @@ from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_file_write_composite,
     guest_net_show_composite,
     guest_process_list_composite,
+    guest_program_run_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._host import (
     datastore_mount_nfs_composite,
@@ -126,6 +127,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     GUEST_NET_SHOW_RESPONSE_SCHEMA,
     GUEST_PROCESS_LIST_PARAMETER_SCHEMA,
     GUEST_PROCESS_LIST_RESPONSE_SCHEMA,
+    GUEST_PROGRAM_RUN_PARAMETER_SCHEMA,
+    GUEST_PROGRAM_RUN_RESPONSE_SCHEMA,
     HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA,
     HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
@@ -317,15 +320,16 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "guest environment variables (env.read), show Tools-reported guest "
         "network state (net.show -- per-NIC IPs / routes / DNS, needs NO guest "
         "credentials), and initiate a guest file read (file.read -- returns the "
-        "transfer handle: size + attributes + one-time URL). Write (dangerous / "
-        "approval-required): place a file into the guest (file.write). Guest OS "
+        "transfer handle: size + attributes + one-time URL). Writes (dangerous / "
+        "approval-required): place a file into the guest (file.write) and run a "
+        "program in the guest (program.run -- freeform in-guest execution via "
+        "StartProgramInGuest, with optional exit-code polling). Guest OS "
         "credentials resolve from the target's Vault secret_ref (guest_username "
         "/ guest_password) and are NEVER a parameter. The right group for "
         "'what's running in this appliance?', 'read /etc/os-release from the "
-        "guest', 'what does the guest think its network is?', or 'drop this "
-        "config file into the guest'. Requires VMware Tools in the guest. "
-        "Running an arbitrary in-guest command (freeform program exec) is a "
-        "deferred tier -- not in this group yet."
+        "guest', 'what does the guest think its network is?', 'drop this config "
+        "file into the guest', or 'run Install-WindowsFeature inside the guest'. "
+        "Requires VMware Tools in the guest."
     ),
 }
 
@@ -1333,6 +1337,58 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             ),
         },
     ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.guest.program.run",
+        handler=guest_program_run_composite,
+        summary="Run a program in a VM's guest OS (dangerous / approval-required).",
+        description=(
+            "Runs a program inside a VM's guest OS via the vim "
+            "GuestProcessManager StartProgramInGuest, authenticating with the "
+            "guest credential from the target's secret_ref (never in params). "
+            "The governed replacement for out-of-band 'govc guest.run': the "
+            "freeform in-guest execution tier #3100 deliberately deferred, now "
+            "lifted. StartProgramInGuest is fire-and-forget and returns only a "
+            "PID (no output is captured); with wait=true the op polls "
+            "ListProcessesInGuest until the process exits or timeout_seconds "
+            "elapses, returning the exit code and start/end times. "
+            "dangerous / approval-required, gated through the standard "
+            "approvals plane -- a parked / denied approval starts no program. "
+            "The 'arguments' string and 'env' values may carry secrets and are "
+            "redacted from the approval preview, the result, and logs. Requires "
+            "VMware Tools."
+        ),
+        parameter_schema=GUEST_PROGRAM_RUN_PARAMETER_SCHEMA,
+        response_schema=GUEST_PROGRAM_RUN_RESPONSE_SCHEMA,
+        group_key="guest_ops",
+        tags=["composite", "write", "guest", "vi-json", "exec"],
+        safety_level="dangerous",
+        requires_approval=True,
+        llm_instructions={
+            "when_to_use": (
+                "Execute a command inside a running guest OS (e.g. "
+                "Install-WindowsFeature, an AD DS promotion, a systemctl "
+                "invocation) without out-of-band govc guest.run. Approval-gated "
+                "-- expect the call to park for a human decision unless a "
+                "standing grant auto-executes it. Set wait=true to get the exit "
+                "code; note StartProgramInGuest captures no stdout, so redirect "
+                "to a file and read it back with guest.file.read if you need "
+                "output. Setting 'env' REPLACES the guest environment rather "
+                "than augmenting it."
+            ),
+            "preconditions": (
+                "VMware Tools running; guest credential in the target's "
+                "secret_ref. Guest user must be allowed to run the program."
+            ),
+            "result_shape": (
+                "On execute: {status, vm, process_manager_moid, program_path, "
+                "pid, exit_code, start_time, end_time, wait}. status is "
+                "'started' (wait=false), 'exited' (exit code captured), "
+                "'timeout' (still running at timeout), or 'exit_unknown' (exit "
+                "info aged out / Tools restarted). On gate: the approval "
+                "OperationResult verbatim (awaiting_approval / denied)."
+            ),
+        },
+    ),
 )
 
 
@@ -1349,8 +1405,8 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 33 composites total -- 9 read (T5 / #508 + the 4 guest-ops
-    reads / #3100) + 24 write (T6 / #509 + the destructive-tier
+    Scope: 37 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 28 write (T6 / #509 + the destructive-tier
     ``vm.destroy`` / #3198,
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
@@ -1359,9 +1415,13 @@ async def register_vmware_composite_operations(
     hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
     ``vm.device.cdrom``, the two GOSC composites
     ``guest.customization_spec.create`` / ``vm.customize`` / #2892, the
-    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, and
-    the three host-domain writes ``host.datastore_mount_nfs`` /
-    ``host.disk_mark_flash`` / ``host.service_control`` / #3182). (The
+    OVF/OVA content-library deploy ``vm.deploy_from_library`` / #2909, the
+    three host-domain writes ``host.datastore_mount_nfs`` /
+    ``host.disk_mark_flash`` / ``host.service_control`` / #3182, the vim
+    portgroup writes ``network.portgroup.create`` /
+    ``network.portgroup.security.set`` / #3091, the content-library import
+    ``vm.import_from_library`` / #3229, and the two guest-ops writes
+    ``vm.guest.file.write`` / #3100 + ``vm.guest.program.run`` / #3255). (The
     former ``host.network_uplinks`` / ``host.vsan_health`` reads were
     re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +

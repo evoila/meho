@@ -546,3 +546,289 @@ async def test_file_write_put_failure_propagates(
             params={"vm": "vm-42", "guest_path": "/tmp/x", "content": "hi"},
             connector=conn,  # type: ignore[arg-type]
         )
+
+
+# ---------------------------------------------------------------------------
+# program.run (the freeform in-guest exec write, #3255)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ProgramRunConnector:
+    """Records vmomi sub-calls; serves a queued ListProcessesInGuest sequence.
+
+    RetrievePropertiesEx resolves the GuestProcessManager (``pm-1``);
+    StartProgramInGuest returns ``start_pid``; ListProcessesInGuest returns
+    the next entry of ``list_responses`` (clamping to the last once the queue
+    is drained, so a still-running loop keeps polling the same state).
+    """
+
+    start_pid: Any = 4321
+    list_responses: list[Any] = field(default_factory=list)
+    vmomi_calls: list[dict[str, Any]] = field(default_factory=list)
+    _list_idx: int = 0
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append({"path": path, "json": json})
+        if path.endswith("/RetrievePropertiesEx"):
+            return _process_mgr()
+        if path.endswith("/StartProgramInGuest"):
+            return self.start_pid
+        if path.endswith("/ListProcessesInGuest"):
+            idx = min(self._list_idx, len(self.list_responses) - 1)
+            self._list_idx += 1
+            return self.list_responses[idx]
+        raise KeyError(path)
+
+
+def _proc(pid: int, *, exit_code: int | None = None) -> dict[str, Any]:
+    """A GuestProcessInfo entry; ``exit_code`` set marks a completed process."""
+    info: dict[str, Any] = {
+        "name": "psql",
+        "pid": pid,
+        "owner": "svc-guest",
+        "cmdLine": "/usr/bin/psql -c ...",
+        "startTime": "2026-09-01T10:00:00Z",
+    }
+    if exit_code is not None:
+        info["exitCode"] = exit_code
+        info["endTime"] = "2026-09-01T10:00:05Z"
+    return info
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the poll loop's inter-poll sleep a no-op so tests do not block."""
+
+    async def _instant(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_guest.asyncio, "sleep", _instant)
+
+
+@pytest.mark.asyncio
+async def test_program_run_no_wait_returns_pid_only(
+    creds: _CredRecorder, auto_gate: _GateRecorder
+) -> None:
+    conn = _ProgramRunConnector(start_pid=4321)
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={
+            "vm": "vm-42",
+            "program_path": "/usr/bin/systemctl",
+            "arguments": "is-system-running",
+            "working_directory": "/root",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "started"
+    assert out["pid"] == 4321
+    assert out["vm"] == "vm-42"
+    assert out["process_manager_moid"] == "pm-1"
+    assert out["program_path"] == "/usr/bin/systemctl"
+    assert out["exit_code"] is None
+    assert out["wait"] is False
+    # No poll happened (wait defaulted false): only RetrieveProperties + Start.
+    paths = [c["path"] for c in conn.vmomi_calls]
+    assert not any(p.endswith("/ListProcessesInGuest") for p in paths)
+    # The StartProgramInGuest body carried the VM MoRef, auth, and GuestProgramSpec.
+    start = next(c for c in conn.vmomi_calls if c["path"].endswith("/StartProgramInGuest"))
+    body = start["json"]
+    assert body["vm"] == {
+        "_typeName": "ManagedObjectReference",
+        "type": "VirtualMachine",
+        "value": "vm-42",
+    }
+    assert body["auth"]["_typeName"] == "NamePasswordAuthentication"
+    assert body["auth"]["username"] == "svc-guest"
+    assert body["spec"] == {
+        "_typeName": "GuestProgramSpec",
+        "programPath": "/usr/bin/systemctl",
+        "arguments": "is-system-running",
+        "workingDirectory": "/root",
+    }
+
+
+@pytest.mark.asyncio
+async def test_program_run_wait_returns_exit_code(
+    creds: _CredRecorder, auto_gate: _GateRecorder, no_sleep: None
+) -> None:
+    conn = _ProgramRunConnector(
+        start_pid=99,
+        list_responses=[[_proc(99)], [_proc(99, exit_code=0)]],
+    )
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/bin/true", "wait": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "exited"
+    assert out["pid"] == 99
+    assert out["exit_code"] == 0  # exit code 0 is captured, not read as "still running"
+    assert out["start_time"] == "2026-09-01T10:00:00Z"
+    assert out["end_time"] == "2026-09-01T10:00:05Z"
+    assert out["wait"] is True
+    # The poll filtered ListProcessesInGuest to the started PID.
+    poll = next(c for c in conn.vmomi_calls if c["path"].endswith("/ListProcessesInGuest"))
+    assert poll["json"]["pids"] == [99]
+    assert poll["json"]["auth"]["_typeName"] == "NamePasswordAuthentication"
+
+
+@pytest.mark.asyncio
+async def test_program_run_wait_nonzero_exit_code(
+    creds: _CredRecorder, auto_gate: _GateRecorder, no_sleep: None
+) -> None:
+    conn = _ProgramRunConnector(start_pid=7, list_responses=[[_proc(7, exit_code=1)]])
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/bin/false", "wait": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "exited"
+    assert out["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_program_run_wait_process_no_longer_listed(
+    creds: _CredRecorder, auto_gate: _GateRecorder, no_sleep: None
+) -> None:
+    """Seen running, then gone before an exit code -> exit_unknown, no hang."""
+    conn = _ProgramRunConnector(start_pid=55, list_responses=[[_proc(55)], []])
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/bin/sleep", "wait": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "exit_unknown"
+    assert out["exit_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_program_run_wait_times_out_while_running(
+    creds: _CredRecorder, auto_gate: _GateRecorder, no_sleep: None
+) -> None:
+    """Still running when the wall-clock deadline passes -> timeout status.
+
+    ``timeout_seconds=0`` makes the deadline the poll's start instant, so the
+    post-poll deadline check fires after exactly one poll (monotonic is
+    non-decreasing) -- a deterministic timeout without patching the clock.
+    """
+    conn = _ProgramRunConnector(start_pid=8, list_responses=[[_proc(8)]])
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={
+            "vm": "vm-42",
+            "program_path": "/bin/sleep",
+            "wait": True,
+            "timeout_seconds": 0,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "timeout"
+    assert out["exit_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_program_run_gate_first_short_circuits(
+    creds: _CredRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parked gate resolves no credential and starts no program."""
+    op_id = "POST:/GuestProcessManager/{moId}/StartProgramInGuest"
+    awaiting = OperationResult(
+        status="awaiting_approval",
+        op_id=op_id,
+        result=None,
+        duration_ms=1.0,
+        extras={"approval_request_id": "00000000-0000-0000-0000-0000000000bb"},
+    )
+    monkeypatch.setattr(_guest, "enforce_subop_policy", _GateRecorder({op_id: awaiting}))
+    conn = _ProgramRunConnector()
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/bin/true", "arguments": "x"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert creds.calls == []
+    assert conn.vmomi_calls == []
+
+
+@pytest.mark.asyncio
+async def test_program_run_redacts_arguments_and_env(
+    creds: _CredRecorder, auto_gate: _GateRecorder, no_sleep: None
+) -> None:
+    """arguments / env values never reach the result or the sub-op gate params.
+
+    They DO reach the vim wire body (the guest needs them) but must not land
+    on any governed surface -- mirroring guest.file.write excluding content.
+    """
+    secret_arg = "--token=SUPERSECRET123"
+    conn = _ProgramRunConnector(start_pid=321, list_responses=[[_proc(321, exit_code=0)]])
+    out = await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={
+            "vm": "vm-42",
+            "program_path": "/usr/bin/deploy",
+            "arguments": secret_arg,
+            "env": {"API_KEY": "SECRET_ENV_VALUE", "PATH": "/usr/bin"},
+            "wait": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    dumped = json.dumps(out)
+    assert "SUPERSECRET123" not in dumped
+    assert "SECRET_ENV_VALUE" not in dumped
+    # The gate ran with the redaction-safe params (no arguments, no env).
+    gate_call = auto_gate.calls[0]
+    assert gate_call["op_id"] == "POST:/GuestProcessManager/{moId}/StartProgramInGuest"
+    assert gate_call["safety_level"] == "dangerous"
+    assert gate_call["requires_approval"] is False
+    assert gate_call["params"] == {"vm": "vm-42", "program_path": "/usr/bin/deploy"}
+    assert "arguments" not in gate_call["params"]
+    assert "env" not in gate_call["params"]
+    # The values are still delivered to the guest on the vim wire body.
+    start = next(c for c in conn.vmomi_calls if c["path"].endswith("/StartProgramInGuest"))
+    spec = start["json"]["spec"]
+    assert spec["arguments"] == secret_arg
+    assert spec["envVariables"] == ["API_KEY=SECRET_ENV_VALUE", "PATH=/usr/bin"]
+
+
+@pytest.mark.asyncio
+async def test_program_run_defaults_arguments_to_empty_string(
+    creds: _CredRecorder, auto_gate: _GateRecorder
+) -> None:
+    """arguments is required by vim; omitting it sends an empty string."""
+    conn = _ProgramRunConnector(start_pid=1)
+    await _guest.guest_program_run_composite(
+        operator=_operator(),
+        target=_Target(),
+        params={"vm": "vm-42", "program_path": "/bin/true"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    start = next(c for c in conn.vmomi_calls if c["path"].endswith("/StartProgramInGuest"))
+    spec = start["json"]["spec"]
+    assert spec["arguments"] == ""
+    assert "workingDirectory" not in spec
+    assert "envVariables" not in spec
+
+
+@pytest.mark.asyncio
+async def test_program_run_no_pid_raises(creds: _CredRecorder, auto_gate: _GateRecorder) -> None:
+    conn = _ProgramRunConnector(start_pid={"not": "a pid"})
+    with pytest.raises(RuntimeError, match="returned no PID"):
+        await _guest.guest_program_run_composite(
+            operator=_operator(),
+            target=_Target(),
+            params={"vm": "vm-42", "program_path": "/bin/true"},
+            connector=conn,  # type: ignore[arg-type]
+        )

@@ -1584,21 +1584,23 @@ def result_connector_vault_write_forbidden(
     :func:`result_connector_vault_forbidden` (#2091). The four-eyes flow
     can succeed end to end — park → approve → re-dispatch — and the write
     still fails at Vault's ACL because the identity the connector dispatches
-    with lacks ``create`` / ``update`` on the target ``<mount>/data/<path>``.
-    Routing that denial through the read-oriented
-    :func:`result_connector_vault_forbidden` mis-describes it: that builder
-    talks about a target's ``secret_ref`` being outside the readable
-    per-tenant subtree, which does not apply to a typed ``vault.kv.*`` write
-    (the write authorizes against the operator's own templated write path,
-    not a target credential read). This builder names the **write** cause
-    instead — the exact data path Vault denied, the acting identity, the
-    write-policy stanza to add — so the operator sees the actionable
-    problem rather than a bare ``permission denied`` or a misleading
-    read-path diagnosis.
+    with lacks the required capability on the path the op authorizes against
+    (``create``/``update`` on ``<mount>/data/<path>`` for ``put``/``patch``,
+    ``update`` on ``<mount>/delete/<path>`` for the ``vault.kv.delete``
+    version soft-delete — #3274). Routing that denial through the
+    read-oriented :func:`result_connector_vault_forbidden` mis-describes it:
+    that builder talks about a target's ``secret_ref`` being outside the
+    readable per-tenant subtree, which does not apply to a typed
+    ``vault.kv.*`` write (the write authorizes against the operator's own
+    templated write path, not a target credential read). This builder names
+    the **write** cause instead — the exact path Vault denied, the acting
+    identity, the write-policy stanza to add — so the operator sees the
+    actionable problem rather than a bare ``permission denied`` or a
+    misleading read-path diagnosis.
 
     Unlike the read builder there is no ``secret_ref`` to fabricate: the
-    path is the op's own ``<mount>/data/<path>`` (rendered by the caller
-    via :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
+    path is the op's own authorization path (rendered by the caller via
+    :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
     and the identity hint is the dispatching / reviewing operator's ``sub``.
     The remediation points at the write-capability stanza (§6.1) and the
     ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
@@ -1620,16 +1622,25 @@ def result_connector_vault_write_forbidden(
     identity_clause = (
         f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
     )
+    # #3274: the capability + path kind is op-aware. A version soft-delete
+    # (``vault.kv.delete``) authorizes with ``update`` on the ``/delete/``
+    # path; ``put`` / ``patch`` with ``create``/``update`` on the ``/data/``
+    # path. Keep the message consistent with the ``write_path`` rendered by
+    # ``vault_kv_write_target_path`` so the two never disagree.
+    if op_id == "vault.kv.delete":
+        capability_clause = "lacks 'update' on that delete path"
+    else:
+        capability_clause = "lacks 'create'/'update' on that data path"
     summary = (
         f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
         f"(permission denied). The approval handshake succeeded, but the identity "
-        f"the connector dispatched the write with lacks 'create'/'update' on that "
-        f"data path.{identity_clause} This is a deploy write-identity gap, not a bug "
-        f"in the approve→execute flow: add the per-operator write-capability stanza "
-        f"(§6.1) so the dispatching/reviewing operator's token can write the path, "
-        f"and verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen "
-        f"the backplane's shared Vault policy — the write grant is per-operator "
-        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+        f"the connector dispatched the write with {capability_clause}.{identity_clause} "
+        f"This is a deploy write-identity gap, not a bug in the approve→execute flow: "
+        f"add the per-operator write-capability stanza (§6.1) so the "
+        f"dispatching/reviewing operator's token can write the path, and verify it "
+        f"with the 'sys/capabilities-self' probe (§6.2). Do NOT widen the backplane's "
+        f"shared Vault policy — the write grant is per-operator templated. See "
+        f"{_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
     )
     if msg:
         # hvac renders Forbidden as "permission denied, on POST <url>" — the

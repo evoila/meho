@@ -1174,7 +1174,7 @@ async def _run_branch_with_error_handling(
 
         if op_id in VAULT_KV_WRITE_CAPABILITIES:
             try:
-                write_path = vault_kv_write_target_path(params)
+                write_path = vault_kv_write_target_path(op_id, params)
             except (KeyError, ValueError):
                 # ``path`` normalises to nothing (validate_params guarantees
                 # presence, but stay defensive inside the never-raises arm) —

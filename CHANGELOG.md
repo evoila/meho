@@ -95,8 +95,9 @@ connector-related release-notes line.
 - Mechanism 2 of the composed write-tier gate: a per-runner-principal
   **capability allowlist** (`op_pattern` glob + `target_scope` cap, tenant-scoped)
   that **is** the definition of a runner's write blast radius (design §3, threats
-  T1/T8). New `runner_write_allowlist` table (migration `0093`, `down_revision
-  0092`) hung off the runner principal, plus `RunnerWriteAllowlistService`.
+  T1/T8). New `runner_write_allowlist` table (migration `0095`, `down_revision
+  0094` — 0093 skipped, #3193's `0094` landed mid-flight) hung off the runner
+  principal, plus `RunnerWriteAllowlistService`.
 - **Composed, not weakened:** a `remote-write` op mints only when its op-class +
   target is on the runner's allowlist **and** the #3189 approval binds it — the
   gate is satisfiable only when **both** halves pass, fail-closed when either is
@@ -122,6 +123,41 @@ connector-related release-notes line.
   remain untraced by the flight recorder; wiring the allowlist does not change
   that (the `remote-write` item still executes through the
   `dispatcher.dispatch`-bypassing edge path).
+
+### Added — satellite write path: store-and-forward tamper-evident effect audit + un-reported-mint alarm (#3193)
+
+- Mechanism 4 of the composed write-tier gate: the two **compensating controls**
+  for the consciously-recorded v0.1-spec §6 exception (a satellite write's
+  **effect** cannot be synchronously audited at the centre — the runner has no DB
+  and the mutation is off-net). The **mint** stays synchronously audited; the
+  **effect** is store-and-forward with a detector for its absence. The existing
+  `gateway.command.mint` / `gateway.command.result` split lineage is preserved.
+- **Tamper-evident effect audit:** the runner writes a **hash-chained**
+  (sequence-numbered, per-runner) effect record **before** each remote-write
+  mutation and **after** it, referencing the signed work item (#3189) as its
+  non-repudiation anchor, and forwards them with the result report on
+  `POST /gateway/{runner}/result` (push-only preserved). The centre ingests each
+  into `audit_log` with a `store-and-forward` provenance marker, links it to the
+  mint audit row (`parent_audit_id = gateway_command.mint_audit_id`), and
+  **verifies the chain** against the persisted per-runner head
+  (`runner_effect_chain`, migration `0094`): a sequence gap, a broken link, a
+  tampered body, or a record forging another runner's chain is refused — the
+  whole submission rolls back (the capability stays unconsumed) and a durable
+  `gateway.command.effect.quarantine` **security** audit row is written.
+- **Un-reported-mint alarm:** a central sweeper (the `gateway/deadman.py` mould —
+  central-clock, advisory-lock-elected, conditional-`UPDATE` idempotent) raises a
+  **security** event (`path='gateway.command.unreported_mint'`,
+  `event_class='security'`) exactly once for a minted `remote-write` capability
+  past `expires_at` still unconsumed — its effect never came back (threat T4).
+  Deliberately distinct from the #2501 dead-man switch's **liveness** flip
+  (`gateway.runner.stale`): a live runner can still execute-but-not-report one
+  write. New `gateway_command.unreported_alarm_at` latch (migration `0094`);
+  gated on `GATEWAY_UNREPORTED_MINT_ENABLED` (default on),
+  `GATEWAY_UNREPORTED_MINT_TICK_INTERVAL_SECONDS` (default 60).
+- Residual (bounded, not eliminated): a fully compromised runner can fabricate a
+  self-consistent alternate chain; tamper evidence catches transit tampering +
+  dropped records, not a lying edge — bounded by the composition (allowlist ×
+  credential TTL) and the alarm. Documented in `docs/codebase/satellite-runner.md`.
 
 ### Added — satellite write path: revocation hardening for write-capable runners (#3192)
 

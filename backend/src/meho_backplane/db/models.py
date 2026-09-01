@@ -4288,7 +4288,7 @@ class RunnerWriteAllowlistEntry(Base):
     trail, binding the capability at issuance.
 
     Additive-only (migration-compat contract): a fresh table plus its indexes,
-    no ALTER of an existing object (migration ``0093``).
+    no ALTER of an existing object (migration ``0095``).
     """
 
     __tablename__ = "runner_write_allowlist"
@@ -6382,6 +6382,22 @@ class GatewayCommand(Base):
         nullable=False,
         server_default=sa.text("'safe'"),
     )
+    # --- Un-reported-mint security alarm (#3193, migration 0094) --------
+    # The one-way latch the un-reported-mint sweeper
+    # (``gateway/unreported_mint.py``, the ``deadman.py`` mould) flips when a
+    # minted ``remote-write`` capability passes ``expires_at`` still
+    # ``consumed_at IS NULL`` -- its effect was never reported (threat T4). The
+    # ``unreported_alarm_at IS NULL`` predicate + the conditional-``UPDATE``
+    # rowcount gate keep "exactly one security audit row per unreported mint"
+    # true across ticks / replicas, the same discipline as
+    # ``runner_assignments.stale_at``. NULL for every reported, unexpired, or
+    # ``safe`` capability. This is the security alarm, distinct from the
+    # liveness ``stale_at`` dead-man flip.
+    unreported_alarm_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -6395,6 +6411,75 @@ class GatewayCommand(Base):
         sa.CheckConstraint(
             _ck_in("status", _GATEWAY_COMMAND_STATUSES),
             name="ck_gateway_command_status",
+        ),
+    )
+
+
+class RunnerEffectChain(Base):
+    """Per-runner head of the store-and-forward effect-audit hash chain (#3193).
+
+    Initiative #2901 (satellite write path), Task #3193 — mechanism 4 of the
+    composed write-tier gate. A satellite runner keeps a local, hash-chained
+    record of every remote **write** effect it attempts
+    (:mod:`meho_backplane.runner.effect_audit`) and forwards it on next contact.
+    The centre ingests each record into ``audit_log`` and **verifies the chain**
+    (:mod:`meho_backplane.gateway.effect_ingest`); to verify continuity *across*
+    forwards it must remember, per runner, the last sequence number and hash it
+    accepted. This row is that head.
+
+    A ``seq`` that is not exactly ``last_seq + 1`` (a gap — a dropped or
+    suppressed record) or a ``prev_hash`` that is not ``last_hash`` (a broken
+    link — transit tampering) is detected against this row and refused /
+    quarantined. The head is keyed on ``(tenant_id, runner_id)`` where
+    ``runner_id`` is the runner principal **name** (the wire identity, matching
+    ``gateway_command.runner_id``); the centre binds ingest to the authenticated
+    runner, so one runner cannot advance another's chain.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key (PG ``gen_random_uuid()`` / ORM ``uuid.uuid4``).
+    * ``tenant_id`` — UUID NOT NULL, real FK to ``tenant.id`` (the newer
+      clean-slate discipline, as ``gateway_command`` / ``runner_principal``).
+    * ``runner_id`` — Text NOT NULL. The runner principal **name**.
+    * ``last_seq`` — BigInteger NOT NULL. The highest sequence number ingested
+      for this runner. Seeded on first ingest.
+    * ``last_hash`` — Text NOT NULL. That record's ``record_hash`` — the
+      ``prev_hash`` the next forwarded record must carry.
+    * ``updated_at`` — ``timestamptz`` NOT NULL, advanced on each accepted
+      forward.
+
+    A partial-free composite unique index ``(tenant_id, runner_id)`` enforces one
+    head per runner and serves the ingest lookup.
+    """
+
+    __tablename__ = "runner_effect_chain"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    runner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    last_seq: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
+    last_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "runner_effect_chain_runner_uq",
+            "tenant_id",
+            "runner_id",
+            unique=True,
         ),
     )
 

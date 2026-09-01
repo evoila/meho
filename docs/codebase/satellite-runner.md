@@ -215,7 +215,7 @@ op-class + target is on the runner's allowlist. Composed with #3189 so the tier
 is satisfiable only when **both** halves pass — the approval binding **and** the
 allowlist — and fail-closed when either is absent.
 
-- **Storage — `runner_write_allowlist` (migration `0093`).** One row per
+- **Storage — `runner_write_allowlist` (migration `0095`).** One row per
   granted `(op_pattern, target_scope)` capability, hung off the runner principal
   (`runner_principal_id` FK). `op_pattern` is an `fnmatch` glob over `op_id`
   (an exact op-class for a minimal Stage-1 allowlist, or a `*` prefix);
@@ -378,6 +378,85 @@ the write tier — the runner needs an outbound Vault to unwrap against; unset
 fails closed), plus optional `MEHO_RUNNER_VAULT_NAMESPACE` (Enterprise) and
 `MEHO_RUNNER_VAULT_TIMEOUT_SECONDS` (default 10). Wrapped brokering is a Vault
 feature; a Vault-free (`gsm`) deployment has no wrapped-brokering path yet.
+
+## Store-and-forward effect audit + un-reported-mint alarm — mechanism 4 (#3193)
+
+Mechanism 4 of the composed write-tier gate (decision
+`docs/decisions/satellite-write-path.md`, design
+`docs/research/2901-satellite-write-path.md` §3, threat T4) is the two
+compensating controls for a **consciously-recorded exception to v0.1-spec §6**.
+
+**Relationship to the §6 invariant (stated explicitly).** v0.1-spec §6 requires
+that an operation does not return success unless its audit row commits
+synchronously at the centre. For a satellite **write** that invariant *cannot*
+hold for the **effect**: the executing side (a runner) has no Postgres and the
+mutation is off-net, so there is no central transaction to commit the effect row
+in before the mutation happens. §6 **still holds for the mint** — the capability
+is minted only inside a synchronous central audit transaction
+(`gateway.command.mint`, `operations/gateway_commands.py`). What §6 cannot cover
+— the remote effect — is replaced by a *store-and-forward* record plus a
+*detector for its absence*, not by pretending the effect was synchronously
+audited. This is the recorded exception; the two mechanisms below make the edge's
+silence and tampering **observable**, they do not make a lying edge honest (that
+residual is bounded by the composition: allowlist × credential TTL).
+
+**Store-and-forward tamper-evident effect audit** (`runner/effect_audit.py`,
+DB-free — stdlib + pydantic, imported verbatim by the centre). For a
+`remote-write` item the runner appends a **hash-chained** record **before** the
+mutation (`intent`) and **after** it (`outcome`), keyed by a strictly-monotonic
+per-runner `seq`; each record's `record_hash = sha256(prev_hash + canonical_body)`
+folds in its predecessor's hash, and every record references the signed work
+item's Ed25519 `signature` (#3189) as the non-repudiation anchor. The chain head
+(`last_seq` / `last_hash`) persists on disk (`ResultSpool` mould) so a runner
+restart continues the chain rather than rewinding `seq` — a rewind would read as
+a gap. The executor brackets the mutation at the one seam that performs it:
+`execute_work_item` records `intent` after screening passes and `outcome` after
+the handler returns, only for a `REMOTE_WRITE` item with a chain provided (a
+`safe` read records nothing). Records forward with the result report on
+`POST /gateway/{runner}/result` (`GatewayResultBody.effect_records`), preserving
+the push-only boundary (#2877).
+
+**Central ingest + chain verification** (`gateway/effect_ingest.py`). The centre
+ingests each record into `audit_log` (`method='GATEWAY'`,
+`path='gateway.command.effect'`, `payload.provenance='store-and-forward'`) with
+`parent_audit_id = gateway_command.mint_audit_id`, so the effect joins the
+mint/result subtree the split lineage (#2500) already forms — **the existing
+`gateway.command.mint` / `gateway.command.result` lineage is preserved, not
+replaced.** Before writing anything it **verifies the chain** against the
+persisted per-runner head (`runner_effect_chain`, migration `0094`): a `seq` that
+is not `last_seq + 1` (a **gap** — a dropped/suppressed record), a `prev_hash`
+that misses the accepted head (a **broken link**), a `record_hash` that does not
+re-derive (a **tampered body**), or a record whose `runner_id` is not the
+authenticated runner (a **cross-runner forge**) each raises
+`EffectChainTamperError`. On a tamper the runner-facing endpoint rolls the whole
+result submission back — a tampered report is **not** accepted, so the capability
+stays unconsumed and the alarm below can still fire — and writes a durable
+`gateway.command.effect.quarantine` **security** audit row. The keying
+(`record.runner_id` bound to the token-authenticated runner) is why one runner
+cannot extend another's chain.
+
+**Un-reported-mint security alarm** (`gateway/unreported_mint.py`, the
+`gateway/deadman.py` mould). A central-clock, advisory-lock-elected,
+conditional-`UPDATE`-idempotent sweeper flags a minted `remote-write` capability
+past `expires_at` still `consumed_at IS NULL` (`safety_level IN` the remote-write
+set) — its effect was never reported (threat T4). Because the mint is audited
+synchronously, the centre always knows a write capability was granted and detects
+within the expiry window that its effect never came back. Each flip sets the
+one-way `gateway_command.unreported_alarm_at` latch (migration `0094`) under a
+`rowcount` gate and writes exactly one internal **security** audit row
+(`path='gateway.command.unreported_mint'`, `payload.event_class='security'`).
+This is a **security** monitor, deliberately **distinct** from the #2501 dead-man
+switch's **liveness** flip (`gateway.runner.stale`): a runner can be perfectly
+live and still execute-but-not-report one write — the exact gap the liveness
+monitor cannot see. Gated on `GATEWAY_UNREPORTED_MINT_ENABLED` (default on),
+cadence `GATEWAY_UNREPORTED_MINT_TICK_INTERVAL_SECONDS` (default 60), registered
+in `main.lifespan` alongside the dead-man sweeper.
+
+**Residual (bounded, not eliminated).** A fully compromised runner holds its own
+genesis and can fabricate a *self-consistent* alternate chain. Tamper evidence
+catches transit tampering and dropped records (chain gaps), **not** a lying edge;
+that residual is bounded only by the composition (allowlist × credential TTL) and
+by the un-reported-mint alarm, never by the effect record alone.
 
 ## Dead-man switch + mandatory heartbeat (#2501)
 

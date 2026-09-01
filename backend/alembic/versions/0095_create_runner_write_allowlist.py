@@ -3,8 +3,8 @@
 
 """Create ``runner_write_allowlist`` — the per-runner remote-write capability set.
 
-Revision ID: 0093
-Revises: 0092
+Revision ID: 0095
+Revises: 0094
 Create Date: 2026-09-01
 
 Task #3190 under Initiative #2901 (satellite write path), design
@@ -46,10 +46,13 @@ runner cannot self-widen its allowlist (decision recommendation 2).
 Migration-chain note (single linear head)
 -----------------------------------------
 
-Numbered ``0093`` with ``down_revision = "0092"`` — the head on ``origin/main``
-(``0092_add_gateway_command_signature``, #3189). Sibling #3193 (effect audit +
-alarm) runs concurrently and owns ``0094`` if it needs one; this task owns
-``0093`` only. Additive-only: a fresh table, no ALTER of an existing object.
+Numbered ``0095`` with ``down_revision = "0094"`` — the head on ``origin/main``
+after sibling #3193 (effect audit + alarm) landed ``0094_satellite_effect_audit``
+mid-flight (``0093`` was originally this task's number against the old head
+``0092``; it was renumbered to ``0095`` and re-parented onto ``0094`` when #3193
+merged first, so ``0093`` is skipped and the chain stays a single linear head
+``0092 -> 0094 -> 0095``). Additive-only: a fresh table, no ALTER of an existing
+object.
 
 Reversibility contract
 ----------------------
@@ -64,8 +67,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0093"
-down_revision: str | None = "0092"
+revision: str = "0095"
+down_revision: str | None = "0094"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

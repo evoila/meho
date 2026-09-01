@@ -198,6 +198,40 @@ connector-related release-notes line.
   human-only (console / CLI / REST), and the 25-tool working surface + 78-tool
   inventory are unchanged. No schema change / no migration.
 
+### Added — `msad` connector: Active Directory over PowerShell-5.1-over-SSH (#3262)
+
+- **`msad` connector** — typed connector for Active Directory day-2 management
+  over SSH → PowerShell 5.1 (the `ActiveDirectory` module on a domain
+  controller), on the shared `_shared/pwsh` transport (#3260) + `SshConnector`
+  base, registered as `("msad", "2022.x", "msad-ssh")` (+ wildcard). 27 ops
+  across five groups — `domain` (about / info / forest / controllers /
+  replication — FSMO holders + functional level + inbound-replication summary),
+  `users` (list / get / search / create / set / enable / disable / delete),
+  `groups` (list / get / members / add-member / remove-member / delete),
+  `computers` (list / get / join-prestage / unjoin / delete), `ou` (list /
+  create / move). Complements `windows_dns` on the same DC; copies the `winsrv`
+  estate mold (#3261).
+- Safety tiers per the Initiative #3259 satellite table: reads `safe`;
+  recoverable writes `caution`; `user.delete` / `group.delete` /
+  `computer.delete` are `dangerous` + `requires_approval` (the rke2
+  approval-parked-write mold, satellite-excluded by the tier ladder).
+  `computer.unjoin` disables the account (recoverable), distinct from the
+  destructive `computer.delete`.
+- Secret hygiene: no credential rides the `-EncodedCommand` argv — `user.create`
+  is passwordless (created disabled until a password is set out of band) and
+  there is **no `password-reset` op** (a Vault-brokered follow-up); a schema-level
+  test proves no op exposes a secret-value parameter. Every operator string is
+  escaped via `ps_single_quote`; the `user.search` query is bound through a
+  script-block `-Filter` (the AD injection-safe form). In-task decision:
+  DC-targeting assumes the SSH host IS a domain controller (`-Server`/jump-host
+  with a second credential deferred).
+- The new `msad` product token extends the OpenAPI `TargetCreate.product` enum,
+  so the CLI snapshot (`cli/api/openapi.json` + generated client) is regenerated.
+  Live `c1sql-dc1` consumer proof is deferred (lab DC not yet reachable from this
+  build); scripted-transport unit suite + injection-safety + secret-leak guard +
+  six-reason probe matrix are the deliverable, consistent with recent connector
+  tasks.
+
 ### Added — `winsrv` connector: Windows Server core over PowerShell-5.1-over-SSH (#3261 / #3271)
 
 - **`winsrv` connector** — typed connector for Windows Server core management

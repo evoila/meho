@@ -432,6 +432,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "loki-api",
         "mail-smtp",
         "mongodb-wire",
+        "msad-ssh",
         "net-probe",
         "nsx-rest",
         "pfsense-ssh",

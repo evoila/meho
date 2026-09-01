@@ -543,6 +543,7 @@ const (
 	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"
 	TargetCreateProductLoki       TargetCreateProduct = "loki"
 	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
+	TargetCreateProductMsad       TargetCreateProduct = "msad"
 	TargetCreateProductNsx        TargetCreateProduct = "nsx"
 	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
 	TargetCreateProductPostgres   TargetCreateProduct = "postgres"

@@ -58,7 +58,6 @@ from typing import Any
 
 import hvac.exceptions
 
-import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
@@ -84,6 +83,7 @@ from meho_backplane.connectors.vault.ops_auth_write_schemas import (
     VAULT_AUTH_USERPASS_WRITE_PARAMETER_SCHEMA,
     VAULT_AUTH_USERPASS_WRITE_RESPONSE_SCHEMA,
 )
+from meho_backplane.connectors.vault.target_auth import vault_client_for_target
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -131,7 +131,7 @@ async def vault_auth_userpass_write(
     if token_policies is not None:
         kwargs["token_policies"] = list(token_policies)
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(client.auth.userpass.create_or_update_user, **kwargs)
         except hvac.exceptions.InvalidPath as exc:
@@ -168,7 +168,7 @@ async def vault_auth_userpass_update_password(
     password: str = str(params["password"])
     mount: str = str(params.get("mount", "userpass")).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(
                 client.auth.userpass.update_password_on_user,
@@ -197,7 +197,7 @@ async def vault_auth_userpass_delete(
     username: str = str(params["username"]).strip()
     mount: str = str(params.get("mount", "userpass")).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(
                 client.auth.userpass.delete_user,
@@ -247,7 +247,7 @@ async def vault_auth_approle_write(
         if field in params and params[field] is not None:
             kwargs[field] = params[field]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(client.auth.approle.create_or_update_approle, **kwargs)
         except hvac.exceptions.InvalidPath as exc:
@@ -271,7 +271,7 @@ async def vault_auth_approle_delete(
     role_name: str = str(params["role_name"]).strip()
     mount: str = str(params.get("mount", "approle")).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             await asyncio.to_thread(
                 client.auth.approle.delete_role,
@@ -315,7 +315,7 @@ async def vault_auth_approle_generate_secret_id(
         if field in params and params[field] is not None:
             kwargs[field] = params[field]
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
+    async with vault_client_for_target(operator, target) as client:
         try:
             payload = await asyncio.to_thread(client.auth.approle.generate_secret_id, **kwargs)
         except hvac.exceptions.InvalidPath as exc:

@@ -270,7 +270,12 @@ async def vault_operations_app(
     seen_operator: dict[str, Any] = {}
 
     @asynccontextmanager
-    async def _root_client_cm(operator: Any) -> AsyncIterator[Any]:
+    async def _root_client_cm(
+        operator: Any,
+        *,
+        role: str | None = None,
+        mount_path: str | None = None,
+    ) -> AsyncIterator[Any]:
         # ``operator`` is the request-scoped Operator the dispatcher
         # threads. Production would OIDC-login with ``operator.raw_jwt``;
         # dev mode has no OIDC method wired, so only the credential

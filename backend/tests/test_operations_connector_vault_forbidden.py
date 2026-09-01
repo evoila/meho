@@ -473,6 +473,31 @@ def test_write_forbidden_names_path_identity_and_write_stanza() -> None:
     assert "permission denied" in out.extras["exception_message"]
 
 
+def test_write_forbidden_delete_names_update_on_delete_path() -> None:
+    """#3274: a ``vault.kv.delete`` denial names ``update`` on the delete path.
+
+    The version soft-delete authorizes with ``update`` on
+    ``<mount>/delete/<path>`` — so the message must not claim
+    ``create``/``update`` on the data path (which would contradict the
+    ``write_path`` the caller renders for a delete).
+    """
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.delete",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/delete/targets/op-x/prod",
+        identity_hint="op-x",
+    )
+    assert out.error is not None
+    assert "'secret/delete/targets/op-x/prod'" in out.error
+    assert "lacks 'update' on that delete path" in out.error
+    # NOT the put/patch data-path phrasing.
+    assert "create'/'update'" not in out.error
+    assert out.extras["path"] == "secret/delete/targets/op-x/prod"
+
+
 def test_write_forbidden_omits_clauses_when_path_and_identity_absent() -> None:
     """No path / identity → no fabricated clause, extras carry None."""
     from meho_backplane.operations._errors import result_connector_vault_write_forbidden

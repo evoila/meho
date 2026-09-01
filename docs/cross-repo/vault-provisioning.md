@@ -566,6 +566,73 @@ vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
 
 [vault-jwt-api]: https://developer.hashicorp.com/vault/api-docs/auth/jwt
 
+### 8. Per-target teardown role (#3274)
+
+Surfaces 1–7 give every operator one shared Vault role (`meho-mcp`) whose
+policy is the ACL for **all** vault dispatch. A governed **teardown** that
+must `vault.kv.delete` credential subtrees needs `update` on those paths —
+but widening `meho-mcp` to grant that would hand every operator (and the
+`/api/v1/health` federation read) standing delete on the credential store.
+The narrow-role alternative (aligned with the management-plane-lockdown
+principle: a dedicated role over widening the main identity) is a **second,
+dedicated role selected per target**.
+
+The backplane seam is per-target role resolution (evoila/meho#3274): a vault
+`Target` may carry the role — and, optionally, the JWT auth mount it lives on
+— in its `extras`, and the connector logs in under that role instead of
+`meho-mcp` for dispatch against that target. It is JWT-federated exactly like
+`meho-mcp`: the operator's runtime JWT is forwarded to `auth/<mount>/login`
+under the role, the role's policy is the ACL, and **no credential is stored on
+the target** (`secret_ref` stays `NULL`).
+
+**Consumer side (provision the role + register the target):**
+
+```bash
+# 1. Policy: read + update ONLY the credential subtrees the teardown deletes.
+#    (Two subtrees in the lab; adjust to your layout. `update` on the KV-v2
+#    `delete/` path is what authorizes a version soft-delete — NOT `data/`;
+#    see connector-vault-policy.md §6.1.)
+vault policy write meho-teardown - <<'HCL'
+path "secret/data/rdc/**"    { capabilities = ["read"] }
+path "secret/delete/rdc/**"  { capabilities = ["update"] }
+path "secret/data/lab/**"    { capabilities = ["read"] }
+path "secret/delete/lab/**"  { capabilities = ["update"] }
+HCL
+
+# 2. Role on the SAME JWT auth mount as meho-mcp (dedicated mount per surface
+#    1; the lab's is `jwt-meho`), same bound_audiences, its own policy.
+vault write auth/jwt-meho/role/meho-teardown \
+  role_type=jwt user_claim=sub \
+  bound_audiences=<keycloak-audience> \
+  policies=meho-teardown token_ttl=1h
+
+# 3. Register a backplane target that selects the role. secret_ref is NULL
+#    (JWT-federated); version may be null (resolves via the connector's
+#    wildcard registration). The role/mount ride the target's extras.
+meho targets register rdc-vault-teardown \
+  --product vault --host <vault-host> \
+  --extra vault_role=meho-teardown \
+  --extra vault_mount=jwt-meho
+```
+
+The reserved `extras` keys are the frozen contract:
+
+| key | required | meaning | fallback when absent |
+|---|---|---|---|
+| `vault_role` | yes (on a teardown target) | JWT role to log in under | `settings.vault_oidc_role` (`meho-mcp`) |
+| `vault_mount` | optional | JWT auth-method mount the role lives on | `settings.vault_oidc_mount_path` |
+
+Fail-closed: if the role is denied (mis-scoped policy, wrong `bound_*`), the
+dispatch surfaces `VaultRoleDeniedError` — it never silently widens back to
+`meho-mcp`. The park-time capability preflight runs under the resolved role
+too, so the approval banner reflects the role that will actually execute.
+Lab-verified end-to-end in
+[`evoila-bosnia/claude-rdc-hetzner-dc#2814`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/2814)
+(PR [`#2815`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/pull/2815)):
+policy `meho-teardown` + role `auth/jwt-meho/role/meho-teardown` soft-deleted a
+scratch KV version through the connector, was denied outside its two subtrees,
+and left `meho-mcp` byte-identical.
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`

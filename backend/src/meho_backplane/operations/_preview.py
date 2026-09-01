@@ -645,13 +645,16 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
 
     Delegates to
     :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_capability_preflight`,
-    which logs in under the operator's ``meho-mcp`` role and issues
-    ``POST sys/capabilities-self`` on the op's ``<mount>/data/<path>`` to
-    learn whether the dispatching token holds the ``create`` / ``update``
-    capability the write needs. The response carries only capability
-    names -- no secret value -- so it is redaction-safe and runs even
-    though ``vault.kv.put`` / ``vault.kv.patch`` classify as
-    ``credential_write``.
+    which logs in under the **resolved per-target role** the write will
+    use (#3274 — the dispatch ``target``'s ``extras["vault_role"]``, or
+    the settings-global ``meho-mcp`` role when the target names none) and
+    issues ``POST sys/capabilities-self`` on the op's authorization path
+    to learn whether that token holds the ``create`` / ``update``
+    capability the write needs. Threading ``ctx.target`` is what makes the
+    banner reflect the role that will actually execute. The response
+    carries only capability names -- no secret value -- so it is
+    redaction-safe and runs even though ``vault.kv.put`` /
+    ``vault.kv.patch`` classify as ``credential_write``.
     """
     from meho_backplane.connectors.vault.ops import vault_kv_write_capability_preflight
 
@@ -659,6 +662,7 @@ async def _vault_kv_write_preflight(ctx: PreviewContext) -> dict[str, Any] | Non
         ctx.operator,
         ctx.descriptor.op_id,
         ctx.params,
+        target=ctx.target,
     )
 
 

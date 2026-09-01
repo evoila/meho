@@ -20,12 +20,21 @@ exit (behaviour inherited from
 Target contract (G0.3 #224, operator-aware dispatch G0.8-T3 #629):
 
 The connector is typed against the real
-:class:`~meho_backplane.targets.schemas.Target`. It reads Vault
-connection parameters (address, role, mount path, namespace, timeout)
-from :func:`~meho_backplane.settings.get_settings`, not from the
-target, because those are deployment-level settings, not per-operator
-overrides — so ``probe``/``fingerprint`` accept ``Target | None`` and
-ignore the value entirely. The operator's bearer token is **not** on
+:class:`~meho_backplane.targets.schemas.Target`. It reads Vault's
+**address**, namespace, and timeout from
+:func:`~meho_backplane.settings.get_settings` — there is one Vault, so
+those stay deployment-global. The JWT **role** and the JWT auth-method
+**mount path** are per-target as of #3274: a dispatch ``Target``
+advertising ``extras["vault_role"]`` (and optionally
+``extras["vault_mount"]``) logs in under that dedicated role, so a
+governed teardown's ``vault.kv.delete`` runs under a narrow role
+(``meho-teardown``) instead of the shared ``meho-mcp`` identity; a
+target naming neither key keeps today's settings-global role byte-for-
+byte. The KV/auth handlers resolve this off the threaded ``Target`` via
+:func:`~meho_backplane.connectors.vault.target_auth.vault_client_for_target`.
+``probe``/``fingerprint`` still accept ``Target | None`` and ignore the
+value entirely — ``/sys/health`` is unauthenticated, so no role
+applies. The operator's bearer token is **not** on
 the persisted ``Target`` row (a per-request token must not be
 persisted on a shared target); typed KV/auth/sys handlers read it from
 the request-scoped :class:`~meho_backplane.auth.operator.Operator` the

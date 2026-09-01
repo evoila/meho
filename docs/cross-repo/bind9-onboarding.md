@@ -37,7 +37,7 @@ the consumer's `bind9-dns.sh` wrapper exercises daily:
 | --- | --- | --- |
 | `identity` | `bind9.about` | read-only fingerprint |
 | `zone` | `bind9.zone.list`, `bind9.zone.read` | read-only |
-| `record` | `bind9.record.get`, `bind9.record.add`, `bind9.record.remove` | 1 read + 2 atomic writes |
+| `record` | `bind9.record.get`, `bind9.record.add`, `bind9.record.remove` | 1 read + 1 caution write (`add`) + 1 governed destructive write (`remove` — approval-gated whole-name clear since #3247) |
 | `config` | `bind9.config.show`, `bind9.config.apply_file`, `bind9.config.apply_views`, `bind9.config.backup`, `bind9.config.reload` | 1 read + 4 writes |
 
 Eleven ops total. Every op dispatches through the same
@@ -239,7 +239,7 @@ $ meho bind9 record remove esx-dc6.evba.lab \
 | --- | --- | --- |
 | `record get <fqdn>` | `bind9.record.get` | `--type` defaults to `A`; supported: `A` / `AAAA` / `CNAME` / `MX` / `TXT`. Resolution is via `dig @localhost`, so views + cache hits behave as the rest of the world sees them. |
 | `record add <fqdn> <ip>` | `bind9.record.add` | `safety_level=caution`, `op_class=write`. Routes through the atomic-apply primitive. `--zone` is optional; the handler resolves the owning zone via longest-suffix match. `--type` accepts `A` or `AAAA` only — CNAME / MX / TXT writes are out of scope for v0.2. |
-| `record remove <fqdn>` | `bind9.record.remove` | `safety_level=caution`, `op_class=write`. Removes the A + AAAA rdatasets at `<fqdn>`. |
+| `record remove <fqdn>` | `bind9.record.remove` | `safety_level=destructive`, `requires_approval=True`, `op_class=write` (governed since #3247). Clears **every** A + AAAA rdataset at `<fqdn>` — a whole-name clear. Runs only through preview → park → distinct-human approval → audited resume; a bare call is refused `preview_binding_required`. To retire a single record instead, use `bind9.record.delete`. |
 
 `record add` is the **1:1 replacement** for the consumer's
 `bind9-dns.sh --add-a-record …` invocation. The wrapper composed a
@@ -361,7 +361,7 @@ retires in favour of the verb tree above:
 | Wrapper invocation | `meho bind9 …` replacement | Notes |
 | --- | --- | --- |
 | `bind9-dns.sh --target <h> --add-a-record <fqdn> <ip> --zone <zone>` | `meho bind9 record add <fqdn> <ip> --zone <zone> --target <slug>` | The wrapper's `<host>` becomes a registered target slug. Atomic-apply rollback is now built-in (the wrapper bolted on its own check + reload step). |
-| `bind9-dns.sh --target <h> --remove-a-record <fqdn> --zone <zone>` | `meho bind9 record remove <fqdn> --zone <zone> --target <slug>` | |
+| `bind9-dns.sh --target <h> --remove-a-record <fqdn> --zone <zone>` | `meho bind9 record remove <fqdn> --zone <zone> --target <slug>` | Governed since #3247: the whole-name clear now requires human approval (preview → park → approve → resume). The wrapper's fire-and-forget removal has no 1:1 approval-free equivalent by design. |
 | `bind9-dns.sh --target <h> --get-record <fqdn>` | `meho bind9 record get <fqdn> --target <slug>` | |
 | `bind9-dns.sh --target <h> --list-zones` | `meho bind9 zone list --target <slug>` | |
 | `bind9-dns.sh --target <h> --read-zone <zone>` | `meho bind9 zone read <zone> --target <slug>` | |

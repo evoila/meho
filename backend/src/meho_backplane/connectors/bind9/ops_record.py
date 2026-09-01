@@ -21,8 +21,13 @@ G3.4-T2 (#588) of Initiative #367 landed the read op (``dig @localhost
   appears in the answer. ``safety_level=caution`` (mutation; the
   production-path gate is G7/G10 policy territory).
 * ``bind9.record.remove <fqdn> [--zone <name>] [--view <name>]`` --
-  symmetric remove with verify predicate = ``dig`` no longer resolves
-  the FQDN.
+  symmetric whole-name clear (every A + AAAA at the FQDN) with verify
+  predicate = ``dig`` no longer resolves the FQDN. Promoted to
+  ``safety_level=destructive`` + ``requires_approval=True`` by the #3247
+  operator ruling: as the broadest DNS removal MEHO exposes it rides the
+  same governed-delete gate as ``record.delete`` (park + human approval +
+  preview-hash binding + a whole-name blast-radius statement, built by
+  :func:`._ops_record_delete_preview._bind9_record_remove_preview`).
 
 ``--zone`` is optional. When omitted, the handler resolves the owning
 zone from ``named-checkconf -p`` (the T2 zone parser) by longest-suffix
@@ -1745,17 +1750,36 @@ _BIND9_RECORD_REMOVE_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+_REMOVE_WARNING = (
+    "GOVERNED WHOLE-NAME CLEAR (destructive tier, #3247). This op clears "
+    "EVERY A and AAAA record at the name in one write — it is the broadest "
+    "DNS removal MEHO exposes, so it rides the same hardest gate as "
+    "``bind9.record.delete``: ``safety_level=destructive`` + "
+    "``requires_approval=True`` — mandatory human approval always (no agent "
+    "path, no standing grant, no self-approval even under break-glass), a "
+    "mandatory preview-hash binding, and a mandatory blast-radius statement "
+    "(the name plus EVERY A / AAAA value that dies) the four-eyes approver "
+    "reads before deciding. Change is global and atomic: the atomic-apply "
+    "primitive stages the new zonefile, runs ``named-checkzone`` + "
+    "``rndc reload`` + a verify predicate that confirms the name no longer "
+    "resolves, and rolls the ``/etc/bind/`` tree back byte-identical on any "
+    "failure. When you need to retire a SINGLE record (one value, not the "
+    "whole name), use ``bind9.record.delete`` instead — it is scoped to one "
+    "(zone, name, type, rdata?) record."
+)
+
+
 BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Remove the A and AAAA records at the given FQDN. "
-        + _WRITE_WARNING
-        + " Use ``bind9.record.get`` first to confirm the current "
-        "state. Removing a record bind9 doesn't actually serve is "
-        "a no-op (verify still passes -- the FQDN doesn't resolve "
-        "before or after)."
+        "Clear the entire name — every A and AAAA record at the given FQDN "
+        "— under governance (an environment teardown that retires a host's "
+        "whole forward resolution). " + _REMOVE_WARNING + " Use "
+        "``bind9.record.get`` first to confirm the current state; removing a "
+        "record bind9 doesn't actually serve is a no-op (verify still passes "
+        "-- the FQDN doesn't resolve before or after)."
     ),
     "parameter_hints": {
-        "fqdn": "Required. The FQDN to clear of A / AAAA records.",
+        "fqdn": "Required. The FQDN to clear of ALL A / AAAA records.",
         "zone": (
             "Optional. Owning zone. Omit to let the handler pick "
             "the longest-suffix-matching zone automatically."
@@ -2000,21 +2024,21 @@ RECORD_OPS: tuple[Bind9Op, ...] = (
     Bind9Op(
         op_id="bind9.record.remove",
         handler_attr="bind9_record_remove",
-        summary="Remove the A and AAAA records at an FQDN atomically with rollback.",
+        summary="Clear ALL A + AAAA at an FQDN — governed destructive tier.",
         description=(
             "Atomic stage-validate-commit-reload-verify-rollback "
-            "remove of every A and AAAA record at the given FQDN. "
-            "Idempotent when the records are already absent (verify "
-            "passes -- the FQDN doesn't resolve before or after). "
-            "Split-horizon aware: pass ``view`` to disambiguate a zone "
-            "declared in multiple views. " + _WRITE_WARNING
+            "remove of every A and AAAA record at the given FQDN — a "
+            "whole-name clear, not a single-record delete. Idempotent when "
+            "the records are already absent (verify passes -- the FQDN "
+            "doesn't resolve before or after). Split-horizon aware: pass "
+            "``view`` to disambiguate a zone declared in multiple views. " + _REMOVE_WARNING
         ),
         parameter_schema=BIND9_RECORD_REMOVE_PARAMETER_SCHEMA,
         response_schema=_BIND9_RECORD_REMOVE_RESPONSE_SCHEMA,
         group_key="record",
-        tags=("write", "record", "atomic-apply"),
-        safety_level="caution",
-        requires_approval=False,
+        tags=("write", "record", "delete", "destructive", "atomic-apply"),
+        safety_level="destructive",
+        requires_approval=True,
         llm_instructions=BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS,
     ),
     Bind9Op(

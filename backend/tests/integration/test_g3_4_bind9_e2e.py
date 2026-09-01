@@ -929,13 +929,20 @@ async def test_dispatch_record_add_against_bind9_writes_state_before_after(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_record_remove_against_bind9_writes_state_before_after(
+async def test_governed_record_remove_gate_holds_against_real_bind9(
     bind9_e2e: _Bind9Target,
 ) -> None:
-    """``bind9.record.remove`` removes a record and the audit row carries
-    ``state_before`` / ``state_after`` summaries.
+    """``bind9.record.remove`` is governed (#3247): the destructive gate fires
+    end-to-end against the real registered descriptor + real target.
+
+    A bare dispatch (no preview-hash binding — the shape an agent would take)
+    is refused ``preview_binding_required`` and the record is **not** cleared
+    on the real server. This proves the promotion closed the caution-tier
+    bypass at the dispatch boundary; the full park → distinct-human approval →
+    audited-resume flow is covered against a mocked transport in
+    ``test_connectors_bind9_record_remove.py``.
     """
-    # Add a record first so there's something to remove.
+    # Add a record first so there's something a bypass could have cleared.
     add_op = _make_operator(sub="op-record-remove-add", tenant_id=_OPERATOR_TENANT_ID)
     add_result = await dispatch(
         operator=add_op,
@@ -951,22 +958,30 @@ async def test_dispatch_record_remove_against_bind9_writes_state_before_after(
     )
     assert add_result.status == "ok"
 
-    operator = _make_operator(sub="op-record-remove", tenant_id=_OPERATOR_TENANT_ID)
-    result = await dispatch(
-        operator=operator,
+    # A bare dispatch of the now-destructive op is refused for lack of a
+    # preview-hash binding — it does not park and it does not execute.
+    requester = _make_operator(sub="op-record-remove", tenant_id=_OPERATOR_TENANT_ID)
+    bare = await dispatch(
+        operator=requester,
         connector_id="bind9-ssh-9.x",
         op_id="bind9.record.remove",
         target=bind9_e2e,
         params={"fqdn": "to-remove.evba.lab", "zone": "evba.lab"},
     )
-    assert result.status == "ok", result.error
-    assert result.result["op_class"] == "write"
-    await _assert_audit_row(
-        "bind9.record.remove",
-        operator_sub="op-record-remove",
-        expect_state_before=True,
-        expect_state_after=True,
+    assert bare.status == "denied", bare
+    assert bare.extras["error_code"] == "preview_binding_required"
+
+    # The record still resolves on the real server — the ungoverned clear was
+    # blocked, not merely refused-then-executed.
+    still_there = await dispatch(
+        operator=_make_operator(sub="op-record-remove-verify", tenant_id=_OPERATOR_TENANT_ID),
+        connector_id="bind9-ssh-9.x",
+        op_id="bind9.record.get",
+        target=bind9_e2e,
+        params={"fqdn": "to-remove.evba.lab", "type": "A"},
     )
+    assert still_there.status == "ok", still_there.error
+    assert any(row["rdata"] == "10.5.50.43" for row in still_there.result["rows"])
 
 
 @pytest.mark.asyncio

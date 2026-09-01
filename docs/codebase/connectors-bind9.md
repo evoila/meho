@@ -197,7 +197,7 @@ reason.
 | `bind9.zone.read` | `Bind9Connector.bind9_zone_read` | `safe` | Resolve zonefile via `named-checkconf -p`, read + parse via dnspython; row per rrset member `{name, ttl, class, type, rdata}` |
 | `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; optional `view` disambiguates split-horizon zones (#2897); verify predicate = `dig` returns the new IP, or `rndc zonestatus` serial-match when a `view` is given |
-| `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given |
+| `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `destructive` | Governed whole-name clear (#3247): atomic remove of **every** A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given. Promoted from `caution` by the #3247 operator ruling — as the broadest DNS removal it rides the same governed gate as `record.delete`: mandatory human approval + preview-hash binding + whole-name blast-radius (the name + every A/AAAA value that dies) |
 | `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
@@ -226,10 +226,12 @@ fail-open lesson); `ServicePrincipalGrantService.create` refuses it even with
 the op-id glob patterns blanked.
 
 It is deliberately **narrower** than `bind9.record.remove`: `remove` clears
-every A + AAAA at a name in one caution-tier write, while `delete` removes
-**exactly one** record scoped by `(zone, name, type, rdata?)`. `type` is
-required; `rdata` is required only to disambiguate a name that carries more
-than one value of that type.
+every A + AAAA at a name in one write (a whole-name clear), while `delete`
+removes **exactly one** record scoped by `(zone, name, type, rdata?)`. `type`
+is required; `rdata` is required only to disambiguate a name that carries more
+than one value of that type. Both now sit on the destructive tier (see
+[Governed whole-name clear](#governed-whole-name-clear-bind9recordremove-3247)
+below) — `delete` is the scalpel, `remove` the whole-name shear.
 
 Layout mirrors the record write ops:
 
@@ -255,6 +257,42 @@ Layout mirrors the record write ops:
 All refusal envelopes carry `status` / `deleted=False` / `guidance` — the
 `vm.destroy` structured-refusal shape. See the approvals-plane note in
 `approvals.md`.
+
+### Governed whole-name clear (`bind9.record.remove`, #3247)
+
+`bind9.record.remove` clears **every** A + AAAA record at a name in one write
+— the broadest DNS removal MEHO exposes. It shipped caution-tier and
+approval-free, which meant an agent could clear a whole name un-governed while
+a human had to approve the *narrower* single-record `record.delete`. The
+[#3247](https://github.com/evoila/meho/issues/3247) operator ruling (Option A,
+2026-09-01) closed that bypass by promoting it onto the same governed-delete
+tier: `safety_level="destructive"` + `requires_approval=True`, tagged
+`delete` / `destructive`.
+
+The promotion is **single-sourced** — flipping the op registration's
+`safety_level` + tags is the only change. Every downstream classifier reads
+it from there: the satellite ladder (`runner/satellite_tier.py`) excludes
+`destructive` → EXCLUDED (never runner-minted); the service-grant guard and
+the flight-recorder body-exclusion (`redaction/flight_recorder/families.py`,
+which keys on the `destructive` tag) fold it in without a re-declared list.
+Broadcast/audit payload sensitivity (`broadcast.events.classify_op`) is
+orthogonal — `record.remove` stays `write` there, the same class as
+`record.delete`.
+
+* **Handler** `ops_record.bind9_record_remove` — unchanged behaviour (atomic
+  clear of both families with snapshot rollback). It now only runs post-approval
+  via `resume_dispatch_after_approval`; the tier change is metadata, not a code
+  path in the handler.
+* **Preview builder** `ops_record_delete_preview._bind9_record_remove_preview`
+  — read-only, wired onto the `_preview` hook alongside the delete builder and
+  sharing the `_resolve_zone_and_read` preamble. Builds the whole-name
+  `blast_radius` block (object = the `dns_name`; children = every current A and
+  AAAA value; `irreversibility="recreatable"`; `match_count` = total values
+  that die). Declines (→ park refused `blast_radius_required`) when the zone is
+  unmanaged or the zonefile is unreadable.
+
+An agent wanting to retire a *single* record (one value, not the whole name)
+is directed to `record.delete` by the op's `llm_instructions`.
 
 ## Atomic-apply primitive (T3 #589)
 
@@ -491,8 +529,10 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
   `bind9_record_remove` handlers' happy path, zone-omitted
   longest-suffix resolution, invalid-IP / type-family-mismatch /
   unsupported-type / missing-sudo-password rejection branches; (6)
-  the registration metadata (`safety_level=caution`, write-warning
-  in description + `llm_instructions`, `additionalProperties=False`).
+  the registration metadata (`record.add` `safety_level=caution`;
+  `record.remove` `safety_level=destructive` since #3247 — see
+  `test_connectors_bind9_record_remove.py`; write-warning in description +
+  `llm_instructions`, `additionalProperties=False`).
 - `backend/tests/test_connectors_bind9_config.py` -- T4 unit suite.
   Covers (1) `pack_views_tar` pure builder (absolute member names,
   traversal rejection, mode-bit pinning, UTF-8 round-trip); (2)

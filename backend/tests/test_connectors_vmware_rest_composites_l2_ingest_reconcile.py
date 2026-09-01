@@ -876,6 +876,80 @@ def test_2970_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #3091 distributed-portgroup writes — portgroup.create + security.set. The
+# pinned vcenter.yaml serves no portgroup-create REST path and no
+# security-policy write (the security policy lives in vim
+# DVPortgroupConfigSpec.defaultPortConfig.securityPolicy), so both writes ride
+# vim and their manifests reconcile against the pinned vi-json.yaml like the
+# #2895 / #2970 vim writes above.
+# ---------------------------------------------------------------------------
+
+#: Expected #3091 vim manifests, pinned so a drift can't shrink a reconcile.
+_EXPECTED_3091_VIM_MANIFESTS: dict[str, set[str]] = {
+    "_VIM_SUB_OPS_NETWORK_PORTGROUP_CREATE": {
+        "POST:/DistributedVirtualSwitch/{moId}/CreateDVPortgroup_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    },
+    "_VIM_SUB_OPS_NETWORK_PORTGROUP_SECURITY_SET": {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/DistributedVirtualPortgroup/{moId}/ReconfigureDVPortgroup_Task",
+    },
+}
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3091_VIM_MANIFESTS))
+def test_3091_vim_sub_op_manifests_are_pinned(manifest_name: str) -> None:
+    """Pin each #3091 portgroup-write vim manifest so a drift can't shrink the reconcile."""
+    assert set(getattr(_write, manifest_name)) == _EXPECTED_3091_VIM_MANIFESTS[manifest_name]
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3091_VIM_MANIFESTS))
+def test_3091_vim_sub_ops_round_trip_through_ingest(manifest_name: str) -> None:
+    """The #3091 vim op_ids are byte-for-byte what ``parse_openapi`` emits.
+
+    Same proof shape as the #2895 / #2970 round-trips above: the ``{moId}``
+    path template survives the parser, so governance op_ids / grants resolve
+    against the ingested rows once ``vi-json.yaml`` is ingested.
+    """
+    required = set(getattr(_write, manifest_name))
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+@pytest.mark.parametrize("manifest_name", sorted(_EXPECTED_3091_VIM_MANIFESTS))
+def test_3091_vim_paths_exist_in_the_pinned_spec(manifest_name: str) -> None:
+    """Each #3091 portgroup-write vim path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #3091 grounding: ``CreateDVPortgroup_Task`` on the DVS and
+    ``ReconfigureDVPortgroup_Task`` on the portgroup (plus the shared
+    ``RetrievePropertiesEx`` read) must exist in the pinned spec — the pinned
+    vcenter.yaml serves neither surface. Skips when the spec-shelf is not
+    configured (the canary's convention), so CI is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in getattr(_write, manifest_name):
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            f"{manifest_name} vim sub-op targets a path the spec does not serve"
+        )
+
+
+# ---------------------------------------------------------------------------
 # vm.create VI-JSON sub-op reconciliation (#3093 VHV leg + #3099 create arm)
 # ---------------------------------------------------------------------------
 #

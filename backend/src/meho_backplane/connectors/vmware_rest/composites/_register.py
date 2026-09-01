@@ -83,6 +83,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
+    network_portgroup_create_composite,
+    network_portgroup_security_set_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
@@ -136,6 +138,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_SERVICE_CONTROL_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
+    NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA,
+    NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA,
+    NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
+    NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
     VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
@@ -234,14 +240,19 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "from 'which datastore?' to acting on a specific VM."
     ),
     "networking": (
-        "Use for distributed-switch and portgroup audits: enumerate "
-        "DVS + portgroups, then enrich each portgroup with parent "
-        "DVS and connected VM names. Read-only. The right group for "
+        "Use for distributed-switch and portgroup work: audit "
+        "(enumerate DVS + portgroups, enrich each with parent DVS + "
+        "connected VM names, read-only) and the two portgroup writes "
+        "for standing up an L2 substrate -- create a distributed "
+        "portgroup on a DVS with a VLAN trunk (or access) spec, and "
+        "set its security policy (promiscuous / forged-transmits / "
+        "MAC-changes), both approval-gated. The right group for "
         "'what's connected to this portgroup?' / 'which DVS does "
-        "this VM live on?' questions, and a prerequisite read before "
-        "the 'host' group's host_detach_from_vds composite write. "
-        "Pair with 'vm' for the post-audit drill-in into one VM's "
-        "NICs."
+        "this VM live on?' and 'create the trunk portgroup my nested "
+        "ESXi attaches to'. The audit read surfaces the DVS / "
+        "portgroup moids the two writes take. Pair with 'vm' for the "
+        "post-audit drill-in into one VM's NICs, and with 'host' "
+        "before its host_detach_from_vds write."
     ),
     "vm": (
         "Use for VM-lifecycle write composites: create with NIC "
@@ -802,6 +813,63 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
         group_key="host",
         tags=["composite", "write", "host", "networking"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.network.portgroup.create",
+        handler=network_portgroup_create_composite,
+        summary="Create a distributed portgroup on a DVS with a VLAN trunk (or access) spec.",
+        description=(
+            "Creates a distributed portgroup on an existing DVS -- the L2 "
+            "substrate a nested-hypervisor lab attaches to. The pinned "
+            "vcenter.yaml serves no portgroup-create REST path, so the create "
+            "goes through vim DistributedVirtualSwitch.CreateDVPortgroup_Task "
+            "with one DVPortgroupConfigSpec (name, binding type, optional "
+            "numPorts) and a VMwareDVSPortSetting.vlan -- either a VLAN trunk "
+            "(VmwareDistributedVirtualSwitchTrunkVlanSpec NumericRange[], e.g. "
+            "0-4094 during bootstrap) or a single access VLAN "
+            "(VmwareDistributedVirtualSwitchVlanIdSpec). The returned task is "
+            "polled to a terminal state; the new portgroup's config is read "
+            "back (name + vlan) for verification. vds is the switch moid (no "
+            "portgroup/switch REST list exists to resolve a name); passing "
+            "both trunk and access VLAN returns status='invalid_vlan_spec' "
+            "before any write. Equivalent of 'govc dvs.portgroup.add'."
+        ),
+        parameter_schema=NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA,
+        response_schema=NETWORK_PORTGROUP_CREATE_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=["composite", "write", "networking", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.network.portgroup.security.set",
+        handler=network_portgroup_security_set_composite,
+        summary=(
+            "Set a distributed portgroup's security policy "
+            "(promiscuous / forged-transmits / MAC-changes)."
+        ),
+        description=(
+            "Sets any of a distributed portgroup's security-policy triple -- "
+            "allowPromiscuous / forgedTransmits / macChanges -- the knobs a "
+            "nested-ESXi trunk portgroup needs at Accept. The security policy "
+            "lives in DVPortgroupConfigSpec.defaultPortConfig.securityPolicy "
+            "with no REST expression (govc exposes no flags for it), so the "
+            "change goes through vim "
+            "DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task. The "
+            "required configVersion and the current policy are read first (the "
+            "before-state the four-eyes reviewer sees); only the booleans you "
+            "supply are written; the applied policy is read back after. No "
+            "boolean supplied returns status='no_change_requested' before any "
+            "write. Governance-sensitive: promiscuous mode makes the portgroup "
+            "see all traffic on its VLANs. Equivalent of PowerCLI "
+            "'Set-VDSecurityPolicy'."
+        ),
+        parameter_schema=NETWORK_PORTGROUP_SECURITY_SET_PARAMETER_SCHEMA,
+        response_schema=NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=["composite", "write", "networking", "vi-json"],
         safety_level="dangerous",
         requires_approval=True,
     ),

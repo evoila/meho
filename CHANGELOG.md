@@ -194,6 +194,36 @@ connector-related release-notes line.
   `merge_queue` rule on the `protect main` ruleset is an operator action;
   no repo setting is changed by this PR. Includes the DCO-App and
   approval-ratchet caveats to verify before enabling.
+### Added — vmware network write composites: dvPG create (VLAN trunk) + security-policy set (#3091)
+
+- Two vim-typed distributed-portgroup writes on the `vmware-rest-9.0` connector
+  for standing up an L2 substrate — the nested-hypervisor lab recipe.
+  `network.portgroup.create` creates a portgroup on an existing DVS via vim
+  `DistributedVirtualSwitch.CreateDVPortgroup_Task` with a VLAN **trunk**
+  (`VmwareDistributedVirtualSwitchTrunkVlanSpec`, a `NumericRange[]`, e.g.
+  0–4094 at bootstrap) or a single access VLAN; the returned task's new
+  portgroup MoRef is read back (`name` + `vlan`) for verification.
+  `network.portgroup.security.set` sets any of the security-policy triple —
+  `allowPromiscuous` / `forgedTransmits` / `macChanges` — via vim
+  `DistributedVirtualPortgroup.ReconfigureDVPortgroup_Task`, reading the
+  required `configVersion` + the current policy first (the `previous`
+  before-state) and the applied policy after (`observed`). Neither surface has
+  a REST write path (the security policy lives in
+  `DVPortgroupConfigSpec.defaultPortConfig.securityPolicy`), so both ride the
+  governed vmomi seam like `host.detach_from_vds` / `cluster.drs_rule.create`.
+- Both are `safety_level="dangerous"` / `requires_approval=True` (the tier every
+  write composite in this connector uses — there is no `caution` tier; only
+  `vm.destroy` is `destructive`). `security.set` touching promiscuous mode is
+  governance-sensitive and pops the same top-level approval gate. Both land in
+  the `networking` operation group beside the `portgroup.audit` read (which
+  surfaces the DVS / portgroup moids the writes take).
+- Every vim method (`CreateDVPortgroup_Task` / `ReconfigureDVPortgroup_Task`)
+  and every emitted `_typeName` (`DVPortgroupConfigSpec`, `VMwareDVSPortSetting`,
+  `DVSSecurityPolicy`, `BoolPolicy`, the trunk / access VLAN specs, `NumericRange`)
+  is grounded against the pinned `vi-json.yaml` by the reconcile lanes; the
+  mechanics are proven by mock-transport unit tests. Live-appliance verification
+  is deferred (no lab access) — implementation + full conformance/unit coverage
+  is the deliverable, consistent with recent connector tasks.
 
 ### Added — approve-only RBAC capability: decouple the approvals plane from the dispatch gate (#3243)
 

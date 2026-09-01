@@ -48,6 +48,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/secret"
 	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
+	"github.com/evoila/meho/cli/internal/cmd/tenants"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
 	vcfautomation "github.com/evoila/meho/cli/internal/cmd/vcf-automation"
@@ -143,6 +144,10 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `targets` parent.
 	root.AddCommand(targets.NewRootCmd())
+	// #3272 -- operator-plane per-tenant flight-recorder capture policy
+	// (`meho tenants flight-recorder-policy set`). Wraps PATCH
+	// /api/v1/tenants/flight-recorder-policy; tenant-scoped, tenant_admin.
+	root.AddCommand(tenants.NewRootCmd())
 	// T3 (#2880) -- event_source registry admin verbs (add / list /
 	// describe / update / delete). Wraps /api/v1/event-sources/*.
 	root.AddCommand(eventsource.NewRootCmd())

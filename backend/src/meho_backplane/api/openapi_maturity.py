@@ -99,6 +99,11 @@ TAG_FEATURE: Final[dict[str, str]] = {
     # same substrate, same maturity tier as the approval queue.
     "service-principal-grants": "approvals",
     "targets": "targets",
+    # The per-tenant flight-recorder capture policy (#3272) is the write-side
+    # companion of the operator flight-recorder read surface, which rides the
+    # ``audit`` tag (``GET /api/v1/audit/{id}/trace``, #3215) -- same plane, same
+    # tenant_admin forensic posture, so it follows the ``audit`` feature.
+    "tenants": "audit",
     "topology": "topology",
 }
 

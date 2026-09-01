@@ -34,6 +34,8 @@ from meho_backplane.db.models import Target, Tenant
 from meho_backplane.flight_recorder import config as fr_config
 from meho_backplane.flight_recorder.config import (
     compute_expires_at,
+    invalidate_target_override_cache,
+    invalidate_tenant_policy_cache,
     reset_flight_recorder_config_cache_for_testing,
     resolve_retention_days,
     should_capture,
@@ -313,3 +315,48 @@ async def test_cache_reset_reflects_updated_tenant_flag() -> None:
     # Without a reset the 60s-TTL cache would still answer False.
     reset_flight_recorder_config_cache_for_testing()
     assert await should_capture(tenant_id=tenant_id) is True
+
+
+# --------------------------------------------------------------------------
+# targeted cache invalidation (#3272 -- the operator-mutation eviction path)
+# --------------------------------------------------------------------------
+
+
+async def test_invalidate_tenant_policy_cache_reflects_flipped_flag() -> None:
+    """Evicting one tenant's cache re-reads its flipped policy without a restart."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug="fr-tenant-evict", enabled=False)
+    assert await should_capture(tenant_id=tenant_id) is False  # primes the cache
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+        row.flight_recorder_enabled = True
+        await session.commit()
+
+    # The mutation surface calls exactly this after a policy write.
+    invalidate_tenant_policy_cache(tenant_id)
+    assert await should_capture(tenant_id=tenant_id) is True
+
+
+async def test_invalidate_tenant_policy_cache_is_idempotent() -> None:
+    """Popping an uncached / already-evicted tenant is a harmless no-op."""
+    invalidate_tenant_policy_cache(uuid.uuid4())  # must not raise
+
+
+async def test_invalidate_target_override_cache_reflects_flipped_override() -> None:
+    """Evicting one target's cache re-reads its flipped tri-state override."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session, slug="fr-target-evict", enabled=False)
+        target_id = await _seed_target(session, tenant_id=tenant_id, name="tgt", override=None)
+    # Inherit -> tenant default (OFF); primes both caches.
+    assert await should_capture(tenant_id=tenant_id, target_id=target_id) is False
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(Target).where(Target.id == target_id))).scalar_one()
+        row.flight_recorder_capture = True
+        await session.commit()
+
+    invalidate_target_override_cache(target_id)
+    assert await should_capture(tenant_id=tenant_id, target_id=target_id) is True

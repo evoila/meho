@@ -116,6 +116,7 @@ from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_route
 from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.service_grants import router as api_v1_service_grants_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
+from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
@@ -866,6 +867,10 @@ app.include_router(api_v1_doc_collections_router)
 # G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover
 # (registered before GET /{name} so the literal path wins).
 app.include_router(api_v1_targets_router)
+# #3272 -- operator mutation surface for the per-tenant flight-recorder
+# capture policy (PATCH /api/v1/tenants/flight-recorder-policy;
+# tenant-scoped, tenant_admin). Operator-plane REST + CLI only; no MCP tool.
+app.include_router(api_v1_tenants_router)
 # T3 (#2880) -- event_source registry admin surface at
 # /api/v1/event-sources*. Tenant-scoped CRUD (operator reads,
 # tenant_admin writes) the inbound webhook ingest (#2881) resolves a

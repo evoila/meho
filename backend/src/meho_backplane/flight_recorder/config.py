@@ -72,6 +72,8 @@ from meho_backplane.settings import get_settings
 
 __all__ = [
     "compute_expires_at",
+    "invalidate_target_override_cache",
+    "invalidate_tenant_policy_cache",
     "reset_flight_recorder_config_cache_for_testing",
     "resolve_retention_days",
     "should_capture",
@@ -98,6 +100,31 @@ def reset_flight_recorder_config_cache_for_testing() -> None:
     """Clear both per-key caches (test isolation only)."""
     _TENANT_CACHE.clear()
     _TARGET_CACHE.clear()
+
+
+def invalidate_tenant_policy_cache(tenant_id: UUID) -> None:
+    """Evict the cached policy for *tenant_id* after an operator policy write.
+
+    The per-tenant cache holds all three policy questions (capture default F1,
+    retention override F4, agent-read override F5) for up to
+    :data:`_CACHE_TTL_SECONDS`. An operator mutation to
+    ``tenant.flight_recorder_enabled`` / ``_agent_readable`` /
+    ``_retention_days`` must call this so the flip takes effect on the next
+    dispatch instead of waiting out the TTL (or a process restart). Idempotent
+    -- popping an absent key is a no-op, so a no-op write can call it safely.
+    """
+    _TENANT_CACHE.pop(tenant_id, None)
+
+
+def invalidate_target_override_cache(target_id: UUID) -> None:
+    """Evict the cached per-target capture override for *target_id* after a write.
+
+    Companion to :func:`invalidate_tenant_policy_cache` for the tri-state
+    ``targets.flight_recorder_capture`` override. The target PATCH route calls
+    this whenever the column changes so :func:`should_capture` sees the new
+    tri-state on the next dispatch rather than a stale cached one. Idempotent.
+    """
+    _TARGET_CACHE.pop(target_id, None)
 
 
 def compute_expires_at(created_at: datetime, retention_days: int) -> datetime:

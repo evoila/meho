@@ -155,6 +155,7 @@ from meho_backplane.connectors.vault.tenant_scope import rendered_tenant_prefix
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import GraphNode
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.flight_recorder.config import invalidate_target_override_cache
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import resolve_target
@@ -390,6 +391,7 @@ def _to_full(t: TargetORM) -> Target:
         notes=t.notes,
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
+        flight_recorder_capture=t.flight_recorder_capture,
         created_at=t.created_at,
         updated_at=t.updated_at,
         deleted_at=t.deleted_at,
@@ -585,6 +587,59 @@ def _audit_target_tls_writes(
             before=ca_pin_before,
             after=t.tls_ca_pin,
         )
+
+
+def _fr_capture_audit_value(value: bool | None) -> str:
+    """Render the tri-state capture override for the audit payload (#3272).
+
+    ``None`` (inherit) becomes the ``"inherit"`` sentinel rather than being
+    left as ``None`` -- :func:`~meho_backplane.audit._resolve_audit_payload`
+    drops ``None`` contextvars, so a clear-to-inherit transition would
+    otherwise silently vanish from the ``audit_log`` payload (the same reason
+    the CA-pin audit coerces its "unpinned" state to ``""``).
+    """
+    if value is None:
+        return "inherit"
+    return "on" if value else "off"
+
+
+def _audit_flight_recorder_capture_write(
+    t: TargetORM,
+    *,
+    tenant_id: uuid.UUID,
+    before: bool | None,
+) -> None:
+    """Record a per-target flight-recorder capture-override change (#3272).
+
+    Governance-relevant config write, so it must leave a durable, queryable
+    trail rather than a silent column update -- the same never-silent posture
+    as the ``verify_tls`` / ``tls_ca_pin`` audits. Reads the post-write value
+    off *t* (``t.flight_recorder_capture``), folds the tri-state before/after
+    into this request's ``audit_log`` payload (via ``audit_*`` contextvars the
+    :class:`~meho_backplane.audit.AuditMiddleware` reads) + a WARN, and evicts
+    the resolver's per-target cache so the flip takes effect on the next
+    dispatch. Called by ``create_target`` (a non-inherit initial value) and
+    ``update_target`` (the override sent AND changed).
+    """
+    after = t.flight_recorder_capture
+    structlog.contextvars.bind_contextvars(
+        audit_flight_recorder_capture_changed=True,
+        audit_target_id=str(t.id),
+        audit_flight_recorder_capture_before=_fr_capture_audit_value(before),
+        audit_flight_recorder_capture_after=_fr_capture_audit_value(after),
+    )
+    _log.warning(
+        "target_flight_recorder_capture_changed",
+        target_id=str(t.id),
+        name=t.name,
+        tenant_id=str(tenant_id),
+        flight_recorder_capture_before=_fr_capture_audit_value(before),
+        flight_recorder_capture_after=_fr_capture_audit_value(after),
+    )
+    # Evict the resolver's per-target override cache so the change is visible on
+    # the next dispatch instead of waiting out the 60s TTL. Harmless no-op on a
+    # freshly-created target id (not yet cached).
+    invalidate_target_override_cache(t.id)
 
 
 def _registered_products() -> set[str]:
@@ -1328,6 +1383,8 @@ async def create_target(
         ca_pin_changed=t.tls_ca_pin is not None,
         ca_pin_before=None,
     )
+    if t.flight_recorder_capture is not None:  # #3272: audit a seeded override
+        _audit_flight_recorder_capture_write(t, tenant_id=operator.tenant_id, before=None)
     return _to_full(t)
 
 
@@ -1410,6 +1467,10 @@ async def update_target(
     # ``setattr`` loop mutates anything.
     ca_pin_sent = "tls_ca_pin" in updates
     ca_pin_before = t.tls_ca_pin
+    # #3272. Snapshot the tri-state capture override; ``in updates`` is the
+    # null-vs-absent gate (``exclude_unset``), the same one the TLS fields use.
+    fr_capture_sent = "flight_recorder_capture" in updates
+    fr_capture_before = t.flight_recorder_capture
     effective_ca_pin = updates["tls_ca_pin"] if ca_pin_sent else ca_pin_before
     effective_verify_tls = updates["verify_tls"] if verify_tls_sent else verify_tls_before
     _enforce_tls_trust_exclusion(effective_ca_pin, effective_verify_tls)
@@ -1453,6 +1514,11 @@ async def update_target(
         ca_pin_changed=ca_pin_sent and t.tls_ca_pin != ca_pin_before,
         ca_pin_before=ca_pin_before,
     )
+    # #3272. Audit + cache-invalidate a capture-override change (sent + changed).
+    if fr_capture_sent and t.flight_recorder_capture != fr_capture_before:
+        _audit_flight_recorder_capture_write(
+            t, tenant_id=operator.tenant_id, before=fr_capture_before
+        )
     return _to_full(t)
 
 

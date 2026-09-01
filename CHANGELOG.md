@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — flight recorder: operator mutation surface for capture policy (#3272)
+
+- The writable path the live-instance verification pass found missing: the
+  flight-recorder capture policy (#3212/#3216) resolved per dispatch but could
+  only be seeded by direct DB writes. New `PATCH
+  /api/v1/tenants/flight-recorder-policy` (`meho tenants flight-recorder-policy
+  set`) flips the three per-tenant fields — `flight_recorder_enabled` (F1),
+  `flight_recorder_agent_readable` (F5, tri-state), and
+  `flight_recorder_retention_days` (F4, bounded 1..365). The route is
+  **tenant-scoped to the caller's own tenant** (from the JWT — no tenant id is
+  accepted, so no cross-tenant write is expressible) and gated at
+  `tenant_admin`.
+- The per-target override `flight_recorder_capture` (tri-state: force on / force
+  off / `null` inherit) now rides the existing `PATCH /api/v1/targets/{name}`
+  and `POST /api/v1/targets` (and `meho targets import --update`), preserving the
+  JSON-null-vs-absent distinction via `exclude_unset`.
+- Operator-plane only — REST + CLI, no MCP tool (the 25-tool agent surface is
+  unchanged): enabling capture is a governance decision. Every applied change
+  writes an `audit_log` row naming field / old / new, and the route evicts the
+  resolver's 60s per-tenant / per-target cache so the flip takes effect on the
+  next dispatch without a restart.
+
 ### Added — `wsfc` connector: Windows Server Failover Clustering over PowerShell-5.1-over-SSH (#3263)
 
 - **`wsfc` connector** — typed connector for Windows Server Failover Clustering
@@ -120,7 +142,6 @@ connector-related release-notes line.
   regenerated. Live c1sql1 consumer proof (probe + governed failover + live
   Sensor) is deferred (lab cluster not yet built); scripted-transport unit suite
   + injection-safety + secret-leak guard are the deliverable.
-
 ### Changed — docs-only CI fast path (#3252)
 
 - A PR whose diff is **purely documentation** — every changed path under
@@ -221,7 +242,6 @@ connector-related release-notes line.
   `hyperv` connectors. Live c1sql1 consumer proof is deferred (lab VMs not yet
   built); scripted-transport unit suite + injection-safety + secret-leak guard
   are the deliverable, consistent with recent connector tasks.
-
 ### Added — typed HttpNfcLease OVF import: `vm.import_from_library` (#3229)
 
 - The durable, transfer-window-decoupled sibling of `vm.deploy_from_library`.

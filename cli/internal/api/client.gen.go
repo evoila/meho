@@ -7884,27 +7884,28 @@ type Target struct {
 	Aliases []string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel       AuthModel               `json:"auth_model"`
-	CreatedAt       time.Time               `json:"created_at"`
-	DeletedAt       *time.Time              `json:"deleted_at"`
-	Extras          map[string]interface{}  `json:"extras"`
-	Fingerprint     *map[string]interface{} `json:"fingerprint"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            string                  `json:"host"`
-	Id              openapi_types.UUID      `json:"id"`
-	Name            string                  `json:"name"`
-	Notes           *string                 `json:"notes"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretRef       *string                 `json:"secret_ref"`
-	TenantId        openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin        *string                 `json:"tls_ca_pin"`
-	TlsServerName   *string                 `json:"tls_server_name"`
-	UpdatedAt       time.Time               `json:"updated_at"`
-	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
-	Version         *string                 `json:"version"`
-	VpnRequired     bool                    `json:"vpn_required"`
+	AuthModel             AuthModel               `json:"auth_model"`
+	CreatedAt             time.Time               `json:"created_at"`
+	DeletedAt             *time.Time              `json:"deleted_at"`
+	Extras                map[string]interface{}  `json:"extras"`
+	Fingerprint           *map[string]interface{} `json:"fingerprint"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  string                  `json:"host"`
+	Id                    openapi_types.UUID      `json:"id"`
+	Name                  string                  `json:"name"`
+	Notes                 *string                 `json:"notes"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
+	Product               string                  `json:"product"`
+	SecretRef             *string                 `json:"secret_ref"`
+	TenantId              openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin              *string                 `json:"tls_ca_pin"`
+	TlsServerName         *string                 `json:"tls_server_name"`
+	UpdatedAt             time.Time               `json:"updated_at"`
+	VerifyTls             *bool                   `json:"verify_tls,omitempty"`
+	Version               *string                 `json:"version"`
+	VpnRequired           bool                    `json:"vpn_required"`
 }
 
 // TargetCreate POST /api/v1/targets body.
@@ -7932,14 +7933,15 @@ type TargetCreate struct {
 	Aliases *[]string `json:"aliases,omitempty"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel       *AuthModel              `json:"auth_model,omitempty"`
-	Extras          *map[string]interface{} `json:"extras,omitempty"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            string                  `json:"host"`
-	Name            string                  `json:"name"`
-	Notes           *string                 `json:"notes"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
+	AuthModel             *AuthModel              `json:"auth_model,omitempty"`
+	Extras                *map[string]interface{} `json:"extras,omitempty"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  string                  `json:"host"`
+	Name                  string                  `json:"name"`
+	Notes                 *string                 `json:"notes"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
 
 	// Product Connector product slug. Must match the ``product`` field of a registered connector class; see ``GET /api/v1/connectors`` for the live list and ``docs/codebase/error-message-shape.md`` for the 422 shape returned on miss.
 	Product       TargetCreateProduct `json:"product"`
@@ -8002,25 +8004,26 @@ type TargetSummary struct {
 	Aliases []string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel       AuthModel               `json:"auth_model"`
-	CreatedAt       time.Time               `json:"created_at"`
-	DeletedAt       *time.Time              `json:"deleted_at"`
-	Fingerprint     *map[string]interface{} `json:"fingerprint"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            string                  `json:"host"`
-	Id              openapi_types.UUID      `json:"id"`
-	Name            string                  `json:"name"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         string                  `json:"product"`
-	SecretRef       *string                 `json:"secret_ref"`
-	TenantId        openapi_types.UUID      `json:"tenant_id"`
-	TlsCaPin        *string                 `json:"tls_ca_pin"`
-	TlsServerName   *string                 `json:"tls_server_name"`
-	UpdatedAt       time.Time               `json:"updated_at"`
-	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
-	Version         *string                 `json:"version"`
-	VpnRequired     bool                    `json:"vpn_required"`
+	AuthModel             AuthModel               `json:"auth_model"`
+	CreatedAt             time.Time               `json:"created_at"`
+	DeletedAt             *time.Time              `json:"deleted_at"`
+	Fingerprint           *map[string]interface{} `json:"fingerprint"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  string                  `json:"host"`
+	Id                    openapi_types.UUID      `json:"id"`
+	Name                  string                  `json:"name"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
+	Product               string                  `json:"product"`
+	SecretRef             *string                 `json:"secret_ref"`
+	TenantId              openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin              *string                 `json:"tls_ca_pin"`
+	TlsServerName         *string                 `json:"tls_server_name"`
+	UpdatedAt             time.Time               `json:"updated_at"`
+	VerifyTls             *bool                   `json:"verify_tls,omitempty"`
+	Version               *string                 `json:"version"`
+	VpnRequired           bool                    `json:"vpn_required"`
 }
 
 // TargetUpdate PATCH /api/v1/targets/{name} body.
@@ -8061,20 +8064,21 @@ type TargetUpdate struct {
 	Aliases *[]string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel       *AuthModel              `json:"auth_model,omitempty"`
-	Extras          *map[string]interface{} `json:"extras"`
-	Fqdn            *string                 `json:"fqdn"`
-	Host            *string                 `json:"host"`
-	Notes           *string                 `json:"notes"`
-	Port            *int                    `json:"port"`
-	PreferredImplId *string                 `json:"preferred_impl_id"`
-	Product         *string                 `json:"product"`
-	SecretRef       *string                 `json:"secret_ref"`
-	TlsCaPin        *string                 `json:"tls_ca_pin"`
-	TlsServerName   *string                 `json:"tls_server_name"`
-	VerifyTls       *bool                   `json:"verify_tls"`
-	Version         *string                 `json:"version"`
-	VpnRequired     *bool                   `json:"vpn_required"`
+	AuthModel             *AuthModel              `json:"auth_model,omitempty"`
+	Extras                *map[string]interface{} `json:"extras"`
+	FlightRecorderCapture *bool                   `json:"flight_recorder_capture"`
+	Fqdn                  *string                 `json:"fqdn"`
+	Host                  *string                 `json:"host"`
+	Notes                 *string                 `json:"notes"`
+	Port                  *int                    `json:"port"`
+	PreferredImplId       *string                 `json:"preferred_impl_id"`
+	Product               *string                 `json:"product"`
+	SecretRef             *string                 `json:"secret_ref"`
+	TlsCaPin              *string                 `json:"tls_ca_pin"`
+	TlsServerName         *string                 `json:"tls_server_name"`
+	VerifyTls             *bool                   `json:"verify_tls"`
+	Version               *string                 `json:"version"`
+	VpnRequired           *bool                   `json:"vpn_required"`
 }
 
 // TargetsDiscoverResult Aggregated discover output across every connector for a product.
@@ -8106,6 +8110,46 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantFlightRecorderPolicy Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.
+//
+// Frozen; maps 1:1 to the three “tenant“ policy columns plus the tenant id.
+// “flight_recorder_agent_readable“ and “flight_recorder_retention_days“
+// are nullable: “None“ means "inherit" (agent-read follows the capture
+// default) / "use the global default" (retention) respectively.
+type TenantFlightRecorderPolicy struct {
+	FlightRecorderAgentReadable *bool              `json:"flight_recorder_agent_readable"`
+	FlightRecorderEnabled       bool               `json:"flight_recorder_enabled"`
+	FlightRecorderRetentionDays *int               `json:"flight_recorder_retention_days"`
+	TenantId                    openapi_types.UUID `json:"tenant_id"`
+}
+
+// TenantFlightRecorderPolicyUpdate “PATCH /api/v1/tenants/flight-recorder-policy“ body.
+//
+// All three fields are optional-partial: only fields the client actually
+// sends are applied (“model_dump(exclude_unset=True)“ in the handler keys
+// off “model_fields_set“, so a JSON “null“ is distinguished from an
+// absent key). “extra='forbid'“ rejects unknown keys with a 422.
+//
+//   - “flight_recorder_enabled“ (F1) -- Boolean, “NOT NULL“ at the DB
+//     layer. Absent = leave unchanged; “true“ / “false“ flips the
+//     per-tenant capture default. An explicit “null“ is rejected (the column
+//     has no inherit state) -- the validator fires only when the key is
+//     present, so an absent field never trips it.
+//   - “flight_recorder_agent_readable“ (F5) -- **tri-state**. Absent = leave
+//     unchanged; “true“ / “false“ force the agent-read override on / off;
+//     “null“ clears it back to inherit (follow the capture default). This is
+//     the JSON-“null“-vs-absent distinction the tri-state needs.
+//   - “flight_recorder_retention_days“ (F4) -- nullable, bounded “1..365“
+//     (the reaper window; matches “Settings.flight_recorder_retention_days_default“'s
+//     “ge=1, le=365“). Absent = leave unchanged; an int sets the per-tenant
+//     window; “null“ clears it back to the global default. The bound applies
+//     only to the int arm -- a “null“ clear is always legal.
+type TenantFlightRecorderPolicyUpdate struct {
+	FlightRecorderAgentReadable *bool `json:"flight_recorder_agent_readable"`
+	FlightRecorderEnabled       *bool `json:"flight_recorder_enabled"`
+	FlightRecorderRetentionDays *int  `json:"flight_recorder_retention_days"`
+}
 
 // TenantRole Per-tenant role granted to the operator by the JWT issuer.
 //
@@ -9748,6 +9792,11 @@ type ProbeTargetApiV1TargetsNameProbePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams defines parameters for UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch.
+type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DependenciesApiV1TopologyDependenciesNameGetParams defines parameters for DependenciesApiV1TopologyDependenciesNameGet.
 type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
@@ -10366,6 +10415,9 @@ type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
 
 // UpdateTargetApiV1TargetsNamePatchJSONRequestBody defines body for UpdateTargetApiV1TargetsNamePatch for application/json ContentType.
 type UpdateTargetApiV1TargetsNamePatchJSONRequestBody = TargetUpdate
+
+// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody defines body for UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch for application/json ContentType.
+type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody = TenantFlightRecorderPolicyUpdate
 
 // AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody defines body for AnnotateEdgeRouteApiV1TopologyEdgesPost for application/json ContentType.
 type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotateEdgeRequest
@@ -12555,6 +12607,11 @@ type ClientInterface interface {
 
 	// ProbeTargetApiV1TargetsNameProbePost request
 	ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody request with any body
+	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DependenciesApiV1TopologyDependenciesNameGet request
 	DependenciesApiV1TopologyDependenciesNameGet(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15921,6 +15978,30 @@ func (c *Client) UpdateTargetApiV1TargetsNamePatch(ctx context.Context, name str
 
 func (c *Client) ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProbeTargetApiV1TargetsNameProbePostRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -29842,6 +29923,61 @@ func NewProbeTargetApiV1TargetsNameProbePostRequest(server string, name string, 
 	return req, nil
 }
 
+// NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest calls the generic UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch builder with application/json body
+func NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest(server string, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequestWithBody generates requests for UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch with any type of body
+func NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequestWithBody(server string, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/tenants/flight-recorder-policy")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDependenciesApiV1TopologyDependenciesNameGetRequest generates requests for DependenciesApiV1TopologyDependenciesNameGet
 func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams) (*http.Request, error) {
 	var err error
@@ -42081,6 +42217,11 @@ type ClientWithResponsesInterface interface {
 	// ProbeTargetApiV1TargetsNameProbePostWithResponse request
 	ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*ProbeTargetApiV1TargetsNameProbePostResponse, error)
 
+	// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse request with any body
+	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error)
+
+	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error)
+
 	// DependenciesApiV1TopologyDependenciesNameGetWithResponse request
 	DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error)
 
@@ -46457,6 +46598,29 @@ func (r ProbeTargetApiV1TargetsNameProbePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProbeTargetApiV1TargetsNameProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantFlightRecorderPolicy
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53243,6 +53407,23 @@ func (c *ClientWithResponses) ProbeTargetApiV1TargetsNameProbePostWithResponse(c
 		return nil, err
 	}
 	return ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp)
+}
+
+// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse request with arbitrary body returning *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse
+func (c *ClientWithResponses) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error) {
+	rsp, err := c.UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error) {
+	rsp, err := c.UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse(rsp)
 }
 
 // DependenciesApiV1TopologyDependenciesNameGetWithResponse request returning *DependenciesApiV1TopologyDependenciesNameGetResponse
@@ -61087,6 +61268,39 @@ func ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp *http.Response) (*Pro
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FingerprintResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse parses an HTTP response from a UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithResponse call
+func ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse(rsp *http.Response) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantFlightRecorderPolicy
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

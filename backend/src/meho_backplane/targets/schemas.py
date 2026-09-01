@@ -175,6 +175,9 @@ class TargetSummary(BaseModel):
     tls_server_name: str | None = None
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
+    # #3272. Per-target capture tri-state (see :class:`Target`); listed so the
+    # list row doesn't silently mask the detail field (api-shape-conventions §5).
+    flight_recorder_capture: bool | None = None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
@@ -284,6 +287,9 @@ class Target(BaseModel):
     notes: str | None
     fingerprint: Mapping[str, Any] | None
     preferred_impl_id: str | None
+    # #3272 / #3212 (F1). Per-target capture override, tri-state: ``None`` inherit
+    # / ``True`` force ON / ``False`` force OFF (resolved by ``should_capture``).
+    flight_recorder_capture: bool | None = None
     created_at: datetime
     updated_at: datetime
     # Soft-delete timestamp (G0.14-T4 #1145). ``None`` for live
@@ -361,6 +367,11 @@ class TargetCreate(BaseModel):
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+    # #3272 / #3212 (F1). Optional per-target capture override (tri-state:
+    # ``None`` inherit / ``True`` ON / ``False`` OFF) so an operator can seed a
+    # capture-on / -off target at create time; a non-inherit initial value is
+    # audited like the ``verify_tls`` / ``tls_ca_pin`` create-time opt-outs.
+    flight_recorder_capture: bool | None = None
 
     @field_validator("tls_ca_pin")
     @classmethod
@@ -489,6 +500,14 @@ class TargetUpdate(BaseModel):
     extras: dict[str, Any] | None = None
     notes: str | None = None
     preferred_impl_id: str | None = Field(default=None, max_length=200)
+    # #3272 / #3212 (F1). Patchable per-target capture override, **tri-state** --
+    # the field the null-vs-absent distinction is load-bearing on, so the route
+    # keys off ``model_fields_set`` (``exclude_unset=True``), NOT off ``None``:
+    # absent = leave untouched; ``true`` = force ON; ``false`` = force OFF;
+    # explicit ``null`` = clear back to inherit (same idiom as ``secret_ref``).
+    # A change is audited and evicts the resolver's per-target cache so the flip
+    # takes effect on the next dispatch.
+    flight_recorder_capture: bool | None = None
 
     @field_validator("tls_ca_pin")
     @classmethod
@@ -573,6 +592,7 @@ def project_target_to_summary(t: TargetORM) -> TargetSummary:
         tls_server_name=t.tls_server_name,
         fingerprint=t.fingerprint,
         preferred_impl_id=t.preferred_impl_id,
+        flight_recorder_capture=t.flight_recorder_capture,
         created_at=t.created_at,
         updated_at=t.updated_at,
         deleted_at=t.deleted_at,

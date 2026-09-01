@@ -80,21 +80,22 @@ type importDoc struct {
 // (no mutual-exclusion validator); the server caps it at 512 chars and
 // returns 422 on overflow, which the import path already surfaces.
 var knownTopLevel = map[string]struct{}{
-	"aliases":           {},
-	"auth_model":        {},
-	"extras":            {},
-	"fqdn":              {},
-	"host":              {},
-	"name":              {},
-	"notes":             {},
-	"port":              {},
-	"preferred_impl_id": {},
-	"product":           {},
-	"secret_ref":        {},
-	"tls_ca_pin":        {},
-	"tls_server_name":   {},
-	"verify_tls":        {},
-	"vpn_required":      {},
+	"aliases":                 {},
+	"auth_model":              {},
+	"extras":                  {},
+	"flight_recorder_capture": {},
+	"fqdn":                    {},
+	"host":                    {},
+	"name":                    {},
+	"notes":                   {},
+	"port":                    {},
+	"preferred_impl_id":       {},
+	"product":                 {},
+	"secret_ref":              {},
+	"tls_ca_pin":              {},
+	"tls_server_name":         {},
+	"verify_tls":              {},
+	"vpn_required":            {},
 }
 
 // skipSilent is the set of YAML keys we deliberately drop on the
@@ -191,8 +192,8 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name. " +
-			"Any other field " +
+			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name, " +
+			"flight_recorder_capture. Any other field " +
 			"is spilled into the `extras` JSONB column. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +

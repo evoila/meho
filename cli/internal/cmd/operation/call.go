@@ -50,6 +50,7 @@ type CallResult struct {
 //	meho operation call <connector_id> <op_id> \
 //	  [--target <slug>]                        # target name (required for ops that read a target)
 //	  [--params '<json>' | @<file>]            # operation params (object)
+//	  [--preview-hash <hash>]                  # destructive-tier binding from `operation preview` (#3197)
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
@@ -65,6 +66,7 @@ func newCallCmd() *cobra.Command {
 	var (
 		targetName        string
 		paramsFlag        string
+		previewHash       string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -87,7 +89,13 @@ func newCallCmd() *cobra.Command {
 			"or a file reference (`--params @./params.json`). The empty case " +
 			"(`--params` omitted) sends no params key on the wire — typed " +
 			"handlers that don't read params see an empty mapping at the " +
-			"validation layer.",
+			"validation layer.\n\n" +
+			"--preview-hash carries the binding a `safety_level='destructive'` " +
+			"op requires (#3197): obtain it from `meho operation preview` of the " +
+			"IDENTICAL (connector_id, op_id, target, params), then pass it here. " +
+			"The dispatcher fail-closes with status=denied / " +
+			"error_code=preview_binding_required when a destructive op is called " +
+			"without a matching hash; it is ignored for every non-destructive op.",
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -97,6 +105,7 @@ func newCallCmd() *cobra.Command {
 				OpID:              args[1],
 				TargetName:        targetName,
 				ParamsFlag:        paramsFlag,
+				PreviewHash:       previewHash,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -106,6 +115,8 @@ func newCallCmd() *cobra.Command {
 		"target slug to dispatch against (required for ops that read a target)")
 	cmd.Flags().StringVar(&paramsFlag, "params", "",
 		"operation params as inline JSON or @<file>; omitted means no params")
+	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
+		"preview_hash from a prior `meho operation preview` — required for a destructive-tier op (#3197)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit the full OperationResult envelope as JSON instead of the human render")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -118,6 +129,7 @@ type callOptions struct {
 	OpID              string
 	TargetName        string
 	ParamsFlag        string
+	PreviewHash       string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -231,6 +243,13 @@ func postCall(
 	if params != nil {
 		p := params
 		body.Params = &p
+	}
+	// Thread the destructive-tier preview binding (#3197). Left nil when
+	// --preview-hash is unset so a bare call stays byte-identical to the
+	// pre-#3197 wire shape; the field is ignored for non-destructive ops.
+	if opts.PreviewHash != "" {
+		h := opts.PreviewHash
+		body.PreviewHash = &h
 	}
 	apiParams := &api.PostCallApiV1OperationsCallPostParams{}
 	resp, err := client.PostCallApiV1OperationsCallPostWithResponse(ctx, apiParams, body)

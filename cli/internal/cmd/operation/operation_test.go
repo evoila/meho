@@ -194,6 +194,85 @@ func TestPrintCallResultOkNullResult(t *testing.T) {
 	}
 }
 
+// TestPrintPreviewResultOkRendersHash — a status=ok preview renders the
+// resolved-request projection and prints the preview_hash prominently
+// with the ready-to-paste `call --preview-hash` hint (the whole point of
+// the verb, #3197).
+func TestPrintPreviewResultOkRendersHash(t *testing.T) {
+	r := &PreviewResult{
+		Status:       "ok",
+		OpID:         "vmware.composite.vm.destroy",
+		ConnectorID:  "vmware-rest-9.0",
+		SourceKind:   "composite",
+		Method:       "COMPOSITE",
+		ResolvedPath: "vmware.composite.vm.destroy",
+		RedactedBody: json.RawMessage(`{"vm":"vm-1812"}`),
+		PreviewHash:  "abc123def456",
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vmware-rest-9.0", "vmware.composite.vm.destroy", r)
+	out := buf.String()
+	for _, want := range []string{
+		"status=ok", "source_kind=composite", "COMPOSITE", "body (redacted)",
+		`"vm"`, "preview_hash: abc123def456", "--preview-hash abc123def456",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult ok missing %q in output:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintPreviewResultErrorRendersExtras — a status=error preview
+// surfaces the error string and the extras envelope, and never prints a
+// preview_hash line.
+func TestPrintPreviewResultErrorRendersExtras(t *testing.T) {
+	errMsg := "unknown_op: vmware.bogus"
+	r := &PreviewResult{
+		Status:      "error",
+		OpID:        "vmware.bogus",
+		ConnectorID: "vmware-rest-9.0",
+		Error:       &errMsg,
+		Extras:      json.RawMessage(`{"error_code":"unknown_op"}`),
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "vmware-rest-9.0", "vmware.bogus", r)
+	out := buf.String()
+	for _, want := range []string{"status=error", "unknown_op: vmware.bogus", "extras:", "error_code"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult error missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "preview_hash:") {
+		t.Errorf("a non-ok preview must not print a preview_hash line; got:\n%s", out)
+	}
+}
+
+// TestPrintPreviewResultUnavailable — a status=unavailable preview (a
+// typed/composite op with no literal HTTP request to preview) surfaces
+// the reason and prints no hash.
+func TestPrintPreviewResultUnavailable(t *testing.T) {
+	errMsg := "preview_unavailable: op 'k8s.about' is source_kind='typed'"
+	r := &PreviewResult{
+		Status:      "unavailable",
+		OpID:        "k8s.about",
+		ConnectorID: "k8s-1.x",
+		SourceKind:  "typed",
+		Error:       &errMsg,
+		Extras:      json.RawMessage(`{"error_code":"preview_unavailable"}`),
+	}
+	var buf bytes.Buffer
+	printPreviewResult(&buf, "k8s-1.x", "k8s.about", r)
+	out := buf.String()
+	for _, want := range []string{"status=unavailable", "preview_unavailable", "error_code"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printPreviewResult unavailable missing %q in output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "preview_hash:") {
+		t.Errorf("an unavailable preview must not print a preview_hash line; got:\n%s", out)
+	}
+}
+
 // TestLoadParamsFlagEmpty — empty flag value returns (nil, nil) so
 // runCall can omit the params key from the body.
 func TestLoadParamsFlagEmpty(t *testing.T) {

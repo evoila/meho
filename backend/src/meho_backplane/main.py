@@ -153,6 +153,10 @@ from meho_backplane.gateway.deadman import (
     start_gateway_deadman_sweeper,
     stop_gateway_deadman_sweeper,
 )
+from meho_backplane.gateway.unreported_mint import (
+    start_gateway_unreported_mint_sweeper,
+    stop_gateway_unreported_mint_sweeper,
+)
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -484,6 +488,7 @@ class _BackgroundTasks:
     flight_recorder_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
+    gateway_unreported_mint: asyncio.Task[None] | None
 
 
 # Deliberately-flat lifespan task registry: the length is per-task
@@ -601,6 +606,15 @@ def _start_background_tasks() -> _BackgroundTasks:
     gateway_deadman: asyncio.Task[None] | None = None
     if settings.gateway_deadman_enabled:
         gateway_deadman = start_gateway_deadman_sweeper()
+    # Initiative #2901 (#3193) — un-reported-mint security alarm. A separate
+    # sweeper from the dead-man switch above: it flags a minted remote-write
+    # capability whose effect went unreported past ``expires_at`` (threat T4), a
+    # security condition distinct from the liveness ``stale_at`` flip. Gated on
+    # GATEWAY_UNREPORTED_MINT_ENABLED (default-on); an external monitor can
+    # disable the in-tree sweep.
+    gateway_unreported_mint: asyncio.Task[None] | None = None
+    if settings.gateway_unreported_mint_enabled:
+        gateway_unreported_mint = start_gateway_unreported_mint_sweeper()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
@@ -617,6 +631,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         flight_recorder_reaper=flight_recorder_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
+        gateway_unreported_mint=gateway_unreported_mint,
     )
 
 
@@ -628,6 +643,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.gateway_unreported_mint is not None:
+        await stop_gateway_unreported_mint_sweeper(tasks.gateway_unreported_mint)
     if tasks.gateway_deadman is not None:
         await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:

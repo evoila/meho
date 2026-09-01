@@ -242,6 +242,12 @@ const (
 	EditTemplateResponseStatusPublished  EditTemplateResponseStatus = "published"
 )
 
+// Defines values for EffectPhase.
+const (
+	EffectPhaseIntent  EffectPhase = "intent"
+	EffectPhaseOutcome EffectPhase = "outcome"
+)
+
 // Defines values for EvalRequestSurface.
 const (
 	EvalRequestSurfaceAll        EvalRequestSurface = "all"
@@ -4281,6 +4287,46 @@ type EditTemplateResponse struct {
 // EditTemplateResponseStatus defines model for EditTemplateResponse.Status.
 type EditTemplateResponseStatus string
 
+// EffectAuditRecord One tamper-evident link in a runner's effect-audit chain.
+//
+// Frozen wire model shared verbatim with the central ingest verifier. The
+// hashed body is every field **except** “record_hash“ (see
+// :func:`canonical_record_body`); “record_hash“ folds in “prev_hash“ so the
+// records form a chain the centre re-derives link by link.
+type EffectAuditRecord struct {
+	CommandId  string  `json:"command_id"`
+	OpId       string  `json:"op_id"`
+	Outcome    *string `json:"outcome"`
+	ParamsHash string  `json:"params_hash"`
+
+	// Phase The two records the runner writes per executed write item.
+	//
+	// * :attr:`INTENT` — written **before** the mutation is attempted (the runner
+	//   is about to execute a centrally-authorised write). Its presence without a
+	//   matching :attr:`OUTCOME` is itself evidence (the runner crashed or was
+	//   cut off mid-write).
+	// * :attr:`OUTCOME` — written **after** the handler returns, carrying the
+	//   runner-level result status.
+	Phase       EffectPhase `json:"phase"`
+	PrevHash    string      `json:"prev_hash"`
+	RecordHash  string      `json:"record_hash"`
+	RecordedAt  string      `json:"recorded_at"`
+	RunnerId    string      `json:"runner_id"`
+	Seq         int         `json:"seq"`
+	Signature   *string     `json:"signature"`
+	TargetScope string      `json:"target_scope"`
+}
+
+// EffectPhase The two records the runner writes per executed write item.
+//
+//   - :attr:`INTENT` — written **before** the mutation is attempted (the runner
+//     is about to execute a centrally-authorised write). Its presence without a
+//     matching :attr:`OUTCOME` is itself evidence (the runner crashed or was
+//     cut off mid-write).
+//   - :attr:`OUTCOME` — written **after** the handler returns, carrying the
+//     runner-level result status.
+type EffectPhase string
+
 // EnableReadsResponse Response body for “POST /api/v1/connectors/{id}/enable-reads“ (G0.25-T7 #1749).
 //
 // The bulk read-class enable path returns “200“ with a count
@@ -4642,6 +4688,9 @@ type GatewayResultAck struct {
 type GatewayResultBody struct {
 	// CommandId The delivered command's id.
 	CommandId openapi_types.UUID `json:"command_id"`
+
+	// EffectRecords Tamper-evident store-and-forward effect audit records to ingest.
+	EffectRecords *[]EffectAuditRecord `json:"effect_records,omitempty"`
 
 	// Error Failure summary (for a 'failed' outcome).
 	Error *string `json:"error"`

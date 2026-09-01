@@ -26640,6 +26640,83 @@
         "title": "EditTemplateResponse",
         "description": "Response for ``meho_runbook_edit_template``.\n\n:attr:`version` equals the input version when editing a draft in\nplace; it is a new version when forking from a published template, in\nwhich case :attr:`forked_from` is populated with the source's\n:class:`ForkInfo`. On the draft-edit path :attr:`forked_from` is\n``None``.\n\n:attr:`status` is normally ``\"draft\"`` (both the in-place edit and the\nfork mint/keep a draft). The one exception is the **no-op fork skip**\n(#144): editing a published/deprecated version with a body byte-identical\nto the source creates no draft and returns the *unchanged source* \u2014 so\n``version`` is the source version, ``forked_from`` is ``None``, and\n``status`` is the source's own ``\"published\"`` / ``\"deprecated\"``. The\nnon-``\"draft\"`` status is the signal that no new draft was created."
       },
+      "EffectAuditRecord": {
+        "properties": {
+          "runner_id": {
+            "type": "string",
+            "title": "Runner Id"
+          },
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/EffectPhase"
+          },
+          "command_id": {
+            "type": "string",
+            "title": "Command Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params_hash": {
+            "type": "string",
+            "title": "Params Hash"
+          },
+          "signature": {
+            "type": "string",
+            "nullable": true,
+            "title": "Signature"
+          },
+          "target_scope": {
+            "type": "string",
+            "title": "Target Scope"
+          },
+          "outcome": {
+            "type": "string",
+            "nullable": true,
+            "title": "Outcome"
+          },
+          "recorded_at": {
+            "type": "string",
+            "title": "Recorded At"
+          },
+          "prev_hash": {
+            "type": "string",
+            "title": "Prev Hash"
+          },
+          "record_hash": {
+            "type": "string",
+            "title": "Record Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runner_id",
+          "seq",
+          "phase",
+          "command_id",
+          "op_id",
+          "params_hash",
+          "target_scope",
+          "recorded_at",
+          "prev_hash",
+          "record_hash"
+        ],
+        "title": "EffectAuditRecord",
+        "description": "One tamper-evident link in a runner's effect-audit chain.\n\nFrozen wire model shared verbatim with the central ingest verifier. The\nhashed body is every field **except** ``record_hash`` (see\n:func:`canonical_record_body`); ``record_hash`` folds in ``prev_hash`` so the\nrecords form a chain the centre re-derives link by link."
+      },
+      "EffectPhase": {
+        "type": "string",
+        "enum": [
+          "intent",
+          "outcome"
+        ],
+        "title": "EffectPhase",
+        "description": "The two records the runner writes per executed write item.\n\n* :attr:`INTENT` \u2014 written **before** the mutation is attempted (the runner\n  is about to execute a centrally-authorised write). Its presence without a\n  matching :attr:`OUTCOME` is itself evidence (the runner crashed or was\n  cut off mid-write).\n* :attr:`OUTCOME` \u2014 written **after** the handler returns, carrying the\n  runner-level result status."
+      },
       "EnableReadsResponse": {
         "properties": {
           "connector_id": {
@@ -27267,6 +27344,14 @@
             "nullable": true,
             "title": "Error",
             "description": "Failure summary (for a 'failed' outcome)."
+          },
+          "effect_records": {
+            "items": {
+              "$ref": "#/components/schemas/EffectAuditRecord"
+            },
+            "type": "array",
+            "title": "Effect Records",
+            "description": "Tamper-evident store-and-forward effect audit records to ingest."
           }
         },
         "additionalProperties": false,

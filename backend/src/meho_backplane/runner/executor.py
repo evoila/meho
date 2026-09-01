@@ -49,6 +49,7 @@ from meho_backplane.operations._handler_resolve import (
     import_handler,
     is_unbound_method,
 )
+from meho_backplane.runner.effect_audit import EffectAuditChain
 from meho_backplane.runner.satellite_tier import (
     SatelliteMintTier,
     classify_satellite_tier,
@@ -182,6 +183,61 @@ def _verify_remote_write_signature(item: RunnerWorkItem) -> str | None:
     return None
 
 
+def _remote_write_effect_keys(item: RunnerWorkItem) -> tuple[str, str]:
+    """The ``(params_hash, target_scope)`` a remote-write effect record binds.
+
+    Mirrors the centre's canonical binding (:func:`params_digest` over the
+    item params, ``str(target.id)`` or :data:`TARGETLESS_SCOPE`) so the runner's
+    recorded effect references the same identity the mint signed.
+    """
+    target_scope = (
+        str(item.target_descriptor.id) if item.target_descriptor is not None else TARGETLESS_SCOPE
+    )
+    return params_digest(item.params), target_scope
+
+
+async def _invoke_recording_effect(
+    handler: Callable[..., Awaitable[Any]],
+    item: RunnerWorkItem,
+    *,
+    effect_chain: EffectAuditChain | None,
+    command_id: str | None,
+) -> RunnerResult:
+    """Invoke *handler*, bracketing a remote-write mutation with effect records.
+
+    Mechanism 4 (#3193): for a ``remote-write`` item with a chain provided, the
+    runner appends a tamper-evident **intent** record *before* the mutation and
+    an **outcome** record *after*, referencing the signed work item (#3189) as
+    the non-repudiation anchor. A ``safe`` item, or a call with no chain, invokes
+    unchanged — effect audit is a write-tier concern only.
+    """
+    if (
+        effect_chain is None
+        or command_id is None
+        or classify_satellite_tier(item.safety_level) is not SatelliteMintTier.REMOTE_WRITE
+    ):
+        return await _invoke(handler, item)
+
+    params_hash, target_scope = _remote_write_effect_keys(item)
+    effect_chain.record_intent(
+        command_id=command_id,
+        op_id=item.op_id,
+        params_hash=params_hash,
+        signature=item.signature,
+        target_scope=target_scope,
+    )
+    result = await _invoke(handler, item)
+    effect_chain.record_outcome(
+        command_id=command_id,
+        op_id=item.op_id,
+        params_hash=params_hash,
+        signature=item.signature,
+        target_scope=target_scope,
+        outcome=result.status,
+    )
+    return result
+
+
 async def _invoke(handler: Callable[..., Awaitable[Any]], item: RunnerWorkItem) -> RunnerResult:
     """Invoke *handler* and wrap its outcome as a structured result."""
     operator = _build_operator(item)
@@ -206,6 +262,8 @@ async def execute_command_once(
     command_id: str,
     item: RunnerWorkItem,
     store: ExecutedCommandStore,
+    *,
+    effect_chain: EffectAuditChain | None = None,
 ) -> RunnerResult:
     """Execute a gateway command at most once, keyed on its UUID request id.
 
@@ -245,13 +303,29 @@ async def execute_command_once(
             "no spooled result to re-submit",
         )
 
-    result = await execute_work_item(item)
+    # Only thread the effect-audit seam when a chain is in play, so the no-audit
+    # path calls ``execute_work_item(item)`` with its original shape (#2500).
+    if effect_chain is None:
+        result = await execute_work_item(item)
+    else:
+        result = await execute_work_item(item, effect_chain=effect_chain, command_id=command_id)
     store.store_result(command_id, result)
     return result
 
 
-async def execute_work_item(item: RunnerWorkItem) -> RunnerResult:
-    """Execute *item* locally and return a structured :class:`RunnerResult`."""
+async def execute_work_item(
+    item: RunnerWorkItem,
+    *,
+    effect_chain: EffectAuditChain | None = None,
+    command_id: str | None = None,
+) -> RunnerResult:
+    """Execute *item* locally and return a structured :class:`RunnerResult`.
+
+    When *effect_chain* + *command_id* are supplied and the item is a
+    ``remote-write`` capability, the mutation is bracketed by a tamper-evident
+    intent/outcome pair on the runner's store-and-forward effect chain (#3193);
+    a ``safe`` item or an omitted chain executes exactly as before.
+    """
     refusal = _screen_item(item)
     if refusal is not None:
         _log.warning(
@@ -289,7 +363,12 @@ async def execute_work_item(item: RunnerWorkItem) -> RunnerResult:
             error=f"handler_ref {item.handler_ref!r} resolved outside {_CONNECTOR_MODULE_PREFIX}*",
         )
 
-    return await _invoke(_maybe_bind_method(handler, item), item)
+    return await _invoke_recording_effect(
+        _maybe_bind_method(handler, item),
+        item,
+        effect_chain=effect_chain,
+        command_id=command_id,
+    )
 
 
 def _maybe_bind_method(

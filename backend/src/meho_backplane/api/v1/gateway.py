@@ -70,6 +70,11 @@ from meho_backplane.auth.runner_guard import assert_runner_scope, require_runner
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
 from meho_backplane.gateway.deadman import clear_runner_stale
+from meho_backplane.gateway.effect_ingest import (
+    EffectChainTamperError,
+    ingest_effect_records,
+    quarantine_effect_chain,
+)
 from meho_backplane.gateway.queue import (
     GATEWAY_LONGPOLL_DEFAULT_WAIT_SECONDS,
     GATEWAY_LONGPOLL_MAX_WAIT_SECONDS,
@@ -82,6 +87,7 @@ from meho_backplane.operations.gateway_commands import (
     GatewayCommandAlreadyConsumedError,
     accept_command_result,
 )
+from meho_backplane.runner.effect_audit import EffectAuditRecord
 
 __all__ = ["router"]
 
@@ -143,6 +149,15 @@ class GatewayResultBody(BaseModel):
         default=None,
         description="Failure summary (for a 'failed' outcome).",
     )
+    # Store-and-forward effect audit (#3193, mechanism 4): the runner forwards
+    # its hash-chained effect records with the result report. Empty for a
+    # ``safe`` read (which mints no signed capability and records no effect) and
+    # for a legacy runner that predates the field — the ingest is a no-op then,
+    # so the field is backward-compatible.
+    effect_records: list[EffectAuditRecord] = Field(
+        default_factory=list,
+        description="Tamper-evident store-and-forward effect audit records to ingest.",
+    )
 
 
 class GatewayResultAck(BaseModel):
@@ -158,6 +173,35 @@ class GatewayResultAck(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _ingest_effect_or_quarantine(
+    session: Any,
+    *,
+    operator: Operator,
+    runner: str,
+    records: list[EffectAuditRecord],
+) -> None:
+    """Verify + ingest a runner's forwarded effect chain, or quarantine a tamper.
+
+    Store-and-forward effect audit (#3193, mechanism 4). A broken chain (gap /
+    transit tampering / cross-runner forge) rolls the whole submission back — a
+    tampered report is **not** accepted, so the capability stays unconsumed and
+    the un-reported-mint alarm can still fire — and the tamper is recorded as a
+    durable security audit row. An empty ``records`` list (a ``safe`` read or a
+    legacy runner) is a no-op, so the field is backward-compatible.
+    """
+    if not records:
+        return
+    try:
+        await ingest_effect_records(session, operator=operator, runner_id=runner, records=records)
+    except EffectChainTamperError as tamper:
+        await session.rollback()
+        await quarantine_effect_chain(tenant_id=operator.tenant_id, runner_id=runner, error=tamper)
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=f"effect_chain_tamper: {tamper.reason}",
+        ) from tamper
 
 
 def _envelope(command: GatewayCommand) -> GatewayCommandEnvelope:
@@ -298,6 +342,11 @@ async def report_command_result(
             # the runner is alive and reporting, so reset any dead-man flip
             # marker the central sweeper set (sweeper only flips; this clears).
             await clear_runner_stale(session, tenant_id=operator.tenant_id, runner_name=runner)
+            # Store-and-forward effect audit ingest (#3193, mechanism 4) on the
+            # same session, so a clean report commits result + effect atomically.
+            await _ingest_effect_or_quarantine(
+                session, operator=operator, runner=runner, records=body.effect_records
+            )
             ack = GatewayResultAck(
                 command_id=command.id,
                 status=command.status,

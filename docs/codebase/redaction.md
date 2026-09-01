@@ -421,11 +421,13 @@ comparator fires `AssertionError`. The meta-tests exist because
 as "the gate is broken" -- the meta-tests rule out the second case.
 
 **Where the gate runs.** The harness is a standard pytest file
-under `backend/tests/`, so it is picked up by the existing
-`python-lint-test` job in `.github/workflows/ci.yml`. That job
-is in the branch-protection required-status-checks set, so a
-round-trip mismatch blocks merge by configuration -- no new
-workflow step needed. Adding new fixture pairs only requires
+under `backend/tests/`, so it is picked up by the required unit
+sweep in `.github/workflows/ci.yml` — since #3251 the
+`python-unit-shard` matrix (whichever stride slice its file lands
+in), reported through the `python-unit-lane` fan-in that carries
+the branch-protection required context. That check is in the
+required-status-checks set, so a round-trip mismatch blocks merge
+by configuration -- no new workflow step needed. Adding new fixture pairs only requires
 dropping them into the fixtures directory; the harness
 auto-discovers them.
 

@@ -426,6 +426,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "gcloud-rest",
         "harbor-rest",
         "holodeck-ssh",
+        "hyperv-ssh",
         "installer-rest",
         "k8s",
         "keycloak-admin",

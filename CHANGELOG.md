@@ -117,6 +117,36 @@ connector-related release-notes line.
   registration-constant value, re-registered on startup). CLI OpenAPI snapshot
   unchanged (no per-op safety metadata in the REST surface).
 
+### Added — hyperv: Hyper-V migration-source typed connector (reads-first) (#3265)
+
+- New `hyperv` typed connector for the **Hyper-V migration source** (registry
+  triple `hyperv-2022.x` / `hyperv-ssh`), a structured copy of the `winsrv`
+  estate mold — the shared PowerShell-over-SSH transport driving the Windows
+  PowerShell 5.1 `Hyper-V` module cmdlets on a Hyper-V host. It is MEHO's
+  governed, source-side reach for a Hyper-V→VMware migration: the safe reads
+  answer what a migration plan needs (which VMs, what firmware, what the disks
+  convert to), and the guarded `Export-VM` seeds it.
+- **18 reads-first ops across six groups** with tiers per the estate satellite
+  table: `host` (Get-VMHost / NUMA / vSwitch — safe), `vms`
+  (list / get / config / state, generation + secure-boot + integration-services
+  version — safe, the migration-assessment surface), `disks` (VHD/VHDX
+  format / size / parent-chain / fragmentation — safe, the VHDX→VMDK planning
+  input), `checkpoints` (list — safe; create — caution; revert / delete —
+  dangerous + approval), `export` (`Export-VM` — caution; long-running, bounded
+  by a `timeout_seconds` budget), and `power` (start / stop — caution, the
+  source-side cutover verbs). Non-goals named on the record: no VM
+  create / delete, no SCVMM, no Hyper-V Replica; cluster-wide views stay in the
+  `wsfc` connector on the same nodes.
+- **Probe distinguishes `hyperv_module_absent` from `hypervisor_role_absent`**
+  (module present but the hypervisor not running). Operator strings are
+  single-quote-escaped into `-EncodedCommand` scripts; no op carries a
+  secret-value parameter. CLI grows the `meho hyperv ...` verbs (the
+  `TargetCreate.product` enum + generated client were regenerated). Consumer
+  proof against the lab's nested Hyper-V cluster c1hv1
+  (`evoila-bosnia/claude-rdc-hetzner-dc#2802`) is tracked open — the estate
+  precedent (winsrv / msad / mssql shipped the same way). See
+  `docs/codebase/connectors-hyperv.md`.
+
 ### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
 
 - **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based

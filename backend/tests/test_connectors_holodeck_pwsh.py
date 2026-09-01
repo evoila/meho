@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from meho_backplane.connectors.holodeck._pwsh import (
+from meho_backplane.connectors._shared.pwsh import (
     PWSH_DEFAULT_DEPTH,
     PwshRunError,
     encode_pwsh_command,

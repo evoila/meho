@@ -45,8 +45,8 @@ credential-shaped can reach the params-echo, audit, or broadcast surfaces.
 The PowerShell scripts these handlers compose reference the credentials only
 by variable **name** (``$env:VC_USER`` / ``$env:VC_PW``, the persisted
 ``$config.Target.password``) -- never an interpolated value -- honouring the
-``_pwsh`` safety contract that the encoded script body (visible on the remote
-argv) must carry no credential material.
+``_shared.pwsh`` safety contract that the encoded script body (visible on the
+remote argv) must carry no credential material.
 
 ``holodeck.router.patch`` is additionally pinned into
 :data:`~meho_backplane.broadcast.events._CREDENTIAL_WRITE_OPS` as
@@ -77,7 +77,12 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
+from meho_backplane.connectors._shared.pwsh import (
+    PwshRunError,
+    encode_pwsh_command,
+    ps_single_quote,
+    pwsh_run,
+)
 from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
@@ -253,8 +258,8 @@ async def holodeck_config_apply(
     # exactly that file confirms the write actually landed on disk. A run that
     # returns no real configID leaves the path as ".../.json" -> $false, so
     # applied:true is impossible without a config genuinely on the appliance.
-    quoted_desc = _pwsh_single_quote(description)
-    quoted_host = _pwsh_single_quote(str(external_ip)) if external_ip else "$env:VC_HOST"
+    quoted_desc = ps_single_quote(description)
+    quoted_host = ps_single_quote(str(external_ip)) if external_ip else "$env:VC_HOST"
     script = (
         "$Global:ProgressPreference = 'SilentlyContinue'; "
         "$Global:WarningPreference = 'SilentlyContinue'; "
@@ -384,7 +389,7 @@ async def holodeck_instance_status(
     """
     instance_id = params.get("instance_id")
     if instance_id:
-        select = f"Get-HoloDeckInstance -InstanceID {_pwsh_single_quote(str(instance_id))}"
+        select = f"Get-HoloDeckInstance -InstanceID {ps_single_quote(str(instance_id))}"
     else:
         select = "Get-HoloDeckInstance"
     script = f"{select} | ConvertTo-Json -Depth 6 -Compress"
@@ -648,23 +653,23 @@ def _compose_detached_launch(
     """
     # Build the New-HoloDeckInstance argument list from bounded, non-secret
     # params. Each token is a fixed flag or a quoted scalar.
-    args = [f"-Version {_pwsh_single_quote(str(params['version']))}"]
-    args.append(f"-InstanceID {_pwsh_single_quote(str(params['instance_id']))}")
+    args = [f"-Version {ps_single_quote(str(params['version']))}"]
+    args.append(f"-InstanceID {ps_single_quote(str(params['instance_id']))}")
     variant = str(params.get("variant") or "management_only")
     if variant == "management_only":
         args.append("-ManagementOnly")
-    args.append(f"-Site {_pwsh_single_quote(str(params.get('site') or 'a'))}")
-    args.append(f"-vSANMode {_pwsh_single_quote(str(params.get('vsan_mode') or 'OSA'))}")
+    args.append(f"-Site {ps_single_quote(str(params.get('site') or 'a'))}")
+    args.append(f"-vSANMode {ps_single_quote(str(params.get('vsan_mode') or 'OSA'))}")
     version = str(params["version"])
     if not _is_cloud_builder_version(version):
         depot_type = str(params.get("depot_type") or "Offline")
-        args.append(f"-DepotType {_pwsh_single_quote(depot_type)}")
+        args.append(f"-DepotType {ps_single_quote(depot_type)}")
     args.append("-DeveloperMode")
     inner = "New-HoloDeckInstance " + " ".join(args)
     # Import the persisted config first so $Global:config is set for the
     # cmdlet; $null = suppresses the cleartext-password auto-print.
     config_id = str(params["config_id"])
-    pwsh_body = f"$null = Import-HoloDeckConfig -ConfigID {_pwsh_single_quote(config_id)}; {inner}"
+    pwsh_body = f"$null = Import-HoloDeckConfig -ConfigID {ps_single_quote(config_id)}; {inner}"
     encoded = _pwsh_encoded(pwsh_body)
     remote = (
         f"pwsh -NoProfile -NonInteractive -EncodedCommand {encoded} > {shlex.quote(log_path)} 2>&1"
@@ -771,21 +776,8 @@ def map_instance_status_envelope(
 # ---------------------------------------------------------------------------
 
 
-def _pwsh_single_quote(value: str) -> str:
-    """Single-quote *value* for a PowerShell string literal (doubling any ``'``).
-
-    PowerShell single-quoted strings are literal (no ``$`` expansion), so this
-    is the safe way to embed an operator-supplied non-secret scalar (a
-    description, an instance id) into a composed script without it being
-    parsed as a variable or subexpression.
-    """
-    return "'" + value.replace("'", "''") + "'"
-
-
 def _pwsh_encoded(script: str) -> str:
     """Return the ``-EncodedCommand`` base64 for *script* (UTF-16LE, no BOM)."""
-    from meho_backplane.connectors.holodeck._pwsh import encode_pwsh_command
-
     return encode_pwsh_command(script)
 
 

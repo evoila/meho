@@ -55,8 +55,8 @@ import pytest
 
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors import all_connectors_v2
+from meho_backplane.connectors._shared.pwsh import PwshRunError
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
-from meho_backplane.connectors.holodeck._pwsh import PwshRunError
 from meho_backplane.connectors.holodeck.connector import parse_photon_version
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.settings import get_settings

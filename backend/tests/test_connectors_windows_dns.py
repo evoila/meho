@@ -49,11 +49,10 @@ import asyncssh
 import pytest
 
 import meho_backplane.connectors.windows_dns  # noqa: F401 -- registers connector at import
+from meho_backplane.connectors._shared.pwsh import encode_pwsh_command, ps_single_quote
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.connectors.windows_dns import WINDOWS_DNS_OPS, WindowsDnsConnector
-from meho_backplane.connectors.windows_dns._pwsh import encode_pwsh_command
 from meho_backplane.connectors.windows_dns.ops_record import (
-    ps_single_quote,
     windows_dns_record_add,
     windows_dns_record_get,
     windows_dns_record_remove,

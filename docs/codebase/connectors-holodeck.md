@@ -18,7 +18,9 @@ The connector replaces the operator's `scripts/holodeck.sh` wrapper in the
 `claude-rdc-hetzner-dc` consumer repository. The G3.8-T1 (#853) skeleton
 ships the `holodeck.about` canary op, the password-default + key-fallback
 auth via the inherited `SshConnector._auth_config`, the fingerprint, the
-probe, and the `_pwsh.py` PowerShell-over-SSH helper. G3.8-T2 (#854) adds
+probe, and the PowerShell-over-SSH helper (hoisted from the former
+package-local `_pwsh.py` to the shared `_shared/pwsh.py` in #3260).
+G3.8-T2 (#854) adds
 the 7 read ops (`config.show`, `pod.list`, `pod.info`, `service.list`,
 `k8s.exec`, `logs.tail`, `networking.show`) for a total of 8 ops
 registered under `connector_id="holodeck-ssh-9.0"`. G3.8-T3 (#855) ships
@@ -60,14 +62,22 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   `ValueError` subclass the dispatcher's error envelope picks up when a
   mutating verb slips through.
 
-- **`_pwsh.py` — the novel primitive.** Houses `encode_pwsh_command(script)`
+- **`_shared/pwsh.py` — the shared transport (formerly the package-local
+  `_pwsh.py`; hoisted in #3260, executing the #2759 note, once the
+  Microsoft-estate program #3259 pushed the consumer count past the ≥3
+  sharing threshold).** Houses `encode_pwsh_command(script)`
   (UTF-16LE-base64 per the `-EncodedCommand` convention), `pwsh_run(connector,
-  target, script)` (runs `pwsh -NoProfile -NonInteractive -EncodedCommand
+  target, script)` (runs `<exe> -NoProfile -NonInteractive -EncodedCommand
   <encoded>` over the pooled SSH connection and parses `ConvertTo-Json`
-  stdout via stdlib `json`), `PwshRunError` (structured failure with the
-  truncated stderr fragment but no script body or auth material), and
-  `PWSH_DEFAULT_DEPTH = 4` (the recommended `ConvertTo-Json -Depth` per the
-  #371 body).
+  stdout via stdlib `json`), `ps_single_quote` (the `shlex.quote` analogue,
+  replacing the former local `_pwsh_single_quote`), `strip_clixml`,
+  `PwshRunError` (structured failure with the truncated stderr fragment but
+  no script body or auth material), and `PWSH_DEFAULT_DEPTH = 4` (the
+  recommended `ConvertTo-Json -Depth` per the #371 body). Per-connector wire
+  variation rides three class-level seams read off the connector:
+  `POWERSHELL_EXECUTABLE` (`pwsh` here), `POWERSHELL_SCRIPT_PREFIX` (unset
+  here — Holodeck silences warnings per-op instead), `POWERSHELL_LOG_EVENT`
+  (`holodeck_pwsh_executed`).
 
   **Design correction (2026-05-21).** The Initiative body originally
   specified CliXml output via `-OutputFormat Xml` + `pyclixml` parsing. T1
@@ -486,9 +496,10 @@ Direct:
 
 - `meho_backplane.connectors.adapters.ssh.SshConnector` — pooled-asyncssh
   base + `_auth_config`.
-- `meho_backplane.connectors.holodeck._pwsh` — the PowerShell-over-SSH
-  helper; the **single** seam between the connector's Python handlers and
-  the appliance's pwsh surface.
+- `meho_backplane.connectors._shared.pwsh` — the shared PowerShell-over-SSH
+  transport (hoisted from the package-local `_pwsh.py` in #3260); the
+  **single** seam between the connector's Python handlers and the
+  appliance's pwsh surface.
 - `meho_backplane.connectors.registry.register_connector_v2` — v2 entry.
 - `meho_backplane.operations.typed_register.register_typed_operation` /
   `register_typed_op_registrar` — async typed-op upsert + lifespan
@@ -529,7 +540,9 @@ External (pinned in `backend/pyproject.toml`):
 ## References
 
 - Initiative #371 (G3.8 typed-SSH connector).
-- Task #853 (T1 skeleton + `_pwsh.py`).
+- Task #853 (T1 skeleton + the package-local `_pwsh.py`).
+- Task #3260 (Initiative #3259) — hoist of the pwsh transport to the shared
+  `_shared/pwsh.py`.
 - Adapter: `SshConnector` (G0.2-T4 #243).
 - Sibling SSH-canary precedents: bind9 (G3.4) `connectors-bind9.md`,
   pfSense (G3.7) `connectors-pfsense.md`.

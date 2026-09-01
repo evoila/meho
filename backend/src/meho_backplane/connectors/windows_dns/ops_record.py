@@ -7,7 +7,7 @@ Mirrors :mod:`~meho_backplane.connectors.bind9.ops_record`'s record
 surface -- one read op and the two symmetric write ops -- but swaps the
 BIND9 ``dig`` / zonefile-transform machinery for the Windows
 ``DnsServer`` module cmdlets driven over PowerShell-over-SSH
-(:func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run`):
+(:func:`~meho_backplane.connectors._shared.pwsh.pwsh_run`):
 
 * ``windns.record.get``    -- ``Get-DnsServerResourceRecord`` (safe).
 * ``windns.record.add``    -- ``Add-DnsServerResourceRecordA`` (A) /
@@ -36,8 +36,8 @@ escape for, only the PowerShell parser. Integer values (TTL seconds) are
 validated to ``int`` before interpolation. A/CNAME writes prefix
 ``$ErrorActionPreference = 'Stop'`` so a cmdlet failure terminates the
 pwsh process with a non-zero exit that
-:func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run` maps to a
-:class:`~meho_backplane.connectors.windows_dns._pwsh.PwshRunError`.
+:func:`~meho_backplane.connectors._shared.pwsh.pwsh_run` maps to a
+:class:`~meho_backplane.connectors._shared.pwsh.PwshRunError`.
 
 References
 ----------
@@ -54,7 +54,7 @@ from __future__ import annotations
 import ipaddress
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.windows_dns._pwsh import pwsh_run
+from meho_backplane.connectors._shared.pwsh import ps_single_quote, pwsh_run
 from meho_backplane.connectors.windows_dns.ops import WindowsDnsOp
 from meho_backplane.connectors.windows_dns.ops_zone import normalise_json_rows
 
@@ -70,7 +70,6 @@ __all__ = [
     "WINDOWS_DNS_RECORD_GET_PARAMETER_SCHEMA",
     "WINDOWS_DNS_RECORD_REMOVE_LLM_INSTRUCTIONS",
     "WINDOWS_DNS_RECORD_REMOVE_PARAMETER_SCHEMA",
-    "ps_single_quote",
     "windows_dns_record_add",
     "windows_dns_record_get",
     "windows_dns_record_remove",
@@ -90,18 +89,6 @@ _REMOVE_SUPPORTED_TYPES: frozenset[str] = frozenset(
 # Add-DnsServerResourceRecordCName). Other record types are out of scope
 # for the mirror.
 _ADD_SUPPORTED_TYPES: frozenset[str] = frozenset({"A", "CNAME"})
-
-
-def ps_single_quote(value: str) -> str:
-    """Return *value* as a safe single-quoted PowerShell string literal.
-
-    Inside a single-quoted PowerShell string the only special character
-    is ``'`` itself; PowerShell escapes it by doubling. This is the
-    PowerShell analogue of :func:`shlex.quote` and matches the
-    ``value.replace("'", "''")`` idiom the Holodeck ``pod.info`` handler
-    uses before interpolating a value into a ``-EncodedCommand`` script.
-    """
-    return "'" + value.replace("'", "''") + "'"
 
 
 async def windows_dns_record_get(

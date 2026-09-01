@@ -6,7 +6,7 @@
 Mirrors :mod:`~meho_backplane.connectors.bind9.ops_zone`'s read surface
 but swaps ``named-checkconf -p`` for the Windows ``DnsServer`` module's
 ``Get-DnsServerZone`` cmdlet, routed through the PowerShell-over-SSH
-transport (:func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run`).
+transport (:func:`~meho_backplane.connectors._shared.pwsh.pwsh_run`).
 
 Only the zone *inventory* read is implemented here (the operator-relevant
 "what zones does this server host?" question, matching bind9's
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors.windows_dns._pwsh import pwsh_run
+from meho_backplane.connectors._shared.pwsh import pwsh_run
 from meho_backplane.connectors.windows_dns.ops import WindowsDnsOp
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ def normalise_json_rows(payload: Any) -> list[dict[str, Any]]:
     PowerShell's ``ConvertTo-Json`` renders a **single**-element result
     as a flat object and a **multi**-element result as a JSON array; a
     zero-element result renders as ``null`` (an empty stdout is caught
-    upstream by :func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run`
+    upstream by :func:`~meho_backplane.connectors._shared.pwsh.pwsh_run`
     before it reaches here). This helper collapses all three shapes to
     a ``list[dict]`` so handlers walk a uniform structure. Mirrors the
     dict/list normalisation the Holodeck ``probe`` and ``pod.list``
@@ -84,7 +84,7 @@ async def windows_dns_zone_list(
     takes no narrowing parameters here, so any cmdlet error (DNS service
     stopped, insufficient rights) is a real failure that must terminate
     the process non-zero and surface as a
-    :class:`~meho_backplane.connectors.windows_dns._pwsh.PwshRunError`
+    :class:`~meho_backplane.connectors._shared.pwsh.PwshRunError`
     carrying the actual stderr -- not be swallowed into a false empty
     inventory.
     """

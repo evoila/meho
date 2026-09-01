@@ -8,7 +8,7 @@ The connector manages Windows AD-DNS records over SSH → PowerShell
 bind9 connector's op surface (identity + zone + record groups) but swaps
 the BIND9 CLI (``named -v`` / ``dig`` / ``named-checkconf``) for the
 Windows ``DnsServer`` cmdlets, routed through
-:func:`~meho_backplane.connectors.windows_dns._pwsh.pwsh_run` (the
+:func:`~meho_backplane.connectors._shared.pwsh.pwsh_run` (the
 PowerShell-over-SSH transport the Holodeck connector established).
 
 Op surface (mirrors bind9's read + record-write groups):

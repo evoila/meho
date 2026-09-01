@@ -818,49 +818,127 @@ to a **fan-in** (`python-unit-lane`) over a lint job (`python-lint`) and a
 _string_ is unchanged, so branch protection / the ruleset are untouched —
 see [Sharded unit lane (#3251)](#sharded-unit-lane-3251) below.
 
-### Merge queue (#769)
+### Merge queue (#769, #3253)
 
-`ci.yml` triggers on `merge_group` in addition to `pull_request` and
-`push`. The `merge_group` event fires when a PR is admitted to the
-GitHub merge queue and runs the full check matrix against the
-**synthesised merge commit** — PR head + current `main` tip + any
-PRs ahead in the queue. A merge that would break `main` fails in the
-queue and never reaches `main`, ending the inherited-red episodes from
-2026-05-20/21 where cancelled post-merge CI allowed broken combinations
-to land silently.
+Every workflow that owns a required status check triggers on
+`merge_group` in addition to `pull_request` and `push`: `ci.yml`,
+`security-scan.yml`, `secret-scan.yml`, `dependency-license-check.yml`
+(all landed with #769) and `chart.yml` (the last gap, closed by #3253).
+The `merge_group` event fires when a PR is admitted to the GitHub merge
+queue and runs the full check matrix against the **synthesised merge
+commit** — PR head + current `main` tip + any PRs ahead in the queue. A
+merge that would break `main` fails in the queue and never reaches
+`main`, ending the inherited-red episodes from 2026-05-20/21 where
+cancelled post-merge CI allowed broken combinations to land silently.
 
-Merge-queue setup (admin action, separate from this code change):
+**Why the queue is worth enabling — two distinct wins:**
 
-1. Enable "Require merge queue" in the repository's branch-protection
-   ruleset for `main` (Settings → Rules → Branches → protect main →
-   add "Require merge queue" rule, or via
-   `gh api -X PUT repos/evoila/meho/rulesets/14556458 ...`).
-2. Configure merge-queue required checks. The full set required by
-   branch protection on `main` spans four workflows; mirror the same
-   set in the merge-queue ruleset so the queue enforces the same bar
-   against the actual merge result, not just the PR's own head:
-   - From `ci.yml`: `Python (ruff + mypy + pytest)`,
-     `Python (integration testcontainers)`,
-     `Go (golangci-lint + go test)`,
-     `Helm (lint + template + kubeconform)`.
-   - From `security-scan.yml`: `Semgrep SAST`.
-   - From `secret-scan.yml`: `TruffleHog Secret Scan`.
-   - From `dependency-license-check.yml`: `Python License Check`,
-     `NPM License Check`. Both jobs no-op via `hashFiles()` when the
-     PR doesn't touch a manifest, so they report cheap green on
-     unrelated PRs — but they MUST run on every queue admission so
-     branch protection's required-context list stays satisfiable.
-3. The `merge_group` triggers in `ci.yml`, `security-scan.yml`,
-   `secret-scan.yml`, and `dependency-license-check.yml` are the
-   code-side prerequisite for step 2 — without each sibling workflow
-   subscribing to `merge_group`, its required context would never
-   report on queue runs and the queue would hang on missing checks.
+- *Inherited-red race.* Without the queue, two independently-green PRs
+  can merge in sequence and produce a broken `main` (each was tested
+  against an older tip). The queue tests the **actual** merge result of
+  each admission, so a semantically-broken combination is caught before
+  it lands.
+- *Changelog-churn / full-relap cost.* Today every force-push to a PR —
+  including the mechanical rebases that resolve `[Unreleased]`
+  CHANGELOG-union conflicts when a sibling PR merges first — reruns the
+  **entire** check matrix on that PR. On a busy day the same PR pays for
+  many full laps it did not semantically change. The queue replaces that
+  with a single batched rebase-test-merge against the queued tip: one
+  authoritative lap per batch instead of N redundant laps per PR. This
+  is the code-side lever the lab-capacity Initiative
+  (claude-rdc-hetzner-dc#2777) leans on.
 
-Concurrency note: `cancel-in-progress` is conditional on
-`github.event_name != 'merge_group'`. A cancelled queue check causes
-the merge attempt to fail and the PR falls out of the queue — so
-merge-queue runs are never cancelled. PR force-pushes and rapid main
-commits still cancel their own prior runs as before.
+**Required-check → workflow map** (branch protection on `main`,
+`branches/main/protection.required_status_checks.contexts`, 11
+contexts). Enabling the queue means every one of these must report on
+`merge_group` refs — a required check that never reports on a queue ref
+hangs the queue forever:
+
+| Required context | Owning workflow | Reports on `merge_group`? |
+| --- | --- | --- |
+| `Python (ruff + mypy + pytest)` | `ci.yml` | yes (#769) |
+| `Python (integration testcontainers)` | `ci.yml` | yes (#769) |
+| `Python (database migrations)` | `ci.yml` | yes (#769) — `changes` job emits `true` on non-PR events |
+| `Go (golangci-lint + go test)` | `ci.yml` | yes (#769) |
+| `Helm (lint + template + kubeconform)` | `ci.yml` | yes (#769) |
+| `Semgrep SAST` | `security-scan.yml` | yes (#769) |
+| `TruffleHog Secret Scan` | `secret-scan.yml` | yes (#769) |
+| `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
+| `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
+| `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
+| `DCO` | **external GitHub App** (`app_id 1861`), not a workflow | **operator must verify** — see caveat below |
+
+Two shapes are load-bearing for queue compatibility and appear across
+these workflows:
+
+- **No `on.*.paths` filter on a required-check workflow.** A workflow
+  skipped by a path filter leaves its required context stuck at
+  "Expected — waiting for status" and blocks the merge (the #2140
+  skipped-vs-pending trap). Instead each conditional workflow always
+  triggers, a lightweight `changes` job detects relevance, and the
+  expensive jobs are gated by a job-level `if:` — a job skipped via `if:`
+  reports **Success** and satisfies the required check. `chart.yml` adds
+  one more layer: an `always()` `helm-test-gate` aggregator carries the
+  required-context *name* and explicitly re-checks the upstream job
+  results so a skipped-because-a-dependency-failed run cannot masquerade
+  as green.
+- **Concurrency scoped so a queue run is never cancelled.** Each
+  workflow's `concurrency` group is suffixed with
+  `${{ github.event_name }}` and sets
+  `cancel-in-progress: ${{ github.event_name != 'merge_group' }}`. A
+  cancelled queue check fails the merge attempt and drops the PR out of
+  the queue, so `merge_group` runs are never cancelled; `pull_request` /
+  `push` runs still cancel their own predecessors as before.
+
+`chart.yml` additionally guards its `publish` and `verify-anonymous-pull`
+jobs to `github.event_name == 'push'` (was `!= 'pull_request'`), so a
+queue admission validates the merge result at full depth **without**
+packaging or pushing a chart to GHCR — the merge has not happened yet.
+
+**Enabling the queue is an operator action — a session never flips it.**
+Repo-settings / ruleset mutations are outside a session's remit (the
+park note on #769; restated in #3253). The code side is now complete;
+the operator performs:
+
+1. **Add a `merge_queue` rule to the `protect main` ruleset**
+   (id `14556458`). UI path: *Settings → Rules → Rulesets → protect
+   main → Add rule → Require merge queue*. API path — fetch the ruleset,
+   append the rule, and PUT it back (the endpoint replaces the whole
+   `rules` array, so a blind PUT would drop the existing
+   `pull_request` / `deletion` / `non_fast_forward` rules):
+
+   ```bash
+   gh api repos/evoila/meho/rulesets/14556458 > ruleset.json
+   # add {"type":"merge_queue","parameters":{ ...grouping/merge_method... }}
+   # to .rules, then:
+   gh api -X PUT repos/evoila/meho/rulesets/14556458 --input ruleset.json
+   ```
+
+2. **Verify the queue enforces the same 11 required contexts.** The
+   required checks currently live in *classic* branch protection
+   (`branches/main/protection`), not in the ruleset. Confirm the merge
+   queue waits on the same set against the merge ref — mirror the
+   contexts into a `required_status_checks` rule on the ruleset if the
+   queue does not pick up the classic set.
+
+3. **Verify the `DCO` context reports on `merge_group` refs before
+   enabling.** DCO is provided by an external GitHub App, not a workflow
+   in this repo — nothing in #3253 can make it report on queue refs. If
+   the DCO App does not post a status on the synthesised merge commit,
+   the required `DCO` context will hang the queue. Confirm on a canary
+   queue entry, or remove `DCO` from the queue's required set and keep it
+   as a PR-only gate, before turning the queue on for everyone.
+
+4. **DCO / `require_last_push_approval` /
+   `require_extra_approval_for_unattributed_changes` interplay.** The
+   `protect main` ruleset's `pull_request` rule has both approval
+   ratchets on. The merge queue rebases the PR onto the queued tip, which
+   can re-touch attribution; verify a queued PR still satisfies these on
+   the merge ref, or document the admin-merge fallback. (This is the
+   #769 AC item that was never closed out.)
+
+No repo setting is changed by the session that lands #3253 — only
+workflow files, this doc, and the changelog.
 
 ### Matrix
 

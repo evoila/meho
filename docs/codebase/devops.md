@@ -946,7 +946,7 @@ workflow files, this doc, and the changelog.
 | --- | --- | --- |
 | `python-lint` (`Python lint + typecheck (ruff + mypy)`) | `backend/src/` + `backend/tests/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict`. Non-required; whole-tree, unshardable-by-file, runs once on the light pool (#3251). |
 | `python-unit-shard` (`Python unit shard N/3`) | `backend/` unit + acceptance subtree, split 3 ways | `pytest -n 3 --dist loadscope --maxfail=1` over a deterministic file-stride slice (excludes `tests/integration/` and `tests/migrations/`; `-n 3` per shard for CPU/memory headroom — see [runner-CPU rule](#runner-cpu-rule)). Non-required matrix (#3251). |
-| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed. Carries the exact branch-protection required context so the ruleset is untouched (#3251). |
+| `python-unit-lane` (`Python (ruff + mypy + pytest)`) | fan-in | `needs: [changes, python-lint, python-unit-shard]`; **required check** — fails iff lint or any shard failed (or the detector is not green). Carries the exact branch-protection required context so the ruleset is untouched (#3251); reports success-by-skip on a docs-only diff (#3252). |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
@@ -1000,15 +1000,21 @@ shape (deterministic file-stride matrix + fan-in):
   canary opt-out (#2980) are preserved on **every** shard.
 - **`python-unit-lane`** — the **fan-in** carrying the exact
   branch-protection required context `Python (ruff + mypy + pytest)`. It
-  `needs: [python-lint, python-unit-shard]` and, via `if: always() && <fork
-  guard>`, runs regardless of upstream results, then FAILS unless both are
-  `success`/`skipped`. `always()` is load-bearing: a plain `needs:` gate
-  would be *skipped* when a shard fails, and a skipped required check
-  counts as Success (#2140) — i.e. a red shard would let the PR merge. A
-  hung shard hits its own `timeout-minutes` → `cancelled` leg → aggregate
+  `needs: [changes, python-lint, python-unit-shard]` and, via `if: always()
+  && <fork guard>`, runs regardless of upstream results, then inspects
+  `needs.*.result`. `always()` is load-bearing: a plain `needs:` gate would
+  be *skipped* when a shard fails, and a skipped required check counts as
+  Success (#2140) — i.e. a red shard would let the PR merge. A hung shard
+  hits its own `timeout-minutes` → `cancelled` leg → aggregate
   `cancelled`/`failure` → the gate FAILS (not open). On a fork PR the fork
   guard skips this job (and the shards), reporting the required context as
-  Success exactly as the old single job did.
+  Success exactly as the old single job did. Since #3252 the step first
+  fails CLOSED if the `changes` detector did not itself succeed, then
+  branches on `needs.changes.outputs.docs_only`: on the **docs-only fast
+  path** it accepts the detect-driven `skipped` lint/shards as pass; on a
+  **full run** it requires strict `success` (a `skipped` lint/shard there is
+  anomalous and fails the gate). See [Docs-only fast path
+  (#3252)](#docs-only-fast-path-3252).
 
 Because the required context string is unchanged and stays on a job, the
 **branch-protection ruleset and merge-queue required-check list need no
@@ -1018,6 +1024,50 @@ byte-identical). No escape-hatch label (the coverage lane's
 `ci-coverage-validate`) is needed: the coverage lane is push-only and must
 be *forced* onto a PR, whereas the unit lane runs on every PR by default,
 so a sharding PR self-validates through its own `pull_request` run.
+
+### Docs-only fast path (#3252)
+
+A PR whose diff is **purely documentation** cannot affect the Python
+toolchain, yet it used to pay the full ~25-min tax of both heavy Python
+lanes. The `changes` detector now classifies the diff and the heavy jobs
+skip via their own `if:`, so a changelog roll / guide edit / README fix
+completes CI in minutes.
+
+- **Classification (allow-list, fail-closed).** In the `changes` job,
+  `docs_only` starts `false` and flips to `true` **only** when *every*
+  changed path matches the allow-list `^docs/` (any file under `docs/`) **or**
+  `\.md$` (any Markdown file anywhere). Anything else — a `.py`, a workflow, a
+  config, a `cli/` or `deploy/` file — sets `docs_only=false` and forces the
+  full matrix. The diff is taken with `git diff --name-only --no-renames
+  <base>...HEAD`: `--no-renames` makes a rename appear as delete(old) +
+  add(new) so a code→`*.md` (or `*.md`→code) rename can never smuggle a
+  non-docs path past the allow-list. The step is written to always exit `0`
+  and emit both outputs — an unresolvable diff or an empty diff keeps the
+  fail-safe defaults (`docs_only=false`). `merge_group` and `push` NEVER
+  fast-path (a queue batch may mix docs + code; a `main` push must always run
+  the full matrix).
+- **What skips.** `python-lint`, the three `python-unit-shard` legs, and
+  `python-integration` gain `needs: changes` and an `if:` that skips them when
+  `docs_only == 'true'` (same #2140 shape as the `python-migration-tests`
+  gate). A job skipped by its own `if:` reports **Success**, so the required
+  contexts `Python (ruff + mypy + pytest)` (via the fan-in) and
+  `Python (integration testcontainers)` stay green without running.
+- **What still runs.** `go-lint-test`, `helm-lint-template`, and the sibling
+  workflows' required contexts (`Semgrep SAST`, `TruffleHog Secret Scan`,
+  `Python License Check`, `NPM License Check`, `helm install + helm test`,
+  `DCO`) are untouched — already fast, and docs can still leak a secret.
+- **Why it cannot skip for code.** A required check that skipped on a *code*
+  diff would let an untested change land green. Two independent guards prevent
+  it: (1) the classifier is fail-safe, so a code path is never proven
+  docs-only; (2) if the detector itself does not succeed, the
+  `python-unit-lane` fan-in fails **CLOSED** (it asserts
+  `needs.changes.result == 'success'` before trusting `docs_only`), which
+  blocks a code PR even though `python-integration` would skip-cascade to
+  green off the failed `needs`. The integration lane deliberately stays on the
+  plain `needs:`+`if:` shape (no `always()`) to preserve cancel-in-progress on
+  the heavy 60-min lane; its detect-crash exposure is identical to the
+  pre-existing migration gate and is neutralised for code PRs by the unit
+  lane's fail-closed guard above.
 
 ### Runner-CPU rule
 

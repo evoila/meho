@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — docs-only CI fast path (#3252)
+
+- A PR whose diff is **purely documentation** — every changed path under
+  `docs/` or ending in `.md` (README, CHANGELOG, guides) — now skips the two
+  heavy Python lanes (`Python (ruff + mypy + pytest)` ~19 min and
+  `Python (integration testcontainers)` ~17 min) and finishes CI in minutes
+  instead of paying the ~25-min tax for zero signal. The `changes` detector in
+  `ci.yml` classifies the diff and the heavy jobs (`python-lint`, the three
+  `python-unit-shard` legs, `python-integration`) skip via their own
+  job-level `if:` — a job skipped by `if:` reports **Success** and satisfies
+  branch protection (#2140), unlike an `on.paths` filter which would leave a
+  required check **Pending** and block merge.
+- **Branch protection is untouched and the fast path fails CLOSED.** The
+  classifier is an allow-list: `docs_only` is `true` only when *every* changed
+  path is proven docs — any code / test / workflow / config / `cli/` /
+  `deploy/` path, an unresolvable diff, a rename (classified with
+  `--no-renames` so the old path is also checked), or any `merge_group` /
+  `push` event forces the **full** matrix. The required
+  `Python (ruff + mypy + pytest)` fan-in still runs and reports; its
+  result-inspection accepts the detect-driven skips **only** when
+  `docs_only=true` and requires strict success otherwise, and it fails closed
+  if the detector itself did not succeed — so a broken or misfiring detector
+  can never let an untested code change land green.
+- The cheap lanes (`Go`, `Helm`) and the Semgrep / TruffleHog / license /
+  DCO checks keep running on docs-only PRs unchanged — they are already fast,
+  and docs can still leak a secret.
+
 ### Changed — merge-queue readiness: every required check now reports on `merge_group` refs (#3253)
 
 - `chart.yml` — the last required-check workflow without a `merge_group`

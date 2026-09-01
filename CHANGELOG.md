@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — `bind9.record.remove` promoted to the governed destructive tier (#3247)
+
+- **Behaviour change for agents — approval now required.** `bind9.record.remove`
+  (the whole-name clear: every A + AAAA at an FQDN) moves from `safety_level=caution`
+  + approval-free to `safety_level=destructive` + `requires_approval=True`, per the
+  #3247 operator ruling (Option A, 2026-09-01). It shipped with the *broader* blast
+  radius than the destructive-tier `bind9.record.delete` (#3231) yet no gate — an
+  agent could clear a whole name un-governed while a human had to approve a single-
+  record delete. Promotion closes that bypass: `record.remove` now runs only through
+  preview → park → distinct-human approval → audited resume. A bare dispatch is
+  refused `preview_binding_required`; a park without a resolvable blast radius is
+  refused `blast_radius_required`. **Agents wanting to retire a single record (one
+  value, not the whole name) should use `bind9.record.delete`.**
+- **Whole-name blast-radius preview** — a park-time builder
+  (`ops_record_delete_preview._bind9_record_remove_preview`, sharing the delete
+  builder's `_resolve_zone_and_read` preamble) names the `dns_name` object and
+  enumerates every current A + AAAA value that dies (`irreversibility="recreatable"`,
+  `match_count`), so the four-eyes approver sees the exact set before deciding.
+- **Single-sourced promotion** — only the op registration's `safety_level` + tags
+  (`delete` / `destructive`) change. The satellite ladder excludes it (`destructive`
+  → EXCLUDED, never runner-minted), and the service-grant guard + flight-recorder
+  body-exclusion fold it in via the `destructive` tag — no re-declared lists.
+  `broadcast.events.classify_op` is unaffected (`record.remove` stays `write`, the
+  same payload-sensitivity class as `record.delete`). No DB migration (the tier is a
+  registration-constant value, re-registered on startup). CLI OpenAPI snapshot
+  unchanged (no per-op safety metadata in the REST surface).
+
 ### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
 
 - **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based

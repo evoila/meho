@@ -1853,18 +1853,34 @@ class TestRecordViewHandling:
 
 
 # ---------------------------------------------------------------------------
-# Registration shape -- AC: ops carry the warning + caution + requires_approval
+# Registration shape -- AC: write ops carry the warning + the correct tier
+# (record.add caution; record.remove destructive since #3247)
 # ---------------------------------------------------------------------------
 
 
 class TestBind9OpsRegistration:
     """The write ops carry the load-bearing safety metadata."""
 
-    @pytest.mark.parametrize("op_id", ["bind9.record.add", "bind9.record.remove"])
-    def test_write_op_is_caution(self, op_id: str) -> None:
-        op = next(o for o in BIND9_OPS if o.op_id == op_id)
+    def test_record_add_is_caution(self) -> None:
+        op = next(o for o in BIND9_OPS if o.op_id == "bind9.record.add")
         assert op.safety_level == "caution"
         assert op.requires_approval is False
+
+    def test_record_remove_is_destructive_requires_approval(self) -> None:
+        """#3247 operator ruling — the whole-name clear rides the governed tier.
+
+        ``record.remove`` had the *broader* blast radius than the
+        destructive-tier ``record.delete`` while sitting caution-tier +
+        approval-free (the bypass this issue named). Promotion folds it onto
+        the same gate: destructive, approval-required, and delete/destructive
+        tagged so the single-source classifiers (satellite exclusion,
+        flight-recorder body-exclusion, grant guard) pick it up.
+        """
+        op = next(o for o in BIND9_OPS if o.op_id == "bind9.record.remove")
+        assert op.safety_level == "destructive"
+        assert op.requires_approval is True
+        assert "destructive" in op.tags
+        assert "delete" in op.tags
 
     @pytest.mark.parametrize("op_id", ["bind9.record.add", "bind9.record.remove"])
     def test_write_op_description_carries_global_atomic_warning(self, op_id: str) -> None:

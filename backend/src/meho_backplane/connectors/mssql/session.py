@@ -79,6 +79,7 @@ __all__ = [
     "fetch_rows",
     "jsonable_row",
     "quote_identifier",
+    "quote_identifier_for_bound_statement",
     "resolve_sql_credentials",
 ]
 
@@ -171,6 +172,26 @@ def quote_identifier(name: object) -> str:
     """
     validated = assert_valid_identifier(name)
     return "[" + validated.replace("]", "]]") + "]"
+
+
+def quote_identifier_for_bound_statement(name: object) -> str:
+    """:func:`quote_identifier`, additionally ``%``-escaped for a bound statement.
+
+    Use this — never :func:`quote_identifier` — whenever the bracket-escaped
+    identifier is interpolated into a statement that **also** carries pyformat
+    bound params (``%(path)s`` on ``BACKUP`` / ``RESTORE``). ``pytds`` runs
+    ``operation % params`` over the **whole** statement string when a param dict
+    is passed (``tds_session.py``), so a literal ``%`` in the interpolated
+    identifier — a legal ``sysname`` character — is consumed by that pass:
+    ``[Q1%Growth]`` raises (``%G`` is not a format code), and ``[db%(path)s]``
+    silently rewrites to the bound value, targeting the wrong database. Doubling
+    ``%`` → ``%%`` makes the pass emit a single literal ``%``, preserving the
+    identifier exactly. A statement that passes **no** params (``CREATE`` /
+    ``DROP``, where ``pytds`` skips the ``%`` pass) must use plain
+    :func:`quote_identifier` instead — doubling there would leave a literal
+    ``%%``.
+    """
+    return quote_identifier(name).replace("%", "%%")
 
 
 def jsonable_row(row: dict[str, Any]) -> dict[str, Any]:

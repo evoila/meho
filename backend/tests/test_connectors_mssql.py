@@ -479,6 +479,54 @@ async def test_restore_without_replace_omits_the_clause(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dbname", ["Q1%Growth", "db%(path)s", "pct%%name"])
+async def test_backup_restore_percent_db_name_survives_pytds_param_pass(
+    monkeypatch: pytest.MonkeyPatch, dbname: str
+) -> None:
+    """A '%' in a db name (legal sysname) survives pytds's ``operation % params``.
+
+    pytds runs ``operation % params`` over the whole statement when a param
+    dict is passed, so the bracket-escaped identifier is ``%``-doubled. This
+    simulates that exact pass and asserts it neither raises (``%G``) nor
+    rewrites the identifier to the bound value (``%(path)s``) — the target
+    stays correct and the path stays bound.
+    """
+    calls = _capture_execute(monkeypatch)
+    conn = MssqlConnector()
+    path = "/backups/x.bak"
+    await conn.backup_database(_make_operator(), _MssqlTarget(), {"database": dbname, "path": path})
+    await conn.backup_restore(_make_operator(), _MssqlTarget(), {"database": dbname, "path": path})
+
+    expected_identifier = "[" + dbname.replace("]", "]]") + "]"
+    for call in calls:
+        sql = call["sql"]
+        assert path not in sql  # path is bound, never in the statement text
+        # Exactly what pytds does with a dict param: %(path)s -> a placeholder,
+        # then `operation % {names}`. Must not raise, and must restore the
+        # correct identifier + a bound placeholder.
+        rendered = sql % {"path": "@P1"}
+        assert expected_identifier in rendered, (dbname, rendered)
+        assert "@P1" in rendered
+
+
+@pytest.mark.asyncio
+async def test_create_drop_do_not_double_percent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create/drop pass no params, so pytds skips the ``%`` pass — no doubling.
+
+    Doubling here would leave a literal ``%%`` in the executed DDL. Guards
+    against someone "fixing" create/drop to use the bound-statement escaper.
+    """
+    calls = _capture_execute(monkeypatch)
+    conn = MssqlConnector()
+    await conn.databases_create(_make_operator(), _MssqlTarget(), {"database": "Q1%Growth"})
+    await conn.databases_drop(_make_operator(), _MssqlTarget(), {"database": "Q1%Growth"})
+    for call in calls:
+        assert call["params"] is None  # no bound params on create/drop
+        assert "[Q1%Growth]" in call["sql"]  # single %, not doubled
+        assert "%%" not in call["sql"]
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_an_injection_identifier_via_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

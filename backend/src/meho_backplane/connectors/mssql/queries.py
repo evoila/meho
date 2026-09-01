@@ -36,6 +36,7 @@ from meho_backplane.connectors.mssql.session import (
     execute_statement,
     fetch_rows,
     quote_identifier,
+    quote_identifier_for_bound_statement,
 )
 
 __all__ = [
@@ -333,11 +334,13 @@ async def backup_database(
 ) -> dict[str, Any]:
     """``BACKUP DATABASE ... TO DISK`` — caution (recoverable, creates a file).
 
-    The database name rides :func:`quote_identifier` (identifier, not bindable);
-    the destination *path* binds as a **value** (``TO DISK = %(path)s``) so an
-    operator-supplied path can never inject T-SQL.
+    The database name rides :func:`quote_identifier_for_bound_statement`
+    (identifier, not bindable — bracket-escaped **and** ``%``-doubled because
+    this statement also carries the ``%(path)s`` bound param); the destination
+    *path* binds as a **value** (``TO DISK = %(path)s``) so an operator-supplied
+    path can never inject T-SQL.
     """
-    identifier = quote_identifier(database)
+    identifier = quote_identifier_for_bound_statement(database)
     await execute_statement(
         target,
         operator,
@@ -365,10 +368,12 @@ async def restore_database(
 
     Overwrites the target database, so the tier is ``dangerous`` +
     ``requires_approval`` (a dispatch parks for a human decision before the
-    restore runs). The database name is bracket-escaped; the source *path*
-    binds as a value. ``WITH REPLACE`` is appended only when *replace* is true.
+    restore runs). The database name is bracket-escaped **and** ``%``-doubled
+    (:func:`quote_identifier_for_bound_statement` — this statement also carries
+    the ``%(path)s`` bound param); the source *path* binds as a value.
+    ``WITH REPLACE`` is appended only when *replace* is true.
     """
-    identifier = quote_identifier(database)
+    identifier = quote_identifier_for_bound_statement(database)
     clause = " WITH REPLACE" if replace else ""
     await execute_statement(
         target,

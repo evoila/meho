@@ -188,7 +188,7 @@ the most-specific class first (`PermissionDenied` is a subclass of
 `DisconnectError` in asyncssh) so the dispatch maps to the right
 reason.
 
-## Shipped op surface (T1 + T2 + T3 + T4 = 11 ops)
+## Shipped op surface (T1 + T2 + T3 + T4 + #3231 = 12 ops)
 
 | Op id | Handler | Safety | Description |
 | ----- | ------- | ------ | ----------- |
@@ -198,6 +198,7 @@ reason.
 | `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; optional `view` disambiguates split-horizon zones (#2897); verify predicate = `dig` returns the new IP, or `rndc zonestatus` serial-match when a `view` is given |
 | `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; same `view` disambiguation as `record.add`; verify predicate = `dig` no longer resolves the FQDN, or `rndc zonestatus` serial-match when a `view` is given |
+| `bind9.record.delete` | `Bind9Connector.bind9_record_delete` | `destructive` | Governed-delete tier (#3231): deletes exactly ONE record scoped by `(zone, name, type, rdata?)` — never zone-wide, never a whole-rrset sweep. Mandatory human approval + preview-hash binding + blast-radius (the exact record + its siblings). Fail-closed structured refusals `not_found` / `ambiguous` (candidates named) / `unmanaged_zone`; verify predicate confirms the single deleted value is gone (view → `rndc zonestatus`) |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
 | `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
 | `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
@@ -209,6 +210,51 @@ views file can dark the whole resolver. The production-path gate
 (G7/G10) keys on `safety_level`, so the apply ops carry an additional
 warning in their `description` + `llm_instructions` that any agent
 proposing the write sees.
+
+### Governed single-record delete (`bind9.record.delete`, #3231)
+
+`bind9.record.delete` is the bind9 arm of the governed-delete tier
+(decision `docs/decisions/governed-delete-operations.md`, first modeled by
+`vmware.composite.vm.destroy` / #3198) — and the **first
+`safety_level="destructive"` op on a typed SSH connector**. It rides the
+hardest gate MEHO has: mandatory human approval (no agent path, no standing
+grant, no self-approval even under break-glass), a mandatory preview-hash
+binding, and a mandatory blast-radius statement. It folds into the
+delete-shaped classifier via the **single source** — its
+`safety_level="destructive"` (not a re-declared pattern list, per the #3213
+fail-open lesson); `ServicePrincipalGrantService.create` refuses it even with
+the op-id glob patterns blanked.
+
+It is deliberately **narrower** than `bind9.record.remove`: `remove` clears
+every A + AAAA at a name in one caution-tier write, while `delete` removes
+**exactly one** record scoped by `(zone, name, type, rdata?)`. `type` is
+required; `rdata` is required only to disambiguate a name that carries more
+than one value of that type.
+
+Layout mirrors the record write ops:
+
+* **Handler** `ops_record.bind9_record_delete` — a fail-closed re-read at
+  dispatch time (post-approval, like `vm.destroy`'s power-state re-read):
+  resolves the owning zone (`unmanaged_zone` refusal on a
+  `ZoneResolutionError`), reads the zonefile, and resolves the target via the
+  pure `_resolve_delete_target` — `not_found` (no silent success),
+  `ambiguous` (candidates named), or a single value. On a unique target it
+  removes that one value via the T3 atomic-apply primitive
+  (`_delete_one_record_from_zonefile` keeps siblings), with a verify predicate
+  (`_dig_value_absent_verify`, or the view-precise `rndc zonestatus`) that
+  confirms the deleted value is gone — `deleted=True` only then.
+* **Preview builder** `ops_record_delete_preview._bind9_record_delete_preview`
+  — read-only; wired onto the `_preview` hook (mirroring
+  `argocd.ops_write_preview`) via a side-effect import in `bind9/__init__.py`.
+  Builds the `blast_radius` block (object = the exact record; children = its
+  current sibling values; `irreversibility="recreatable"` — a DNS record can
+  be re-added from the captured rdata). Declines (→ park refused
+  `blast_radius_required`) when the zone is unmanaged or the zonefile is
+  unreadable.
+
+All refusal envelopes carry `status` / `deleted=False` / `guidance` — the
+`vm.destroy` structured-refusal shape. See the approvals-plane note in
+`approvals.md`.
 
 ## Atomic-apply primitive (T3 #589)
 

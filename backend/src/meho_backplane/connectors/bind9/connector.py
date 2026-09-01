@@ -746,6 +746,27 @@ class Bind9Connector(SshConnector):
 
         return await _bind9_record_remove(self, target, params, operator)
 
+    async def bind9_record_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.record.delete`` op (#3231).
+
+        Governed single-record delete on the ``destructive`` safety tier
+        (decision ``docs/decisions/governed-delete-operations.md``). Deletes
+        exactly one record scoped by ``(zone, name, type, rdata?)`` via the T3
+        atomic-apply primitive; the dispatcher's destructive-tier gate
+        (mandatory human approval + preview-hash binding + blast-radius) sits
+        in front of this handler.
+        """
+        from meho_backplane.connectors.bind9.ops_record import (
+            bind9_record_delete as _bind9_record_delete,
+        )
+
+        return await _bind9_record_delete(self, target, params, operator)
+
     async def bind9_config_show(
         self,
         target: Target,

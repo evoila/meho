@@ -663,6 +663,26 @@ refused without a matching hash, park refused without a blast-radius block,
 and the full preview→park→human-approve→audited-resume flow — is pinned in
 `tests/test_connectors_vmware_rest_vm_destroy.py`.
 
+### Second governed delete: `bind9.record.delete` (#3231)
+
+The bind9 arm of the tier — and the **first `destructive` op on a typed SSH
+connector** (the vm.destroy machinery above needed no change to reach it, so
+this Task added no gate code, only the op). `bind9.record.delete` deletes
+exactly one DNS record scoped by `(zone, name, type, rdata?)`, for the
+DNS-retirement leg of a governed environment teardown in a shared zone. It
+reuses everything above unchanged: the typed op is `destructive` +
+`requires_approval=True`, so it folds into the delete-shaped classifier via
+the single-source `safety_level` (`_delete_shaped_reason_by_descriptor`); the
+`destructive` previewability gate already covers typed ops (not only
+composites); its blast radius (`ops_record_delete_preview`) names the exact
+record + its sibling values with `irreversibility="recreatable"`. Fail-closed
+structured refusals mirror `vm.destroy`'s `not_powered_off`: `not_found`,
+`ambiguous` (candidates named), `unmanaged_zone`. Conformance is pinned in
+`tests/test_connectors_bind9_record_delete.py` — including a monkeypatch test
+proving the grant refusal folds via the single source with the op-id glob
+patterns blanked (the #3213 fail-open guard). See
+`connectors-bind9.md` for the handler/preview layout.
+
 ## Uniform op-identity envelope (#2681)
 
 The preview base varies by outcome — a bespoke `{op_class, preview}`, the

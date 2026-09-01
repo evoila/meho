@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
+
+- **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based
+  protocol-mapper recipe that provisions the approve-only `approver` JWT
+  claim the backplane started reading in #3270 — closing the "capability
+  that reads a claim nothing mints" gap. `kcadm.sh` is the primary path
+  (Admin Console steps follow as version-tolerant notes): create an
+  `approvers` group and a Script Mapper that emits `approver: true` for
+  its members (Shape A), or a script-free per-user **User Attribute**
+  mapper (Shape B); both emit **Claim JSON Type boolean** on the access
+  token, aligned with `JWT_APPROVER_CLAIM_NAME` (default `approver`), and
+  fail closed for everyone else. Includes decode + live decouple
+  verification (a `read_only + approver` principal clears
+  `POST /api/v1/approvals/{id}/decide` but is refused 403 on
+  `POST /api/v1/operations/call`), a note that the operator console
+  `/ui/approvals*` admits the same capability (#3282 / #3285), and a
+  rollback note covering the access-token-TTL caveat. Forward-pointers
+  added from `docs/codebase/approvals.md` and `docs/codebase/backend.md`.
+
 ### Added — mssql: SQL Server typed connector (TDS-direct) (#3264)
 
 - New `mssql` typed connector for Microsoft SQL Server 2022 (registry triple

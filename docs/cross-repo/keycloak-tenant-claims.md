@@ -546,6 +546,275 @@ Shape B). The backplane also accepts the string forms `"true"` /
 > realm-side mapper is applied by the lab operator when the first
 > cross-tenant platform role is provisioned.
 
+## The `approver` approve-only capability — group-based recipe (#3243)
+
+`tenant_role` gates *dispatch* (who may run operations). A separate,
+**optional** boolean claim — `approver` — gates the *approvals plane*
+(list / show / approve / reject / decide) **without** granting dispatch.
+[#3243](https://github.com/evoila/meho/issues/3243) (backplane side
+[#3270](https://github.com/evoila/meho/issues/3270)) lifts it onto
+`Operator.approver` so a **dedicated approver** can be provisioned as
+`read_only` role **+** `approver=true`: it clears a four-eyes gate yet is
+denied `POST /api/v1/operations/call` (dispatch stays
+`require_role(operator)`, and `read_only` ranks below `operator`). This
+recipe is the realm-side provisioning path — without it the capability is
+code that reads a claim nothing mints.
+
+### What the backplane reads
+
+- **Claim name:** `approver` by default, overridable with
+  `JWT_APPROVER_CLAIM_NAME` (settings field
+  `Settings.jwt_approver_claim_name`). The Token Claim Name the mapper
+  emits **must** equal this value.
+- **Accepted shapes** (`auth/jwt._extract_approver`): a JSON boolean
+  `true` / `false` (the canonical mapper output for
+  **Claim JSON Type: boolean**) **or** the strings `"true"` / `"false"`
+  (case-insensitive) for realms whose mapper emits the claim as a string.
+- **Fail-closed:** an **absent** claim, `null`, a number, an object, or
+  any unrecognised string resolves to **`False`** — so every existing
+  token, and every principal whose token does not carry the claim, is a
+  non-approver unless the realm explicitly grants it. A
+  present-but-malformed value is logged `malformed_approver_claim` and
+  still fails closed.
+- **Gate:** `auth/rbac.require_approvals_access` admits a principal that
+  is `operator`-or-higher **or** carries `approver=true`. Dispatch
+  (`POST /api/v1/operations/call`) is untouched — it stays
+  `require_role(operator)`, and the `sub`-keyed self-approval refusal
+  (#1401) still applies (an approver cannot approve a request it parked).
+
+### Mapper design — a group-gated boolean needs a script (or a per-user attribute)
+
+Stock Keycloak has **no built-in mapper that turns "member of group *X*"
+into a fixed boolean claim.** The **Group Membership** mapper emits the
+user's group *paths* (a string / JSON array), not a boolean; the
+**Hardcoded claim** mapper emits its constant for *every* token on the
+client, ungated; and there is **no** OIDC "Group Attribute" mapper in the
+stock distribution (the package ships `GroupMembershipMapper` and
+`UserAttributeMapper`, verified against the [26.x mapper
+javadocs](https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/protocol/oidc/mappers/package-summary.html)).
+Two shapes meet the contract, mirroring the `tenant_role` Shape A / Shape
+B split in [Step 4](#step-4--configure-the-tenant_role-protocol-mapper).
+
+Both shapes rely on the same coercion fact: an attribute / script value
+of the string `"true"` under **Claim JSON Type: boolean** is emitted as a
+JSON boolean `true` — Keycloak's `OIDCAttributeMapperHelper` converts it
+with `Boolean.valueOf(String)` (case-insensitive). Even if a realm leaves
+the type as `String`, the backplane accepts `"true"` / `"false"`, so the
+recipe is robust either way; **boolean** is the canonical choice.
+
+The commands below use `kcadm.sh` (the admin REST API path — scriptable,
+IaC-friendly, and stable across Console-label changes) as the **primary**
+path; the Admin Console equivalents follow as version-tolerant notes.
+Assume the operator has authenticated `kcadm.sh config credentials` and
+exported `REALM` and the backplane client's `clientId`
+(the one whose `aud` matches `KEYCLOAK_AUDIENCE`, typically `meho-mcp`).
+
+#### Shape A (recommended, group-driven) — a Script Mapper gated on the `approvers` group
+
+Create the group, then a Script Mapper on the backplane client that emits
+`approver: true` for members and nothing for everyone else.
+
+```bash
+# 1. Create the approvers group.
+kcadm.sh create groups -r "$REALM" -s name=approvers
+
+# 2. Resolve the backplane client's internal id (protocol mappers are
+#    created under the client's UUID, not its clientId).
+CID=$(kcadm.sh get clients -r "$REALM" -q clientId="$CLIENT_ID" \
+  --fields id --format csv --noquotes)
+
+# 3. Create the Script Mapper. The script emits `true` for members of the
+#    approvers group and leaves `exports` undefined otherwise, so Keycloak
+#    omits the claim for non-members (which the backplane reads as false).
+cat > /tmp/approver-script-mapper.json <<'JSON'
+{
+  "name": "approver",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-script-based-protocol-mapper",
+  "config": {
+    "script": "var it = user.getGroupsStream().iterator();\nwhile (it.hasNext()) {\n  if (it.next().getName() == 'approvers') { exports = true; break; }\n}\n",
+    "claim.name": "approver",
+    "jsonType.label": "boolean",
+    "access.token.claim": "true",
+    "id.token.claim": "false",
+    "userinfo.token.claim": "true"
+  }
+}
+JSON
+kcadm.sh create "clients/$CID/protocol-mappers/models" -r "$REALM" \
+  -f /tmp/approver-script-mapper.json
+
+# 4. Assign an approver into the group (repeat per approver). Avoid the
+#    shell-reserved names UID / GID (read-only in bash and zsh).
+USER_ID=$(kcadm.sh get users -r "$REALM" -q username=approver-bob \
+  --fields id --format csv --noquotes)
+GROUP_ID=$(kcadm.sh get groups -r "$REALM" -q search=approvers \
+  --fields id --format csv --noquotes)
+kcadm.sh update "users/$USER_ID/groups/$GROUP_ID" -r "$REALM" -n
+```
+
+Admin Console equivalent (version-tolerant — the mapper type and config
+keys are stable; only the Console labels drift across 22.x–26.x): **Clients**
+→ the backplane client → **Client scopes** → its **dedicated** scope →
+**Mappers** → **Add mapper** → **By configuration** → **Script Mapper**;
+set **Name** `approver`, paste the same script body, **Token Claim Name**
+`approver`, **Claim JSON Type** `boolean`, **Add to access token** on,
+**Add to ID token** off, **Add to userinfo** on. Assign users to the
+`approvers` group under **Users** → user → **Groups** → **Join Group**.
+
+Script Mapper requires the script-mappers feature (`--features=scripts` on
+`kc.sh start`, disabled by default since Keycloak 18) and a JS engine on
+the classpath (GraalJS ships with current distributions) — the same
+caveat as `tenant_role` Shape A. `user.getGroupsStream()` is the current
+`UserModel` API (Keycloak 19+); match on the top-level group name.
+
+#### Shape B (no scripts) — `approver` as a per-user attribute
+
+For realms that cannot enable the scripts feature, stamp `approver=true`
+directly on each approver user and copy it with a built-in **User
+Attribute** mapper. The `approvers` group from Shape A is still useful as
+RBAC bookkeeping on the realm side, but under Shape B the per-user
+attribute — not group membership — drives the claim (mirrors
+`tenant_role` Shape B).
+
+```bash
+# 1. Stamp the attribute on each approver user (USER_ID, not the
+#    shell-reserved UID which is read-only in bash and zsh).
+USER_ID=$(kcadm.sh get users -r "$REALM" -q username=approver-bob \
+  --fields id --format csv --noquotes)
+kcadm.sh update "users/$USER_ID" -r "$REALM" -s 'attributes.approver=["true"]'
+
+# 2. One User Attribute mapper on the backplane client.
+CID=$(kcadm.sh get clients -r "$REALM" -q clientId="$CLIENT_ID" \
+  --fields id --format csv --noquotes)
+cat > /tmp/approver-attr-mapper.json <<'JSON'
+{
+  "name": "approver",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-usermodel-attribute-mapper",
+  "config": {
+    "user.attribute": "approver",
+    "claim.name": "approver",
+    "jsonType.label": "boolean",
+    "access.token.claim": "true",
+    "id.token.claim": "false",
+    "userinfo.token.claim": "true",
+    "aggregate.attrs": "false",
+    "multivalued": "false"
+  }
+}
+JSON
+kcadm.sh create "clients/$CID/protocol-mappers/models" -r "$REALM" \
+  -f /tmp/approver-attr-mapper.json
+```
+
+Admin Console equivalent: **Users** → user → **Attributes** → add
+`approver` = `true`; then **Clients** → backplane client → **Client
+scopes** → dedicated scope → **Mappers** → **Add mapper** → **By
+configuration** → **User Attribute** with **User Attribute** `approver`,
+**Token Claim Name** `approver`, **Claim JSON Type** `boolean`, **Add to
+access token** on, **Aggregate attribute values** off, **Multivalued**
+off. Both shapes put the same `"approver": true` on the wire; a user with
+neither the group (Shape A) nor the attribute (Shape B) carries no
+`approver` claim and is a non-approver.
+
+### Verification
+
+Two operator checks against a live realm, plus a code-side proof that
+runs without one.
+
+**Check A — decoded access token carries the claim.** Mint a token for a
+member and decode its body (reuse the base64url decoder from
+[Check 2](#check-2--decoded-access-token-carries-the-claims) above):
+
+```bash
+echo "$TOKEN" | cut -d. -f2 | python3 -c '
+import base64, json, sys
+p = sys.stdin.read().strip(); p += "=" * (-len(p) % 4)
+print(json.loads(base64.urlsafe_b64decode(p)).get("approver"))
+'
+# Member  → True ;  non-member → None (claim absent → backplane reads false)
+```
+
+**Check B — the decouple #3243 promises (operator execution step).**
+Requires a deployed backplane and a parked `requires_approval` request.
+With a `read_only` **+** `approver=true` token, the approvals decide route
+clears the gate while dispatch stays refused:
+
+```bash
+# Clears require_approvals_access (200, decision applied):
+curl -sS -X POST -H "Authorization: Bearer $APPROVER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"approved"}' \
+  "$BASE/api/v1/approvals/$REQUEST_ID/decide"
+
+# Refused before the dispatcher runs (HTTP 403 insufficient_role — the
+# require_role(operator) dependency rejects read_only):
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  -H "Authorization: Bearer $APPROVER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"connector_id":"...","op_id":"...","params":{}}' \
+  "$BASE/api/v1/operations/call"
+# → 403
+```
+
+**Code-side proof (no live realm — runs in CI).** The claim-extraction
+and decouple behaviour the two live checks confirm is pinned by the
+#3270 unit suite; run it to prove the semantics the mapper feeds into:
+
+```bash
+cd backend && uv run pytest \
+  tests/test_auth_approver.py \
+  tests/test_auth_rbac.py \
+  tests/test_api_v1_approvals.py -q
+```
+
+`test_auth_approver.py` pins the accepted shapes (JSON `true`/`false`,
+string `"true"`/`"false"`, **absent → false**, malformed → false);
+`test_auth_rbac.py::test_approvals_access_read_only_with_approver_passes`
+and `::test_approver_flag_does_not_grant_dispatch` pin the gate decouple;
+`test_api_v1_approvals.py` pins `read_only + approver` → **403
+`insufficient_role`** on `POST /api/v1/operations/call`.
+
+### Operator console admits the same capability (#3282)
+
+The complete human approver workflow needs **both** the claim provisioned
+(this recipe) **and** a surface that admits it. Both surfaces are live:
+
+- **REST** — the routes above, gated by `require_approvals_access`.
+- **Operator console** — `/ui/approvals*` reconstructs the `Operator` via
+  the same `_operator_from_claims` (which lifts the `approver` claim) and
+  delegates to the shared `approve_request` / `reject_request`, so a
+  `read_only + approver` operator can approve / reject from the console
+  bell and the full-page queue. This parity is pinned by
+  [#3282](https://github.com/evoila/meho/issues/3282) /
+  PR [#3285](https://github.com/evoila/meho/pull/3285) (merged
+  `b03ad98e`); the 403 banner names **both** levers ("operator role OR
+  the approver capability"). No separate console flag is needed.
+
+Ordering: the console admission (#3282) already merged, so the only
+remaining gap this recipe closes is realm-side provisioning. Once a member
+of the `approvers` group (Shape A) or a user carrying `approver=true`
+(Shape B) mints a token, the REST decide path and the console are both
+immediately usable by that approver.
+
+### Rollback / removal
+
+- **Shape A:** remove the user from the `approvers` group
+  (`kcadm.sh delete "users/$USER_ID/groups/$GROUP_ID" -r "$REALM"`).
+- **Shape B:** clear the attribute
+  (`kcadm.sh update "users/$USER_ID" -r "$REALM" -s 'attributes.approver=[]'`).
+
+Either takes effect on the **next** token mint. An **already-minted**
+access token keeps `approver: true` until it expires — the capability
+rides the token, not a per-request DB lookup, so removal is not
+retroactive. For immediate revocation, end the user's SSO sessions
+(`kcadm.sh create "users/$USER_ID/logout" -r "$REALM"`) so the next request
+must re-authenticate (`USER_ID` resolved as in the recipe above), and/or
+keep the realm's access-token lifespan short (the Keycloak default is 5
+minutes). Same in-flight-token caveat as the `tenant_role`
+[troubleshooting](#troubleshooting) rows.
+
 ## Status
 
 | Item | Side | State |
@@ -556,6 +825,8 @@ Shape B). The backplane also accepts the string forms `"true"` /
 | Per-tenant audit-row isolation test | producer | tracked at [#222](https://github.com/evoila/meho/issues/222) (T6) |
 | Realm groups + roles + mappers configured on `evba.lab` | consumer | pending — applied by the dogfooding lab operator before deploying v0.2 |
 | End-to-end `meho status` against v0.2 returns 200 | consumer | pending — the closing-comment artefact on the parent Initiative |
+| Backplane reads `approver` from JWT + `require_approvals_access` decouple | producer | landed — [#3270](https://github.com/evoila/meho/issues/3270) (`auth/jwt._extract_approver`, `auth/rbac.require_approvals_access`); console parity [#3282](https://github.com/evoila/meho/issues/3282) |
+| `approvers` group + `approver` mapper configured on the realm | consumer | pending — applied by the operator when the first dedicated approver is provisioned (this doc's [approver recipe](#the-approver-approve-only-capability--group-based-recipe-3243)) |
 
 ## References
 
@@ -564,6 +835,7 @@ Shape B). The backplane also accepts the string forms `"true"` /
 - Sibling handshake: [`./targets-yaml.md`](./targets-yaml.md) — `targets.yaml` `rdc-meho` entry; the per-tenant UUID minted in Step 1 lands here in v0.2.next
 - Sibling handshake: [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md) — per-PR ephemeral smoke + `repository_dispatch`
 - Backend codebase walkthrough: [`../codebase/backend.md`](../codebase/backend.md) — `Settings`, `verify_jwt`, `Operator` model
+- Approve-only capability: [#3243](https://github.com/evoila/meho/issues/3243) / [#3270](https://github.com/evoila/meho/issues/3270) — `auth/jwt._extract_approver`, `auth/rbac.require_approvals_access`; approvals surface in [`../codebase/approvals.md`](../codebase/approvals.md)
 - Keycloak Server Admin Guide — [Protocol Mappers](https://www.keycloak.org/docs/latest/server_admin/index.html#protocol-mappers)
 - Keycloak OIDC layers — [UserInfo endpoint](https://www.keycloak.org/securing-apps/oidc-layers)
 - Consumer's Keycloak realm: see `evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/INVENTORY.md` Keycloak section

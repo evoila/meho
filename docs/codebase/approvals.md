@@ -858,6 +858,12 @@ line. The `/result` read is deliberately **not** on this gate: it is
 principal-scoped on `principal_sub`, so an approver deciding a request it
 did not park gains no result-read rights.
 
+The realm-side provisioning path for the `approver` claim — a group-based
+Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
+secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
+token-decode + live decouple verification, and a rollback note — lives in
+[`../cross-repo/keycloak-tenant-claims.md`](../cross-repo/keycloak-tenant-claims.md#the-approver-approve-only-capability--group-based-recipe-3243).
+
 | Verb | Path | Access | Purpose |
 |---|---|---|---|
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |

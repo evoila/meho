@@ -29,7 +29,7 @@ sweep bites without a DB.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -79,7 +79,7 @@ _KNOWN_DESTRUCTIVE_OPS_WITH_BUILDERS: frozenset[str] = frozenset(
 
 
 def _destructive_ops_missing_builder(
-    op_ids: object,
+    op_ids: Iterable[str],
     *,
     registered_builders: Mapping[str, Any],
     exemptions: frozenset[str],
@@ -92,7 +92,7 @@ def _destructive_ops_missing_builder(
     """
     return sorted(
         op_id
-        for op_id in set(op_ids)  # type: ignore[arg-type]
+        for op_id in set(op_ids)
         if op_id not in registered_builders and op_id not in exemptions
     )
 

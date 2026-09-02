@@ -47,6 +47,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_from_template_composite,
     vm_create_composite,
     vm_deploy_from_library_composite,
+    vm_disk_attach_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
 )
@@ -423,6 +424,127 @@ async def test_disk_grow_human_operator_vmomi_write_auto_executes(
     assert isinstance(out, dict)
     assert out["status"] == "grown"
     # The reconfigure write executed on the session; the sub-op auto-executed.
+    assert len(conn.reconfig_writes) == 1
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+
+
+# ===========================================================================
+# vm.disk.attach — the shared-attach ReconfigVM_Task flows through the same
+# gate as disk-grow (#3256); the op reuses _RECONFIG_OP_ID above
+# ===========================================================================
+
+
+class _DiskAttachRecordingConnector:
+    """Recording double for the shared-attach governance tests.
+
+    Serves the ``config.hardware.device`` read (one SCSI controller, no
+    device at the target unit) + the ``Task.info`` poll, and records every
+    ``ReconfigVM_Task`` write so the tests can assert the mutating vmomi POST
+    never fired when the gate parks / denies.
+    """
+
+    def __init__(self) -> None:
+        self.reconfig_writes: list[Any] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        if path.endswith("/ReconfigVM_Task"):
+            self.reconfig_writes.append(json)
+            return {"type": "Task", "value": "task-attach-1"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            controller = {"_typeName": "VirtualLsiLogicSASController", "key": 1000, "busNumber": 1}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                        "propSet": [{"name": "config.hardware.device", "val": [controller]}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-attach-1"},
+                    "propSet": [{"name": "info", "val": {"state": "success"}}],
+                }
+            ]
+        }
+
+
+_ATTACH_PARAMS = {
+    "vm": "vm-1",
+    "vmdk_path": "[vsanDatastore] wsfc-quorum/quorum.vmdk",
+    "controller_key": 1000,
+    "unit_number": 0,
+}
+
+
+@pytest.mark.asyncio
+async def test_disk_attach_gated_vmomi_write_queues_and_never_reaches_wire(
+    session: AsyncSession,
+) -> None:
+    """An agent-gated ReconfigVM_Task add queues for approval; the vmomi write never fires."""
+    await _grant(
+        principal_sub="agent-write-composite",
+        op_pattern=_RECONFIG_OP_ID,
+        verdict=PermissionVerdict.NEEDS_APPROVAL,
+    )
+    conn = _DiskAttachRecordingConnector()
+    out = await vm_disk_attach_composite(
+        operator=_operator(),
+        target=None,
+        params=dict(_ATTACH_PARAMS),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _RECONFIG_OP_ID
+    request_id = uuid.UUID(out.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.op_id == _RECONFIG_OP_ID
+    assert row.connector_id == "vmware-rest-9.0"
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    assert conn.reconfig_writes == []
+
+
+@pytest.mark.asyncio
+async def test_disk_attach_dangerous_vmomi_write_denied_without_grant(
+    session: AsyncSession,
+) -> None:
+    """An agent with no grant is denied the dangerous ReconfigVM_Task add; it never runs."""
+    conn = _DiskAttachRecordingConnector()
+    out = await vm_disk_attach_composite(
+        operator=_operator(sub="agent-no-grant"),
+        target=None,
+        params=dict(_ATTACH_PARAMS),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "denied"
+    assert out.op_id == _RECONFIG_OP_ID
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    assert conn.reconfig_writes == []
+
+
+@pytest.mark.asyncio
+async def test_disk_attach_human_operator_vmomi_write_auto_executes(
+    session: AsyncSession,
+) -> None:
+    """A human operator's already-approved composite auto-executes the ReconfigVM_Task add."""
+    conn = _DiskAttachRecordingConnector()
+    out = await vm_disk_attach_composite(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        target=None,
+        params=dict(_ATTACH_PARAMS),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "attached"
     assert len(conn.reconfig_writes) == 1
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0

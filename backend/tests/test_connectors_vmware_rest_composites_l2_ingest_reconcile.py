@@ -453,6 +453,26 @@ def test_vm_disk_grow_vi_json_sub_ops_round_trip_through_ingest() -> None:
     assert required <= ingested_op_ids
 
 
+def test_vm_disk_attach_vi_json_sub_op_manifest_is_the_expected_pair() -> None:
+    """Pin the shared-attach vi-json manifest so a drift can't shrink the reconcile (#3256).
+
+    ``vm.disk.attach`` rides the exact #2893 substrate methods disk-grow pins:
+    ``RetrievePropertiesEx`` (locate the SCSI controller + confirm the unit is
+    free) + ``ReconfigVM_Task`` (the ``VirtualDeviceConfigSpec`` add, no
+    ``fileOperation``). Both paths are already reconciled against the pinned
+    ``vi-json.yaml`` by the disk-grow round-trip / paths-exist lanes above (the
+    manifests are identical), so this pin only guards the attach manifest from
+    drifting to a bogus path.
+    """
+    assert set(_write._VIM_SUB_OPS_VM_DISK_ATTACH) == {
+        "POST:/VirtualMachine/{moId}/ReconfigVM_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+    # The two shared-attach paths are the disk-grow pair verbatim — the
+    # already-passing round-trip lane covers their ingest fidelity.
+    assert set(_write._VIM_SUB_OPS_VM_DISK_ATTACH) == set(_write._VIM_SUB_OPS_VM_DISK_GROW)
+
+
 def _vi_json_path_item_has_post(spec_text: str, path: str) -> bool:
     """Whether *path* is a top-level ``paths`` item with a POST operation.
 

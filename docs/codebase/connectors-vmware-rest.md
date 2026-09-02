@@ -8,14 +8,15 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 32 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 38 hand-authored composites
 that orchestrate cross-spec workflows: 9 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 28 write
+in `#2258`; plus the four guest-operations reads `#3100`) and 29 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
-mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
+mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
+`vm.disk.attach` / `#3256`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
 `cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
@@ -478,7 +479,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 37 composites (9 reads + 28 writes) land as `source_kind="composite"`
+The 38 composites (9 reads + 29 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -545,7 +546,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 37 composites are hand-authored aggregators the connector ships as
+The 38 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -662,6 +663,7 @@ enum) are:
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
+| `vm.disk.attach` | `attached`, `invalid_vmdk_path`, `invalid_unit`, `controller_not_found`, `unit_in_use`, `timeout` (#3256; the first four are pre-write fail-closed refusals; `timeout` when the `ReconfigVM_Task` add poll gives up; a task *fault* raises `connector_error`) |
 | `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted` (the maintenance-enter is the vim `EnterMaintenanceMode_Task`, polled; fault/timeout raises `connector_error`, #2970) |
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
@@ -874,6 +876,79 @@ capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
 requested_capacity_bytes, delta_bytes}`) — the delta is the decision the
 approver makes; a failing disk read parks with the #1628
 `preview_unavailable` marker (the delta is unknowable).
+
+### Shared disks for WSFC/FCI — bus-sharing, eagerzeroedthick, shared-attach (#3256)
+
+A Windows Server Failover Cluster (WSFC) / SQL FCI needs shared disks that
+two nodes open at identical SCSI addresses. Three knobs express the build,
+all on the **vim seam**. Two of the three are genuinely REST-inexpressible:
+the pinned `Disk.VmdkCreateSpec` carries only `name` / `capacity` /
+`storage_policy` (spec-verified — no provisioning field, so `eagerzeroedthick`
+cannot be asked for over REST), and there is no per-disk multi-writer field.
+The third — controller bus-sharing — *is* REST-expressible in principle
+(`Vm.CreateSpec.scsi_adapters[].sharing` accepts `NONE`/`VIRTUAL`/`PHYSICAL`),
+but the composite folds a single fixed SCSI controller and exposes no
+`scsi_adapters` knob, so it has no bus-sharing spelling on the REST arm
+either. Rather than support each knob on a different arm, any non-default
+knob routes `vm.create` uniformly through the vim `CreateVM_Task` arm
+regardless of vCenter version (`_shared_disk_knobs_requested` generalises the
+pre-9.0 `_vim_create_required` gate; that arm requires `resource_pool` +
+`datastore` pins), and the shared-attach op is vim-only — both mirroring
+`vm.disk.grow`. All knobs at default keep the 9.0+ REST create body
+byte-identical.
+
+- **`vm.create` disk/adapter knobs.** Top-level `scsi_bus_sharing`
+  (`none`→`noSharing` | `virtual`→`virtualSharing` | `physical`→`physicalSharing`)
+  sets the folded `VirtualLsiLogicSASController`'s `sharedBus`; each `disks[]`
+  entry's `provisioning` maps to the backing's allocation fields
+  (`thin`→`thinProvisioned:true`; `thick`→`thinProvisioned:false,eagerlyScrub:false`;
+  `eagerzeroedthick`→`thinProvisioned:false,eagerlyScrub:true`) and `sharing`
+  (`multi_writer`→`sharingMultiWriter`) to the backing `sharing`. The knobs
+  apply to the **data disks** the create folds; the boot/OS disk is not part
+  of that fold, so it never lands on a shared bus.
+- **`vm.disk.attach` (the shared-attach leg).** Attaches an **existing** VMDK
+  to a VM at an explicit `controller_key` + `unit_number`. A `RetrievePropertiesEx`
+  read (un-gated) locates the SCSI controller by key and confirms the unit is
+  free; a single `ReconfigVM_Task` carries a `VirtualDeviceConfigSpec` add with
+  **no `fileOperation`** — the seam that attaches an existing backing instead of
+  creating one (`fileOperation:"create"` would make a new VMDK). Fail-closed
+  before any write: `vmdk_path` must match `[datastore] path.vmdk`
+  (`invalid_vmdk_path` — no injection reaches the backing `fileName`),
+  `unit_number` 0-15 and not the reserved 7 (`invalid_unit`), the controller
+  must exist and be SCSI (`controller_not_found`), and the unit must be free
+  (`unit_in_use`). Reuses the already-pinned #2893 vim methods
+  (`ReconfigVM_Task` + `RetrievePropertiesEx`) — no new reconcile pins.
+
+**Bus-sharing vs multi-writer — pick correctly per workload.** These are two
+different vim fields for two different clustering models:
+
+- **SCSI bus-sharing** (`scsi_bus_sharing`, the controller's `sharedBus`) is
+  the **WSFC / SQL FCI** mechanism. `physicalSharing` shares the SCSI bus
+  across VMs on different hosts and turns on SCSI-3 persistent reservations,
+  which the Windows cluster uses to arbitrate exclusive ownership of each
+  clustered disk. WSFC disks are **not** multi-writer — only one node owns a
+  disk at a time.
+- **Multi-writer** (`sharing`, the disk backing's `sharingMultiWriter`) lets
+  several VMs open the **same VMDK concurrently** with the vendor lock
+  disabled, for **application-managed** clustering where the guest coordinates
+  its own locking (e.g. Oracle RAC, or a clustered filesystem). It is a disk
+  property, independent of the controller's bus-sharing.
+
+Both require `eagerzeroedthick` disks. For a WSFC/FCI node: create the OS
+separately (or clone from a template), give each node a dedicated
+`physical`-bus-sharing controller with the EZT shared disks (`vm.create`
+`scsi_bus_sharing="physical"` + `provisioning="eagerzeroedthick"` on the first
+node), then `vm.disk.attach` the same VMDKs onto the second node at the
+identical `controller_key`/`unit_number`. Leave `sharing="none"` for WSFC —
+reach for `multi_writer` only when the guest application (not SCSI-3 PR) owns
+the locking. (`vm.create` currently folds shared disks at create time; adding
+a newly-created EZT shared disk to an *already-provisioned* VM is a follow-up,
+not in this task's scope.)
+
+The `vm.disk.attach` park-time preview is a param-echo (`{vm, vmdk_path,
+controller_key, unit_number, sharing}`) — the params fully name the blast
+radius (which disk attaches to which VM at which address), so no live read is
+needed, unlike disk-grow's from→to delta.
 
 ### Governed destructive delete (`vm.destroy`, #3198)
 

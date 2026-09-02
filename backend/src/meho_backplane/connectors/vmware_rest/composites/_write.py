@@ -90,7 +90,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import httpx
 
@@ -333,6 +333,19 @@ _VIM_SUB_OPS_VM_DISK_GROW: tuple[str, ...] = (
     _OP_RECONFIG_VM_TASK,
 )
 
+#: vi-json sub-op manifest for the ``vm.disk.attach`` shared-attach leg
+#: (#3256). Reuses the exact #2893 substrate methods the disk-grow op
+#: pins: ``RetrievePropertiesEx`` reads ``config.hardware.device`` to
+#: locate the target SCSI controller + confirm the unit is free, and
+#: ``ReconfigVM_Task`` carries the ``VirtualDeviceConfigSpec`` ``add``
+#: (no ``fileOperation`` — an attach of the existing VMDK, not a create).
+#: Both paths are already reconciled against the pinned ``vi-json.yaml``
+#: via ``_VIM_SUB_OPS_VM_DISK_GROW``; this manifest names them for the op.
+_VIM_SUB_OPS_VM_DISK_ATTACH: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIG_VM_TASK,
+)
+
 # VI-JSON polymorphic-type discriminator (``Any._typeName`` in
 # vi-json.yaml) + the VirtualDisk data-object type name. A device read
 # from ``config.hardware.device`` carries ``_typeName`` so the handler can
@@ -474,6 +487,75 @@ _GIB_IN_BYTES = 1024**3
 # arm's ``CreateSpec.disks`` — a SCSI-attached ``new_vmdk`` (matches the
 # governed raw disk-add's ``{"type": "SCSI", "new_vmdk": {...}}`` shape).
 _REST_DISK_TYPE_SCSI = "SCSI"
+
+# WSFC / FCI shared-disk knobs (#3256). All three ride the vim seam: the
+# composite's folded SCSI controller exposes no bus-sharing knob (the REST
+# ``Vm.CreateSpec.scsi_adapters[].sharing`` field could carry it, but the
+# composite folds a single fixed controller with no such knob), and
+# eagerzeroedthick provisioning + per-disk multi-writer are REST-inexpressible
+# (the pinned ``VmdkCreateSpec`` carries only name / capacity / storage_policy).
+# So any shared-disk knob routes ``vm.create`` uniformly through the vim
+# ``CreateVM_Task`` arm (like ``vm.disk.grow`` is vim-only) and the
+# shared-attach leg is vim-only. Every literal is spec-grounded against the
+# pinned ``vi-json.yaml``.
+#
+# ``VirtualSCSISharing`` enum (the controller ``sharedBus``): a bus shared
+# between VMs on the same host (``virtualSharing``) or on different hosts
+# (``physicalSharing`` — the WSFC/FCI SCSI-3 persistent-reservation mode).
+# ``noSharing`` is ``_VIM_SCSI_NO_SHARING`` above.
+_VIM_SCSI_SHARING_VIRTUAL = "virtualSharing"
+_VIM_SCSI_SHARING_PHYSICAL = "physicalSharing"
+# ``VirtualDiskSharing`` enum (the backing ``sharing`` field): multiple VMs
+# may open the same VMDK concurrently — application-managed clustering
+# (Oracle RAC), distinct from SCSI bus-sharing.
+_VIM_DISK_SHARING_MULTI_WRITER = "sharingMultiWriter"
+# The ``scsi_bus_sharing`` param enum → the ``VirtualSCSISharing`` value on
+# the folded controller's ``sharedBus``.
+_BUS_SHARING_TO_VIM: Final[dict[str, str]] = {
+    "none": _VIM_SCSI_NO_SHARING,
+    "virtual": _VIM_SCSI_SHARING_VIRTUAL,
+    "physical": _VIM_SCSI_SHARING_PHYSICAL,
+}
+# The per-disk ``provisioning`` param enum → the ``VirtualDiskFlatVer2Backing
+# Info`` allocation fields. ``thin`` allocate-on-write; ``thick`` lazy-zeroed;
+# ``eagerzeroedthick`` eager-zeroed (the shared-disk / multi-writer floor).
+_PROVISIONING_TO_BACKING: Final[dict[str, dict[str, bool]]] = {
+    "thin": {"thinProvisioned": True},
+    "thick": {"thinProvisioned": False, "eagerlyScrub": False},
+    "eagerzeroedthick": {"thinProvisioned": False, "eagerlyScrub": True},
+}
+# The per-disk ``sharing`` param enum → the backing ``sharing`` value
+# (``None`` omits the field, leaving the vendor default ``sharingNone``).
+_DISK_SHARING_TO_VIM: Final[dict[str, str | None]] = {
+    "none": None,
+    "multi_writer": _VIM_DISK_SHARING_MULTI_WRITER,
+}
+# New-device temp key for the shared-attach add — a distinct band from the
+# folded-create controller (``-100``) / disks (``-200``…) so nothing collides.
+_VIM_ATTACH_DISK_KEY = -300
+# The vim SCSI-controller ``_typeName`` family the shared-attach handler
+# accepts as a ``controller_key`` target (read-side matching only — none is
+# emitted, so the #3103 vocabulary lane is unaffected). Every name is a real
+# ``vi-json.yaml`` component schema.
+_VIM_SCSI_CONTROLLER_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        _VIRTUAL_LSILOGIC_SAS_CONTROLLER_TYPE,
+        "VirtualLsiLogicController",
+        "VirtualBusLogicController",
+        "ParaVirtualSCSIController",
+    }
+)
+# Canonical ``[datastore] dir/disk.vmdk`` datastore-path shape. The
+# shared-attach ``vmdk_path`` is validated against this before any read/write
+# so no malformed / control-char / ``..``-traversal value reaches the vim
+# backing ``fileName`` (#3256 param hygiene). There is no shell on the vim
+# backing path, so the defence is shape + control-char + ``..``-segment
+# rejection (see :func:`_valid_vmdk_path`), not quoting. The shape check is
+# the regex; the ``..``-segment reject is applied by the helper on top.
+_VALID_VMDK_PATH: Final[re.Pattern[str]] = re.compile(r"\[[^\[\]\r\n]+\]\s[^\r\n]+\.vmdk")
+# Default wall-clock bound for the shared-attach ReconfigVM_Task poll — the
+# 600s convention shared with disk-grow; module-global so tests can zero it.
+_DISK_ATTACH_TASK_TIMEOUT_SECONDS = 600.0
 
 # vim data-object ``_typeName`` discriminators for the request-body specs
 # the write composites assemble by hand (#3103, all spec-verified against
@@ -1683,6 +1765,68 @@ def _disk_capacities_bytes(disks: list[dict[str, Any]]) -> tuple[list[int] | Non
     return capacities, None
 
 
+class _VimDiskSpec(NamedTuple):
+    """A validated ``disks[]`` entry for the vim create arm (#3256).
+
+    Carries the capacity plus the WSFC/FCI provisioning + multi-writer
+    knobs, which only the vim arm can express (the REST ``VmdkCreateSpec``
+    has neither field).
+    """
+
+    capacity_bytes: int
+    provisioning: str  # "thin" | "thick" | "eagerzeroedthick"
+    sharing: str  # "none" | "multi_writer"
+
+
+def _vim_disk_specs(disks: list[dict[str, Any]]) -> tuple[list[_VimDiskSpec] | None, str | None]:
+    """Validate the ``disks`` param for the vim arm, returning per-disk specs (#3256).
+
+    Extends :func:`_disk_capacities_bytes` with the ``provisioning`` +
+    ``sharing`` knobs. Fail-closed handler-side net (the dispatch schema
+    already enums both): an unknown enum returns ``(None, reason)`` for the
+    caller to fold into a ``rolled_back`` envelope before any write.
+    """
+    specs: list[_VimDiskSpec] = []
+    for index, disk in enumerate(disks):
+        capacity_gb = disk.get("capacity_gb") if isinstance(disk, dict) else None
+        if isinstance(capacity_gb, bool) or not isinstance(capacity_gb, int) or capacity_gb < 1:
+            return None, (
+                f"disks[{index}] needs a positive integer ``capacity_gb``; got {capacity_gb!r}"
+            )
+        provisioning = disk.get("provisioning", "thin")
+        if provisioning not in _PROVISIONING_TO_BACKING:
+            return None, (
+                f"disks[{index}] provisioning {provisioning!r} is not one of "
+                "thin / thick / eagerzeroedthick"
+            )
+        sharing = disk.get("sharing", "none")
+        if sharing not in _DISK_SHARING_TO_VIM:
+            return None, (f"disks[{index}] sharing {sharing!r} is not one of none / multi_writer")
+        specs.append(_VimDiskSpec(capacity_gb * _GIB_IN_BYTES, provisioning, sharing))
+    return specs, None
+
+
+def _shared_disk_knobs_requested(params: dict[str, Any]) -> bool:
+    """Whether any WSFC/FCI shared-disk knob departs from its default (#3256).
+
+    ``scsi_bus_sharing`` other than ``none``, or any disk carrying a
+    non-default ``provisioning`` / ``sharing``: the folded controller exposes
+    no bus-sharing knob and eagerzeroedthick + multi-writer are
+    REST-inexpressible, so any such knob routes ``vm.create`` uniformly
+    through the vim ``CreateVM_Task`` arm regardless of the target's vCenter
+    version (mirroring how ``vm.disk.grow`` is vim-only because capacity has
+    no REST path).
+    """
+    if params.get("scsi_bus_sharing", "none") != "none":
+        return True
+    for disk in params.get("disks") or []:
+        if isinstance(disk, dict) and (
+            disk.get("provisioning", "thin") != "thin" or disk.get("sharing", "none") != "none"
+        ):
+            return True
+    return False
+
+
 def _scsi_unit_number(index: int) -> int:
     """The SCSI unit number for the *index*-th folded disk, skipping unit 7.
 
@@ -1693,17 +1837,44 @@ def _scsi_unit_number(index: int) -> int:
     return index if index < _VIM_SCSI_CONTROLLER_UNIT else index + 1
 
 
-def _build_vim_disk_device_changes(capacities_bytes: list[int]) -> list[dict[str, Any]]:
-    """Build the controller + per-disk ``deviceChange`` adds for the vim arm (#3117).
+def _build_vim_disk_backing(spec: _VimDiskSpec) -> dict[str, Any]:
+    """Build a folded-disk ``VirtualDiskFlatVer2BackingInfo`` for the vim arm.
+
+    Empty ``fileName`` (vCenter auto-generates a unique path in the VM home),
+    ``persistent`` mode, plus the #3256 knobs: ``provisioning`` maps to the
+    ``thinProvisioned`` / ``eagerlyScrub`` allocation fields and ``sharing``
+    to the multi-writer backing ``sharing`` (omitted when ``none`` — the
+    vendor default ``sharingNone``). A ``thin`` / ``none`` disk yields the
+    pre-#3256 backing byte-for-byte. Every DataObject carries ``_typeName``
+    (#3103).
+    """
+    backing: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_FLAT_BACKING_TYPE,
+        "fileName": "",
+        "diskMode": _VIM_DISK_MODE_PERSISTENT,
+    }
+    backing.update(_PROVISIONING_TO_BACKING[spec.provisioning])
+    disk_sharing = _DISK_SHARING_TO_VIM[spec.sharing]
+    if disk_sharing is not None:
+        backing["sharing"] = disk_sharing
+    return backing
+
+
+def _build_vim_disk_device_changes(
+    disk_specs: list[_VimDiskSpec], *, shared_bus: str
+) -> list[dict[str, Any]]:
+    """Build the controller + per-disk ``deviceChange`` adds for the vim arm (#3117, #3256).
 
     Always emits one ``VirtualLsiLogicSASController`` add (so a fresh
     vim-arm VM has a controller for the governed REST disk-add even when no
     disks were requested — the issue's minimum ask), followed by one
-    ``VirtualDisk`` add per requested capacity, each with ``fileOperation:
-    create`` and bound to that controller. The disk backing uses an empty
-    ``fileName`` (vCenter auto-generates a unique path inside the VM home),
-    ``persistent`` mode and thin provisioning — the canonical govmomi
-    ``CreateDisk`` shape. Every DataObject carries its ``_typeName`` (#3103).
+    ``VirtualDisk`` add per requested disk, each with ``fileOperation:
+    create`` and bound to that controller. ``shared_bus`` is the resolved
+    ``VirtualSCSISharing`` value on the controller's ``sharedBus`` (#3256:
+    ``physicalSharing`` for a WSFC/FCI node); each disk's backing carries its
+    provisioning + multi-writer knobs (:func:`_build_vim_disk_backing`). With
+    ``noSharing`` + ``thin`` disks the body is byte-identical to the pre-#3256
+    shape. Every DataObject carries its ``_typeName`` (#3103).
     """
     controller: dict[str, Any] = {
         _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
@@ -1712,7 +1883,7 @@ def _build_vim_disk_device_changes(capacities_bytes: list[int]) -> list[dict[str
             _VMOMI_TYPE_NAME_KEY: _VIRTUAL_LSILOGIC_SAS_CONTROLLER_TYPE,
             "key": _VIM_SCSI_CONTROLLER_KEY,
             "busNumber": 0,
-            "sharedBus": _VIM_SCSI_NO_SHARING,
+            "sharedBus": shared_bus,
         },
     }
     disk_changes = [
@@ -1725,16 +1896,11 @@ def _build_vim_disk_device_changes(capacities_bytes: list[int]) -> list[dict[str
                 "key": _VIM_DISK_KEY_BASE - index,
                 "controllerKey": _VIM_SCSI_CONTROLLER_KEY,
                 "unitNumber": _scsi_unit_number(index),
-                "capacityInBytes": capacity_bytes,
-                "backing": {
-                    _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_FLAT_BACKING_TYPE,
-                    "fileName": "",
-                    "diskMode": _VIM_DISK_MODE_PERSISTENT,
-                    "thinProvisioned": True,
-                },
+                "capacityInBytes": spec.capacity_bytes,
+                "backing": _build_vim_disk_backing(spec),
             },
         }
-        for index, capacity_bytes in enumerate(capacities_bytes)
+        for index, spec in enumerate(disk_specs)
     ]
     return [controller, *disk_changes]
 
@@ -1763,12 +1929,13 @@ def _build_vim_create_request(
     memory_mib: int,
     datastore_name: str,
     nic_backings: list[dict[str, Any]],
-    disk_capacities_bytes: list[int],
+    disk_specs: list[_VimDiskSpec],
+    shared_bus: str,
     nested_hv: bool,
     pool_moid: str,
     host_moid: str | None,
 ) -> dict[str, Any]:
-    """Assemble the ``Folder.CreateVM_Task`` request body (#3099, #3117).
+    """Assemble the ``Folder.CreateVM_Task`` request body (#3099, #3117, #3256).
 
     ``CreateVMRequestType`` (spec-verified against the pinned
     ``vi-json.yaml``): ``{config: VirtualMachineConfigSpec, pool:
@@ -1814,7 +1981,7 @@ def _build_vim_create_request(
         for index, backing in enumerate(nic_backings)
     ]
     config["deviceChange"] = [
-        *_build_vim_disk_device_changes(disk_capacities_bytes),
+        *_build_vim_disk_device_changes(disk_specs, shared_bus=shared_bus),
         *nic_changes,
     ]
     body: dict[str, Any] = {"config": config, "pool": _moref(_RESOURCE_POOL_MO_TYPE, pool_moid)}
@@ -1935,8 +2102,14 @@ async def _vm_create_via_vim(
     Fail-closed validations run before any sub-call: an unmapped
     ``guest_os`` enum, missing ``resource_pool`` / ``datastore`` pins (vim
     needs an explicit pool and VM home — vCenter-side placement defaulting
-    exists only on the REST create), an invalid disk ``capacity_gb``, and an
-    unsupported NIC backing each return a structured ``rolled_back``.
+    exists only on the REST create), an invalid disk ``capacity_gb``, an
+    unknown ``scsi_bus_sharing`` / disk ``provisioning`` / disk ``sharing``
+    enum (#3256), and an unsupported NIC backing each return a structured
+    ``rolled_back``. The #3256 shared-disk knobs (SCSI bus-sharing on the
+    folded controller, per-disk eagerzeroedthick provisioning, per-disk
+    multi-writer) fold into the one ConfigSpec here — this arm is the sole
+    governed path for them: the folded controller exposes no bus-sharing
+    knob, and eagerzeroedthick + multi-writer are REST-inexpressible.
     """
     folder_name = params.get("folder_name")
     name = params["name"]
@@ -1950,6 +2123,7 @@ async def _vm_create_via_vim(
     pool_moid = params.get("resource_pool")
     datastore_moid = params.get("datastore")
     host_moid = params.get("host")
+    bus_sharing = params.get("scsi_bus_sharing", "none")
 
     guest_id = _VIM_GUEST_ID_BY_REST_GUEST_OS.get(guest_os)
     if guest_id is None:
@@ -1973,8 +2147,14 @@ async def _vm_create_via_vim(
                 "only on the REST create"
             ),
         )
-    disk_capacities_bytes, disk_err = _disk_capacities_bytes(disks)
-    if disk_capacities_bytes is None:
+    if bus_sharing not in _BUS_SHARING_TO_VIM:
+        return _rolled_back(
+            steps=[],
+            failed_step="scsi_bus_sharing",
+            reason=(f"scsi_bus_sharing {bus_sharing!r} is not one of none / virtual / physical"),
+        )
+    disk_specs, disk_err = _vim_disk_specs(disks)
+    if disk_specs is None:
         return _rolled_back(steps=[], failed_step="disk_spec", reason=disk_err or "")
 
     steps: list[str] = []
@@ -2020,14 +2200,17 @@ async def _vm_create_via_vim(
         memory_mib=memory_mib,
         datastore_name=datastore_name,
         nic_backings=nic_backings,
-        disk_capacities_bytes=disk_capacities_bytes,
+        disk_specs=disk_specs,
+        shared_bus=_BUS_SHARING_TO_VIM[bus_sharing],
         nested_hv=nested_hv,
         pool_moid=pool_moid,
         host_moid=host_moid if isinstance(host_moid, str) else None,
     )
     # Identity-only gate params: the durable ApprovalRequest names the
     # blast radius (what gets created, where) without the assembled vim
-    # body — mirroring the clone-from-template gate discipline.
+    # body — mirroring the clone-from-template gate discipline. The #3256
+    # shared-disk knobs (bus-sharing + per-disk provisioning / multi-writer)
+    # ride the gate so the approver sees a WSFC/FCI node's disk posture.
     gate_params = {
         "name": name,
         "folder_name": folder_name,
@@ -2039,7 +2222,15 @@ async def _vm_create_via_vim(
         "cpu_count": cpu_count,
         "memory_mib": memory_mib,
         "nics": [nic.get("network") for nic in nics],
-        "disks": [disk.get("capacity_gb") for disk in disks],
+        "disks": [
+            {
+                "capacity_gb": disk.get("capacity_gb"),
+                "provisioning": disk.get("provisioning", "thin"),
+                "sharing": disk.get("sharing", "none"),
+            }
+            for disk in disks
+        ],
+        "scsi_bus_sharing": bus_sharing,
         "nested_hv": nested_hv,
     }
     gate, vm_id, create_failure = await _issue_vim_create(
@@ -2133,9 +2324,20 @@ async def vm_create_composite(
     ``POST /api/vcenter/vm`` is vendor-defective on vCenter 8.0.x — with
     NICs, disks and ``nested_hv`` folded into the one ConfigSpec. 9.0+ and
     unresolved versions keep the REST path below byte-identical.
+
+    WSFC / FCI shared-disk knobs (#3256): when any of ``scsi_bus_sharing``,
+    per-disk ``provisioning``, or per-disk ``sharing`` departs from its
+    default, the create also rides the vim arm regardless of version — the
+    composite's folded controller exposes no bus-sharing knob, and
+    eagerzeroedthick + multi-writer are REST-inexpressible (the pinned
+    ``VmdkCreateSpec`` carries no provisioning field), so vim is the sole
+    governed path (mirroring ``vm.disk.grow``). That arm needs
+    ``resource_pool`` + ``datastore`` pins; absent them it refuses with the
+    structured ``placement_params`` ``rolled_back`` before any write. All
+    knobs at default keep the REST path below byte-identical.
     """
     about_version = await connector._about_version(target, operator)
-    if _vim_create_required(about_version):
+    if _vim_create_required(about_version) or _shared_disk_knobs_requested(params):
         return await _vm_create_via_vim(
             operator=operator, target=target, params=params, connector=connector
         )
@@ -4776,6 +4978,313 @@ async def vm_disk_grow_composite(
         "delta_bytes": delta,
         "guidance": None,
     }
+
+
+# ===========================================================================
+# vm.disk.attach (shared-attach: attach an existing VMDK — WSFC/FCI, #3256)
+# ===========================================================================
+#
+# Attaches an EXISTING VMDK to a VM at an explicit SCSI controller/unit
+# address — the second-node leg of a Windows Server Failover Cluster / SQL
+# FCI (or a multi-writer cluster). Rides the #2893 mutating VI-JSON substrate
+# exactly as vm.disk.grow does: a RetrievePropertiesEx read locates the
+# target SCSI controller + confirms the unit is free, then a single
+# ReconfigVM_Task carries a VirtualDeviceConfigSpec `add` with NO
+# fileOperation (fileOperation="create" would create a new VMDK; its absence
+# attaches the existing one — the govmomi/govc convention). The REST
+# Disk.CreateSpec.backing can attach an existing VMDK but cannot set the
+# multi-writer sharing flag, so the governed path is vim-uniform (8.x + 9.x).
+
+
+def _find_scsi_controller(devices: list[Any], controller_key: int) -> dict[str, Any] | None:
+    """Return the SCSI controller device whose key matches, else ``None``.
+
+    Matches ``key == controller_key`` and ``_typeName`` in the SCSI
+    controller family (:data:`_VIM_SCSI_CONTROLLER_TYPES`) — a non-SCSI
+    device (NIC, CD-ROM, the disk itself) at that key is not a valid attach
+    target for a WSFC/FCI shared disk.
+    """
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        if dev.get(_VMOMI_TYPE_NAME_KEY) not in _VIM_SCSI_CONTROLLER_TYPES:
+            continue
+        if _coerce_int(dev.get("key")) == controller_key:
+            return dev
+    return None
+
+
+def _scsi_unit_occupied(devices: list[Any], controller_key: int, unit_number: int) -> bool:
+    """Whether a device already sits at ``(controller_key, unit_number)``."""
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        if _coerce_int(dev.get("controllerKey")) != controller_key:
+            continue
+        if _coerce_int(dev.get("unitNumber")) == unit_number:
+            return True
+    return False
+
+
+def _valid_vmdk_path(path: str) -> bool:
+    """Whether *path* is a safe ``[datastore] dir/disk.vmdk`` value (#3256).
+
+    Shape check (:data:`_VALID_VMDK_PATH` — a bracketed datastore + a ``.vmdk``
+    suffix, no control chars) plus a ``..``-segment reject so a traversal like
+    ``[ds] a/../b.vmdk`` cannot walk outside the intended datastore directory.
+    There is no shell on the vim backing path, so the defence is
+    malformed-shape / control-char / path-traversal rejection, not quoting.
+    """
+    if _VALID_VMDK_PATH.fullmatch(path) is None:
+        return False
+    return not any(segment == ".." for segment in re.split(r"[\\/]", path))
+
+
+def _valid_scsi_unit(unit: int) -> bool:
+    """A SCSI unit number in range (0-15) and not the controller-reserved unit 7."""
+    return 0 <= unit <= 15 and unit != _VIM_SCSI_CONTROLLER_UNIT
+
+
+def _build_attach_disk_device_change(
+    *, vmdk_path: str, controller_key: int, unit_number: int, sharing: str
+) -> dict[str, Any]:
+    """Build the ``VirtualDeviceConfigSpec`` add attaching an existing VMDK (#3256).
+
+    ``operation="add"`` with **no** ``fileOperation`` — the seam that
+    distinguishes an attach of an existing backing from a create. The
+    backing's ``fileName`` is the validated ``vmdk_path``; ``sharing`` sets
+    the multi-writer flag when requested. No ``capacityInBytes`` — the server
+    reads the size from the existing VMDK. Every DataObject carries its
+    ``_typeName`` (#3103); all names are already-emitted, so the #3103
+    vocabulary lane needs no new entry.
+    """
+    backing: dict[str, Any] = {
+        _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_FLAT_BACKING_TYPE,
+        "fileName": vmdk_path,
+        "diskMode": _VIM_DISK_MODE_PERSISTENT,
+    }
+    disk_sharing = _DISK_SHARING_TO_VIM.get(sharing)
+    if disk_sharing is not None:
+        backing["sharing"] = disk_sharing
+    return {
+        _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DEVICE_CONFIG_SPEC_TYPE,
+        "operation": "add",
+        "device": {
+            _VMOMI_TYPE_NAME_KEY: _VIRTUAL_DISK_TYPE,
+            "key": _VIM_ATTACH_DISK_KEY,
+            "controllerKey": controller_key,
+            "unitNumber": unit_number,
+            "backing": backing,
+        },
+    }
+
+
+def _attach_result(
+    status: str,
+    *,
+    vm: str,
+    vmdk_path: Any,
+    controller_key: Any,
+    unit_number: Any,
+    sharing: str,
+    task: str | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    """Build the canonical ``vm.disk.attach`` response envelope (#3256)."""
+    return {
+        "status": status,
+        "vm": vm,
+        "vmdk_path": vmdk_path,
+        "controller_key": controller_key,
+        "unit_number": unit_number,
+        "sharing": sharing,
+        "task": task,
+        "guidance": guidance,
+    }
+
+
+async def vm_disk_attach_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Attach an existing VMDK to a VM at an explicit SCSI controller/unit (#3256).
+
+    Op-id: ``vmware.composite.vm.disk.attach``. The shared-attach leg of a
+    WSFC/FCI or multi-writer cluster: the second node opens the same VMDK the
+    first node created, at the same controller/unit address. Rides the #2893
+    mutating VI-JSON substrate (vim-uniform on 8.x + 9.x, like
+    ``vm.disk.grow``).
+
+    Flow:
+
+    1. Fail-closed param hygiene before any I/O: ``vmdk_path`` must match the
+       ``[datastore] path.vmdk`` shape and carry no ``..`` path segment
+       (``status='invalid_vmdk_path'`` — no shell on this path, so the check
+       is shape + control-char + traversal rejection); ``unit_number`` must be
+       0-15 and not the reserved unit 7 (``status='invalid_unit'``).
+    2. Read the VM's ``config.hardware.device`` (``RetrievePropertiesEx``, a
+       *read* — no gate) to locate the SCSI controller ``controller_key``
+       (``status='controller_not_found'`` when absent / not SCSI) and confirm
+       the unit is free (``status='unit_in_use'``).
+    3. Issue one ``ReconfigVM_Task`` add through the governed vmomi write seam
+       (:func:`_write_vmomi_sub_op` → the #2254 gate) — a
+       ``VirtualDeviceConfigSpec`` ``add`` with **no** ``fileOperation`` so
+       the existing VMDK is attached, not recreated. A parked/denied gate
+       returns the :class:`OperationResult` verbatim; no reconfigure fires.
+    4. Poll the returned ``*_Task`` MoRef to terminal via
+       :func:`~...vim_task.poll_vim_task`. A task fault raises
+       (``connector_error``, mirroring ``vm.disk.grow``); a poll timeout
+       returns ``status='timeout'`` with the task id.
+    """
+    vm_moid = params["vm"]
+    vmdk_path = params["vmdk_path"]
+    controller_key = _coerce_int(params.get("controller_key"))
+    unit_number = _coerce_int(params.get("unit_number"))
+    sharing = params.get("sharing", "none")
+
+    if not isinstance(vmdk_path, str) or not _valid_vmdk_path(vmdk_path):
+        return _attach_result(
+            "invalid_vmdk_path",
+            vm=vm_moid,
+            vmdk_path=params.get("vmdk_path"),
+            controller_key=params.get("controller_key"),
+            unit_number=params.get("unit_number"),
+            sharing=sharing,
+            guidance=(
+                "vmdk_path must be a datastore path of the form "
+                "'[datastore] dir/disk.vmdk' with no '..' path segment — the "
+                "existing shared VMDK created on the first cluster node"
+            ),
+        )
+    if unit_number is None or not _valid_scsi_unit(unit_number):
+        return _attach_result(
+            "invalid_unit",
+            vm=vm_moid,
+            vmdk_path=vmdk_path,
+            controller_key=params.get("controller_key"),
+            unit_number=params.get("unit_number"),
+            sharing=sharing,
+            guidance="unit_number must be 0-15 and not the controller-reserved unit 7",
+        )
+    if controller_key is None:
+        return _attach_result(
+            "controller_not_found",
+            vm=vm_moid,
+            vmdk_path=vmdk_path,
+            controller_key=params.get("controller_key"),
+            unit_number=unit_number,
+            sharing=sharing,
+            guidance="controller_key must be the integer device key of a SCSI controller",
+        )
+
+    devices = _extract_vm_devices(
+        await connector._post_vmomi_json(
+            target,
+            _VMOMI_RETRIEVE_PROPERTIES_PATH,
+            operator=operator,
+            json=_build_vm_devices_retrieve_params(vm_moid),
+        )
+    )
+    if _find_scsi_controller(devices, controller_key) is None:
+        return _attach_result(
+            "controller_not_found",
+            vm=vm_moid,
+            vmdk_path=vmdk_path,
+            controller_key=controller_key,
+            unit_number=unit_number,
+            sharing=sharing,
+            guidance=(
+                f"no SCSI controller with key {controller_key} on vm {vm_moid!r}; "
+                "list the VM's devices to confirm the controller key (for WSFC "
+                "create a dedicated bus-shared controller via vm.create "
+                "scsi_bus_sharing)"
+            ),
+        )
+    if _scsi_unit_occupied(devices, controller_key, unit_number):
+        return _attach_result(
+            "unit_in_use",
+            vm=vm_moid,
+            vmdk_path=vmdk_path,
+            controller_key=controller_key,
+            unit_number=unit_number,
+            sharing=sharing,
+            guidance=(
+                f"a device already occupies controller {controller_key} unit "
+                f"{unit_number}; pick a free unit (both cluster nodes must use "
+                "the same address for the shared disk)"
+            ),
+        )
+
+    reconfig_spec = {
+        "spec": {
+            _VMOMI_TYPE_NAME_KEY: _VM_CONFIG_SPEC_TYPE,
+            "deviceChange": [
+                _build_attach_disk_device_change(
+                    vmdk_path=vmdk_path,
+                    controller_key=controller_key,
+                    unit_number=unit_number,
+                    sharing=sharing,
+                )
+            ],
+        }
+    }
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIG_VM_TASK,
+        vmomi_path=f"/VirtualMachine/{vm_moid}/ReconfigVM_Task",
+        body=reconfig_spec,
+        params={
+            "vm": vm_moid,
+            "vmdk_path": vmdk_path,
+            "controller_key": controller_key,
+            "unit_number": unit_number,
+            "sharing": sharing,
+        },
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_DISK_ATTACH_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            f"vm.disk.attach: ReconfigVM_Task on vm {vm_moid!r} attaching {vmdk_path!r} "
+            f"faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return _attach_result(
+            "timeout",
+            vm=vm_moid,
+            vmdk_path=vmdk_path,
+            controller_key=controller_key,
+            unit_number=unit_number,
+            sharing=sharing,
+            task=outcome.task,
+            guidance=(
+                f"ReconfigVM_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_DISK_ATTACH_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
+                "VM's disks — the attach may still complete in the background"
+            ),
+        )
+    return _attach_result(
+        "attached",
+        vm=vm_moid,
+        vmdk_path=vmdk_path,
+        controller_key=controller_key,
+        unit_number=unit_number,
+        sharing=sharing,
+        task=outcome.task,
+    )
 
 
 # ===========================================================================

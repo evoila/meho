@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pure JSON-Schema-constant declaration module
+# for every vmware-rest composite (one parameter + response schema per op);
+# the sibling handler modules (_read.py / _write.py) carry the same marker.
 
-"""JSON Schema 2020-12 parameter + response schemas for the 27 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 38 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -782,6 +785,43 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                             "Disk capacity in GiB (converted to bytes for the vendor spec)."
                         ),
                     },
+                    "provisioning": {
+                        "type": "string",
+                        "enum": ["thin", "thick", "eagerzeroedthick"],
+                        "default": "thin",
+                        "description": (
+                            "Disk provisioning policy (#3256). ``thin`` — "
+                            "allocate-on-write (``thinProvisioned=true``); "
+                            "``thick`` — lazy-zeroed thick "
+                            "(``thinProvisioned=false``, ``eagerlyScrub=false``); "
+                            "``eagerzeroedthick`` — eager-zeroed thick "
+                            "(``thinProvisioned=false``, ``eagerlyScrub=true``), "
+                            "the WSFC/FCI shared-disk and multi-writer "
+                            "requirement. The pinned REST ``VmdkCreateSpec`` "
+                            "has no provisioning field, so any value other than "
+                            "``thin`` routes the whole create through the vim "
+                            "``CreateVM_Task`` arm (which needs "
+                            "``resource_pool`` + ``datastore`` pins)."
+                        ),
+                    },
+                    "sharing": {
+                        "type": "string",
+                        "enum": ["none", "multi_writer"],
+                        "default": "none",
+                        "description": (
+                            "Per-disk multi-writer sharing (#3256), distinct "
+                            "from SCSI bus-sharing. ``multi_writer`` sets the "
+                            "backing's ``sharing=sharingMultiWriter`` so several "
+                            "VMs may open the same VMDK concurrently — the mode "
+                            "for application-managed clustering (e.g. Oracle "
+                            "RAC), where the guest coordinates its own locking. "
+                            "Use ``scsi_bus_sharing`` (not this) for WSFC/FCI, "
+                            "which relies on SCSI-3 persistent reservations on a "
+                            "shared bus. Multi-writer has no REST expression, so "
+                            "any value other than ``none`` routes the create "
+                            "through the vim arm."
+                        ),
+                    },
                 },
                 "required": ["capacity_gb"],
                 "additionalProperties": False,
@@ -799,9 +839,31 @@ VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "``POST:/vcenter/vm/{vm}/hardware/disk`` even when this "
                 "list is empty) plus one ``VirtualDisk`` "
                 "``fileOperation: create`` per entry, bound to it. "
-                "Thin-vs-thick follows the datastore default. Empty list "
-                "keeps the REST create body byte-identical to a pre-#3117 "
-                "call."
+                "``provisioning`` defaults to ``thin`` (the datastore default "
+                "on the REST arm); a non-default ``provisioning`` or "
+                "``sharing`` value routes the create through the vim arm "
+                "(#3256). Empty list keeps the REST create body byte-identical "
+                "to a pre-#3117 call."
+            ),
+        },
+        "scsi_bus_sharing": {
+            "type": "string",
+            "enum": ["none", "virtual", "physical"],
+            "default": "none",
+            "description": (
+                "SCSI bus-sharing mode for the VM's SCSI controller (#3256), "
+                "distinct from per-disk multi-writer. ``none`` — private bus "
+                "(``noSharing``); ``virtual`` — bus shared between VMs on the "
+                "same host (``virtualSharing``); ``physical`` — bus shared "
+                "between VMs on different hosts (``physicalSharing``), the "
+                "Windows Server Failover Cluster (WSFC) / SQL FCI requirement "
+                "(SCSI-3 persistent reservations). Applies to the controller "
+                "the create folds for the data ``disks``; the boot/OS disk is "
+                "not part of this fold, so it never lands on a shared bus. "
+                "Any value other than ``none`` routes the create through the "
+                "vim ``CreateVM_Task`` arm (the REST create fabricates a "
+                "non-shared controller with no sharing knob), which requires "
+                "``resource_pool`` + ``datastore`` pins."
             ),
         },
         "nested_hv": {
@@ -1265,6 +1327,90 @@ VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["vm", "disk", "capacity_bytes"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.disk.attach`` parameter schema (#3256).
+#:
+#: Attach an **existing** VMDK to a VM at an explicit SCSI ``controller/unit``
+#: address — the shared-attach leg of a WSFC / FCI or multi-writer cluster
+#: build (the second node opens the same disk the first node created). Rides
+#: vim ``ReconfigVM_Task`` with a ``VirtualDeviceConfigSpec`` ``add`` that
+#: carries **no** ``fileOperation`` (``fileOperation="create"`` would make a
+#: new VMDK; its absence attaches the existing one). The pinned REST spec's
+#: ``Disk.CreateSpec.backing`` can attach an existing VMDK but cannot set the
+#: multi-writer ``sharing`` flag, so the governed path is vim-uniform (works
+#: on vSphere 8.x and 9.x, like ``vm.disk.grow``). Fail-closed before any
+#: write: an ill-formed ``vmdk_path``, an out-of-range ``unit_number``, a
+#: missing / non-SCSI ``controller_key``, or an occupied unit each return a
+#: structured status and issue no reconfigure.
+VM_DISK_ATTACH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Managed-object ID of the VM to attach the disk to (e.g. 'vm-42').",
+        },
+        "vmdk_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Datastore path of the existing VMDK to attach, in the "
+                "canonical ``[datastore] dir/disk.vmdk`` form (e.g. "
+                "``[vsanDatastore] wsfc-quorum/quorum.vmdk``). Validated "
+                "before any write; a value that does not match the "
+                "``[datastore] path.vmdk`` shape, or that carries a ``..`` "
+                "path segment, is refused with ``status='invalid_vmdk_path'`` "
+                "(there is no shell on this path — the check rejects malformed "
+                "shape, control chars, and path traversal before the "
+                "reconfigure body is built)."
+            ),
+        },
+        "controller_key": {
+            "type": "integer",
+            "description": (
+                "Device key of the target SCSI controller already present on "
+                "the VM (the vim ``VirtualController.key``, e.g. 1000). The "
+                "handler reads the VM's ``config.hardware.device`` and refuses "
+                "with ``status='controller_not_found'`` when no device with "
+                "this key exists or it is not a SCSI controller. For WSFC/FCI "
+                "this is a dedicated bus-shared controller (create it on the "
+                "VM with ``scsi_bus_sharing`` on ``vm.create``); the boot "
+                "controller must not be shared."
+            ),
+        },
+        "unit_number": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15,
+            "description": (
+                "SCSI unit number on ``controller_key`` to attach the disk at "
+                "(0-15, excluding 7 which the controller reserves). Both "
+                "cluster nodes attach the shared VMDK at the **same** "
+                "controller/unit address. An occupied unit is refused with "
+                "``status='unit_in_use'``; unit 7 (or out of range) with "
+                "``status='invalid_unit'`` — both before any write."
+            ),
+        },
+        "sharing": {
+            "type": "string",
+            "enum": ["none", "multi_writer"],
+            "default": "none",
+            "description": (
+                "Per-disk multi-writer sharing on the attached backing, "
+                "distinct from the controller's bus-sharing. ``multi_writer`` "
+                "sets ``sharing=sharingMultiWriter`` (application-managed "
+                "clustering, e.g. Oracle RAC). WSFC/FCI does NOT use "
+                "multi-writer — it relies on SCSI-3 persistent reservations "
+                "from a ``physical`` bus-sharing controller instead — so leave "
+                "this ``none`` and attach to a bus-shared ``controller_key`` "
+                "for a Windows failover cluster."
+            ),
+        },
+    },
+    "required": ["vm", "vmdk_path", "controller_key", "unit_number"],
     "additionalProperties": False,
 }
 
@@ -2098,6 +2244,68 @@ VM_DISK_GROW_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "disk", "to_capacity_bytes"],
+}
+
+
+#: ``vmware.composite.vm.disk.attach`` response schema (#3256).
+VM_DISK_ATTACH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "attached",
+                "invalid_vmdk_path",
+                "invalid_unit",
+                "controller_not_found",
+                "unit_in_use",
+                "timeout",
+            ],
+            "description": (
+                "``'attached'`` — the ReconfigVM_Task add reached terminal "
+                "success; ``'invalid_vmdk_path'`` — ``vmdk_path`` did not match "
+                "the ``[datastore] path.vmdk`` shape or carried a ``..`` path "
+                "segment (refused before any "
+                "write); ``'invalid_unit'`` — ``unit_number`` was out of range "
+                "or the reserved unit 7; ``'controller_not_found'`` — no SCSI "
+                "controller with ``controller_key`` on the VM; "
+                "``'unit_in_use'`` — a device already occupies that "
+                "controller/unit; ``'timeout'`` — the reconfigure task did not "
+                "reach a terminal state within the poll bound (it may still "
+                "complete in the background)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the disk was attached to."},
+        "vmdk_path": {"type": "string", "description": "Datastore path of the attached VMDK."},
+        "controller_key": {
+            "type": "integer",
+            "description": "Device key of the SCSI controller the disk attached to.",
+        },
+        "unit_number": {
+            "type": "integer",
+            "description": "SCSI unit number the disk attached at.",
+        },
+        "sharing": {
+            "type": "string",
+            "enum": ["none", "multi_writer"],
+            "description": "The multi-writer sharing mode applied to the attached backing.",
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigVM_Task moid — present once the write was issued "
+                "(``attached`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``attached`` status; "
+                "``null`` on a successful attach."
+            ),
+        },
+    },
+    "required": ["status", "vm", "vmdk_path", "controller_key", "unit_number"],
 }
 
 

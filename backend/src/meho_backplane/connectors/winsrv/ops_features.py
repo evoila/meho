@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""winsrv feature ops — ``list`` (safe) + ``install`` / ``remove`` (caution).
+"""winsrv feature ops — ``list`` (safe) + ``install`` (caution) + ``remove`` (dangerous).
 
 The Windows Server role/feature surface is driven by the ``ServerManager``
 module (``Get-WindowsFeature`` / ``Install-WindowsFeature`` /
@@ -10,9 +10,16 @@ This is the c1sql1 ``Install-WindowsFeature`` path
 (evoila-bosnia/claude-rdc-hetzner-dc#2789) — the Failover-Clustering role
 install that today rides ungoverned ``govc guest.run``.
 
-``install`` / ``remove`` are ``caution`` (recoverable — a removed feature can
-be reinstalled). They deliberately **never** pass ``-Restart``: a reboot is a
-``dangerous`` + ``requires_approval`` action, so the handlers return
+``install`` is ``caution`` (additive, recoverable). ``remove`` was promoted to
+``safety_level=dangerous`` + ``requires_approval=True`` by the #3288 operator
+ruling: uninstalling a role is disruptive enough to demand a human decision, so
+it parks for approval (the ``winsrv.localuser.delete`` mould). It is
+**deliberately not** ``destructive`` — removal is reversible by reinstall and
+preserves data, and the destructive tier is reserved for unrecoverable deletes.
+So no blast-radius preview is required at the ``dangerous`` tier (unlike the
+destructive ops governed under #3288); the dispatcher simply parks the dispatch
+at ``awaiting_approval``. Both handlers deliberately **never** pass ``-Restart``:
+a reboot is itself a ``dangerous`` + ``requires_approval`` action, so they return
 ``restart_needed`` and leave the reboot to the approval-gated
 ``winsrv.power.reboot`` op. Batch feature changes, then take one governed
 reboot.
@@ -128,11 +135,18 @@ async def winsrv_feature_remove(
     params: dict[str, Any],
     operator: Operator | None = None,
 ) -> dict[str, Any]:
-    """Handler for ``winsrv.feature.remove`` (caution) — ``Uninstall-WindowsFeature``.
+    """Handler for ``winsrv.feature.remove`` (dangerous, approval-gated).
 
+    ``Uninstall-WindowsFeature``.
     Removes the named feature under ``$ErrorActionPreference = 'Stop'``.
     Never passes ``-Restart`` — returns ``restart_needed`` and leaves the
     reboot to the approval-gated ``winsrv.power.reboot``.
+
+    Governed dangerous tier (#3288): the op is ``safety_level=dangerous`` +
+    ``requires_approval=True``, so a dispatch parks for a human decision before
+    the uninstall runs. Not ``destructive`` (reversible by reinstall,
+    data-preserving), so no blast-radius preview is required — the handler body
+    is unchanged; the tier is enforced upstream in the dispatcher.
     """
     name: str = params["name"]
     mgmt_tools = _ps_bool(params.get("include_management_tools"))
@@ -290,12 +304,16 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
     WinsrvOp(
         op_id="winsrv.feature.remove",
         handler_attr="winsrv_feature_remove",
-        summary="Remove a Windows role/feature via ``Uninstall-WindowsFeature`` (caution).",
+        summary="Remove a Windows role/feature via ``Uninstall-WindowsFeature`` (dangerous).",
         description=(
             "Runs ``Uninstall-WindowsFeature -Name <name>`` (optionally with "
             "``-IncludeManagementTools`` to also remove the tools). Never "
-            "auto-restarts — returns ``restart_needed``. safety_level=caution "
-            "(recoverable — the feature can be reinstalled)."
+            "auto-restarts — returns ``restart_needed``. safety_level=dangerous, "
+            "requires_approval=True (#3288): uninstalling a role is disruptive, "
+            "so a dispatch parks for a human decision first. NOT destructive — "
+            "reversible by reinstall and data-preserving, so no blast-radius "
+            "preview is required (the ``winsrv.localuser.delete`` dangerous-tier "
+            "mould)."
         ),
         parameter_schema={
             "type": "object",
@@ -315,13 +333,15 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
         response_schema=_FEATURE_WRITE_RESPONSE_SCHEMA,
         group_key="features",
         tags=("write", "feature", "remove"),
-        safety_level="caution",
-        requires_approval=False,
+        safety_level="dangerous",
+        requires_approval=True,
         llm_instructions={
             "when_to_use": (
-                "Remove a Windows role/feature. Recoverable; "
-                "safety_level=caution. Does NOT restart — check "
-                "``restart_needed``. " + SSH_TRANSPORT_NOTE
+                "Remove a Windows role/feature. Disruptive but reversible by "
+                "reinstall; safety_level=dangerous, requires_approval=True "
+                "(#3288) — a dispatch parks for a human decision before the "
+                "uninstall runs. Does NOT restart — check ``restart_needed`` "
+                "and use ``winsrv.power.reboot`` (approval-gated) if set. " + SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "name": "Required. The feature short name.",

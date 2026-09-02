@@ -43,6 +43,9 @@ triple advertises this class.
 """
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.windows_dns import (
+    ops_record_remove_preview,  # noqa: F401 -- registers the destructive-tier blast-radius preview builder at import
+)
 from meho_backplane.connectors.windows_dns.connector import WindowsDnsConnector
 from meho_backplane.connectors.windows_dns.ops import WINDOWS_DNS_OPS, WindowsDnsOp
 from meho_backplane.operations.typed_register import register_typed_op_registrar

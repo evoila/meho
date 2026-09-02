@@ -163,10 +163,15 @@ def test_op_surface_ids_and_safety_tiers() -> None:
         "winsrv.power.reboot",
         "winsrv.power.shutdown",
         "winsrv.localuser.delete",
+        # #3288: uninstalling a role is disruptive-but-reversible → dangerous +
+        # requires_approval (NOT destructive — reinstall recovers it, so no
+        # blast-radius preview is required at this tier).
+        "winsrv.feature.remove",
     }
     # Every dangerous op requires approval; nothing else does.
     assert {k for k, v in by_id.items() if v.requires_approval} == dangerous
     assert "winsrv.feature.install" in caution
+    assert "winsrv.feature.remove" not in caution
     assert "winsrv.storage.disk.format" in caution
     assert {"winsrv.about", "winsrv.service.list", "winsrv.storage.disk.list"} <= safe
 

@@ -105,6 +105,7 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._request_preview import compute_preview_hash, preview_dispatch
 from meho_backplane.operations.approval_queue import approve_request
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
@@ -535,6 +536,68 @@ async def _create_robot_via_approve_resume(
     )
 
 
+async def _delete_robot_via_approve_resume(
+    *,
+    target: _HarborTarget,
+    requester_sub: str,
+    approver_sub: str,
+    project: str,
+    robot_id: int,
+) -> OperationResult:
+    """Drive ``harbor.robot.delete`` through the real governed destructive flow.
+
+    Since #3288 ``harbor.robot.delete`` is ``safety_level=destructive`` +
+    ``requires_approval=True``, so a bare dispatch is refused
+    ``preview_binding_required``. This helper reproduces the governed-delete
+    flow: resolve the park-time preview binding (``preview_dispatch`` →
+    ``compute_preview_hash``), present the bound hash on the parking dispatch,
+    commit the real approval as a **distinct** approver (four-eyes), then resume
+    with ``_approved=True`` against the **live** ``target`` fixture (same
+    live-binding reasoning as :func:`_create_robot_via_approve_resume` — a
+    DB-rehydrated resume would resolve ``no_connector``). Returns the resumed
+    :class:`OperationResult` (``status`` ``"ok"``, ``result["deleted"] is True``).
+    """
+    requester = _make_operator(sub=requester_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    params = {"project": project, "id": robot_id}
+
+    # Bind the destructive-tier preview hash (typed op → composite preview).
+    authoritative = await preview_dispatch(
+        operator=requester,
+        connector_id=HARBOR_CONNECTOR_ID,
+        op_id="harbor.robot.delete",
+        target=target,
+        params=params,
+    )
+    assert authoritative["status"] == "ok", authoritative
+    preview_hash = compute_preview_hash(authoritative)
+
+    parked = await dispatch(
+        operator=requester,
+        connector_id=HARBOR_CONNECTOR_ID,
+        op_id="harbor.robot.delete",
+        target=target,
+        params=params,
+        preview_hash=preview_hash,
+    )
+    assert parked.status == "awaiting_approval", parked.error
+    request_id = uuid.UUID(parked.extras["approval_request_id"])
+
+    approver = _make_operator(sub=approver_sub, tenant_id=_HARBOR_E2E_TENANT_ID)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        await approve_request(session, request_id, operator=approver)
+        await session.commit()
+
+    return await dispatch(
+        operator=requester,
+        connector_id=HARBOR_CONNECTOR_ID,
+        op_id="harbor.robot.delete",
+        target=target,
+        params=params,
+        _approved=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Audit assertion helper
 # ---------------------------------------------------------------------------
@@ -719,7 +782,14 @@ async def test_robot_delete_classified_write(
     harbor_e2e: tuple[_HarborTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``harbor.robot.delete`` removes the robot; broadcast is classified write."""
+    """``harbor.robot.delete`` removes the robot; broadcast is classified write.
+
+    Since #3288 the op is ``safety_level=destructive`` + ``requires_approval``,
+    so the delete runs through the governed flow (preview-hash-bound park →
+    distinct-human approval → audited resume); a bare dispatch is refused
+    ``preview_binding_required``. The executed (post-approval) op still
+    classifies ``write`` — the tier change is orthogonal to ``classify_op``.
+    """
     target, _ = harbor_e2e
 
     # Create a robot to delete. ``harbor.robot.create`` parks (#147), so the
@@ -736,17 +806,14 @@ async def test_robot_delete_classified_write(
     assert create_result.status == "ok", create_result.error
     robot_id = create_result.result["id"]
 
-    # Now delete it.
-    operator = _make_operator(sub="e2e-robot-delete")
-    result = await dispatch(
-        operator=operator,
-        connector_id=HARBOR_CONNECTOR_ID,
-        op_id="harbor.robot.delete",
+    # Now delete it — governed destructive flow (preview-bound park → approve →
+    # audited resume against the live container).
+    result = await _delete_robot_via_approve_resume(
         target=target,
-        params={
-            "project": _TEST_PROJECT_NAME,
-            "id": robot_id,
-        },
+        requester_sub="e2e-robot-delete",
+        approver_sub="e2e-robot-delete-approver",
+        project=_TEST_PROJECT_NAME,
+        robot_id=robot_id,
     )
     assert result.status == "ok", result.error
     assert result.result.get("deleted") is True, (

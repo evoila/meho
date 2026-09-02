@@ -862,7 +862,7 @@ hangs the queue forever:
 | `Go (golangci-lint + go test)` | `ci.yml` | yes (#769) |
 | `Helm (lint + template + kubeconform)` | `ci.yml` | yes (#769) |
 | `Semgrep SAST` | `security-scan.yml` | yes (#769) |
-| `TruffleHog Secret Scan` | `secret-scan.yml` | yes (#769) |
+| `TruffleHog Secret Scan` | `secret-scan.yml` | yes (#769 trigger; #3307 scan-range fix) — see caveat below |
 | `Python License Check` | `dependency-license-check.yml` | yes — `changes` + job-level `if:` |
 | `NPM License Check` | `dependency-license-check.yml` | yes — same shape |
 | `helm install + helm test (pgvector preflight)` | `chart.yml` | **yes (#3253)** — the `helm-test-gate` aggregator (`if: always()`) is the required context and fails closed |
@@ -889,6 +889,21 @@ these workflows:
   cancelled queue check fails the merge attempt and drops the PR out of
   the queue, so `merge_group` runs are never cancelled; `pull_request` /
   `push` runs still cancel their own predecessors as before.
+- **Third-party actions that derive their own scan range must be told
+  the `merge_group` range explicitly.** A `merge_group` trigger makes the
+  workflow *run*, but an action that computes its diff from the event
+  payload can still misfire: the TruffleHog action's dispatch handles
+  only `push` / `pull_request` / `workflow_dispatch` / `schedule`, so on a
+  `merge_group` event its `BASE`/`HEAD` stay empty and it falls back to a
+  full-filesystem scan of the whole tree — which, with
+  `--results=verified,unknown`, trips `--fail` on pre-existing unverified
+  fixture findings and ejected the first real queue entry `failed_checks`
+  (#3306 → #3307). The fix passes `base: ${{ github.event.merge_group.base_sha }}`
+  / `head: ${{ github.event.merge_group.head_sha }}` so the queue ref is
+  scanned as a `base..head` diff; both expressions are empty off the
+  queue, preserving PR/push behaviour. When adding any range-deriving
+  action to a required-check workflow, check its `merge_group` handling —
+  the trigger alone is not enough.
 
 `chart.yml` additionally guards its `publish` and `verify-anonymous-pull`
 jobs to `github.event_name == 'push'` (was `!= 'pull_request'`), so a

@@ -124,8 +124,10 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     ``pfsense.config.show``, and ``pfsense.dhcp.leases`` (#2849)) +
     ``WRITE_OPS`` (``pfsense.gateway.add`` and
     ``pfsense.route.static.add``, #3090) + ``DELETE_OPS`` (the governed
-    destructive deletes ``pfsense.nat.delete`` and
-    ``pfsense.alias.delete``, #3232). Thirteen ops total.
+    destructive deletes ``pfsense.nat.delete`` / ``pfsense.alias.delete``
+    (#3232), plus the teardown-inverse deletes
+    ``pfsense.route.static.delete`` / ``pfsense.gateway.delete`` /
+    ``pfsense.alias.member.remove`` (#3313)). Sixteen ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -154,8 +156,10 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: ``pfsense.config.show``); #2849 adds ``pfsense.dhcp.leases``; #3090
 #: adds the first write ops (``pfsense.gateway.add``,
 #: ``pfsense.route.static.add``); #3232 adds the first governed
-#: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``)
-#: -- 13 ops total. The shape of each follow-on PR is "import a new
+#: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``);
+#: #3313 adds the teardown-inverse deletes (``pfsense.route.static.delete``,
+#: ``pfsense.gateway.delete``, ``pfsense.alias.member.remove``)
+#: -- 16 ops total. The shape of each follow-on PR is "import a new
 #: module-level tuple and splat it into :data:`PFSENSE_OPS` via
 #: :func:`_pfsense_ops`" -- the registration walk in
 #: :meth:`PfSenseConnector.register_operations` does not need to

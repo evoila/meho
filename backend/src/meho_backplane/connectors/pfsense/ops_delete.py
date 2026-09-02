@@ -4,9 +4,14 @@
 # op metadata / JSON schemas / llm_instructions) mirroring the ops_write.py sibling's
 # single-module-per-op-group convention; all functions are small + low-complexity.
 
-"""pfSense governed destructive deletes -- NAT-rule + alias delete (#3232).
+"""pfSense governed destructive deletes -- NAT / alias / routing teardown.
 
-Adds the connector's first two ``safety_level="destructive"`` typed ops:
+#3232 shipped the connector's first two ``safety_level="destructive"``
+typed ops (``pfsense.nat.delete`` / ``pfsense.alias.delete``); #3313 adds
+the three **teardown-inverse** ops that reverse a governed bring-up --
+retire a static route, retire a gateway, and trim ONE member out of a
+*shared* alias -- so an environment teardown removes what its bring-up
+created, symmetrically and governed, verified by read-back:
 
 * ``pfsense.nat.delete`` -- permanently delete ONE port-forward NAT rule
   (``config.xml`` ``<nat><rule>``) identified by its stable ``<tracker>``
@@ -18,6 +23,25 @@ Adds the connector's first two ``safety_level="destructive"`` typed ops:
   fail-closed (``referenced``) when the alias is still referenced by any
   filter rule, NAT rule (port-forward / outbound / 1:1), or other alias --
   naming the referrers -- exactly as pfSense's own delete guard does.
+* ``pfsense.route.static.delete`` (#3313) -- the inverse of
+  ``pfsense.route.static.add``. Delete ONE static route
+  (``config.xml`` ``<staticroutes><route>``) by its canonical ``network``
+  (CIDR). Refuses ``not_found`` / ``ambiguous``; applies via ``pfSsh.php
+  playback`` (``write_config`` + ``system_routing_configure``).
+* ``pfsense.gateway.delete`` (#3313) -- the inverse of
+  ``pfsense.gateway.add``. Delete ONE ``gateways/gateway_item`` by exact
+  ``name``, with a fail-closed dependency guard (``referenced``, mirroring
+  ``alias.delete``): refuses -- naming every referrer -- when the gateway
+  is still used by any static route, gateway group, or default-gateway
+  setting, so a gateway is never pulled out from under a live route.
+* ``pfsense.alias.member.remove`` (#3313) -- remove ONE member (host /
+  network entry) from a firewall alias **without deleting the alias** (the
+  shared-alias case: an alias shared across environments keeps its other
+  members and its identity). Refuses ``not_found`` / ``member_not_found`` /
+  ``ambiguous``, and refuses ``last_member`` -- never empties a shared
+  alias into deletion (that is ``alias.delete``'s job). A read-modify-write
+  on ``<address>`` (and its positionally-aligned ``<detail>``), applied via
+  ``filter_configure``, verified by read-back.
 
 Governed-delete tier (the whole point of #3232)
 -----------------------------------------------
@@ -94,16 +118,22 @@ References
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from typing import TYPE_CHECKING, Any
 
 from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
+from meho_backplane.connectors.pfsense.ops_read import parse_gateways_xml
 from meho_backplane.connectors.pfsense.ops_write import (
+    _GATEWAY_NAME_RE,
     _apply_playback,
     _php_squote,
     _read_config_xml,
+    _validate_gateway_name,
+    _validate_network_cidr,
+    parse_static_routes_xml,
 )
 from meho_backplane.operations._preview import PreviewContext, register_preview_builder
 
@@ -114,10 +144,14 @@ if TYPE_CHECKING:
 __all__ = [
     "DELETE_OPS",
     "find_alias_references",
+    "find_gateway_references",
     "parse_aliases_xml",
     "parse_nat_port_forwards_xml",
     "pfsense_alias_delete",
+    "pfsense_alias_member_remove",
+    "pfsense_gateway_delete",
     "pfsense_nat_delete",
+    "pfsense_route_static_delete",
     "register_pfsense_delete_preview_builders",
 ]
 
@@ -130,6 +164,15 @@ _TRACKER_RE = re.compile(r"^[0-9]{1,20}$")
 # ``^[a-zA-Z0-9_]+$``). Bounded + metacharacter-free, so the value is safe
 # to emit into the playback fragment and to compare as a reference token.
 _ALIAS_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+
+# An alias member (one space-separated ``<address>`` token) is an IP, a
+# CIDR, an FQDN host, or a port / port range. This allowlist covers all of
+# those (letters / digits / dot / colon / slash / dash / underscore) and
+# nothing else -- no whitespace (a member is a single token, never a list),
+# no shell metacharacters, no PHP string-literal terminators -- so the value
+# is safe to emit into the playback fragment and to compare as an exact
+# ``<address>`` token.
+_MEMBER_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,255}$")
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +200,36 @@ def _validate_alias_name(value: Any) -> str:
             f"underscore); got {value!r}"
         )
     return value
+
+
+def _validate_member_value(value: Any) -> str:
+    """Return *value* if it is a valid alias member token, else raise.
+
+    A member is one ``<address>`` token -- an IP, CIDR, FQDN host, or port /
+    port range. Matched exactly against a stored token (never canonicalised),
+    so ``pfsense.alias.member.remove`` removes precisely the entry the caller
+    named. Allowlist: ``^[A-Za-z0-9_.:/-]{1,255}$`` (no whitespace -- a member
+    is a single token, never a space-separated list).
+    """
+    if not isinstance(value, str) or not _MEMBER_VALUE_RE.match(value):
+        raise ValueError(
+            "member value must match ^[A-Za-z0-9_.:/-]{1,255}$ (a single "
+            "IP / CIDR / host / port token, no spaces); "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _alias_members(address: str | None) -> list[str]:
+    """Split an alias ``<address>`` string into its member tokens.
+
+    pfSense stores an alias's members as a whitespace-separated
+    ``<address>`` string. ``str.split()`` (no args) splits on any whitespace
+    run and drops empties -- matching the ``preg_split('/\\s+/', trim(...))``
+    the removal playback uses, so the Python member count and the PHP one
+    agree.
+    """
+    return (address or "").split()
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +500,100 @@ def find_alias_references(xml_text: str, alias_name: str) -> list[dict[str, Any]
     return refs
 
 
+def _match_static_routes_canonical(xml_text: str, network: str) -> list[dict[str, Any]]:
+    """Return the ``<route>`` rows whose canonical network equals *network*.
+
+    Both the stored network and *network* (already canonical) are reduced to
+    their canonical CIDR form before comparison, so a route stored with host
+    bits set (``10.9.0.5/24``) matches a canonical query (``10.9.0.0/24``).
+    Returns every match so the handler can refuse ``ambiguous`` when two
+    routes canonicalise to the same network. A stored value that will not
+    parse as a network is skipped (it cannot be the delete target).
+    """
+    matches: list[dict[str, Any]] = []
+    for row in parse_static_routes_xml(xml_text):
+        stored = row.get("network")
+        if not isinstance(stored, str):
+            continue
+        try:
+            if str(ipaddress.ip_network(stored.strip(), strict=False)) == network:
+                matches.append(row)
+        except ValueError:
+            continue
+    return matches
+
+
+def find_gateway_references(xml_text: str, gateway_name: str) -> list[dict[str, Any]]:
+    """Return the config objects that reference *gateway_name* (fail-closed guard).
+
+    Scans the reference surface pfSense's own gateway-delete guard checks, so a
+    delete that would pull a gateway out from under a live consumer is refused
+    here too -- **before** any mutation:
+
+    * **Static routes** (``<staticroutes><route>``) -- a route whose
+      ``<gateway>`` names this gateway.
+    * **Gateway groups** (``<gateways><gateway_group>``) -- a group whose
+      ``<item>`` (``GATEWAY|tier|vip``) names this gateway in its first
+      pipe-delimited field.
+    * **Default-gateway setting** -- the modern ``<gateways><defaultgw4>`` /
+      ``<defaultgw6>`` pointer, or the legacy per-item ``<defaultgw/>`` flag on
+      the ``gateway_item`` itself.
+
+    Returns one ``{kind, id, descr}`` row per referrer so the refusal can name
+    every one (``id`` is the route's network, the group name, or the
+    default-gateway setting key). An empty list means the gateway is safe to
+    delete. Returns an empty list on parse failure (the handler's own read /
+    parse guards catch a broken config first).
+    """
+    if not xml_text.strip():
+        return []
+    try:
+        root = fromstring(xml_text)
+    except ParseError:
+        return []
+    refs: list[dict[str, Any]] = []
+
+    # Static routes pointing at the gateway.
+    sr_root = root.find(".//staticroutes")
+    if sr_root is not None:
+        for route in sr_root.findall("route"):
+            if _child_text(route, "gateway") == gateway_name:
+                refs.append(
+                    {
+                        "kind": "static_route",
+                        "id": _child_text(route, "network"),
+                        "descr": _child_text(route, "descr"),
+                    }
+                )
+
+    gw_root = root.find(".//gateways")
+    if gw_root is not None:
+        # Gateway groups listing the gateway as a member.
+        for group in gw_root.findall("gateway_group"):
+            for item in group.findall("item"):
+                token = (item.text or "").split("|", 1)[0].strip()
+                if token == gateway_name:
+                    refs.append(
+                        {
+                            "kind": "gateway_group",
+                            "id": _child_text(group, "name"),
+                            "descr": _child_text(group, "descr"),
+                        }
+                    )
+                    break  # one referrer row per group, however many tiers name it
+        # Modern default-gateway pointers.
+        for tag in ("defaultgw4", "defaultgw6"):
+            dgw = gw_root.find(tag)
+            if dgw is not None and (dgw.text or "").strip() == gateway_name:
+                refs.append({"kind": "default_gateway", "id": tag, "descr": None})
+        # Legacy per-item default flag on the gateway being deleted.
+        for item in gw_root.findall("gateway_item"):
+            if _child_text(item, "name") == gateway_name and item.find("defaultgw") is not None:
+                refs.append({"kind": "default_gateway", "id": "gateway_item_flag", "descr": None})
+
+    return refs
+
+
 # ---------------------------------------------------------------------------
 # pfSsh.php playback fragment construction
 # ---------------------------------------------------------------------------
@@ -488,6 +655,130 @@ def _build_alias_delete_playback(name: str) -> str:
         "}",
         "if ($meho_removed === 1) {",
         f"  write_config({_php_squote('meho: delete alias ' + name)});",
+        "  filter_configure();",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_route_delete_playback(network_exact: str) -> str:
+    """Return the raw-PHP playback fragment that deletes ONE static route.
+
+    Removes only the ``<staticroutes><route>`` whose ``<network>`` matches
+    *network_exact* (the route's exact stored string -- the handler resolves
+    the canonical query to this single stored value first, so a
+    non-canonical-but-equal stored route is deleted by its real key),
+    reindexes, and persists **only when exactly one** entry was removed
+    (``$meho_removed === 1``). Applies via ``system_routing_configure()``
+    (route-table apply only -- never an interface re-enumeration).
+    """
+    lines = [
+        "global $config;",
+        f"$meho_network = {_php_squote(network_exact)};",
+        "$meho_removed = 0;",
+        "if (is_array($config['staticroutes']) && is_array($config['staticroutes']['route'])) {",
+        "  foreach ($config['staticroutes']['route'] as $meho_i => $meho_r) {",
+        "    if (isset($meho_r['network']) && (string)$meho_r['network'] === $meho_network) {",
+        "      unset($config['staticroutes']['route'][$meho_i]);",
+        "      $meho_removed++;",
+        "    }",
+        "  }",
+        "  if ($meho_removed > 0) {",
+        "    $config['staticroutes']['route'] = array_values($config['staticroutes']['route']);",
+        "  }",
+        "}",
+        "if ($meho_removed === 1) {",
+        f"  write_config({_php_squote('meho: delete static route ' + network_exact)});",
+        "  system_routing_configure();",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_gateway_delete_playback(name: str) -> str:
+    """Return the raw-PHP playback fragment that deletes ONE gateway_item by name.
+
+    Removes only the ``<gateways><gateway_item>`` whose ``<name>`` matches,
+    reindexes, and persists **only when exactly one** entry was removed.
+    Applies via ``system_routing_configure()`` (routing / gateway apply --
+    never an interface re-enumeration that could stun the operator's path).
+    """
+    lines = [
+        "global $config;",
+        f"$meho_name = {_php_squote(name)};",
+        "$meho_removed = 0;",
+        "if (is_array($config['gateways']) && is_array($config['gateways']['gateway_item'])) {",
+        "  foreach ($config['gateways']['gateway_item'] as $meho_i => $meho_g) {",
+        "    if (isset($meho_g['name']) && (string)$meho_g['name'] === $meho_name) {",
+        "      unset($config['gateways']['gateway_item'][$meho_i]);",
+        "      $meho_removed++;",
+        "    }",
+        "  }",
+        "  if ($meho_removed > 0) {",
+        "    $config['gateways']['gateway_item'] = "
+        "array_values($config['gateways']['gateway_item']);",
+        "  }",
+        "}",
+        "if ($meho_removed === 1) {",
+        f"  write_config({_php_squote('meho: delete gateway ' + name)});",
+        "  system_routing_configure();",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_alias_member_remove_playback(name: str, value: str) -> str:
+    """Return the raw-PHP fragment that removes ONE member from an alias.
+
+    A read-modify-write on the SHARED alias object: split ``<address>`` on
+    whitespace, drop the **first** token equal to *value* (and its
+    positionally-aligned ``<detail>`` entry), and rejoin -- keeping the alias
+    and every other member. Persists **only when** exactly one alias matched
+    the name (``$meho_matched === 1``) *and* the member removal actually
+    applied (``$meho_applied === 1``, which requires exactly one token
+    removed AND at least one member surviving) -- so an empty-out (last
+    member) never persists, defence-in-depth behind the handler's
+    ``last_member`` refusal. Applies via ``filter_configure()`` (aliases
+    compile into pf tables).
+    """
+    lines = [
+        "global $config;",
+        f"$meho_name = {_php_squote(name)};",
+        f"$meho_value = {_php_squote(value)};",
+        "$meho_matched = 0;",
+        "$meho_applied = 0;",
+        "if (is_array($config['aliases']) && is_array($config['aliases']['alias'])) {",
+        "  foreach ($config['aliases']['alias'] as $meho_i => $meho_a) {",
+        "    if (!isset($meho_a['name']) || (string)$meho_a['name'] !== $meho_name) { continue; }",
+        "    $meho_matched++;",
+        "    $meho_addr = array();",
+        "    if (isset($meho_a['address'])) {",
+        "      foreach (preg_split('/\\s+/', trim((string)$meho_a['address'])) as $meho_t) {",
+        "        if ($meho_t !== '') { $meho_addr[] = $meho_t; }",
+        "      }",
+        "    }",
+        "    $meho_det = isset($meho_a['detail']) ? explode('||', (string)$meho_a['detail']) "
+        ": array();",
+        "    $meho_new_addr = array();",
+        "    $meho_new_det = array();",
+        "    $meho_removed = 0;",
+        "    foreach ($meho_addr as $meho_j => $meho_tok) {",
+        "      if ($meho_tok === $meho_value && $meho_removed === 0) {",
+        "        $meho_removed++;",
+        "        continue;",
+        "      }",
+        "      $meho_new_addr[] = $meho_tok;",
+        "      if (isset($meho_det[$meho_j])) { $meho_new_det[] = $meho_det[$meho_j]; }",
+        "    }",
+        "    if ($meho_removed === 1 && count($meho_new_addr) >= 1) {",
+        "      $config['aliases']['alias'][$meho_i]['address'] = implode(' ', $meho_new_addr);",
+        "      $config['aliases']['alias'][$meho_i]['detail'] = implode('||', $meho_new_det);",
+        "      $meho_applied = 1;",
+        "    }",
+        "  }",
+        "}",
+        "if ($meho_matched === 1 && $meho_applied === 1) {",
+        f"  write_config({_php_squote('meho: remove alias member ' + value + ' from ' + name)});",
         "  filter_configure();",
         "}",
     ]
@@ -701,6 +992,351 @@ async def pfsense_alias_delete(
     }
 
 
+async def pfsense_route_static_delete(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``pfsense.route.static.delete`` -- inverse of the add op.
+
+    Sequence: validate + canonicalise ``network`` -> read ``config.xml`` ->
+    canonical-match static routes. **Fail-closed pre-check:** 0 matches ->
+    ``not_found``, >1 (two routes canonicalising to the same network) ->
+    ``ambiguous`` (never guess). Exactly one -> stage + play back the
+    delete-by-network fragment (keyed on the route's *exact stored* network
+    string, persisting only on a single removal, then
+    ``system_routing_configure()``), then read ``config.xml`` back and verify
+    the route is **absent** *and* the route count dropped by **exactly one**.
+
+    Returns ``{op_class, resource, status, network, matched, removed,
+    routes_before, routes_after, verified, guidance}``.
+    """
+    network = _validate_network_cidr(params.get("network"))
+
+    before = await _read_config_xml(self, target, operator)
+    routes_before = parse_static_routes_xml(before)
+    matches = _match_static_routes_canonical(before, network)
+
+    result: dict[str, Any] = {
+        "op_class": "delete",
+        "resource": "static_route",
+        "network": network,
+        "matched": len(matches),
+        "removed": None,
+        "routes_before": len(routes_before),
+        "routes_after": None,
+        "verified": False,
+    }
+    if not matches:
+        return {
+            **result,
+            "status": "not_found",
+            "guidance": (
+                f"no static route for network {network!r} in config.xml "
+                f"({len(routes_before)} route(s) present); nothing deleted"
+            ),
+        }
+    if len(matches) > 1:
+        return {
+            **result,
+            "status": "ambiguous",
+            "guidance": (
+                f"{len(matches)} static routes canonicalise to {network!r} "
+                "(corrupt config); refusing to delete -- an operator must "
+                "disambiguate the duplicate routes first"
+            ),
+        }
+
+    route = matches[0]
+    stored_network = route["network"]  # exact stored string -- the PHP delete key
+    await _apply_playback(
+        self,
+        target,
+        script_name=f"meho_route_delete_{_script_token(network)}",
+        script_body=_build_route_delete_playback(stored_network),
+        operator=operator,
+    )
+
+    after = await _read_config_xml(self, target, operator)
+    routes_after = parse_static_routes_xml(after)
+    still_present = bool(_match_static_routes_canonical(after, network))
+    removed_exactly_one = len(routes_after) == len(routes_before) - 1
+    if still_present or not removed_exactly_one:
+        raise RuntimeError(
+            f"route.static.delete verification failed for {network!r}: "
+            f"present_after={still_present}, routes {len(routes_before)}->{len(routes_after)} "
+            "(expected exactly one fewer); the pfSsh.php playback did not persist a "
+            "clean single-route delete"
+        )
+    return {
+        **result,
+        "status": "deleted",
+        "removed": route,
+        "routes_after": len(routes_after),
+        "verified": True,
+        "guidance": None,
+    }
+
+
+async def pfsense_gateway_delete(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``pfsense.gateway.delete`` -- inverse of the add op.
+
+    Sequence: validate ``name`` -> read ``config.xml`` -> match gateways by
+    exact name. **Fail-closed pre-checks:** 0 matches -> ``not_found``, >1 ->
+    ``ambiguous``; then a **dependency check** (mirrors ``alias.delete``) --
+    if any static route, gateway group, or default-gateway setting still uses
+    the gateway, refuse with ``referenced`` and name every referrer, deleting
+    nothing (so a gateway is never pulled out from under a live route). Only a
+    single, unreferenced gateway is deleted: stage + play back the
+    delete-by-name fragment (persists only on a single removal, then
+    ``system_routing_configure()``), then read ``config.xml`` back and verify
+    the gateway is **absent** *and* the count dropped by **exactly one**. Runs
+    at dispatch time (post-approval), so a reference added between park and
+    approval is still caught.
+
+    Returns ``{op_class, resource, status, name, matched, removed,
+    references, reference_count, gateways_before, gateways_after, verified,
+    guidance}``.
+    """
+    name = _validate_gateway_name(params.get("name"))
+
+    before = await _read_config_xml(self, target, operator)
+    gateways_before = parse_gateways_xml(before)
+    matches = [g for g in gateways_before if g.get("name") == name]
+
+    result: dict[str, Any] = {
+        "op_class": "delete",
+        "resource": "gateway",
+        "name": name,
+        "matched": len(matches),
+        "removed": None,
+        "references": [],
+        "reference_count": 0,
+        "gateways_before": len(gateways_before),
+        "gateways_after": None,
+        "verified": False,
+    }
+    if not matches:
+        return {
+            **result,
+            "status": "not_found",
+            "guidance": (
+                f"no gateway named {name!r} in config.xml "
+                f"({len(gateways_before)} gateway(s) present); nothing deleted"
+            ),
+        }
+    if len(matches) > 1:
+        return {
+            **result,
+            "status": "ambiguous",
+            "guidance": (
+                f"{len(matches)} gateways share the name {name!r} (corrupt config); "
+                "refusing to delete -- an operator must disambiguate first"
+            ),
+        }
+
+    references = find_gateway_references(before, name)
+    if references:
+        referrers = ", ".join(
+            f"{r['kind']}({r.get('id') or '?'}{': ' + r['descr'] if r.get('descr') else ''})"
+            for r in references
+        )
+        return {
+            **result,
+            "status": "referenced",
+            "references": references,
+            "reference_count": len(references),
+            "guidance": (
+                f"gateway {name!r} is still referenced by {len(references)} object(s) "
+                f"[{referrers}]; refusing to delete (fail-closed) -- remove or "
+                "repoint those references first"
+            ),
+        }
+
+    gateway = matches[0]
+    await _apply_playback(
+        self,
+        target,
+        script_name=f"meho_gateway_delete_{_script_token(name)}",
+        script_body=_build_gateway_delete_playback(name),
+        operator=operator,
+    )
+
+    after = await _read_config_xml(self, target, operator)
+    gateways_after = parse_gateways_xml(after)
+    still_present = any(g.get("name") == name for g in gateways_after)
+    removed_exactly_one = len(gateways_after) == len(gateways_before) - 1
+    if still_present or not removed_exactly_one:
+        raise RuntimeError(
+            f"gateway.delete verification failed for {name!r}: present_after={still_present}, "
+            f"gateways {len(gateways_before)}->{len(gateways_after)} (expected exactly one "
+            "fewer); the pfSsh.php playback did not persist a clean single-gateway delete"
+        )
+    return {
+        **result,
+        "status": "deleted",
+        "removed": gateway,
+        "gateways_after": len(gateways_after),
+        "verified": True,
+        "guidance": None,
+    }
+
+
+async def pfsense_alias_member_remove(
+    self: PfSenseConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``pfsense.alias.member.remove`` -- trim one shared-alias member.
+
+    Removes ONE member from a firewall alias **without deleting the alias**:
+    the shared-alias case, where an alias shared across environments must keep
+    its other members and its identity. Sequence: validate ``name`` + ``value``
+    -> read ``config.xml`` -> match aliases by exact name. **Fail-closed
+    pre-checks:** 0 name matches -> ``not_found``, >1 -> ``ambiguous``; then
+    within the single alias, count occurrences of ``value`` among its members:
+    0 -> ``member_not_found``, >1 -> ``ambiguous`` (a degenerate duplicate,
+    refuse); exactly one -> proceed. **Idempotency + safety:** if that member
+    is the alias's *only* member -> ``last_member`` (never empty a shared
+    alias into deletion -- that is ``alias.delete``'s job). Only a valid,
+    non-last member is removed: stage + play back the read-modify-write
+    fragment (drop the token + its aligned ``<detail>`` entry, then
+    ``filter_configure()``), then read ``config.xml`` back and verify the
+    member is **gone**, the alias is **retained**, and every *other* member
+    survives (the residual set is exactly the prior set minus ``value``).
+
+    Returns ``{op_class, resource, status, alias, value, matched,
+    member_matched, removed, members_before, members_after, residual_members,
+    alias_retained, verified, guidance}``.
+    """
+    name = _validate_alias_name(params.get("name"))
+    value = _validate_member_value(params.get("value"))
+
+    before = await _read_config_xml(self, target, operator)
+    aliases_before = parse_aliases_xml(before)
+    matches = [a for a in aliases_before if a.get("name") == name]
+
+    result: dict[str, Any] = {
+        "op_class": "update",
+        "resource": "alias_member",
+        "alias": name,
+        "value": value,
+        "matched": len(matches),
+        "member_matched": 0,
+        "removed": False,
+        "members_before": None,
+        "members_after": None,
+        "residual_members": None,
+        "alias_retained": None,
+        "verified": False,
+    }
+    if not matches:
+        return {
+            **result,
+            "status": "not_found",
+            "guidance": (
+                f"no alias named {name!r} in config.xml "
+                f"({len(aliases_before)} alias(es) present); nothing removed"
+            ),
+        }
+    if len(matches) > 1:
+        return {
+            **result,
+            "status": "ambiguous",
+            "guidance": (
+                f"{len(matches)} aliases share the name {name!r} (corrupt config); "
+                "refusing to modify -- an operator must disambiguate first"
+            ),
+        }
+
+    alias = matches[0]
+    members = _alias_members(alias.get("address"))
+    occurrences = members.count(value)
+    result["member_matched"] = occurrences
+    result["members_before"] = len(members)
+    if occurrences == 0:
+        return {
+            **result,
+            "status": "member_not_found",
+            "guidance": (
+                f"alias {name!r} has no member {value!r} "
+                f"({len(members)} member(s): {members}); nothing removed"
+            ),
+        }
+    if occurrences > 1:
+        return {
+            **result,
+            "status": "ambiguous",
+            "guidance": (
+                f"member {value!r} appears {occurrences} times in alias {name!r} "
+                "(degenerate duplicate); refusing to modify -- an operator must "
+                "disambiguate first"
+            ),
+        }
+    if len(members) == 1:
+        return {
+            **result,
+            "status": "last_member",
+            "guidance": (
+                f"{value!r} is the ONLY member of alias {name!r}; refusing to remove "
+                "it (fail-closed) -- emptying a shared alias into deletion is not this "
+                "op's job. Use pfsense.alias.delete (with its own dependency guard) to "
+                "delete the whole alias."
+            ),
+        }
+
+    expected_residual = sorted(m for m in members if m != value)
+    await _apply_playback(
+        self,
+        target,
+        script_name=f"meho_alias_member_remove_{_script_token(name)}_{_script_token(value)}",
+        script_body=_build_alias_member_remove_playback(name, value),
+        operator=operator,
+    )
+
+    after = await _read_config_xml(self, target, operator)
+    aliases_after = parse_aliases_xml(after)
+    alias_after = next((a for a in aliases_after if a.get("name") == name), None)
+    alias_retained = alias_after is not None
+    members_after = _alias_members(alias_after.get("address")) if alias_after else []
+    value_gone = value not in members_after
+    dropped_exactly_one = len(members_after) == len(members) - 1
+    others_survived = sorted(members_after) == expected_residual
+    same_alias_count = len(aliases_after) == len(aliases_before)
+    if not (
+        alias_retained
+        and value_gone
+        and dropped_exactly_one
+        and others_survived
+        and same_alias_count
+    ):
+        raise RuntimeError(
+            f"alias.member.remove verification failed for {value!r} in {name!r}: "
+            f"alias_retained={alias_retained}, value_gone={value_gone}, "
+            f"members {len(members)}->{len(members_after)} (expected exactly one fewer), "
+            f"others_survived={others_survived}, aliases {len(aliases_before)}->"
+            f"{len(aliases_after)} (expected unchanged); the pfSsh.php playback did not "
+            "persist a clean single-member removal that retained the shared alias"
+        )
+    return {
+        **result,
+        "status": "removed",
+        "removed": True,
+        "members_after": len(members_after),
+        "residual_members": members_after,
+        "alias_retained": True,
+        "verified": True,
+        "guidance": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Blast-radius preview builders (#3197 mandatory destructive-tier block)
 # ---------------------------------------------------------------------------
@@ -821,6 +1457,133 @@ async def _alias_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
+async def _route_static_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Blast-radius builder for ``pfsense.route.static.delete`` (#3197 requirement 3).
+
+    Live-reads ``config.xml`` and, when the ``network`` canonicalises to
+    **exactly one** static route, populates the mandatory blast-radius block:
+    the route identity (canonical network -> gateway, descr). A route has no
+    dependents, so there are no children. Declines (``None`` -> park refused
+    ``blast_radius_required``, fail-closed) when the connector can't be read
+    or the network does not resolve to a unique route.
+    """
+    raw = ctx.params.get("network")
+    if not isinstance(raw, str):
+        return None
+    try:
+        network = _validate_network_cidr(raw)
+    except ValueError:
+        return None
+    xml_text = await _read_config_for_preview(ctx)
+    if xml_text is None:
+        return None
+    matches = _match_static_routes_canonical(xml_text, network)
+    if len(matches) != 1:
+        return None
+    route = matches[0]
+    return {
+        "blast_radius": {
+            "object": {
+                "kind": "static_route",
+                "network": network,
+                "gateway": route.get("gateway"),
+                "descr": route.get("descr"),
+            },
+            "children": [],
+            "irreversibility": "permanent",
+        },
+    }
+
+
+async def _gateway_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Blast-radius builder for ``pfsense.gateway.delete`` (#3197 requirement 3).
+
+    Live-reads ``config.xml`` and, when the name resolves to **exactly one**
+    gateway, populates the mandatory blast-radius block: the gateway identity
+    (name / interface / gateway IP / descr) plus, as enumerated children,
+    every object that references it -- with ``reference_count`` surfaced so the
+    approver sees at a glance that the delete will be **refused** at execution
+    (fail-closed) unless those references are removed first (mirrors
+    ``alias.delete``). Declines (``None`` -> park refused
+    ``blast_radius_required``) when the connector can't be read or the name
+    does not resolve to a unique gateway.
+    """
+    name = ctx.params.get("name")
+    if not isinstance(name, str) or not _GATEWAY_NAME_RE.match(name):
+        return None
+    xml_text = await _read_config_for_preview(ctx)
+    if xml_text is None:
+        return None
+    matches = [g for g in parse_gateways_xml(xml_text) if g.get("name") == name]
+    if len(matches) != 1:
+        return None
+    gateway = matches[0]
+    references = find_gateway_references(xml_text, name)
+    children = [
+        {"kind": "reference", "ref_kind": r["kind"], "id": r.get("id"), "descr": r.get("descr")}
+        for r in references
+    ]
+    return {
+        "blast_radius": {
+            "object": {
+                "kind": "gateway",
+                "name": name,
+                "interface": gateway.get("interface"),
+                "gateway": gateway.get("gateway"),
+                "descr": gateway.get("descr"),
+            },
+            "children": children,
+            "reference_count": len(references),
+            "irreversibility": "permanent",
+        },
+    }
+
+
+async def _alias_member_remove_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Blast-radius builder for ``pfsense.alias.member.remove`` (#3197 requirement 3).
+
+    Live-reads ``config.xml`` and, when the request resolves to a valid
+    single-member removal -- the alias exists (exactly one), the ``value`` is a
+    unique member, and it is **not** the last member -- populates the mandatory
+    blast-radius block: the member identity (alias name + type + the member
+    being removed) and the ``residual_member_count`` that will survive, with
+    ``alias_retained: true`` making explicit that the alias itself is kept.
+    Declines (``None`` -> park refused ``blast_radius_required``, fail-closed)
+    for any non-removable request (absent alias, absent / duplicate / last
+    member) or an unreadable connector, so only a currently-valid removal ever
+    parks.
+    """
+    name = ctx.params.get("name")
+    value = ctx.params.get("value")
+    if not isinstance(name, str) or not _ALIAS_NAME_RE.match(name):
+        return None
+    if not isinstance(value, str) or not _MEMBER_VALUE_RE.match(value):
+        return None
+    xml_text = await _read_config_for_preview(ctx)
+    if xml_text is None:
+        return None
+    matches = [a for a in parse_aliases_xml(xml_text) if a.get("name") == name]
+    if len(matches) != 1:
+        return None
+    members = _alias_members(matches[0].get("address"))
+    if members.count(value) != 1 or len(members) <= 1:
+        return None
+    return {
+        "blast_radius": {
+            "object": {
+                "kind": "alias_member",
+                "alias": name,
+                "type": matches[0].get("type"),
+                "member": value,
+            },
+            "children": [],
+            "residual_member_count": len(members) - 1,
+            "alias_retained": True,
+            "irreversibility": "permanent",
+        },
+    }
+
+
 def register_pfsense_delete_preview_builders() -> None:
     """Wire the destructive-delete blast-radius builders. Import-time.
 
@@ -832,6 +1595,9 @@ def register_pfsense_delete_preview_builders() -> None:
     """
     register_preview_builder("pfsense.nat.delete", _nat_delete_preview)
     register_preview_builder("pfsense.alias.delete", _alias_delete_preview)
+    register_preview_builder("pfsense.route.static.delete", _route_static_delete_preview)
+    register_preview_builder("pfsense.gateway.delete", _gateway_delete_preview)
+    register_preview_builder("pfsense.alias.member.remove", _alias_member_remove_preview)
 
 
 # ---------------------------------------------------------------------------
@@ -988,10 +1754,257 @@ _ALIAS_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
 }
 
+#: Curated ``when_to_use`` for the ``routing`` group's destructive route delete.
+_ROUTE_DELETE_WHEN_TO_USE = (
+    "Permanently delete ONE pfSense static route by its canonical ``network`` "
+    "(CIDR) -- the inverse of ``pfsense.route.static.add``, for a governed "
+    "environment teardown. GOVERNED DESTRUCTIVE DELETE (same tier + gate as "
+    "``pfsense.nat.delete``). Fail-closed: refuses on 0 matches (``not_found``) "
+    "or >1 (``ambiguous`` -- two routes canonicalising to the same network); "
+    "never guesses. Deletes exactly one route (``write_config`` + "
+    "``system_routing_configure``) and verifies it is gone and the count "
+    "dropped by one."
+)
+
+#: Curated ``when_to_use`` for the ``routing`` group's destructive gateway delete.
+_GATEWAY_DELETE_WHEN_TO_USE = (
+    "Permanently delete ONE pfSense gateway by exact ``name`` -- the inverse "
+    "of ``pfsense.gateway.add``, for a governed environment teardown. GOVERNED "
+    "DESTRUCTIVE DELETE. Fail-closed dependency check (mirrors "
+    "``pfsense.alias.delete``): refuses (``referenced``) when the gateway is "
+    "still used by any static route, gateway group, or default-gateway "
+    "setting, naming every referrer -- remove or repoint those first so a "
+    "gateway is never pulled out from under a live route. Also refuses on 0 "
+    "matches (``not_found``) or >1 (``ambiguous``). Deletes exactly one gateway "
+    "(``write_config`` + ``system_routing_configure``) and verifies the count "
+    "dropped by one."
+)
+
+#: Curated ``when_to_use`` for the ``alias`` group's shared-member removal.
+_ALIAS_MEMBER_REMOVE_WHEN_TO_USE = (
+    "Remove ONE member (host / network entry) from a pfSense firewall alias "
+    "WITHOUT deleting the alias -- the shared-alias teardown case, where an "
+    "alias shared across environments must keep its other members and its "
+    "identity while one environment's entry is trimmed out. GOVERNED "
+    "DESTRUCTIVE op (safety_level=destructive, mandatory human approval, "
+    "preview-hash binding, blast-radius statement). Fail-closed: refuses "
+    "``not_found`` (alias absent), ``member_not_found`` (the value is not a "
+    "member), ``ambiguous`` (duplicate alias name or duplicate member), and "
+    "``last_member`` -- it never empties a shared alias into deletion (deleting "
+    "the whole alias is ``pfsense.alias.delete``'s job, with its own dependency "
+    "guard). Removes exactly the named member (``write_config`` + "
+    "``filter_configure``) and verifies the member is gone, the alias is "
+    "retained, and every other member survives."
+)
+
+_ROUTE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "network": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Destination network in CIDR form, e.g. ``10.9.0.0/24``. "
+                "Canonicalised to the network address before matching (so "
+                "``10.9.0.5/24`` matches the route stored as ``10.9.0.0/24``). "
+                "A network matching 0 routes is ``not_found``; >1 "
+                "(corrupt config) is ``ambiguous`` and refused."
+            ),
+        },
+    },
+    "required": ["network"],
+    "additionalProperties": False,
+}
+
+_ROUTE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op_class": {"type": "string", "enum": ["delete"]},
+        "resource": {"type": "string", "enum": ["static_route"]},
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "not_found", "ambiguous"],
+            "description": (
+                "``deleted`` on a verified single-route delete; ``not_found`` "
+                "when no route matches the network; ``ambiguous`` when >1 do "
+                "(refused, fail-closed)."
+            ),
+        },
+        "network": {"type": "string"},
+        "matched": {"type": "integer"},
+        "removed": {"type": ["object", "null"]},
+        "routes_before": {"type": ["integer", "null"]},
+        "routes_after": {"type": ["integer", "null"]},
+        "verified": {"type": "boolean"},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["op_class", "resource", "status", "network", "matched", "verified"],
+    "additionalProperties": False,
+}
+
+_ROUTE_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": _ROUTE_DELETE_WHEN_TO_USE,
+    "parameter_hints": {
+        "network": "Required. Destination CIDR, e.g. ``10.9.0.0/24`` (canonicalised).",
+    },
+    "output_shape": (
+        "``{op_class: 'delete', resource: 'static_route', status, network, "
+        "matched, removed, routes_before, routes_after, verified, guidance}``. "
+        "``status`` is ``deleted`` / ``not_found`` / ``ambiguous``. On "
+        "``deleted``, ``removed`` carries the deleted route (network -> "
+        "gateway) and ``verified`` is true (config read back: route absent, "
+        "count -1)."
+    ),
+}
+
+_GATEWAY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "description": (
+                "Exact name of the ONE gateway to delete. Refused "
+                "(``referenced``) when still used by any static route, gateway "
+                "group, or default-gateway setting; ``not_found`` when absent."
+            ),
+        },
+    },
+    "required": ["name"],
+    "additionalProperties": False,
+}
+
+_GATEWAY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op_class": {"type": "string", "enum": ["delete"]},
+        "resource": {"type": "string", "enum": ["gateway"]},
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "not_found", "ambiguous", "referenced"],
+            "description": (
+                "``deleted`` on a verified single-gateway delete; ``not_found`` "
+                "when absent; ``ambiguous`` on a duplicate name; ``referenced`` "
+                "when still in use (refused, fail-closed, with the referrers "
+                "named in ``references``)."
+            ),
+        },
+        "name": {"type": "string"},
+        "matched": {"type": "integer"},
+        "removed": {"type": ["object", "null"]},
+        "references": {"type": "array", "items": {"type": "object"}},
+        "reference_count": {"type": "integer"},
+        "gateways_before": {"type": ["integer", "null"]},
+        "gateways_after": {"type": ["integer", "null"]},
+        "verified": {"type": "boolean"},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["op_class", "resource", "status", "name", "matched", "verified"],
+    "additionalProperties": False,
+}
+
+_GATEWAY_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": _GATEWAY_DELETE_WHEN_TO_USE,
+    "parameter_hints": {
+        "name": "Required. Exact gateway name (alphanumeric / dash / underscore).",
+    },
+    "output_shape": (
+        "``{op_class: 'delete', resource: 'gateway', status, name, matched, "
+        "removed, references, reference_count, gateways_before, gateways_after, "
+        "verified, guidance}``. On ``referenced``, ``references`` names every "
+        "static route / gateway group / default-gateway setting still using "
+        "the gateway. On ``deleted``, ``removed`` carries the deleted gateway "
+        "and ``verified`` is true."
+    ),
+}
+
+_ALIAS_MEMBER_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_]{1,64}$",
+            "description": (
+                "Exact name of the firewall alias to trim. The alias is "
+                "retained; only the named member is removed. ``not_found`` "
+                "when absent."
+            ),
+        },
+        "value": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:/-]{1,255}$",
+            "description": (
+                "The exact member entry to remove -- one ``<address>`` token "
+                "(an IP, CIDR, host, or port). Matched exactly (never "
+                "canonicalised). ``member_not_found`` when not a member; "
+                "``last_member`` when it is the alias's only member (refused "
+                "-- use ``pfsense.alias.delete`` to delete the whole alias)."
+            ),
+        },
+    },
+    "required": ["name", "value"],
+    "additionalProperties": False,
+}
+
+_ALIAS_MEMBER_REMOVE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op_class": {"type": "string", "enum": ["update"]},
+        "resource": {"type": "string", "enum": ["alias_member"]},
+        "status": {
+            "type": "string",
+            "enum": ["removed", "not_found", "member_not_found", "ambiguous", "last_member"],
+            "description": (
+                "``removed`` on a verified single-member removal that retained "
+                "the alias; ``not_found`` when the alias is absent; "
+                "``member_not_found`` when the value is not a member; "
+                "``ambiguous`` on a duplicate alias name or duplicate member; "
+                "``last_member`` when the value is the alias's only member "
+                "(refused, fail-closed)."
+            ),
+        },
+        "alias": {"type": "string"},
+        "value": {"type": "string"},
+        "matched": {"type": "integer"},
+        "member_matched": {"type": "integer"},
+        "removed": {"type": "boolean"},
+        "members_before": {"type": ["integer", "null"]},
+        "members_after": {"type": ["integer", "null"]},
+        "residual_members": {"type": ["array", "null"], "items": {"type": "string"}},
+        "alias_retained": {"type": ["boolean", "null"]},
+        "verified": {"type": "boolean"},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["op_class", "resource", "status", "alias", "value", "matched", "verified"],
+    "additionalProperties": False,
+}
+
+_ALIAS_MEMBER_REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": _ALIAS_MEMBER_REMOVE_WHEN_TO_USE,
+    "parameter_hints": {
+        "name": "Required. Exact alias name (alphanumeric / underscore).",
+        "value": (
+            "Required. The exact member entry to remove -- one IP / CIDR / host "
+            "/ port token, matched exactly against the alias's members."
+        ),
+    },
+    "output_shape": (
+        "``{op_class: 'update', resource: 'alias_member', status, alias, "
+        "value, matched, member_matched, removed, members_before, "
+        "members_after, residual_members, alias_retained, verified, "
+        "guidance}``. On ``removed``, the alias is retained, "
+        "``residual_members`` lists the surviving members, ``alias_retained`` "
+        "is true, and ``verified`` is true (config read back: member gone, "
+        "others intact, alias count unchanged)."
+    ),
+}
+
 #: The governed destructive-delete ops :class:`PfSenseConnector` registers
-#: alongside the read + additive-write surface. Both are
-#: ``safety_level='destructive'`` / ``requires_approval=True`` (#3232) --
-#: the connector's first ops on the governed-delete tier.
+#: alongside the read + additive-write surface. All are
+#: ``safety_level='destructive'`` / ``requires_approval=True`` -- the
+#: governed-delete tier. #3232 shipped ``nat.delete`` + ``alias.delete``;
+#: #3313 adds the three teardown-inverse ops (``route.static.delete``,
+#: ``gateway.delete``, ``alias.member.remove``).
 DELETE_OPS: tuple[PfSenseOp, ...] = (
     PfSenseOp(
         op_id="pfsense.nat.delete",
@@ -1048,6 +2061,93 @@ DELETE_OPS: tuple[PfSenseOp, ...] = (
         safety_level="destructive",
         requires_approval=True,
         llm_instructions=_ALIAS_DELETE_LLM_INSTRUCTIONS,
+    ),
+    PfSenseOp(
+        op_id="pfsense.route.static.delete",
+        handler_attr="route_static_delete",
+        summary="Permanently delete ONE static route by canonical network (governed).",
+        description=(
+            "Governed destructive delete of a single pfSense static route "
+            "(``config.xml`` ``<staticroutes><route>``) by its canonical "
+            "``network`` (CIDR) -- the inverse of ``pfsense.route.static.add``, "
+            "for a governed environment teardown. safety_level=destructive "
+            "(same tier + gate as ``pfsense.nat.delete``): mandatory human "
+            "approval, a preview-hash binding, and a blast-radius statement "
+            "(the route's network -> gateway). Fail-closed: 0 matches -> "
+            "``not_found``, >1 (two routes canonicalising to the same network) "
+            "-> ``ambiguous`` (never guesses). Deletes exactly one route via "
+            "``pfSsh.php playback`` (``write_config`` + "
+            "``system_routing_configure``) and verifies the route is gone and "
+            "the count dropped by exactly one. Surgical: touches only "
+            "``staticroutes/route``, never interface config."
+        ),
+        parameter_schema=_ROUTE_DELETE_PARAMETER_SCHEMA,
+        response_schema=_ROUTE_DELETE_RESPONSE_SCHEMA,
+        group_key="routing",
+        tags=("write", "routing", "static-route", "delete", "destructive", "pfsense"),
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=_ROUTE_DELETE_LLM_INSTRUCTIONS,
+    ),
+    PfSenseOp(
+        op_id="pfsense.gateway.delete",
+        handler_attr="gateway_delete",
+        summary="Permanently delete ONE gateway by exact name (governed, fail-closed).",
+        description=(
+            "Governed destructive delete of a single pfSense gateway "
+            "(``config.xml`` ``<gateways><gateway_item>``) by exact ``name`` -- "
+            "the inverse of ``pfsense.gateway.add``, for a governed environment "
+            "teardown. safety_level=destructive (same tier + gate as "
+            "``pfsense.nat.delete``). Fail-closed dependency check (mirrors "
+            "``pfsense.alias.delete``): refuses (``referenced``) when the "
+            "gateway is still used by any static route, gateway group, or "
+            "default-gateway setting -- naming every referrer -- so a gateway is "
+            "never pulled out from under a live route. Also refuses on 0 "
+            "matches (``not_found``) or >1 (``ambiguous``). The blast-radius "
+            "statement names the gateway + its reference count. Deletes exactly "
+            "one gateway via ``pfSsh.php playback`` (``write_config`` + "
+            "``system_routing_configure``) and verifies it is gone and the "
+            "count dropped by exactly one."
+        ),
+        parameter_schema=_GATEWAY_DELETE_PARAMETER_SCHEMA,
+        response_schema=_GATEWAY_DELETE_RESPONSE_SCHEMA,
+        group_key="routing",
+        tags=("write", "routing", "gateway", "delete", "destructive", "pfsense"),
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=_GATEWAY_DELETE_LLM_INSTRUCTIONS,
+    ),
+    PfSenseOp(
+        op_id="pfsense.alias.member.remove",
+        handler_attr="alias_member_remove",
+        summary="Remove ONE member from a firewall alias, keeping the shared alias (governed).",
+        description=(
+            "Governed destructive removal of ONE member (host / network entry) "
+            "from a pfSense firewall alias (``config.xml`` "
+            "``<aliases><alias>``) WITHOUT deleting the alias -- the shared-alias "
+            "teardown case, where an alias shared across environments keeps its "
+            "other members and its identity while one environment's entry is "
+            "trimmed out. safety_level=destructive (same tier + gate as "
+            "``pfsense.nat.delete``): mandatory human approval, a preview-hash "
+            "binding, and a blast-radius statement (the alias + the member "
+            "being removed + the residual member count). A read-modify-write on "
+            "``<address>`` (and its positionally-aligned ``<detail>``). "
+            "Fail-closed: refuses ``not_found`` (alias absent), "
+            "``member_not_found`` (value not a member), ``ambiguous`` "
+            "(duplicate alias name or duplicate member), and ``last_member`` -- "
+            "never empties a shared alias into deletion (that is "
+            "``pfsense.alias.delete``'s job). Removes exactly the named member "
+            "via ``pfSsh.php playback`` (``write_config`` + ``filter_configure``) "
+            "and verifies the member is gone, the alias is retained, and every "
+            "other member survives."
+        ),
+        parameter_schema=_ALIAS_MEMBER_REMOVE_PARAMETER_SCHEMA,
+        response_schema=_ALIAS_MEMBER_REMOVE_RESPONSE_SCHEMA,
+        group_key="alias",
+        tags=("write", "alias", "member", "delete", "destructive", "pfsense"),
+        safety_level="destructive",
+        requires_approval=True,
+        llm_instructions=_ALIAS_MEMBER_REMOVE_LLM_INSTRUCTIONS,
     ),
 )
 

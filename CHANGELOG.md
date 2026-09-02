@@ -90,6 +90,38 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — pfsense: three teardown-inverse governed deletes (#3313)
+
+- **`pfsense.route.static.delete`** — the inverse of `pfsense.route.static.add`.
+  Deletes ONE static route (`config.xml` `<staticroutes><route>`) by its
+  canonical `network` (CIDR), refusing fail-closed on 0 matches (`not_found`)
+  or >1 (`ambiguous`, two routes canonicalising to the same network). Applies
+  via `pfSsh.php playback` (`write_config()` + `system_routing_configure()`),
+  then reads `config.xml` back and verifies the route is gone and the count
+  dropped by exactly one.
+- **`pfsense.gateway.delete`** — the inverse of `pfsense.gateway.add`. Deletes
+  ONE gateway (`<gateways><gateway_item>`) by exact `name` with a **fail-closed
+  dependency guard** (mirrors `alias.delete`): refuses `referenced` — naming
+  every referrer — when the gateway is still used by any static route, gateway
+  group, or default-gateway setting, so a gateway is never pulled out from
+  under a live route. Also refuses `not_found` / `ambiguous`; read-back
+  verified.
+- **`pfsense.alias.member.remove`** — removes ONE member (host / network entry)
+  from a firewall alias **without deleting the alias** (the shared-alias case:
+  an alias shared across environments keeps its identity and its other members).
+  A read-modify-write on `<address>` (and its positionally-aligned `<detail>`),
+  applied via `filter_configure()`. Refuses `not_found` / `member_not_found` /
+  `ambiguous`, and refuses `last_member` so a shared alias is never emptied into
+  deletion (that is `alias.delete`'s job). Read-back-verifies the member is
+  gone, the alias is retained, and every other member survives.
+- All three are `safety_level="destructive"` / `requires_approval=True` — the
+  governed-delete tier (mandatory human approval, #3197 preview-hash binding,
+  mandatory blast-radius statement, no agent path / standing grant /
+  self-approval / satellite mint). `alias.member.remove` (op-id not ending in
+  `.delete`) folds into the destructive-tier service-grant refusal via its
+  safety level / `destructive` tag rather than the `*.delete` glob. No DB
+  migration; CLI OpenAPI snapshot unchanged (typed ops carry no REST surface).
+
 ## [0.32.0] - 2026-09-02
 
 ### Security — HttpNfcLease device-URL transfers pinned to the lease `sslThumbprint` (#3284)

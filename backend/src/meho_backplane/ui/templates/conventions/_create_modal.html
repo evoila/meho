@@ -56,28 +56,28 @@
       <div id="conventions-write-result" aria-live="assertive"></div>
 
       <div class="grid gap-3 md:grid-cols-2">
-        <label class="form-control">
-          <span class="label-text">Slug</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Slug</span>
           <input
             type="text"
             name="slug"
             required
             maxlength="{{ slug_max_length }}"
             pattern="[a-z0-9][a-z0-9\-]*"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             placeholder="confirm-before-applying"
             aria-describedby="conventions-create-slug-hint"
           />
-          <span id="conventions-create-slug-hint" class="text-xs opacity-60 mt-1">
+          <span id="conventions-create-slug-hint" class="text-xs opacity-60">
             Lowercase letters, digits, hyphen. The natural key within your tenant.
           </span>
         </label>
 
-        <label class="form-control">
-          <span class="label-text">Kind</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Kind</span>
           <select
             name="kind"
-            class="select select-bordered select-sm"
+            class="select select-bordered select-sm w-full"
             required
             data-action="kind-select"
             hx-post="/ui/conventions/preview"
@@ -93,42 +93,42 @@
         </label>
       </div>
 
-      <label class="form-control">
-        <span class="label-text">Title</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Title</span>
         <input
           type="text"
           name="title"
           required
           maxlength="{{ title_max_length }}"
-          class="input input-bordered input-sm"
+          class="input input-bordered input-sm w-full"
           placeholder="Confirm before applying a destructive change"
         />
       </label>
 
-      <label class="form-control max-w-[12rem]">
-        <span class="label-text">Priority</span>
+      <label class="flex flex-col gap-1 max-w-[12rem]">
+        <span class="text-sm font-medium">Priority</span>
         <input
           type="number"
           name="priority"
           value="0"
           min="{{ priority_min }}"
           max="{{ priority_max }}"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           aria-describedby="conventions-create-priority-hint"
         />
-        <span id="conventions-create-priority-hint" class="text-xs opacity-60 mt-1">
+        <span id="conventions-create-priority-hint" class="text-xs opacity-60">
           Higher wins when the preamble packer drops on overflow.
         </span>
       </label>
 
       <div class="grid gap-3 md:grid-cols-2">
-        <label class="form-control">
-          <span class="label-text">Body (Markdown)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Body (Markdown)</span>
           <textarea
             name="body"
             required
             maxlength="{{ body_max_length }}"
-            class="textarea textarea-bordered min-h-[14rem] font-mono text-sm"
+            class="textarea textarea-bordered min-h-[14rem] w-full font-mono text-sm"
             hx-post="/ui/conventions/preview"
             hx-trigger="keyup changed delay:300ms"
             hx-target="#conventions-token-preview"

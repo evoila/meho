@@ -327,6 +327,11 @@ def test_create_modal_renders_for_admin() -> None:
     # The debounced preview wiring is present.
     assert 'hx-post="/ui/conventions/preview"' in body
     assert "keyup changed delay:300ms" in body
+    # #240: the create form is migrated off dead daisyUI-v4 classes
+    # (removed in v5 — zero compiled rules — which collapsed the
+    # label-over-input column and misaligned the grids).
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_create_end_to_end_returns_hx_redirect() -> None:

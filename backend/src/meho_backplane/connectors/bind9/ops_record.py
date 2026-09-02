@@ -549,12 +549,20 @@ def resolve_zone_target(
 
     Zone selection:
 
-    * ``explicit_zone`` set -> that zone name (trailing-dot / case
-      normalised).
-    * otherwise -> longest-suffix match via :func:`resolve_zone_for_fqdn`
-      over the **distinct** zone names, so a zone declared in N views no
-      longer ties with itself and spuriously reports ``ambiguous`` (the
-      #2897 failure mode).
+    * ``explicit_zone`` set **and configured on this server** -> that zone
+      name (trailing-dot / case normalised).
+    * otherwise (no ``explicit_zone``, **or** an ``explicit_zone`` this
+      server does not serve) -> longest-suffix match via
+      :func:`resolve_zone_for_fqdn` over the **distinct** configured zone
+      names, so a zone declared in N views no longer ties with itself and
+      spuriously reports ``ambiguous`` (the #2897 failure mode). Walking on
+      an unserved ``explicit_zone`` (rather than refusing it verbatim) lets a
+      record that lives flat in a configured ancestor's zonefile -- e.g.
+      ``host.sub.example.com`` written into the ``example.com`` zone, where
+      ``sub.example.com`` is not itself a zone -- resolve to that ancestor
+      instead of failing closed (#3304). The FQDN is authoritative for a
+      record op, so the walk can only ever land on a zone the FQDN belongs
+      to; a truly-outside FQDN still raises ``unresolvable``.
 
     View disambiguation, over the rows whose name matches the zone and
     that carry a ``file`` directive:
@@ -575,10 +583,22 @@ def resolve_zone_target(
     def _name(row: dict[str, Any]) -> str:
         return str(row["name"]).rstrip(".").lower()
 
-    if explicit_zone is not None:
+    configured_zone_names = {_name(row) for row in rows}
+    if explicit_zone is not None and explicit_zone.rstrip(".").lower() in configured_zone_names:
         zone_name = explicit_zone.rstrip(".").lower()
     else:
-        zone_name = resolve_zone_for_fqdn(sorted({_name(row) for row in rows}), fqdn)
+        # No ``explicit_zone`` -- OR an ``explicit_zone`` this server does
+        # not serve (e.g. a parent-hosted subdomain like ``sub.example.com``
+        # whose records live flat in a configured ancestor's zonefile, not a
+        # delegated child zone). In both cases walk the configured zones
+        # longest-first for the record's FQDN and pick the longest suffix the
+        # server actually serves; ``resolve_zone_for_fqdn`` fails closed
+        # (``unresolvable``) only when NO configured zone is a suffix of the
+        # FQDN. Honouring an unserved ``explicit_zone`` verbatim would wrongly
+        # refuse a computable delete whose record lives in a configured
+        # ancestor (#3304); the FQDN is authoritative for a record op, so the
+        # walk cannot resolve into a zone the FQDN does not belong to.
+        zone_name = resolve_zone_for_fqdn(sorted(configured_zone_names), fqdn)
 
     candidates = [row for row in rows if _name(row) == zone_name and row.get("file")]
     if not candidates:

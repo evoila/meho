@@ -538,6 +538,7 @@ const (
 	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
 	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
 	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
+	TargetCreateProductHyperv     TargetCreateProduct = "hyperv"
 	TargetCreateProductInstaller  TargetCreateProduct = "installer"
 	TargetCreateProductK8s        TargetCreateProduct = "k8s"
 	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"

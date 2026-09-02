@@ -247,10 +247,13 @@ def _cert_thumbprint(cert_der: bytes, expected_hex_len: int) -> str:
     vim default; 64 → SHA-256), so a matching cert produces an identical
     bare-hex string. An unrecognised length falls back to SHA-1, whose
     40-char digest cannot equal a differently-sized expected value, so the
-    comparison fails closed.
+    comparison fails closed. ``usedforsecurity=False`` keeps the
+    protocol-mandated SHA-1 available under a FIPS-restricted build -- the
+    algorithm is fixed by vCenter's thumbprint convention, not a
+    security-strength choice we are free to substitute.
     """
     algorithm = _THUMBPRINT_ALGORITHMS.get(expected_hex_len, "sha1")
-    return hashlib.new(algorithm, cert_der).hexdigest()
+    return hashlib.new(algorithm, cert_der, usedforsecurity=False).hexdigest()
 
 
 def _fetch_peer_cert_der(host: str, port: int, timeout: float) -> bytes | None:

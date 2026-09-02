@@ -110,6 +110,42 @@ connector-related release-notes line.
   still import. The SSRF host screen stays off for device-URL PUTs; pinning is
   the replacement, not an addition on top of a host allowlist.
 
+### Changed — three caution-tier permanent-removal ops promoted to governed approval (#3288)
+
+- **Behaviour change for agents — approval now required on three permanent-removal
+  ops**, per the #3288 operator ruling (per-op deliberate postures, mirroring the
+  #3247 bind9 precedent):
+  - **`windns.record.remove`** (the `-Force` RRset clear: every value of an RRType
+    at a name) moves from `caution` + approval-free to **`destructive` +
+    `requires_approval=True`**, tagged `delete`/`destructive`. It now runs only
+    through preview → park → distinct-human approval → audited resume; a bare
+    dispatch is refused `preview_binding_required` and a park without a resolvable
+    blast radius is refused `blast_radius_required`. A read-only park-time preview
+    (`ops_record_remove_preview`) names the `(zone, name, type)` record-set and
+    enumerates every value that dies (`irreversibility="recreatable"`).
+  - **`harbor.robot.delete`** moves from `caution` + approval-free to
+    **`destructive` + `requires_approval=True`**. Permanent removal of a
+    credential-bearing principal is not transparently reversible — re-creating the
+    robot mints a NEW secret and silently breaks every consumer of the old one (the
+    lab signal `bind9-harbor-dangerous-writes-bypass-approval-gate.yaml`). The
+    park-time preview (`ops_robot_delete_preview`, params-derived) names the robot
+    `{id, project, level}` + its project association
+    (`irreversibility="recreatable_new_secret"`).
+  - **`winsrv.feature.remove`** moves from `caution` + approval-free to
+    **`dangerous` + `requires_approval=True`** — disruptive enough to demand a
+    human, but deliberately **not** `destructive` (reversible by reinstall,
+    data-preserving), so no blast-radius preview is required at this tier (the
+    `winsrv.localuser.delete` mould). A dispatch parks at `awaiting_approval`.
+- **Single-sourced promotions** — only each op's `safety_level` + tags change. The
+  satellite ladder excludes all three (`dangerous`/`destructive` → EXCLUDED, never
+  runner-minted; `REMOTE_WRITE_SAFETY_LEVELS` stays `{caution}`), and the
+  service-grant guard + flight-recorder body-exclusion fold the destructive pair in
+  via the `destructive` tag — no re-declared op lists. `broadcast.events.classify_op`
+  is unaffected (all three stay `write`, the payload-sensitivity class orthogonal to
+  the safety tier). No DB migration (the tier is a registration-constant value,
+  re-registered on startup). CLI OpenAPI snapshot unchanged (no per-op safety
+  metadata in the REST surface).
+
 ### Fixed — `TruffleHog Secret Scan` fails on `merge_group` refs, ejecting every merge-queue entry (#3307)
 
 - The `merge_group` trigger #3253 added to `secret-scan.yml` made the
@@ -137,6 +173,26 @@ connector-related release-notes line.
   check-run on `merge_group` refs; non-blocking under the queue's
   `ALLGREEN` strategy since the ruleset carries no `required_status_checks`
   rule — tracked as the next required-set decision, not fixed here.)
+
+### Fixed — bind9 destructive-delete resolves records in parent-hosted subdomains (#3304)
+
+- `bind9.record.delete` / `bind9.record.remove` (destructive tier) fail-closed
+  with `blast_radius_required` at park time for a record that lives flat in a
+  configured parent zone's zonefile (`host.sub.example.com` written into the
+  `example.com` zone, where `sub.example.com` is not itself a zone) whenever a
+  `zone` context naming that unserved subdomain reached the op. Zone resolution
+  (`resolve_zone_target`) honoured a supplied `zone` verbatim and refused it when
+  it was not an exactly-configured zone, instead of walking up to the configured
+  ancestor that actually owns the record — so governed teardowns could not delete
+  any such record even though the delete is fully computable. Resolution now
+  treats an unserved `zone` the same as an omitted one: it walks the configured
+  zones longest-first for the record's FQDN and selects the longest suffix the
+  server actually serves, failing closed only when **no** configured zone is a
+  suffix of the FQDN. Deletion params (`fqdn` / `type`) are untouched — only the
+  resolved zone context changes, so the blast radius names the true owning zone
+  and the exact record, and the shared resolver keeps park-time preview and
+  post-approval execution in agreement. A genuinely-configured subzone still wins
+  by longest suffix; a record under no configured zone still parks refused.
 
 ### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
 

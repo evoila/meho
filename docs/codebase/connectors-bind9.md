@@ -350,10 +350,19 @@ explicit_zone, explicit_view)` (in `ops_record.py`) walks the
 `{name, file, type, view}` rows T2's `parse_named_checkconf_zones`
 emits and returns `(zone_name, zonefile_path, view)`:
 
-* **Zone name** -- `explicit_zone` when given, else longest-suffix match
-  (`resolve_zone_for_fqdn`) over the **distinct** zone names. The FQDN's
-  label sequence must end with the zone's (`api.evba.lab` matches
-  `evba.lab`, not `ba.lab`); the root zone (`.`) is excluded.
+* **Zone name** -- `explicit_zone` when it names a zone this server
+  serves; otherwise (no `explicit_zone`, **or** an `explicit_zone` this
+  server does not serve) longest-suffix match (`resolve_zone_for_fqdn`)
+  over the **distinct** zone names. The FQDN's label sequence must end
+  with the zone's (`api.evba.lab` matches `evba.lab`, not `ba.lab`); the
+  root zone (`.`) is excluded. Walking on an unserved `explicit_zone`
+  (rather than refusing it verbatim) lets a record that lives flat in a
+  configured ancestor's zonefile -- e.g. `host.sub.evba.lab` written into
+  the `evba.lab` zone, where `sub.evba.lab` is not itself a zone --
+  resolve to that ancestor instead of failing closed (#3304); the FQDN is
+  authoritative for a record op, so the walk can only land on a zone the
+  FQDN belongs to. A genuinely-configured subzone still wins by longest
+  suffix.
 * **View** -- the candidate rows are the zone's rows that carry a `file`
   directive:
   * `view` given -> restrict to that view; no match raises

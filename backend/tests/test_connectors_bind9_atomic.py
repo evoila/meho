@@ -324,6 +324,88 @@ class TestResolveZoneTarget:
             resolve_zone_target(rows, fqdn="api.evba.lab", explicit_zone=None, explicit_view=None)
         assert exc_info.value.reason == "unresolvable"
 
+    def test_unserved_explicit_zone_walks_to_configured_parent(self) -> None:
+        """#3304: an ``explicit_zone`` this server does not serve walks up.
+
+        A record written flat into a configured parent's zonefile
+        (``host.sub.evba.lab`` under ``evba.lab``, where ``sub.evba.lab`` is
+        not itself a zone) must resolve to the configured ancestor rather than
+        fail closed. Before the fix, honouring the unserved ``sub.evba.lab``
+        verbatim raised ``unresolvable`` and the destructive-delete park was
+        refused ``blast_radius_required`` for a computable delete.
+        """
+        zone, path, view = resolve_zone_target(
+            _NO_VIEW_ROWS,
+            fqdn="host.sub.evba.lab",
+            explicit_zone="sub.evba.lab",
+            explicit_view=None,
+        )
+        assert (zone, path, view) == ("evba.lab", "/etc/bind/db.evba.lab", None)
+
+    def test_configured_subzone_wins_over_parent_longest_suffix(self) -> None:
+        """#3304: a genuinely-configured subzone resolves to the subzone.
+
+        When ``sub.evba.lab`` really is a served zone, the longest suffix
+        wins over the parent -- whether the caller omits ``zone`` (walk) or
+        names the subzone explicitly (served -> honoured verbatim).
+        """
+        rows = [
+            {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master", "view": None},
+            {
+                "name": "sub.evba.lab",
+                "file": "/etc/bind/db.sub.evba.lab",
+                "type": "master",
+                "view": None,
+            },
+        ]
+        expected = ("sub.evba.lab", "/etc/bind/db.sub.evba.lab", None)
+        assert (
+            resolve_zone_target(
+                rows, fqdn="host.sub.evba.lab", explicit_zone=None, explicit_view=None
+            )
+            == expected
+        )
+        assert (
+            resolve_zone_target(
+                rows,
+                fqdn="host.sub.evba.lab",
+                explicit_zone="sub.evba.lab",
+                explicit_view=None,
+            )
+            == expected
+        )
+
+    def test_unserved_explicit_zone_with_no_configured_ancestor_is_unresolvable(self) -> None:
+        """#3304: the walk fails closed when no configured zone owns the FQDN.
+
+        An unserved ``explicit_zone`` does not lower the bar -- if no
+        configured zone is a suffix of the FQDN, resolution still raises
+        ``unresolvable`` (the destructive-delete park stays refused
+        ``blast_radius_required``).
+        """
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                _NO_VIEW_ROWS,
+                fqdn="host.other.example",
+                explicit_zone="sub.other.example",
+                explicit_view=None,
+            )
+        assert exc_info.value.reason == "unresolvable"
+
+    def test_configured_but_file_less_explicit_zone_unchanged(self) -> None:
+        """#3304 regression guard: a configured file-less explicit zone is
+
+        still refused verbatim (not walked). The fix only changes the
+        behaviour for zones this server does not serve *at all*; a configured
+        forward / hint zone named explicitly keeps failing ``unresolvable``.
+        """
+        rows = [{"name": "evba.lab", "file": None, "type": "forward", "view": None}]
+        with pytest.raises(ZoneResolutionError) as exc_info:
+            resolve_zone_target(
+                rows, fqdn="api.evba.lab", explicit_zone="evba.lab", explicit_view=None
+            )
+        assert exc_info.value.reason == "unresolvable"
+
 
 # ---------------------------------------------------------------------------
 # View-aware verify predicate builders (#2897)

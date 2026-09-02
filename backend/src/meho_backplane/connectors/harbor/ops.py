@@ -25,8 +25,12 @@ Robot ops — registers two scoped-write ops against ``connector_id="harbor-rest
   appears in the SSE stream.
 
 * ``harbor.robot.delete`` — delete a project-scoped robot account by
-  numeric ID. Classified ``write`` (suffix-based). No secret material
-  in the response payload.
+  numeric ID. Classified ``write`` (suffix-based) for broadcast; no secret
+  material in the response payload. Governed destructive tier (#3288):
+  ``safety_level=destructive`` + ``requires_approval=True`` with a park-time
+  blast-radius preview (:mod:`.ops_robot_delete_preview`), because permanent
+  removal of a credential-bearing principal breaks every consumer of the old
+  secret when the robot is later re-minted.
 
 Both ops use non-retried HTTP calls (Harbor write endpoints are
 non-idempotent). ``harbor.robot.create`` calls
@@ -248,8 +252,15 @@ _HARBOR_ROBOT_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Use when decommissioning a CI credential or revoking machine access "
         "to a Harbor project. Requires the numeric 'id' returned by "
         "harbor.robot.create — Harbor's delete endpoint is keyed on the ID, "
-        "not the robot name. This operation is irreversible; the account and "
-        "its associated secret are permanently removed."
+        "not the robot name. GOVERNED DESTRUCTIVE TIER (#3288): "
+        "safety_level=destructive + requires_approval=True — the deletion parks "
+        "for mandatory human approval (no agent path, no standing grant, no "
+        "self-approval even under break-glass, a preview-hash binding, and a "
+        "blast-radius statement naming the robot + its project association). "
+        "This operation is irreversible: the account and its secret are "
+        "permanently removed, and re-creating the robot mints a BRAND-NEW "
+        "secret — every consumer still authenticating with the old credential "
+        "breaks and must be re-issued."
     ),
     "parameter_hints": {
         "project": "Harbor project name that scopes the robot account.",
@@ -336,29 +347,40 @@ async def register_harbor_robot_operations(
         impl_id="harbor-rest",
         op_id="harbor.robot.delete",
         handler=HarborConnector.robot_delete,
-        summary="Delete a project-scoped robot account from Harbor.",
+        summary="Delete a project-scoped robot account from Harbor — governed destructive tier.",
         description=(
             "Deletes a project-scoped robot account via "
             "DELETE /api/v2.0/robots/{id} (Harbor v2 robot API). "
             "Requires the numeric robot ID (returned by harbor.robot.create). "
-            "Non-idempotent write — permanent removal. safety_level=caution."
+            "Non-idempotent write — permanent removal of a credential-bearing "
+            "principal. safety_level=destructive, requires_approval=True (#3288): "
+            "the deletion parks for mandatory human approval with a preview-hash "
+            "binding and a park-time blast-radius statement (the robot identity + "
+            "its project association). Re-creating the robot mints a NEW secret, "
+            "so every consumer authenticating with the old credential breaks — the "
+            "'reversible' path is not silent."
         ),
         parameter_schema=_HARBOR_ROBOT_DELETE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_DELETE_RESPONSE_SCHEMA,
         group_key="robot",
         when_to_use=_HARBOR_ROBOT_WHEN_TO_USE,
         tags=["write", "destructive"],
-        safety_level="caution",
-        # Left ungated (#147). ``harbor.robot.delete`` is a ``caution``-class
-        # ``write`` (suffix-classified) that revokes access — it does NOT mint
-        # or return any credential, so it is not part of the credential-mint
-        # bypass this Task closes. It mirrors the bind9 precedent (#129), which
-        # four-eyes-gated only the ``dangerous`` config-replacement ops and left
-        # ``caution`` ops default-allow for humans. Revoking a robot is
-        # recoverable (re-mint via ``harbor.robot.create``), so it does not clear
-        # the four-eyes bar. Gating it would also break the deliberate
-        # full-detail-broadcast contrast the credential_mint tests pin.
-        requires_approval=False,
+        safety_level="destructive",
+        # Governed destructive tier (#3288 operator ruling, superseding the
+        # #147 "left ungated" posture). ``harbor.robot.delete`` permanently
+        # removes a credential-bearing principal: recreation mints a NEW secret
+        # and silently breaks every consumer still using the old one (the lab
+        # signal ``bind9-harbor-dangerous-writes-bypass-approval-gate.yaml``).
+        # ``requires_approval=True`` parks the dispatch at ``awaiting_approval``
+        # for a distinct human. The promotion is single-sourced on
+        # ``safety_level`` + the ``destructive`` tag: the satellite ladder
+        # excludes it (destructive → EXCLUDED, never runner-minted), and the
+        # service-grant guard + flight-recorder body-exclusion fold it in via
+        # the tag — no re-declared op lists. ``broadcast.events.classify_op`` is
+        # unaffected: robot.delete stays ``write`` (full-detail broadcast, the
+        # deliberate contrast with credential_mint ``robot.create``), so the
+        # broadcast contrast the credential_mint tests pin still holds.
+        requires_approval=True,
         llm_instructions=_HARBOR_ROBOT_DELETE_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

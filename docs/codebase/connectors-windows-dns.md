@@ -39,17 +39,30 @@ Source: `backend/src/meho_backplane/connectors/windows_dns/`.
 | `windns.zone.list` | safe | no | `Get-DnsServerZone` |
 | `windns.record.get` | safe | no | `Get-DnsServerResourceRecord -ZoneName [-Name] [-RRType]` |
 | `windns.record.add` | caution | no | `Add-DnsServerResourceRecordA -IPv4Address` (A) / `Add-DnsServerResourceRecordCName -HostNameAlias` (CNAME), optional `-TimeToLive (New-TimeSpan -Seconds <ttl>)` |
-| `windns.record.remove` | caution | no | `Remove-DnsServerResourceRecord -ZoneName -Name -RRType -Force` |
+| `windns.record.remove` | **destructive** | **yes** | `Remove-DnsServerResourceRecord -ZoneName -Name -RRType -Force` |
 
-The two writes are `safety_level="caution"` (a DNS change is global — no
-per-caller scoping), mirroring bind9's record writes; the production-path
-gate is G7/G10 policy territory keyed on that value, so
-`requires_approval=false` today. `record.get` supports
+`record.add` is `safety_level="caution"` (a DNS change is global — no
+per-caller scoping), mirroring bind9's `record.add`; `requires_approval=false`.
+`record.remove` was promoted to the governed destructive tier by the #3288
+operator ruling (mirroring #3247 for `bind9.record.remove`):
+`safety_level="destructive"` + `requires_approval=True`, tagged
+`delete`/`destructive`. As the `-Force` RRset clear removes **every** value of
+an RRType at a name in one write, it rides the same governed-delete gate as
+`bind9.record.remove` — preview → park → distinct-human approval → audited
+resume. A bare dispatch is refused `preview_binding_required`; a park without a
+resolvable blast radius is refused `blast_radius_required`. The park-time
+blast-radius preview (`ops_record_remove_preview._windns_record_remove_preview`,
+a read-only `Get-DnsServerResourceRecord` projection) names the
+`(zone, name, type)` record-set and enumerates every value that dies
+(`irreversibility="recreatable"`, `match_count`). `record.get` supports
 A/AAAA/CNAME/MX/TXT/PTR/NS/SRV/SOA as `-RRType` filters; `record.remove`
 the same set minus SOA; `record.add` is A + CNAME only (the bind9
 write-surface mirror). `record.remove` deletes **all** records matching
-`(zone, name, RRType)` — the cmdlet default when `-RecordData` is omitted;
-a precision-delete `record_data` parameter is a known follow-up.
+`(zone, name, RRType)` — the cmdlet default when `-RecordData` is omitted; a
+surgical single-value `windns.record.delete` sibling (bind9-style, with
+`-RecordData` disambiguation) is a documented follow-up (see #3288 PR body),
+deferred because `record.remove` is already `(name, type)`-scoped and adding a
+new op meaningfully expands surface beyond this posture sweep.
 
 ## Key types
 
@@ -199,8 +212,13 @@ round-trip + safety-level invariants.
 ## Known issues / scope
 
 - `windns.record.remove` deletes **all** records matching
-  `(zone, name, RRType)`; an optional `record_data` precision-delete
-  parameter (cmdlet `-RecordData`) is a candidate follow-up.
+  `(zone, name, RRType)` and is governed at the destructive tier (#3288:
+  approval-gated, preview-hash-bound, blast-radius-previewed). A surgical
+  single-value `windns.record.delete` sibling (bind9-style, `-RecordData`
+  disambiguation) was evaluated and **deferred** in the #3288 posture sweep —
+  it is a new op with its own schema/preview/tests, and `record.remove` is
+  already `(name, type)`-scoped, so the marginal value is lower than for
+  bind9's whole-name `record.remove`. Tracked as an explicit follow-up.
 - `record.add` supports A + CNAME only (the deliberate bind9
   write-surface mirror); zone create/delete is out of scope.
 - Writes were live-validated against a WS2022 AD-DNS DC via `-WhatIf`

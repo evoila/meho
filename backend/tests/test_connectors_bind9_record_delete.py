@@ -658,6 +658,103 @@ async def test_park_refused_without_blast_radius_unmanaged_zone() -> None:
 
 
 # ===========================================================================
+# #3304 — records in parent-hosted subdomains resolve to the owning zone
+# ===========================================================================
+
+# A zonefile for ``example.test`` that carries a record written flat under a
+# subdomain (``host.sub`` -> ``host.sub.example.test.``) — ``sub.example.test``
+# is NOT a separate zone, the record lives in the parent zonefile.
+_ZONEFILE_PARENT_HOSTED_SUB = """$TTL 3600
+@ IN SOA ns1.example.test. admin.example.test. (
+    2026080101 3600 600 604800 86400 )
+@        IN NS ns1.example.test.
+ns1      IN A 192.0.2.1
+host.sub IN A 192.0.2.55
+"""
+
+
+async def test_park_resolves_parent_hosted_subdomain_to_owning_zone() -> None:
+    """#3304: a delete for a record that lives flat in a configured parent's
+
+    zonefile — behind an unserved ``zone=sub.example.test`` context — parks
+    with a blast radius naming the *parent* zone + the exact record, and the
+    approved resume deletes it. Before the fix the park was refused
+    ``blast_radius_required`` because the unserved subdomain was honoured
+    verbatim.
+    """
+    recorder = _RecordingBind9Connector(zonefile=_ZONEFILE_PARENT_HOSTED_SUB)
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    # The caller supplies the subdomain as the zone context (what an operator
+    # or the consumer write flow passes when treating ``sub`` as a zone).
+    args = _args(params={"fqdn": "host.sub.example.test", "type": "A", "zone": "sub.example.test"})
+
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "awaiting_approval", call
+    request_id = UUID(call["extras"]["approval_request_id"])
+    assert recorder.sudo_calls == []
+
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        effect = dict(row.proposed_effect)
+    blast = effect["blast_radius"]
+    # The blast radius names the RESOLVED owning zone (the parent), not the
+    # unserved subdomain, and the exact record.
+    assert blast["object"] == {
+        "kind": "dns_record",
+        "zone": _ZONE,
+        "name": "host.sub.example.test.",
+        "type": "A",
+        "view": None,
+    }
+    assert blast["children"] == [{"kind": "record_value", "type": "A", "rdata": "192.0.2.55"}]
+
+    # Post-approval resume deletes it — the shared resolver means execution
+    # walks to the same parent zone the park named.
+    approver = _make_operator(sub="op-approver")
+    async with get_sessionmaker()() as s:
+        approved = await approve_request(s, request_id, operator=approver, params=None)
+        await s.commit()
+    assert approved.status == "approved"
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        resume = await resume_dispatch_after_approval(operator=approver, request=row, params=None)
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "deleted"
+    assert resume.result["zone"] == _ZONE
+    assert len(recorder.sudo_calls) == 1
+
+
+async def test_park_still_refused_when_no_configured_zone_owns_fqdn() -> None:
+    """#3304 guard: an unserved ``zone`` does not lower the bar. When no
+
+    configured zone is a suffix of the FQDN the preview still declines and the
+    park stays refused ``blast_radius_required`` (fail-closed preserved).
+    """
+    recorder = _RecordingBind9Connector(checkconf=_CHECKCONF_OTHER)
+    await _bootstrap(recorder)
+    await _seed_target()
+
+    requester = _make_operator(sub="op-requester")
+    args = _args(params={"fqdn": "host.sub.example.test", "type": "A", "zone": "sub.example.test"})
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok"
+
+    call = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert call["status"] == "denied", call
+    assert call["extras"]["error_code"] == "blast_radius_required"
+    assert recorder.sudo_calls == []
+    assert await _pending_count() == 0
+
+
+# ===========================================================================
 # No agent execution path — an AGENT principal is DENY'd
 # ===========================================================================
 

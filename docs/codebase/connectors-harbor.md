@@ -185,9 +185,23 @@ aggregate-only so the minted secret never appears in the SSE stream — and is
 registered `requires_approval=True` (#147): minting a robot credential is
 privilege issuance, so a human `tenant_admin` dispatch **parks** at
 `awaiting_approval` and a second operator must approve it before the mint
-executes. `robot_delete` (op `harbor.robot.delete`) stays ungated — a
-`caution`-class `write` that revokes access rather than minting a credential
-(mirroring the bind9 #129 precedent). Both forward the dispatched `operator`
+executes. `robot_delete` (op `harbor.robot.delete`) was promoted to the
+governed **destructive** tier by the #3288 operator ruling (superseding the
+#147 "left ungated" posture): `safety_level="destructive"` +
+`requires_approval=True`, tagged `write`/`destructive`. Permanently removing a
+credential-bearing principal is not transparently reversible — re-creating the
+robot mints a BRAND-NEW secret, so every consumer still using the old
+credential breaks silently (the lab signal
+`bind9-harbor-dangerous-writes-bypass-approval-gate.yaml`). So the delete now
+runs only through preview → park (preview-hash-bound, blast-radius statement) →
+distinct-human approval → audited resume; a bare dispatch is refused
+`preview_binding_required`. The park-time blast radius
+(`ops_robot_delete_preview._harbor_robot_delete_preview`, params-derived — no
+live call) names the robot `{id, project, level}` + its project association,
+with `irreversibility="recreatable_new_secret"`. `classify_op` is unchanged —
+`robot.delete` stays `write` (full-detail broadcast), the deliberate contrast
+with `credential_mint` `robot.create` — so the tier change is orthogonal to the
+broadcast redaction. Both forward the dispatched `operator`
 through `auth_headers` → `_load_credentials` for the operator-context Vault
 read and use non-retried HTTP calls (Harbor write endpoints are non-idempotent).
 

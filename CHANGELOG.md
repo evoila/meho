@@ -118,6 +118,26 @@ connector-related release-notes line.
   `ALLGREEN` strategy since the ruleset carries no `required_status_checks`
   rule — tracked as the next required-set decision, not fixed here.)
 
+### Fixed — bind9 destructive-delete resolves records in parent-hosted subdomains (#3304)
+
+- `bind9.record.delete` / `bind9.record.remove` (destructive tier) fail-closed
+  with `blast_radius_required` at park time for a record that lives flat in a
+  configured parent zone's zonefile (`host.sub.example.com` written into the
+  `example.com` zone, where `sub.example.com` is not itself a zone) whenever a
+  `zone` context naming that unserved subdomain reached the op. Zone resolution
+  (`resolve_zone_target`) honoured a supplied `zone` verbatim and refused it when
+  it was not an exactly-configured zone, instead of walking up to the configured
+  ancestor that actually owns the record — so governed teardowns could not delete
+  any such record even though the delete is fully computable. Resolution now
+  treats an unserved `zone` the same as an omitted one: it walks the configured
+  zones longest-first for the record's FQDN and selects the longest suffix the
+  server actually serves, failing closed only when **no** configured zone is a
+  suffix of the FQDN. Deletion params (`fqdn` / `type`) are untouched — only the
+  resolved zone context changes, so the blast radius names the true owning zone
+  and the exact record, and the shared resolver keeps park-time preview and
+  post-approval execution in agreement. A genuinely-configured subzone still wins
+  by longest suffix; a record under no configured zone still parks refused.
+
 ### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
 
 - The unconditional self-approval refusal (#3198 — "no self-approval, even

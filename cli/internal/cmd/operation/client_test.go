@@ -34,6 +34,8 @@ type fakeOperationsClient struct {
 	// raw-string URL concatenation).
 	lastCallParams        *api.PostCallApiV1OperationsCallPostParams
 	lastCallBody          *api.CallOperationBody
+	lastPreviewParams     *api.PostPreviewApiV1OperationsPreviewPostParams
+	lastPreviewBody       *api.PreviewOperationBody
 	lastGroupsParams      *api.GetGroupsApiV1OperationsGroupsGetParams
 	lastSearchParams      *api.GetSearchApiV1OperationsSearchGetParams
 	lastResultQueryParams *api.PostResultQueryApiV1OperationsResultQueryPostParams
@@ -44,6 +46,7 @@ type fakeOperationsClient struct {
 	// 401, then the post-refresh outcome) and one on every other
 	// path.
 	callResponses        []*api.PostCallApiV1OperationsCallPostResponse
+	previewResponses     []*api.PostPreviewApiV1OperationsPreviewPostResponse
 	groupsResponses      []*api.GetGroupsApiV1OperationsGroupsGetResponse
 	searchResponses      []*api.GetSearchApiV1OperationsSearchGetResponse
 	resultQueryResponses []*api.PostResultQueryApiV1OperationsResultQueryPostResponse
@@ -52,6 +55,7 @@ type fakeOperationsClient struct {
 	// the response queues so a refresh-then-transport-failure scenario
 	// can be authored.
 	callErrors        []error
+	previewErrors     []error
 	groupsErrors      []error
 	searchErrors      []error
 	resultQueryErrors []error
@@ -75,6 +79,18 @@ func (f *fakeOperationsClient) PostCallApiV1OperationsCallPostWithResponse(
 	bodyCopy := body
 	f.lastCallBody = &bodyCopy
 	return popCallResp(&f.callResponses), popErr(&f.callErrors)
+}
+
+func (f *fakeOperationsClient) PostPreviewApiV1OperationsPreviewPostWithResponse(
+	_ context.Context,
+	params *api.PostPreviewApiV1OperationsPreviewPostParams,
+	body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+	_ ...api.RequestEditorFn,
+) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error) {
+	f.lastPreviewParams = params
+	bodyCopy := body
+	f.lastPreviewBody = &bodyCopy
+	return popPreviewResp(&f.previewResponses), popErr(&f.previewErrors)
 }
 
 func (f *fakeOperationsClient) GetGroupsApiV1OperationsGroupsGetWithResponse(
@@ -124,6 +140,17 @@ func popResultQueryResp(
 }
 
 func popCallResp(q *[]*api.PostCallApiV1OperationsCallPostResponse) *api.PostCallApiV1OperationsCallPostResponse {
+	if len(*q) == 0 {
+		return nil
+	}
+	r := (*q)[0]
+	*q = (*q)[1:]
+	return r
+}
+
+func popPreviewResp(
+	q *[]*api.PostPreviewApiV1OperationsPreviewPostResponse,
+) *api.PostPreviewApiV1OperationsPreviewPostResponse {
 	if len(*q) == 0 {
 		return nil
 	}
@@ -873,5 +900,252 @@ func TestRunResultQueryHappyPathRendersWindow(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("result-query render missing %q in output:\n%s", want, out.String())
 		}
+	}
+}
+
+// ---- postPreview ----
+
+// okPreviewBody is the canned status=ok preview envelope the postPreview
+// / runPreview tests decode. It carries the load-bearing preview_hash
+// plus the resolved-request projection.
+func okPreviewBody(t *testing.T) []byte {
+	t.Helper()
+	pr, err := json.Marshal(PreviewResult{
+		Status:       "ok",
+		OpID:         "vmware.composite.vm.destroy",
+		ConnectorID:  "vmware-rest-9.0",
+		SourceKind:   "composite",
+		Method:       "COMPOSITE",
+		ResolvedPath: "vmware.composite.vm.destroy",
+		RedactedBody: json.RawMessage(`{"vm":"vm-1812"}`),
+		PreviewHash:  "abc123def456",
+	})
+	if err != nil {
+		t.Fatalf("marshal preview body: %v", err)
+	}
+	return pr
+}
+
+// TestPostPreviewThreadsTargetAndParams — --target lands on the
+// bare-string oneOf shape and non-nil params thread onto body.Params,
+// mirroring postCall's plumbing.
+func TestPostPreviewThreadsTargetAndParams(t *testing.T) {
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: okPreviewBody(t)},
+		},
+	}
+	opts := previewOptions{
+		ConnectorID: "vmware-rest-9.0",
+		OpID:        "vmware.composite.vm.destroy",
+		TargetName:  "rdc-vcenter",
+	}
+	params := map[string]any{"vm": "vm-1812"}
+	if _, err := postPreview(context.Background(), f, opts, params); err != nil {
+		t.Fatalf("postPreview: %v", err)
+	}
+	if f.lastPreviewBody.Target == nil {
+		t.Fatalf("--target should set body.Target; got nil")
+	}
+	gotTarget, err := f.lastPreviewBody.Target.AsPreviewOperationBodyTarget0()
+	if err != nil {
+		t.Fatalf("target not the bare-string shape: %v", err)
+	}
+	if gotTarget != "rdc-vcenter" {
+		t.Fatalf("target not threaded; got %q", gotTarget)
+	}
+	if f.lastPreviewBody.Params == nil || (*f.lastPreviewBody.Params)["vm"] != "vm-1812" {
+		t.Fatalf("params not threaded; got %+v", f.lastPreviewBody.Params)
+	}
+}
+
+// TestPostPreviewTargetOmittedNullOnWire — omitting --target leaves
+// body.Target nil so the wire emits `"target":null`, same contract as
+// postCall.
+func TestPostPreviewTargetOmittedNullOnWire(t *testing.T) {
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: okPreviewBody(t)},
+		},
+	}
+	opts := previewOptions{ConnectorID: "k8s-1.x", OpID: "k8s.about"}
+	if _, err := postPreview(context.Background(), f, opts, nil); err != nil {
+		t.Fatalf("postPreview: %v", err)
+	}
+	if f.lastPreviewBody.Target != nil {
+		t.Fatalf("omitted --target should leave body.Target=nil; got %+v", f.lastPreviewBody.Target)
+	}
+	raw, err := json.Marshal(f.lastPreviewBody)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"target":null`)) {
+		t.Fatalf("expected `\"target\":null` on the wire; got %s", string(raw))
+	}
+}
+
+// TestPostPreviewRefreshOn401 — the one-shot refresh dance fires exactly
+// once on a 401, then the retried call decodes cleanly.
+func TestPostPreviewRefreshOn401(t *testing.T) {
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(401), Body: []byte(`{"detail":"token expired"}`)},
+			{HTTPResponse: makeHTTPResp(200), Body: okPreviewBody(t)},
+		},
+	}
+	opts := previewOptions{ConnectorID: "vmware-rest-9.0", OpID: "vmware.composite.vm.destroy", TargetName: "rdc-vcenter"}
+	if _, err := postPreview(context.Background(), f, opts, nil); err != nil {
+		t.Fatalf("postPreview after refresh: %v", err)
+	}
+	if f.refreshCount != 1 {
+		t.Fatalf("expected exactly one Refresh; got %d", f.refreshCount)
+	}
+}
+
+// TestPostPreviewNon2xxClassifiesAsApiResponseError — a 500 wraps as
+// *apiResponseError so renderRequestError maps it to unexpected_response.
+func TestPostPreviewNon2xxClassifiesAsApiResponseError(t *testing.T) {
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(500), Body: []byte(`{"detail":"backplane unavailable"}`)},
+		},
+	}
+	opts := previewOptions{ConnectorID: "vmware-rest-9.0", OpID: "vmware.composite.vm.destroy"}
+	_, err := postPreview(context.Background(), f, opts, nil)
+	var apiErr *apiResponseError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 500 {
+		t.Fatalf("expected *apiResponseError{StatusCode:500}; got %+v", err)
+	}
+}
+
+// TestRunPreviewOkPrintsHashRealPath — the full runPreview path (real
+// cobra command + fake client) prints the preview_hash prominently on
+// stdout and exits 0.
+func TestRunPreviewOkPrintsHashRealPath(t *testing.T) {
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: okPreviewBody(t)},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newPreviewCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{
+		"vmware-rest-9.0", "vmware.composite.vm.destroy",
+		"--target", "rdc-vcenter", "--params", `{"vm":"vm-1812"}`, "--backplane", "https://x",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("ok preview must exit 0; got %v", err)
+	}
+	for _, want := range []string{"status=ok", "preview_hash: abc123def456", "--preview-hash abc123def456"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("preview render missing %q in output:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunPreviewErrorExitsNonZero — a status=error envelope (unknown op,
+// invalid params, unresolvable target) surfaces the error and exits 1
+// via errOpError, same gate-failed semantic as `operation call`.
+func TestRunPreviewErrorExitsNonZero(t *testing.T) {
+	errMsg := "unknown_op: vmware.bogus"
+	pr, _ := json.Marshal(PreviewResult{
+		Status:      "error",
+		OpID:        "vmware.bogus",
+		ConnectorID: "vmware-rest-9.0",
+		Error:       &errMsg,
+		Extras:      json.RawMessage(`{"error_code":"unknown_op"}`),
+	})
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: pr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newPreviewCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vmware-rest-9.0", "vmware.bogus", "--backplane", "https://x"})
+	if err := cmd.Execute(); !errors.Is(err, errOpError) {
+		t.Fatalf("status=error should exit via errOpError; got %v", err)
+	}
+	for _, want := range []string{"status=error", "unknown_op: vmware.bogus", "error_code"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("error preview render missing %q in output:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunPreviewInvalidStatusRejected — a status the preview contract
+// does not define (ok/error/unavailable) is a malformed response:
+// surface as unexpected_response on stderr, print no envelope on stdout.
+func TestRunPreviewInvalidStatusRejected(t *testing.T) {
+	pr, _ := json.Marshal(PreviewResult{Status: "weird", OpID: "x", ConnectorID: "c"})
+	f := &fakeOperationsClient{
+		previewResponses: []*api.PostPreviewApiV1OperationsPreviewPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: pr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newPreviewCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"c", "x", "--backplane", "https://x"})
+	_ = cmd.Execute()
+	if !strings.Contains(errBuf.String(), "invalid preview status") {
+		t.Errorf("expected invalid-status diagnostic on stderr; got %q", errBuf.String())
+	}
+	if strings.Contains(out.String(), "status=weird") {
+		t.Errorf("malformed status must not render an envelope on stdout; got %q", out.String())
+	}
+}
+
+// TestPostCallThreadsPreviewHash — --preview-hash lands on
+// body.PreviewHash so a destructive-tier dispatch carries the binding
+// (#3197); an unset flag leaves it nil (bare call byte-identical to
+// pre-#3197).
+func TestPostCallThreadsPreviewHash(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vmware.composite.vm.destroy", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	opts := callOptions{
+		ConnectorID: "vmware-rest-9.0",
+		OpID:        "vmware.composite.vm.destroy",
+		TargetName:  "rdc-vcenter",
+		PreviewHash: "abc123def456",
+	}
+	if _, err := postCall(context.Background(), f, opts, map[string]any{"vm": "vm-1812"}); err != nil {
+		t.Fatalf("postCall: %v", err)
+	}
+	if f.lastCallBody.PreviewHash == nil || *f.lastCallBody.PreviewHash != "abc123def456" {
+		t.Fatalf("preview hash not threaded onto body.PreviewHash; got %+v", f.lastCallBody.PreviewHash)
+	}
+}
+
+// TestPostCallPreviewHashNilWhenOmitted — no --preview-hash leaves
+// body.PreviewHash nil.
+func TestPostCallPreviewHashNilWhenOmitted(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	opts := callOptions{ConnectorID: "vault-1.x", OpID: "vault.kv.read", TargetName: "rdc-vault"}
+	if _, err := postCall(context.Background(), f, opts, nil); err != nil {
+		t.Fatalf("postCall: %v", err)
+	}
+	if f.lastCallBody.PreviewHash != nil {
+		t.Fatalf("omitted --preview-hash should leave body.PreviewHash=nil; got %+v", f.lastCallBody.PreviewHash)
 	}
 }

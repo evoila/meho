@@ -202,6 +202,27 @@ connector-related release-notes line.
   replays the shared-disk build through the governed ops.
 - [#3256](https://github.com/evoila/meho/issues/3256).
 
+### Added — cli: `operation preview` verb + `--preview-hash` threading (#3293)
+
+- **`meho operation preview <connector_id> <op_id>`** — the CLI twin of
+  the MCP `preview_operation` tool, wrapping `POST /api/v1/operations/preview`
+  (the read-only sibling of `/call` added by #3197). It resolves the same
+  op + target + params a real call would and returns the literal would-be
+  request (`method` / `resolved_path` / `query` / redacted `body`) plus the
+  **`preview_hash`** — printed prominently in both the human render and
+  `--json` — instead of dispatching. Flags mirror `operation call`
+  (`--target`, `--params '<json>'`/`@<file>`, `--json`, `--backplane`);
+  operator-input faults ride the envelope (`status="error"`/`"unavailable"`,
+  exit 1), not transport.
+- **`meho operation call --preview-hash <hash>`** — threads the binding a
+  `safety_level='destructive'` op requires (#3197) into
+  `CallOperationBody.preview_hash`. Before this, destructive-tier ops were
+  **un-drivable from the CLI**: the dispatcher fail-closed with
+  `status=denied` / `error_code=preview_binding_required` and the CLI had no
+  way to obtain or pass the hash (MCP-only). An unset flag leaves a bare
+  call byte-identical to the pre-#3197 wire shape. Restores CLI/MCP parity
+  for the whole destructive tier.
+
 ### Added — Keycloak provisioning recipe for the `approver` claim (#3283)
 
 - **`docs/cross-repo/keycloak-tenant-claims.md`** gains a group-based

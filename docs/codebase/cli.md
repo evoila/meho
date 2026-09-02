@@ -998,13 +998,32 @@ narrow-waist contract.
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
   with `fused_score`. `--limit` is clamped by the API at 50.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
   `OperationResult` envelope; HTTP 200 carries both `status="ok"` and
   `status="error"` outcomes. The verb exits 1 on a non-ok envelope so
-  shell pipelines see the gate-failed signal.
+  shell pipelines see the gate-failed signal. `--preview-hash` threads
+  the destructive-tier binding (#3197) into
+  `CallOperationBody.preview_hash` (see below).
+- `meho operation preview <connector_id> <op_id> [--target <slug>] [--params ...]`
+  — calls `POST /api/v1/operations/preview`, the read-only diagnosis
+  sibling of `/call` (#1683) and the CLI twin of the MCP
+  `preview_operation` tool. Resolves the SAME op + target + params a
+  real call would and returns the literal would-be request
+  (`method` / `resolved_path` / `query` / redacted `body`) plus a
+  `preview_hash` **instead of dispatching** — nothing is sent, no audit
+  row is written. The `preview_hash` is the binding a
+  `safety_level='destructive'` op requires (#3197): the dispatcher
+  fail-closes a destructive `call` with `status=denied` /
+  `error_code=preview_binding_required` unless it carries a
+  `--preview-hash` from a prior preview of the identical
+  `(connector_id, op_id, target, params)`. Without this verb the CLI
+  had no way to obtain the hash, so the destructive tier was
+  MCP-only. The verb exits 1 on a non-ok envelope (`status="error"`
+  for input faults, `status="unavailable"` for a typed/composite op
+  with no literal HTTP request to preview).
 
 ### Reserved flags (same shape across all three verbs)
 
@@ -1012,11 +1031,17 @@ narrow-waist contract.
   render. Useful for piping into `jq` or capturing for diff.
 - `--backplane <url>` — override the backplane URL (defaults to the URL
   recorded by `meho login`).
-- `--params '<json>'` / `--params @<file>` (call only) — operation
+- `--params '<json>'` / `--params @<file>` (call + preview) — operation
   params. Inline JSON object or `@`-prefixed file path. The empty case
   (`--params` omitted) sends no `params` key on the wire — typed
   handlers that don't read params see an empty mapping at the
   validation layer.
+- `--preview-hash <hash>` (call only) — the destructive-tier binding
+  (#3197) from a prior `meho operation preview` of the identical
+  `(connector_id, op_id, target, params)`. Threaded into
+  `api.CallOperationBody.PreviewHash`; left nil when unset so a bare
+  call is byte-identical to the pre-#3197 wire shape. Ignored by the
+  dispatcher for every non-destructive op.
 
 ### HTTP shape
 
@@ -1082,12 +1107,15 @@ scenarios.
 
 ### MCP parity
 
-The same three handlers also back the MCP tools registered in
+The same handlers also back the MCP tools registered in
 [backend/src/meho_backplane/mcp/tools/operations.py](../../backend/src/meho_backplane/mcp/tools/operations.py)
-(`list_operation_groups`, `search_operations`, `call_operation`).
-Agents call the MCP tools; operators call the CLI verbs; both hit
-the same backend functions in
+(`list_operation_groups`, `search_operations`, `call_operation`,
+`preview_operation`). Agents call the MCP tools; operators call the CLI
+verbs; both hit the same backend functions in
 [backend/src/meho_backplane/operations/meta_tools.py](../../backend/src/meho_backplane/operations/meta_tools.py).
+The CLI `operation preview` verb + `call --preview-hash` flag (#3293)
+give operators the same destructive-tier preview/dispatch pair the MCP
+`preview_operation` + `call_operation(preview_hash)` tools give agents.
 The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.

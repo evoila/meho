@@ -58,6 +58,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newGroupsCmd())
 	cmd.AddCommand(newSearchCmd())
 	cmd.AddCommand(newCallCmd())
+	cmd.AddCommand(newPreviewCmd())
 	cmd.AddCommand(newResultQueryCmd())
 	return cmd
 }
@@ -76,6 +77,12 @@ type operationsAPI interface {
 		body api.PostCallApiV1OperationsCallPostJSONRequestBody,
 		reqEditors ...api.RequestEditorFn,
 	) (*api.PostCallApiV1OperationsCallPostResponse, error)
+	PostPreviewApiV1OperationsPreviewPostWithResponse(
+		ctx context.Context,
+		params *api.PostPreviewApiV1OperationsPreviewPostParams,
+		body api.PostPreviewApiV1OperationsPreviewPostJSONRequestBody,
+		reqEditors ...api.RequestEditorFn,
+	) (*api.PostPreviewApiV1OperationsPreviewPostResponse, error)
 	GetGroupsApiV1OperationsGroupsGetWithResponse(
 		ctx context.Context,
 		params *api.GetGroupsApiV1OperationsGroupsGetParams,

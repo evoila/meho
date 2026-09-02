@@ -64,6 +64,11 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations._preview import (
+    _PREVIEW_BUILDERS,
+    PreviewContext,
+    register_preview_builder,
+)
 from meho_backplane.operations._request_preview import preview_dispatch
 from meho_backplane.operations.meta_tools import preview_operation
 from meho_backplane.redaction import clear_overrides, parse_policy, register_policy
@@ -671,6 +676,192 @@ async def test_preview_typed_op_is_unavailable(
     assert envelope["extras"]["reason"] == "not_ingested"
     assert "method" not in envelope
     assert "resolved_path" not in envelope
+
+
+# ---------------------------------------------------------------------------
+# #3312 -- preview parity for approval-requiring typed ops
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _preview_builders_snapshot() -> Iterator[None]:
+    """Snapshot + restore the global preview-builder registry.
+
+    The parity tests register a bespoke builder against a synthetic op id;
+    without this the entry would leak into the process-wide
+    :data:`_PREVIEW_BUILDERS` and pollute the destructive-builder conformance
+    sweep and every other test that reads it.
+    """
+    snapshot = dict(_PREVIEW_BUILDERS)
+    yield
+    _PREVIEW_BUILDERS.clear()
+    _PREVIEW_BUILDERS.update(snapshot)
+
+
+async def _pure_delete_preview(ctx: PreviewContext) -> dict[str, Any]:
+    """A pure preview builder (reads only ``ctx.params``) — the vault.kv.delete shape."""
+    return {
+        "resource": "kv_secret",
+        "path": ctx.params.get("path", ""),
+        "semantics": "soft_delete",
+        "versions": ctx.params.get("versions", []),
+    }
+
+
+@pytest.mark.asyncio
+async def test_preview_requires_approval_typed_op_serves_bespoke_proposed_effect(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    _preview_builders_snapshot: None,
+) -> None:
+    """A dangerous + requires_approval typed op previews ok, carrying proposed_effect (#3312).
+
+    The asymmetry #3312 closes: at park time the approver sees a rich
+    ``proposed_effect`` from ``build_proposed_effect``, but pre-dispatch the
+    agent's ``preview_operation`` answered ``preview_unavailable``. Modelled on
+    ``vault.kv.delete`` (dangerous + requires_approval, a *pure* builder that
+    reads only its params). The synthetic preview binds the logical request
+    tuple (COMPOSITE method, op_id path, redacted params) AND reuses the
+    park-time effect via the same builder path.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="demo.secret.delete",
+        handler=_handler_returning_ok,
+        summary="A governed delete.",
+        description="Typed, dangerous, requires approval.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_preview_builder("demo.secret.delete", _pure_delete_preview)
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.secret.delete",
+        target=_FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        params={"path": "app/db", "versions": [3]},
+    )
+
+    # Availability change: status=ok, not unavailable.
+    assert envelope["status"] == "ok"
+    assert envelope["source_kind"] == "typed"
+    # Params-bound projection (the #3198 hash binding, unchanged).
+    assert envelope["method"] == "COMPOSITE"
+    assert envelope["resolved_path"] == "demo.secret.delete"
+    assert envelope["redacted_body"] == {"path": "app/db", "versions": [3]}
+    assert isinstance(envelope["preview_hash"], str)
+    # The reused park-time proposed_effect (#3312).
+    effect = envelope["proposed_effect"]
+    assert effect["op_class"] == "write"  # classify_op(".delete")
+    assert effect["preview"] == {
+        "resource": "kv_secret",
+        "path": "app/db",
+        "semantics": "soft_delete",
+        "versions": [3],
+    }
+    # No dispatch happened.
+    assert captured_events == []
+
+
+@pytest.mark.asyncio
+async def test_preview_proposed_effect_does_not_perturb_the_binding_hash(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    _preview_builders_snapshot: None,
+) -> None:
+    """Attaching proposed_effect must not change the preview_hash (#3197 binding intact).
+
+    The #3197 caution: the served preview participates in the preview-hash
+    contract, so the added ``proposed_effect`` key must stay outside the hashed
+    projection. The identical op previewed with and without its builder
+    registered must yield the identical hash.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="demo.secret.delete",
+        handler=_handler_returning_ok,
+        summary="A governed delete.",
+        description="Typed, dangerous, requires approval.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    args = {
+        "operator": _make_operator(),
+        "connector_id": "demo-1.x",
+        "op_id": "demo.secret.delete",
+        "target": _FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        "params": {"path": "app/db", "versions": [3]},
+    }
+
+    # No builder registered: proposed_effect rides the generic params-echo.
+    without_builder = await preview_dispatch(**args)  # type: ignore[arg-type]
+    register_preview_builder("demo.secret.delete", _pure_delete_preview)
+    with_builder = await preview_dispatch(**args)  # type: ignore[arg-type]
+
+    # The bespoke preview differs from the generic echo ...
+    assert "preview" in with_builder["proposed_effect"]
+    assert "params_echo" in without_builder["proposed_effect"]
+    # ... but the binding hash is identical (proposed_effect is unhashed).
+    assert with_builder["preview_hash"] == without_builder["preview_hash"]
+
+
+@pytest.mark.asyncio
+async def test_preview_requires_approval_generic_echo_scrubs_secret_param(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    _preview_builders_snapshot: None,
+) -> None:
+    """The reused proposed_effect applies park-time redaction to a builder-less op (#3312).
+
+    A requires_approval op with no bespoke builder falls to the generic
+    params-echo default — the *same* code path the approval-park path runs — so
+    a secret-by-key-name param is scrubbed identically to park time. This is the
+    "redaction discipline identical to park-time proposed_effect" acceptance.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="demo.thing.reconfigure",
+        handler=_handler_returning_ok,
+        summary="A governed reconfigure.",
+        description="Typed, dangerous, requires approval, no bespoke builder.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="demo.thing.reconfigure",
+        target=_FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        params={"host": "h1", "password": "hunter2"},
+    )
+
+    assert envelope["status"] == "ok"
+    echo = envelope["proposed_effect"]["params_echo"]
+    assert echo["host"] == "h1"
+    assert echo["password"] == "***REDACTED***"
 
 
 @pytest.mark.asyncio

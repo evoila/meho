@@ -671,9 +671,16 @@ missing/malformed block → `_handle_needs_approval` refuses the park with
 `denied` / `blast_radius_required` (naming the missing field) rather than
 falling back to the identifier-only default. So a `destructive` op that
 registers no blast-radius preview builder is un-parkable by construction —
-fail-closed. The console modal (`ui/templates/approvals/_modal.html`)
-renders the block as an error-tinted "what this destroys" card above the
-generic field table.
+fail-closed. That refusal is **runtime-only**, though: a posture sweep that
+promotes an op to `destructive` without adding its builder ships an
+un-parkable op that is green in CI and only breaks on first use. #3312 adds
+the registry-driven CI conformance sweep
+(`tests/test_destructive_builder_conformance.py`) that enumerates every
+registered `destructive` descriptor (every connector, both source kinds) and
+fails the build if any lacks a registered proposed-effect builder — moving
+the failure from first-use to CI. The console modal
+(`ui/templates/approvals/_modal.html`) renders the block as an error-tinted
+"what this destroys" card above the generic field table.
 
 **Scope note.** The gate lives on the top-level dispatch park path
 (`_handle_needs_approval`). The composite-subop park path
@@ -695,17 +702,26 @@ builder are documented in
 surfaced — and this task closed — three gaps in the tier's *human*-side
 enforcement that #3196/#3197 left, plus one machinery limitation:
 
-- **A composite/typed op is now previewable when it is `destructive`.**
+- **A composite/typed op is now previewable when it is `destructive`
+  (#3198) or `requires_approval` (#3312).**
   `preview_dispatch` returns `unavailable` for non-ingested ops (they have
   no single literal HTTP request), which would make the requirement-2 hash
   binding impossible on the composite surface. The gate in
-  `_resolve_previewable_descriptor` now lets a `destructive` non-ingested op
-  through to `_build_composite_preview`, which binds the *logical request
-  tuple*: the redacted params ride the `redacted_body` slot, so
-  `compute_preview_hash` (unchanged) is param-sensitive while a `COMPOSITE`
-  sentinel `method` + the `op_id` as `resolved_path` name the op. Scoped to
-  `destructive` so every non-destructive typed/composite op keeps its
-  `unavailable` contract.
+  `_resolve_previewable_descriptor` now lets a governed-tier non-ingested op
+  through to `build_composite_preview` (`operations/_composite_preview.py`),
+  which binds the *logical request tuple*: the redacted params ride the
+  `redacted_body` slot, so `compute_preview_hash` (unchanged) is
+  param-sensitive while a `COMPOSITE` sentinel `method` + the `op_id` as
+  `resolved_path` name the op. #3312 additionally extends the gate to any
+  `requires_approval` op (canonical case the `dangerous`-tier typed
+  `vault.kv.delete`) and layers the **reused park-time `proposed_effect`**
+  onto the envelope, so the calling agent reads the same effect block the
+  approver sees pre-dispatch instead of `preview_unavailable`. That reuse
+  runs `build_proposed_effect` with **no connector instance** (egress-free):
+  a pure builder populates, a live-read blast-radius builder declines. The
+  `proposed_effect` key is outside the hashed projection, so the
+  requirement-2 binding is unperturbed. Every op outside the two governed
+  tiers keeps its `unavailable` contract.
 - **The USER auto-execute hole.** `_non_agent_verdict` (`operations/_validate.py`)
   previously parked a human only on `requires_approval`; the
   `safety_level→park` mapping lived on the service-principal branch alone.

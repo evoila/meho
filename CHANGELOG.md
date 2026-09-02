@@ -90,6 +90,34 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — preview parity for approval-requiring typed ops + a destructive builder CI sweep (#3312)
+
+- **`preview_operation` now serves the park-time effect for a `requires_approval`
+  typed op, instead of `preview_unavailable`.** A `dangerous`-tier typed op
+  (canonical case `vault.kv.delete`) parks for a human who sees a rich
+  `proposed_effect` (mount / path / versions / semantics), but the calling agent's
+  pre-dispatch `preview_operation` answered `preview_unavailable` — an asymmetry
+  the through-backplane governed-delete canary surfaced. The previewability gate
+  now admits any `requires_approval` op (alongside the `destructive` tier it
+  already served), and the synthetic preview layers the **reused** park-time
+  `proposed_effect` onto the params-bound projection. The effect is built
+  egress-free — `build_proposed_effect` runs with no connector instance, so a pure
+  builder populates while a live-read blast-radius builder declines — and rides
+  outside the hashed projection, so the #3197 preview-hash binding is unperturbed.
+  Availability change only; park / approval behaviour is unchanged, and #3197's
+  preview-*hash* binding is deliberately **not** extended to the `dangerous` tier.
+- **A registry-driven CI conformance sweep now fails the build if a `destructive`
+  op ships without a blast-radius builder.** The runtime park gate is fail-closed
+  (a destructive op with no builder is un-parkable), but that failure was
+  runtime-only: a posture sweep that promoted an op to `destructive` without adding
+  its builder passed CI and shipped an un-parkable op, silently broken until first
+  use. `test_destructive_builder_conformance.py` enumerates every registered
+  `destructive` descriptor (every connector, both source kinds) from the typed-op
+  registrars and fails if any resolves no registered proposed-effect builder,
+  moving the failure from first-use to CI.
+- No DB migration; the preview REST route returns an untyped object (no OpenAPI
+  schema change), so the CLI snapshot is unchanged.
+
 ### Added — pfsense: three teardown-inverse governed deletes (#3313)
 
 - **`pfsense.route.static.delete`** — the inverse of `pfsense.route.static.add`.

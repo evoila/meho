@@ -279,3 +279,39 @@ blast-radius statement (requirements 2–3). Those gates live on the approvals
 plane and the audit row, not in the trace; the flight recorder neither duplicates
 nor bypasses them — it captures the post-approval vendor traffic of the executed
 destroy, with the destructive / delete-shaped spans' bodies excluded as above.
+
+## Amendment (2026-09-02) — preview parity + a builder-coverage CI sweep (#3312)
+
+Two coupled follow-ups from the 2026-09-02 through-backplane canary of the
+governed `vault.kv.delete` chain (lab evoila-bosnia/claude-rdc-hetzner-dc#2814):
+the park → human-approve → execute chain held, but `preview_operation` answered
+`preview_unavailable` for the op even though the park-time apparatus built a rich
+`proposed_effect`. Both extend — do not revise — requirements 2 and 3 above.
+
+**1. Preview parity for approval-requiring typed ops.** Requirement 2's
+previewability gate (`_resolve_previewable_descriptor`) admitted the
+`destructive` tier only. It now also admits any `requires_approval` op (the
+`dangerous`-tier typed ops, canonical case `vault.kv.delete`), and the synthetic
+preview (now `operations/_composite_preview.py`) layers the **reused** park-time
+`proposed_effect` onto the params-bound projection — `build_proposed_effect` run
+with **no connector instance**, so it stays egress-free (a pure builder like
+`vault.kv.delete`'s populates; a live-read blast-radius builder declines). This
+closes the asymmetry where the approver saw the effect block but the calling
+agent could not preview it. The preview-hash binding is untouched: the
+`proposed_effect` key is outside the hashed projection, and — per this decision's
+non-goals — #3197's preview-*hash* binding is **not** extended to the `dangerous`
+tier (typed synthetic previews are params-derived, so the existing `params_hash`
+on dangerous parks already pins the same content).
+
+**2. A registry-driven CI sweep for destructive builder coverage.** Requirement 3
+makes a destructive op un-parkable without a blast-radius builder — fail-closed,
+but **runtime-only**: a posture sweep (#3247 / #3288 / #3305 show these recur)
+that promotes an op to `destructive` without adding its builder passes CI and
+ships an un-parkable op, silently broken until first use. The conformance tests
+this decision's requirement 3 named (§"conformance tests proving no agent path,
+no grant path, …") scoped to **access-control invariants** only. #3312 adds a
+new, orthogonal conformance sweep
+(`tests/test_destructive_builder_conformance.py`): it enumerates every registered
+`destructive` descriptor from the real typed-op registrars (every connector, both
+source kinds) and fails the build if any resolves no registered proposed-effect
+builder. A promotion without a builder now fails CI, not first use.

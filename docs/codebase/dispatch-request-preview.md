@@ -38,17 +38,22 @@ connector-boundary pipeline the response path uses.
 ## Scope
 
 In scope: the literal would-be request for an `source_kind='ingested'`
-op, redacted, returned without sending.
+op, redacted, returned without sending. Plus, for a non-ingested op in a
+governed approval tier (`safety_level='destructive'` #3198, or
+`requires_approval` #3312), a **synthetic preview** — a params-bound
+projection (the hash binding) plus the reused park-time `proposed_effect`
+(`_composite_preview.py`, egress-free).
 
 Out of scope (honouring #1683's dispositions):
 
 - **No persisting the raw body.** `params_hash` stays the audit field.
 - **No replay.** Inspecting a *would-be* request only; re-dispatching a
   past audited request is a separate governance concern (Goal #1651).
-- **Non-ingested ops.** A `typed` / `composite` op runs a Python handler
-  (which may make zero or many HTTP calls) and has no single literal HTTP
-  request — the preview returns `status="unavailable"` rather than
-  fabricating one.
+- **Non-ingested ops outside the governed tiers.** A `typed` / `composite`
+  op runs a Python handler (which may make zero or many HTTP calls) and has
+  no single literal HTTP request — unless it is `destructive` /
+  `requires_approval` (above), the preview returns `status="unavailable"`
+  rather than fabricating one.
 - **Error-echo on the dispatch path** is deferred (see Known issues).
 
 ## Key types
@@ -91,11 +96,15 @@ preview_dispatch(operator, connector_id, op_id, target, params)
         │
         ├─ parse_connector_id → (product, version, impl_id)
         ├─ lookup_descriptor → None ? → status=error error_code=unknown_op
-        ├─ source_kind != 'ingested' ? → status=unavailable (not_ingested)
+        ├─ source_kind != 'ingested' AND not (destructive OR requires_approval) ?
+        │       → status=unavailable (not_ingested)     ◄── governed tiers pass (#3198/#3312)
         ├─ validate_params → errors ? → status=error error_code=invalid_params
         │       (InvalidOpSchemaError ? → status=error error_code=invalid_op_schema, #3095)
         ├─ resolve_connector_or_label → label ? → status=error (no_connector /
         │       ambiguous_connector)
+        ├─ source_kind != 'ingested' (governed tier) ? → build_composite_preview:
+        │       COMPOSITE method + op_id path + redacted params, hashed, PLUS the
+        │       reused park-time proposed_effect (build_proposed_effect, no connector)
         ├─ get_or_create_connector_instance(cls)   (cached singleton)
         ├─ resolve_ingested_request(...)   ◄── SAME resolver dispatch_ingested uses
         │       → IngestedRequest{method, path, query, body}
@@ -104,24 +113,27 @@ preview_dispatch(operator, connector_id, op_id, target, params)
                      tenant, op).redacted   ◄── SAME pipeline the response path uses
         ▼
 {status: ok, op_id, connector_id, source_kind, method,
- resolved_path, query, redacted_body, preview_hash}
+ resolved_path, query, redacted_body, preview_hash [, proposed_effect]}
 ```
 
 The HTTP transport (`HttpConnector._post_json` / `_request_json`) is
 **never** called: there is no network egress, no audit row, no broadcast
-event, no policy-gate park. The policy gate (dispatch Step 4) is
-deliberately skipped — a preview reveals only what *would* be sent (and
-the body is redacted), so it carries no side effect to authorize, the
-same posture as `search_operations` over the same descriptors. Both
-surfaces stay `OPERATOR`-gated at the route / tool layer.
+event, no policy-gate park. The synthetic-preview branch keeps this
+contract — it reuses `build_proposed_effect` with **no connector instance**,
+so a pure builder (e.g. `vault.kv.delete`) populates while a live-read
+blast-radius builder declines rather than dialling out. The policy gate
+(dispatch Step 4) is deliberately skipped — a preview reveals only what
+*would* be sent (and the body is redacted), so it carries no side effect to
+authorize, the same posture as `search_operations` over the same
+descriptors. Both surfaces stay `OPERATOR`-gated at the route / tool layer.
 
 ## Envelope shape
 
 | `status` | meaning | extra fields |
 |---|---|---|
-| `ok` | request resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval) |
+| `ok` | request (or synthetic preview) resolved | `method`, `resolved_path`, `query` (object/null), `redacted_body` (object/null), `source_kind`, `preview_hash` (#3197 — SHA-256 over the resolved-request projection; the caller presents it on a `destructive`-tier `call_operation` and the dispatcher recomputes + matches it before parking the approval), and — on a governed-tier synthetic preview whose builder populated — `proposed_effect` (#3312, the reused park-time effect block; unhashed, so it never perturbs the `preview_hash` binding) |
 | `error` | structured failure | `error` (`"<code>: …"`), `extras.error_code` (`unknown_op` / `invalid_params` / `invalid_op_schema` / `no_connector` / `ambiguous_connector` / `dispatch_error`) + per-code detail (`invalid_op_schema` carries `extras.missing_ref`, #3095) |
-| `unavailable` | not an HTTP-ingested op | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
+| `unavailable` | not an HTTP-ingested op **and** not in a governed approval tier (destructive / requires_approval) | `source_kind`, `extras.error_code=preview_unavailable`, `extras.reason=not_ingested` |
 
 Operator-input faults come back **inside** the envelope (not as
 exceptions), mirroring the dispatcher's never-raises contract so the REST
@@ -200,10 +212,16 @@ named-pattern catalogue and policy resolution.
   is a larger, riskier change for marginal benefit (an operator who hit a
   4xx re-issues the same args against `/preview`). It is recorded here as
   a possible follow-up rather than shipped in this change.
-- The preview covers `source_kind='ingested'` only; previewing the
-  *effective* request a composite handler would synthesize per sub-op is
-  out of scope (composites already carry the park-time `proposed_effect`
-  semantic preview, #1608 / #1628).
+- The literal-request preview covers `source_kind='ingested'` only;
+  previewing the *effective* per-sub-op requests a composite handler would
+  synthesize is out of scope. A governed-tier (destructive /
+  requires_approval) non-ingested op instead gets the **synthetic** preview
+  (`_composite_preview.py`, #3198 / #3312): a params-bound projection plus
+  the reused park-time `proposed_effect`. That effect is built egress-free
+  (no connector instance), so a live-read blast-radius builder — which needs
+  a connector to enumerate children — declines and the synthetic preview
+  carries only the params-bound projection; the rich blast radius still
+  lands at park time, where the connector is resolved.
 
 ## References
 

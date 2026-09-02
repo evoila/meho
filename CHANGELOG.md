@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — HttpNfcLease device-URL transfers pinned to the lease `sslThumbprint` (#3284)
+
+- The typed OVF import (`vm.import_from_library`, #3229) streams each disk to an
+  *absolute* per-device ESXi upload URL, which the pooled client dials without
+  the per-target SSRF host re-screen (that screen is keyed to `target.host`, and
+  screening would wrongly block a legitimate private ESXi host). That bypass now
+  has a replacement control: before a byte streams, the device host's TLS
+  certificate is **pinned** to the `HttpNfcLeaseDeviceUrl.sslThumbprint` the
+  authenticated vCenter attests for it (SHA-1 of the DER cert, colon/case
+  normalised). A mismatch — or a handshake that cannot obtain a certificate —
+  **fails closed**: no disk bytes flow, the lease is aborted (vCenter tears down
+  the half-import), and the failure surfaces as a distinct `security`-category
+  `import_error`, closing the redirect/MITM window on the multi-GB PUTs.
+- **Missing-thumbprint policy is fail-open by design:** an empty / absent
+  `sslThumbprint` skips pinning and falls back to the client's existing TLS
+  trust, because the vim spec sanctions an empty value ("Empty if no SSL
+  thumbprint is available or needed") — a conformant lease that omits it must
+  still import. The SSRF host screen stays off for device-URL PUTs; pinning is
+  the replacement, not an addition on top of a host allowlist.
+
 ### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
 
 - The unconditional self-approval refusal (#3198 — "no self-approval, even

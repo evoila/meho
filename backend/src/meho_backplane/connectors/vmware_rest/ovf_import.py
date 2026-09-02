@@ -279,11 +279,26 @@ async def _run_transfer(
             heartbeat_interval=heartbeat_interval,
         )
         await control.lease_complete(connector, target, operator, lease_moid=lease_moid)
+    except transfer.DeviceThumbprintError as exc:
+        # A device host failed certificate-thumbprint pinning (#3284): no disk
+        # bytes flowed. Surface a distinct security-category issue so the
+        # mismatch is not conflated with an ordinary transport fault.
+        return await _abort_import_error(
+            connector,
+            target,
+            operator,
+            lease_moid=lease_moid,
+            warnings=warnings,
+            issue=control.issue("security", "error", f"device thumbprint pin failed: {exc}"),
+        )
     except httpx.HTTPError as exc:
-        await control.abort_lease(connector, target, operator, lease_moid=lease_moid)
-        return LeaseImportResult(
-            status="import_error",
-            issues=[*warnings, control.issue("transfer", "error", f"disk upload faulted: {exc}")],
+        return await _abort_import_error(
+            connector,
+            target,
+            operator,
+            lease_moid=lease_moid,
+            warnings=warnings,
+            issue=control.issue("transfer", "error", f"disk upload faulted: {exc}"),
         )
     vm_id, resource_type = control.entity_from_info(info)
     return LeaseImportResult(
@@ -293,3 +308,22 @@ async def _run_transfer(
         issues=warnings,
         transfer=manifest,
     )
+
+
+async def _abort_import_error(
+    connector: VmwareRestConnector,
+    target: VsphereTargetLike,
+    operator: Operator,
+    *,
+    lease_moid: str,
+    warnings: list[dict[str, Any]],
+    issue: dict[str, Any],
+) -> LeaseImportResult:
+    """Abort the lease and return an ``import_error`` carrying *issue*.
+
+    The shared failure tail for a transfer fault: vCenter tears down the
+    half-created inventory on ``HttpNfcLeaseAbort``, so a failed import never
+    leaves a partial VM behind.
+    """
+    await control.abort_lease(connector, target, operator, lease_moid=lease_moid)
+    return LeaseImportResult(status="import_error", issues=[*warnings, issue])

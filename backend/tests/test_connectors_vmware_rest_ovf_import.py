@@ -15,15 +15,21 @@ against ``_write.vm_import_from_library_composite``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from typing import Any, ClassVar
 
 import httpx
 import pytest
 
 from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest import ovf_import
+from meho_backplane.connectors.vmware_rest import ovf_import, ovf_transfer
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.ovf_import import ImportPlacement, LeaseImportResult
+
+
+def _colon_hex(digest: str) -> str:
+    """Render a bare hex digest in vCenter's uppercase colon-separated form."""
+    return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2)).upper()
 
 
 class _Target:
@@ -172,14 +178,21 @@ def _import_spec_result(
     }
 
 
-def _ready_poll(*, with_ssl_cert: bool = False) -> dict[str, Any]:
+def _ready_poll(
+    *,
+    with_ssl_cert: bool = False,
+    ssl_thumbprint: str | None = None,
+    url: str = "https://*/nfc/lease-1/disk-0.vmdk",
+) -> dict[str, Any]:
     device_url: dict[str, Any] = {
         "_typeName": "HttpNfcLeaseDeviceUrl",
         "key": "/vm-9/disk-0",
         "importKey": "disk1",
-        "url": "https://*/nfc/lease-1/disk-0.vmdk",
+        "url": url,
         "disk": True,
     }
+    if ssl_thumbprint is not None:
+        device_url["sslThumbprint"] = ssl_thumbprint
     if with_ssl_cert:  # 9.0-only field the engine must ignore
         device_url["sslCertificate"] = "-----BEGIN CERTIFICATE-----"
     info = {
@@ -386,6 +399,186 @@ async def test_import_is_version_agnostic_ignoring_9_0_only_device_fields() -> N
     result = await _run(conn, source)
     assert isinstance(result, LeaseImportResult)
     assert result.status == "imported"
+
+
+# ---------------------------------------------------------------------------
+# Device-host certificate thumbprint pinning (#3284)
+# ---------------------------------------------------------------------------
+
+
+def test_thumbprint_normalization_is_colon_and_case_insensitive() -> None:
+    """Colons, whitespace, and case are stripped before comparison."""
+    assert ovf_transfer._normalize_thumbprint("A1:B2:C3:D4") == "a1b2c3d4"
+    assert ovf_transfer._normalize_thumbprint("  a1:b2 ") == "a1b2"
+
+
+def test_cert_thumbprint_selects_algorithm_by_expected_length() -> None:
+    """A 40-char expectation hashes SHA-1; 64 hashes SHA-256 (vim convention)."""
+    der = b"esxi-leaf-cert-der"
+    assert ovf_transfer._cert_thumbprint(der, 40) == hashlib.sha1(der).hexdigest()
+    assert ovf_transfer._cert_thumbprint(der, 64) == hashlib.sha256(der).hexdigest()
+    # An unrecognised length falls back to SHA-1, whose digest cannot equal a
+    # differently-sized expected value — the comparison then fails closed.
+    assert ovf_transfer._cert_thumbprint(der, 12) == hashlib.sha1(der).hexdigest()
+
+
+async def test_verify_matches_when_presented_cert_hashes_to_the_thumbprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device cert whose SHA-1 matches the lease thumbprint verifies silently."""
+    der = b"esxi-real-cert"
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", lambda *_a: der)
+    thumbprint = _colon_hex(hashlib.sha1(der).hexdigest())
+    await ovf_transfer.verify_device_thumbprint("https://esxi.lab:443/nfc/x.vmdk", thumbprint)
+
+
+async def test_verify_raises_on_thumbprint_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cert that does not hash to the lease thumbprint fails closed."""
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", lambda *_a: b"attacker-cert")
+    thumbprint = _colon_hex(hashlib.sha1(b"real-cert").hexdigest())
+    with pytest.raises(ovf_transfer.DeviceThumbprintError):
+        await ovf_transfer.verify_device_thumbprint("https://esxi.lab/nfc/x.vmdk", thumbprint)
+
+
+@pytest.mark.parametrize("absent", ["", None])
+async def test_verify_is_fail_open_on_absent_thumbprint(
+    monkeypatch: pytest.MonkeyPatch, absent: str | None
+) -> None:
+    """An empty/None thumbprint skips the handshake (vim: 'Empty if ... not needed')."""
+    handshakes: list[str] = []
+    monkeypatch.setattr(
+        ovf_transfer, "_fetch_peer_cert_der", lambda h, *_a: handshakes.append(h) or b"x"
+    )
+    await ovf_transfer.verify_device_thumbprint("https://esxi.lab/nfc/x.vmdk", absent)
+    assert handshakes == []  # fail-open: no pin handshake was attempted
+
+
+async def test_verify_fails_closed_when_handshake_cannot_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handshake that cannot obtain a cert to compare is a closed failure."""
+
+    def _boom(*_a: Any) -> bytes:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", _boom)
+    with pytest.raises(ovf_transfer.DeviceThumbprintError):
+        await ovf_transfer.verify_device_thumbprint("https://esxi.lab/nfc/x.vmdk", "AA:BB:CC")
+
+
+async def test_thumbprint_mismatch_aborts_before_any_disk_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mismatch aborts the lease pre-stream — no PUT, no Complete, security issue."""
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", lambda *_a: b"attacker-cert")
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll(ssl_thumbprint=_colon_hex(hashlib.sha1(b"real").hexdigest()))],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _FakeDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "import_error"
+    assert result.issues[-1]["category"] == "security"
+    assert conn._client.puts == []  # fail closed: not a single byte streamed
+    assert any(p.endswith("/HttpNfcLeaseAbort") for p, _ in conn.vmomi_calls)
+    assert not any(p.endswith("/HttpNfcLeaseComplete") for p, _ in conn.vmomi_calls)
+
+
+async def test_thumbprint_match_streams_disk_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching thumbprint permits the stream and the import completes."""
+    der = b"esxi-real-cert"
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", lambda *_a: der)
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll(ssl_thumbprint=_colon_hex(hashlib.sha1(der).hexdigest()))],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _FakeDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "imported"
+    assert conn._client.puts[0]["url"] == "https://vcenter.lab/nfc/lease-1/disk-0.vmdk"
+
+
+async def test_absent_thumbprint_streams_under_existing_tls_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail-open policy: an empty sslThumbprint imports without a pin handshake."""
+    handshakes: list[str] = []
+    monkeypatch.setattr(
+        ovf_transfer, "_fetch_peer_cert_der", lambda h, *_a: handshakes.append(h) or b"x"
+    )
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll(ssl_thumbprint="")],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _FakeDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "imported"
+    assert handshakes == []
+
+
+async def test_thumbprint_pin_uses_the_wildcard_substituted_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinning composes with `*`-host substitution: it dials the concrete host."""
+    der = b"esxi-real-cert"
+    seen: dict[str, Any] = {}
+
+    def _fake(host: str, port: int, _timeout: float) -> bytes:
+        seen["host"], seen["port"] = host, port
+        return der
+
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", _fake)
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[_ready_poll(ssl_thumbprint=_colon_hex(hashlib.sha1(der).hexdigest()))],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _FakeDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "imported"
+    assert seen["host"] == "vcenter.lab"  # the substituted host, never the raw "*"
+
+
+async def test_private_device_host_streams_when_thumbprint_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinning — not a host allowlist — authorizes a private ESXi device host.
+
+    The per-target SSRF host screen stays off for device-URL PUTs (it would
+    wrongly block a legitimate private ESXi host); a matching thumbprint is
+    the replacement control, so a private-IP device host streams cleanly.
+    """
+    der = b"esxi-private-cert"
+    monkeypatch.setattr(ovf_transfer, "_fetch_peer_cert_der", lambda *_a: der)
+    conn = _EngineConnector(
+        service_content=_service_content(),
+        import_spec_result=_import_spec_result(),
+        lease_ref=_lease_ref(),
+        lease_polls=[
+            _ready_poll(
+                ssl_thumbprint=_colon_hex(hashlib.sha1(der).hexdigest()),
+                url="https://10.11.16.9/nfc/lease-1/disk-0.vmdk",
+            )
+        ],
+    )
+    source = _FakeSource("<Envelope/>", {"app-disk1.vmdk": _FakeDisk(b"12345678")})
+    result = await _run(conn, source)
+    assert isinstance(result, LeaseImportResult)
+    assert result.status == "imported"
+    assert conn._client.puts[0]["url"] == "https://10.11.16.9/nfc/lease-1/disk-0.vmdk"
 
 
 # ---------------------------------------------------------------------------

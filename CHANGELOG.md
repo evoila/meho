@@ -98,14 +98,19 @@ connector-related release-notes line.
   `proposed_effect` (mount / path / versions / semantics), but the calling agent's
   pre-dispatch `preview_operation` answered `preview_unavailable` — an asymmetry
   the through-backplane governed-delete canary surfaced. The previewability gate
-  now admits any `requires_approval` op (alongside the `destructive` tier it
-  already served), and the synthetic preview layers the **reused** park-time
-  `proposed_effect` onto the params-bound projection. The effect is built
-  egress-free — `build_proposed_effect` runs with no connector instance, so a pure
-  builder populates while a live-read blast-radius builder declines — and rides
-  outside the hashed projection, so the #3197 preview-hash binding is unperturbed.
-  Availability change only; park / approval behaviour is unchanged, and #3197's
-  preview-*hash* binding is deliberately **not** extended to the `dangerous` tier.
+  now admits any **non-credential-class** `requires_approval` op (alongside the
+  `destructive` tier it already served), and the synthetic preview layers the
+  **reused** park-time `proposed_effect` onto the params-bound projection. The
+  effect is built egress-free — `build_proposed_effect` runs with no connector
+  instance, so a pure builder populates while a live-read blast-radius builder
+  declines — and rides outside the hashed projection, so the #3197 preview-hash
+  binding is unperturbed. A credential-class op (`vault.kv.put` /
+  `k8s.secret.create`, whose secret rides in the request params) is deliberately
+  excluded and stays `unavailable`, since the preview's `redacted_body`
+  connector-boundary redaction cannot be trusted to scrub a structured secret —
+  mirroring the park-time credential-class suppression. Availability change only;
+  park / approval behaviour is unchanged, and #3197's preview-*hash* binding is
+  deliberately **not** extended to the `dangerous` tier.
 - **A registry-driven CI conformance sweep now fails the build if a `destructive`
   op ships without a blast-radius builder.** The runtime park gate is fail-closed
   (a destructive op with no builder is un-parkable), but that failure was

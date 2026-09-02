@@ -713,15 +713,21 @@ enforcement that #3196/#3197 left, plus one machinery limitation:
   `redacted_body` slot, so `compute_preview_hash` (unchanged) is
   param-sensitive while a `COMPOSITE` sentinel `method` + the `op_id` as
   `resolved_path` name the op. #3312 additionally extends the gate to any
-  `requires_approval` op (canonical case the `dangerous`-tier typed
-  `vault.kv.delete`) and layers the **reused park-time `proposed_effect`**
-  onto the envelope, so the calling agent reads the same effect block the
-  approver sees pre-dispatch instead of `preview_unavailable`. That reuse
-  runs `build_proposed_effect` with **no connector instance** (egress-free):
-  a pure builder populates, a live-read blast-radius builder declines. The
-  `proposed_effect` key is outside the hashed projection, so the
-  requirement-2 binding is unperturbed. Every op outside the two governed
-  tiers keeps its `unavailable` contract.
+  **non-credential-class** `requires_approval` op (canonical case the
+  `dangerous`-tier typed `vault.kv.delete`) and layers the **reused park-time
+  `proposed_effect`** onto the envelope, so the calling agent reads the same
+  effect block the approver sees pre-dispatch instead of `preview_unavailable`.
+  That reuse runs `build_proposed_effect` with **no connector instance**
+  (egress-free): a pure builder populates, a live-read blast-radius builder
+  declines. The `proposed_effect` key is outside the hashed projection, so the
+  requirement-2 binding is unperturbed. A **credential-class** op (`vault.kv.put`
+  / `k8s.secret.create` — `classify_op` ∈ the aggregate-only sensitivity set)
+  is deliberately **excluded** and keeps its `unavailable` contract: its secret
+  rides in the request params, and the synthetic preview's `redacted_body` slot
+  uses only connector-boundary value-shape redaction, which cannot be trusted to
+  scrub a structured secret — the same reason `build_proposed_effect` suppresses
+  credential-class request detail at park time. Every op outside the two governed
+  tiers likewise keeps its `unavailable` contract.
 - **The USER auto-execute hole.** `_non_agent_verdict` (`operations/_validate.py`)
   previously parked a human only on `requires_approval`; the
   `safety_level→park` mapping lived on the service-principal branch alone.

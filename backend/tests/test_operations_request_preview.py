@@ -865,6 +865,58 @@ async def test_preview_requires_approval_generic_echo_scrubs_secret_param(
 
 
 @pytest.mark.asyncio
+async def test_preview_credential_class_requires_approval_op_stays_unavailable(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    _preview_builders_snapshot: None,
+) -> None:
+    """A credential-class requires_approval op is NOT previewable — no secret leak (#3312).
+
+    The security guard on the #3312 extension. `k8s.secret.create` (and
+    `vault.kv.put` etc.) classify as `credential_write`: the secret rides in the
+    request params, and the synthetic preview's `redacted_body` slot uses only
+    connector-boundary *value-shape* redaction, which does NOT scrub a structured
+    secret like `{"data": {"password": …}}`. So making it previewable would
+    surface the written secret. The gate excludes credential-class ops (mirroring
+    the park-time `build_proposed_effect` credential suppression), keeping the
+    `unavailable` contract and never producing a `redacted_body` for them.
+    """
+    register_connector_v2(product="demo", version="", impl_id="", cls=_RecordingHttpConnector)
+    # op_id `k8s.secret.create` classifies as credential_write (allowlisted in
+    # broadcast.events), regardless of the demo connector it is registered under.
+    await register_typed_operation(
+        product="demo",
+        version="1.x",
+        impl_id="demo",
+        op_id="k8s.secret.create",
+        handler=_handler_returning_ok,
+        summary="A credential-class governed write.",
+        description="Typed, dangerous, requires approval, secret in params.",
+        parameter_schema={"type": "object"},
+        safety_level="dangerous",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    envelope = await preview_dispatch(
+        operator=_make_operator(),
+        connector_id="demo-1.x",
+        op_id="k8s.secret.create",
+        target=_FakeTarget(product="demo", version="1.x", name="demo-prod"),
+        params={"name": "db", "data": {"password": "s3cr3tVALUE"}},
+    )
+
+    assert envelope["status"] == "unavailable"
+    assert envelope["extras"]["reason"] == "not_ingested"
+    assert "redacted_body" not in envelope
+    assert "proposed_effect" not in envelope
+    # Belt-and-suspenders: the secret value appears nowhere in the envelope.
+    assert "s3cr3tVALUE" not in str(envelope)
+
+
+@pytest.mark.asyncio
 async def test_preview_invalid_params_returns_structured_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,

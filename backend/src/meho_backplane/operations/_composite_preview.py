@@ -16,7 +16,11 @@ governed approval tiers are the exception and MUST be previewable:
   (canonical case ``vault.kv.delete``) park for a human. The approver already
   sees a rich park-time ``proposed_effect``; previewing removes the
   pre-dispatch asymmetry so the calling agent reads the *same* effect block
-  instead of ``preview_unavailable``.
+  instead of ``preview_unavailable``. A **credential-class** op (e.g.
+  ``vault.kv.put``) is excluded upstream by
+  :func:`~meho_backplane.operations._request_preview._is_previewable` — its
+  secret rides in the params, which the ``redacted_body`` slot below cannot be
+  trusted to scrub — so it never reaches here.
 
 The synthetic preview binds the *logical request tuple* (the redacted params
 on the ``redacted_body`` slot, a ``COMPOSITE`` sentinel ``method``, the

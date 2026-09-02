@@ -289,15 +289,21 @@ the park → human-approve → execute chain held, but `preview_operation` answe
 `proposed_effect`. Both extend — do not revise — requirements 2 and 3 above.
 
 **1. Preview parity for approval-requiring typed ops.** Requirement 2's
-previewability gate (`_resolve_previewable_descriptor`) admitted the
-`destructive` tier only. It now also admits any `requires_approval` op (the
-`dangerous`-tier typed ops, canonical case `vault.kv.delete`), and the synthetic
-preview (now `operations/_composite_preview.py`) layers the **reused** park-time
+previewability gate (`_resolve_previewable_descriptor` → `_is_previewable`)
+admitted the `destructive` tier only. It now also admits any **non-credential-class**
+`requires_approval` op (the `dangerous`-tier typed ops, canonical case
+`vault.kv.delete`), and the synthetic preview (now
+`operations/_composite_preview.py`) layers the **reused** park-time
 `proposed_effect` onto the params-bound projection — `build_proposed_effect` run
 with **no connector instance**, so it stays egress-free (a pure builder like
 `vault.kv.delete`'s populates; a live-read blast-radius builder declines). This
 closes the asymmetry where the approver saw the effect block but the calling
-agent could not preview it. The preview-hash binding is untouched: the
+agent could not preview it. A **credential-class** op (`vault.kv.put` /
+`k8s.secret.create`) is deliberately excluded — its secret rides in the request
+params, and the synthetic preview's `redacted_body` slot uses only
+connector-boundary value-shape redaction, which cannot be trusted to scrub a
+structured secret; the exclusion mirrors `build_proposed_effect`'s own
+credential-class suppression. The preview-hash binding is untouched: the
 `proposed_effect` key is outside the hashed projection, and — per this decision's
 non-goals — #3197's preview-*hash* binding is **not** extended to the `dangerous`
 tier (typed synthetic previews are params-derived, so the existing `params_hash`

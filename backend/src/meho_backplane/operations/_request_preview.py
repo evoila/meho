@@ -37,9 +37,11 @@ Scope (honouring #1683's out-of-scope dispositions):
   to preview -- so by default the preview says so explicitly
   (``status="unavailable"``) rather than fabricating one. The two governed
   approval tiers are the exception: a ``safety_level='destructive'`` op
-  (#3198) and an op that ``requires_approval`` (#3312, canonical case the
-  ``dangerous``-tier typed ``vault.kv.delete``) instead get a **synthetic
-  preview** -- a params-bound projection (the hashed binding) plus the
+  (#3198) and a non-credential-class op that ``requires_approval`` (#3312,
+  canonical case the ``dangerous``-tier typed ``vault.kv.delete``; a
+  credential-class op like ``vault.kv.put`` stays ``unavailable`` because its
+  secret rides in the params) instead get a **synthetic preview** -- a
+  params-bound projection (the hashed binding) plus the
   reused park-time ``proposed_effect`` content -- so the agent reads the
   same effect block the approver sees, pre-dispatch. That proposed-effect
   reuse is **egress-free**: it runs the registered builder with **no
@@ -65,6 +67,7 @@ from typing import Any, Final
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import resolve_connector_or_label
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._branches import resolve_ingested_request
@@ -74,6 +77,7 @@ from meho_backplane.operations._lookup import (
     lookup_descriptor,
     parse_connector_id,
 )
+from meho_backplane.operations._preview import _SENSITIVE_CLASSES
 from meho_backplane.operations._validate import InvalidOpSchemaError, validate_params
 from meho_backplane.redaction import apply_connector_boundary_redaction
 
@@ -184,6 +188,37 @@ def _invalid_op_schema_envelope(
     }
 
 
+def _is_previewable(descriptor: EndpointDescriptor) -> bool:
+    """True when the op has a preview surface; else it previews as ``unavailable``.
+
+    An ``source_kind='ingested'`` op has a literal would-be HTTP request. A
+    non-ingested (``typed`` / ``composite``) op has none, so it is previewable
+    only in a governed approval tier, via the synthetic preview
+    (:func:`._composite_preview.build_composite_preview`):
+
+    * ``safety_level='destructive'`` (#3198) — unconditional: the
+      governed-delete gate refuses to park without a bound preview hash, so the
+      op MUST be previewable. Destructive ops are non-credential deletes.
+    * ``requires_approval`` (#3312), **except a credential-class op** — so the
+      calling agent reads the same park-time ``proposed_effect`` the approver
+      sees. A credential-class op (``classify_op`` ∈ the aggregate-only
+      :data:`~meho_backplane.operations._preview._SENSITIVE_CLASSES`) is
+      **excluded**: its secret rides in the request params, and the synthetic
+      preview's ``redacted_body`` slot uses only connector-boundary value-shape
+      redaction — which does not scrub a structured secret like
+      ``{"data": {"password": …}}``. The park path suppresses credential-class
+      request detail for exactly this reason (``build_proposed_effect`` step 3);
+      mirror it here so a ``vault.kv.put`` / ``k8s.secret.create`` preview never
+      surfaces the written secret. Single-sourced on ``classify_op``; the class
+      set is imported, never re-declared.
+    """
+    if descriptor.source_kind == "ingested":
+        return True
+    if descriptor.safety_level == "destructive":
+        return True
+    return descriptor.requires_approval and classify_op(descriptor.op_id) not in _SENSITIVE_CLASSES
+
+
 async def _resolve_previewable_descriptor(
     *,
     operator: Operator,
@@ -194,10 +229,9 @@ async def _resolve_previewable_descriptor(
     """Run dispatch Steps 2-3 + the previewability gate; return descriptor or error.
 
     Returns the validated :class:`EndpointDescriptor` when the op resolves,
-    is previewable (``source_kind='ingested'``, or a non-ingested op in a
-    governed approval tier — ``destructive`` #3198 or ``requires_approval``
-    #3312), and its params pass the schema. Otherwise returns the structured
-    envelope the caller propagates verbatim:
+    is previewable (:func:`_is_previewable` — ``source_kind='ingested'``, or a
+    governed-tier non-ingested op), and its params pass the schema. Otherwise
+    returns the structured envelope the caller propagates verbatim:
 
     * ``unknown_op`` -- the natural key resolved no descriptor.
     * ``preview_unavailable`` (status ``"unavailable"``) -- a ``typed`` /
@@ -237,22 +271,11 @@ async def _resolve_previewable_descriptor(
             "extras": {"error_code": "unknown_op", "known_op_count": known_op_count},
         }
 
-    # --- Non-ingested ops have no single literal HTTP request -------------
-    # A ``typed`` / ``composite`` op runs a Python handler; there is no one
-    # method/path/body to preview, so say so — unless it is in a governed
-    # approval tier, which MUST be previewable: ``destructive`` (#3198, the
-    # governed-delete gate refuses to park without a bound preview hash) or
-    # ``requires_approval`` (#3312, so the calling agent reads the same
-    # park-time ``proposed_effect`` the approver sees, not
-    # ``preview_unavailable``). Such an op has no literal request, so its
-    # preview binds the logical tuple + reuses ``proposed_effect`` — see
-    # :func:`._composite_preview.build_composite_preview`. Every other
-    # typed/composite op keeps the "unavailable" contract.
-    if (
-        descriptor.source_kind != "ingested"
-        and descriptor.safety_level != "destructive"
-        and not descriptor.requires_approval
-    ):
+    # --- Previewability gate (see :func:`_is_previewable`) -----------------
+    # A non-ingested op previews as "unavailable" unless it is in a governed
+    # approval tier (destructive #3198 / non-credential requires_approval
+    # #3312), which routes to the synthetic preview.
+    if not _is_previewable(descriptor):
         return _preview_unavailable_envelope(
             op_id=op_id, connector_id=connector_id, source_kind=descriptor.source_kind
         )
@@ -471,7 +494,8 @@ async def preview_dispatch(
     request via :func:`~meho_backplane.operations._branches.resolve_ingested_request`
     and returns it with the body redacted (:func:`_redact_request_body`). A
     non-ingested op in a governed approval tier (``destructive`` #3198 /
-    ``requires_approval`` #3312) instead gets the synthetic preview
+    non-credential ``requires_approval`` #3312 — see :func:`_is_previewable`)
+    instead gets the synthetic preview
     (:func:`~meho_backplane.operations._composite_preview.build_composite_preview`).
     Never sends, never audits, never parks;
     the policy gate (Step 4) is skipped — a preview carries no side effect to

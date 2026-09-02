@@ -55,7 +55,7 @@ central-dial / on-site only).
 | `winsrv.service.restart` | caution | no | `Restart-Service` |
 | `winsrv.feature.list` | safe | no | `Get-WindowsFeature` |
 | `winsrv.feature.install` | caution | no | `Install-WindowsFeature` |
-| `winsrv.feature.remove` | caution | no | `Uninstall-WindowsFeature` |
+| `winsrv.feature.remove` | **dangerous** | **yes** | `Uninstall-WindowsFeature` |
 | `winsrv.power.reboot` | **dangerous** | **yes** | `shutdown.exe /r /t <delay>` |
 | `winsrv.power.shutdown` | **dangerous** | **yes** | `shutdown.exe /s /t <delay>` |
 | `winsrv.localuser.list` | safe | no | `Get-LocalUser` |
@@ -68,16 +68,23 @@ central-dial / on-site only).
 | `winsrv.storage.iscsi.connect` | caution | no | `Connect-IscsiTarget` |
 | `winsrv.storage.disk.format` | caution | no | `Initialize-Disk` + `New-Partition` + `Format-Volume` |
 
-The three `dangerous` ops (`power.reboot`, `power.shutdown`, `localuser.delete`)
-are `requires_approval=True` — a dispatch parks at `needs-approval` for a human
-decision (the rke2 write mold; no bespoke `proposed_effect` builder is
-registered — the generic params-echo default (#1856) surfaces the target /
-params redaction-safely to the reviewer). The **agent-principal ceiling**
-therefore applies: an agent session cannot self-approve these — approval is a
-human decision (v0.1-spec §7), so a `winsrv.power.*` / `localuser.delete`
-dispatch from an agent floors at the approval queue until an operator approves in
-the console / CLI. Reads ride satellite runners; the `dangerous` ops are excluded
-from satellites by the tier ladder.
+The four `dangerous` ops (`power.reboot`, `power.shutdown`, `localuser.delete`,
+`feature.remove`) are `requires_approval=True` — a dispatch parks at
+`needs-approval` for a human decision (the rke2 write mold; no bespoke
+`proposed_effect` builder is registered — the generic params-echo default
+(#1856) surfaces the target / params redaction-safely to the reviewer).
+`feature.remove` was promoted from `caution` by the #3288 operator ruling:
+uninstalling a role is disruptive enough to demand a human, but it is
+deliberately **not** `destructive` — removal is reversible by reinstall and
+data-preserving, and the destructive tier is reserved for unrecoverable deletes,
+so no blast-radius preview is required at the `dangerous` tier (unlike the
+destructive `windns.record.remove` / `harbor.robot.delete` governed under
+#3288). The **agent-principal ceiling** therefore applies: an agent session
+cannot self-approve these — approval is a human decision (v0.1-spec §7), so a
+`winsrv.power.*` / `localuser.delete` / `feature.remove` dispatch from an agent
+floors at the approval queue until an operator approves in the console / CLI.
+Reads ride satellite runners; the `dangerous` ops are excluded from satellites
+by the tier ladder.
 
 ## Key types
 

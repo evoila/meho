@@ -90,6 +90,42 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — three caution-tier permanent-removal ops promoted to governed approval (#3288)
+
+- **Behaviour change for agents — approval now required on three permanent-removal
+  ops**, per the #3288 operator ruling (per-op deliberate postures, mirroring the
+  #3247 bind9 precedent):
+  - **`windns.record.remove`** (the `-Force` RRset clear: every value of an RRType
+    at a name) moves from `caution` + approval-free to **`destructive` +
+    `requires_approval=True`**, tagged `delete`/`destructive`. It now runs only
+    through preview → park → distinct-human approval → audited resume; a bare
+    dispatch is refused `preview_binding_required` and a park without a resolvable
+    blast radius is refused `blast_radius_required`. A read-only park-time preview
+    (`ops_record_remove_preview`) names the `(zone, name, type)` record-set and
+    enumerates every value that dies (`irreversibility="recreatable"`).
+  - **`harbor.robot.delete`** moves from `caution` + approval-free to
+    **`destructive` + `requires_approval=True`**. Permanent removal of a
+    credential-bearing principal is not transparently reversible — re-creating the
+    robot mints a NEW secret and silently breaks every consumer of the old one (the
+    lab signal `bind9-harbor-dangerous-writes-bypass-approval-gate.yaml`). The
+    park-time preview (`ops_robot_delete_preview`, params-derived) names the robot
+    `{id, project, level}` + its project association
+    (`irreversibility="recreatable_new_secret"`).
+  - **`winsrv.feature.remove`** moves from `caution` + approval-free to
+    **`dangerous` + `requires_approval=True`** — disruptive enough to demand a
+    human, but deliberately **not** `destructive` (reversible by reinstall,
+    data-preserving), so no blast-radius preview is required at this tier (the
+    `winsrv.localuser.delete` mould). A dispatch parks at `awaiting_approval`.
+- **Single-sourced promotions** — only each op's `safety_level` + tags change. The
+  satellite ladder excludes all three (`dangerous`/`destructive` → EXCLUDED, never
+  runner-minted; `REMOTE_WRITE_SAFETY_LEVELS` stays `{caution}`), and the
+  service-grant guard + flight-recorder body-exclusion fold the destructive pair in
+  via the `destructive` tag — no re-declared op lists. `broadcast.events.classify_op`
+  is unaffected (all three stay `write`, the payload-sensitivity class orthogonal to
+  the safety tier). No DB migration (the tier is a registration-constant value,
+  re-registered on startup). CLI OpenAPI snapshot unchanged (no per-op safety
+  metadata in the REST surface).
+
 ### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
 
 - The unconditional self-approval refusal (#3198 — "no self-approval, even

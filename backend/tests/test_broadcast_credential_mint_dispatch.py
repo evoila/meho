@@ -94,6 +94,7 @@ from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.main import app
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
+from meho_backplane.operations.meta_tools import call_operation, preview_operation
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -347,6 +348,36 @@ async def _park_robot_create(
     return UUID(parked.extras["approval_request_id"])
 
 
+async def _park_robot_delete(
+    stub_embedding_service: AsyncMock,
+    *,
+    requester: Operator,
+) -> UUID:
+    """Register the ops, drive the governed destructive flow for ``robot.delete``.
+
+    ``harbor.robot.delete`` is ``safety_level=destructive`` +
+    ``requires_approval=True`` (#3288), so a bare dispatch is refused
+    ``preview_binding_required`` — the caller must present a ``preview_hash``
+    from a prior ``preview_operation`` and the park needs a blast-radius block.
+    This drives the meta-tool path (target resolved by name against the
+    persisted row, so the parked ``ApprovalRequest`` re-hydrates on resume):
+    ``preview_operation`` → bound hash → ``call_operation`` parks. Returns the
+    pending ``approval_request_id``.
+    """
+    await register_harbor_robot_operations(embedding_service=stub_embedding_service)
+    args = {
+        "connector_id": "harbor-rest-2.x",
+        "op_id": "harbor.robot.delete",
+        "target": _TARGET_NAME,
+        "params": {"project": "proj", "id": 7},
+    }
+    preview = await preview_operation(requester, args)
+    assert preview["status"] == "ok", preview
+    parked = await call_operation(requester, {**args, "preview_hash": preview["preview_hash"]})
+    assert parked["status"] == "awaiting_approval", parked
+    return UUID(parked["extras"]["approval_request_id"])
+
+
 def _approve_via_decide(
     request_id: UUID,
     mock: respx.MockRouter,
@@ -362,6 +393,11 @@ def _approve_via_decide(
     re-dispatches with ``_approved=True``; returns the decision-response
     body so callers assert ``dispatch_status``.
     """
+    # Re-callable within one test: a fresh keypair is minted each call (same
+    # kid), so clear the in-process JWKS cache first — otherwise a second
+    # /decide verifies its token against the first call's cached key and fails
+    # jws_signature_mismatch.
+    clear_jwks_cache()
     key = make_rsa_keypair("kid-decider")
     mock_discovery_and_jwks(mock, public_jwks(key))
     token = mint_token(
@@ -472,7 +508,7 @@ async def test_robot_create_broadcast_is_aggregate_only(
 
 
 # ---------------------------------------------------------------------------
-# (AC2) harbor.robot.delete stays full-detail (write) — no gate, executes direct
+# (AC2) harbor.robot.delete stays full-detail (write) — governed, executes on resume
 # ---------------------------------------------------------------------------
 
 
@@ -485,28 +521,30 @@ async def test_robot_delete_broadcast_is_full_detail(
     """``harbor.robot.delete`` broadcasts full detail (``write`` class).
 
     Contrast test: ``harbor.robot.delete`` classifies ``write``, not
-    ``credential_mint``, and is left ungated (#147 — a ``caution`` write
-    that revokes, not mints), so a human dispatches it directly (no
-    approval park). Its broadcast carries the full ``params`` block. The
-    divergent behaviour is solely due to :func:`classify_op`.
-    """
-    await register_harbor_robot_operations(embedding_service=stub_embedding_service)
+    ``credential_mint``, so its broadcast carries the full ``params`` block.
+    The divergent *redaction* is solely due to :func:`classify_op`.
 
-    operator = _make_operator()
+    Since #3288 the op is ``safety_level=destructive`` + ``requires_approval``,
+    so the write no longer executes on a lone dispatch — it runs on the
+    approve→resume path (preview-bound park → second-operator approval →
+    audited resume). The broadcast redaction is asserted against the
+    **executed** (post-approval) op, exactly as the credential_mint side is.
+    """
+    requester = _make_operator(sub="op-requester")
 
     with respx.mock() as mock:
         mock.delete(_ROBOT_7_URL).mock(return_value=respx.MockResponse(200))
-        result = await dispatch(
-            operator=operator,
-            connector_id="harbor-rest-2.x",
-            op_id="harbor.robot.delete",
-            target=_HarborDispatchTarget(),
-            params={"project": "proj", "id": 7},
-        )
+        request_id = await _park_robot_delete(stub_embedding_service, requester=requester)
+        # Parking must not have broadcast a write event (nothing executed yet).
+        assert not any(e.op_id == "harbor.robot.delete" for e in captured_events)
 
-    assert result.status == "ok", result.error
+        body = _approve_via_decide(request_id, mock, approver_sub="op-approver")
 
-    delete_events = [e for e in captured_events if e.op_id == "harbor.robot.delete"]
+    assert body["dispatch_status"] == "ok", body
+
+    delete_events = [
+        e for e in captured_events if e.op_id == "harbor.robot.delete" and e.result_status == "ok"
+    ]
     assert len(delete_events) == 1
     event = delete_events[0]
     assert event.op_class == "write"
@@ -521,43 +559,39 @@ async def test_credential_mint_and_write_diverge_on_same_dispatch_path(
     captured_events: list[BroadcastEvent],
     _persisted_harbor_target: UUID,
 ) -> None:
-    """Create is aggregate-only (post-approval); delete is full-detail (direct).
+    """Create is aggregate-only; delete is full-detail — both post-approval.
 
-    Both ops flow through the identical dispatch + broadcast infrastructure
-    against the same target. The only variables are the op-id and the
-    #147 gate: create parks then executes via approve→resume; delete
-    executes directly. Divergent redaction proves :func:`classify_op`
-    drives the behaviour, not the handler or target.
+    Both ops flow through the identical dispatch + broadcast + approve→resume
+    infrastructure against the same target. The only variable is the op-id:
+    create classifies ``credential_mint`` (aggregate-only broadcast), delete
+    classifies ``write`` (full-detail). Since #3288 both are approval-gated
+    (create ``credential_mint``/#147, delete ``destructive``/#3288), so the
+    divergent redaction on the executed ops proves :func:`classify_op` drives
+    the behaviour, not the handler, target, or gate.
     """
     requester = _make_operator(sub="op-requester")
-    # Register both ops up front (idempotent — _park_robot_create re-calls it)
-    # so the direct delete dispatch resolves its descriptor.
     await register_harbor_robot_operations(embedding_service=stub_embedding_service)
 
     with respx.mock() as mock:
         _mock_robot_create(mock)
         mock.delete(_ROBOT_7_URL).mock(return_value=respx.MockResponse(200))
 
-        # Ungated write executes directly.
-        delete_result = await dispatch(
-            operator=requester,
-            connector_id="harbor-rest-2.x",
-            op_id="harbor.robot.delete",
-            target=_HarborDispatchTarget(),
-            params={"project": "proj", "id": 7},
-        )
-        assert delete_result.status == "ok", delete_result.error
+        # Governed destructive write: preview-bound park, then execute on approval.
+        delete_request_id = await _park_robot_delete(stub_embedding_service, requester=requester)
+        delete_body = _approve_via_decide(delete_request_id, mock, approver_sub="op-approver")
+        assert delete_body["dispatch_status"] == "ok", delete_body
 
         # Gated credential-mint parks, then executes on second-operator approval.
-        request_id = await _park_robot_create(stub_embedding_service, requester=requester)
-        body = _approve_via_decide(request_id, mock, approver_sub="op-approver")
-
-    assert body["dispatch_status"] == "ok", body
+        create_request_id = await _park_robot_create(stub_embedding_service, requester=requester)
+        create_body = _approve_via_decide(create_request_id, mock, approver_sub="op-approver")
+        assert create_body["dispatch_status"] == "ok", create_body
 
     create_event = next(
         e for e in captured_events if e.op_id == "harbor.robot.create" and e.result_status == "ok"
     )
-    delete_event = next(e for e in captured_events if e.op_id == "harbor.robot.delete")
+    delete_event = next(
+        e for e in captured_events if e.op_id == "harbor.robot.delete" and e.result_status == "ok"
+    )
 
     # Same path, opposite redaction — classifier-driven by construction.
     assert create_event.op_class == "credential_mint"

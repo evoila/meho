@@ -476,7 +476,17 @@ def test_op_surface_ids_and_safety_levels() -> None:
     assert by_id["windns.zone.list"].safety_level == "safe"
     assert by_id["windns.record.get"].safety_level == "safe"
     assert by_id["windns.record.add"].safety_level == "caution"
-    assert by_id["windns.record.remove"].safety_level == "caution"
+    # windns.record.remove was promoted to the governed destructive tier
+    # (#3288): destructive + requires_approval + the destructive tag (the
+    # single source the satellite ladder / service-grant guard / flight-recorder
+    # body-exclusion read).
+    remove = by_id["windns.record.remove"]
+    assert remove.safety_level == "destructive"
+    assert remove.requires_approval is True
+    assert "destructive" in remove.tags
+    # record.remove is the ONLY approval-gated windns op; every other op is
+    # approval-free.
+    assert {op.op_id for op in WINDOWS_DNS_OPS if op.requires_approval} == {"windns.record.remove"}
     # Every op declares a curated when_to_use group the registration walk
     # can resolve (identity / zone / record).
     assert {op.group_key for op in WINDOWS_DNS_OPS} == {"identity", "zone", "record"}

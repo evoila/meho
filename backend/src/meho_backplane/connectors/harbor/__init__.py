@@ -50,6 +50,9 @@ ladder. Same pattern :mod:`meho_backplane.connectors.sddc_manager` and
 
 from typing import Final
 
+from meho_backplane.connectors.harbor import (
+    ops_robot_delete_preview,  # noqa: F401 -- registers the destructive-tier blast-radius preview builder at import
+)
 from meho_backplane.connectors.harbor.connector import HarborConnector
 from meho_backplane.connectors.harbor.ops import (
     register_harbor_artifact_operations,

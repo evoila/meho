@@ -14,12 +14,20 @@ BIND9 ``dig`` / zonefile-transform machinery for the Windows
   ``Add-DnsServerResourceRecordCName`` (CNAME), selected by ``type``
   (caution).
 * ``windns.record.remove`` -- ``Remove-DnsServerResourceRecord ... -Force``
-  (caution).
+  (governed destructive tier, #3288).
 
-Safety levels mirror bind9 exactly: ``record.get`` is ``safe``;
-``record.add`` / ``record.remove`` are ``caution`` (a DNS change is
-global -- no per-caller scoping -- so it carries the same production-path
-policy weight bind9's record writes do).
+Safety levels mirror bind9's record surface: ``record.get`` is ``safe``;
+``record.add`` is ``caution`` (a DNS change is global -- no per-caller
+scoping -- so it carries the same production-path policy weight bind9's
+record writes do). ``record.remove`` was promoted to
+``safety_level=destructive`` + ``requires_approval=True`` by the #3288
+operator ruling (mirroring #3247 for ``bind9.record.remove``): the ``-Force``
+clear removes every value of an RRType at a name in one write, so it rides
+the governed-delete gate (human approval + preview-hash binding + a park-time
+blast-radius statement built by
+:func:`.ops_record_remove_preview._windns_record_remove_preview`). The remove
+handler itself is unchanged -- the tier change is metadata; it now runs only
+post-approval.
 
 PowerShell injection safety
 ---------------------------
@@ -244,6 +252,14 @@ async def windows_dns_record_remove(
     ``-Force`` suppresses the interactive confirmation prompt (mandatory
     for the non-interactive transport). Returns
     ``{zone, name, type, op_class}`` with ``op_class="write"``.
+
+    Governed destructive tier (#3288): the op is ``safety_level=destructive``
+    + ``requires_approval=True``, so a dispatch parks for a human decision (with
+    a preview-hash binding + a whole-RRset blast-radius statement, built by
+    :func:`.ops_record_remove_preview._windns_record_remove_preview`) before the
+    ``-Force`` clear runs. The handler body is unchanged -- the tier is
+    enforced upstream in the dispatcher; it executes only on the audited resume
+    after approval.
     """
     zone: str = params["zone"]
     name: str = params["name"]
@@ -436,6 +452,20 @@ WINDOWS_DNS_RECORD_ADD_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
+_REMOVE_WARNING = (
+    "GOVERNED RRSET CLEAR (destructive tier, #3288). This op clears EVERY "
+    "record of the given RRType at the name in one ``-Force`` write, so it "
+    "rides the same hardest gate as ``bind9.record.remove``: "
+    "``safety_level=destructive`` + ``requires_approval=True`` -- mandatory "
+    "human approval always (no agent path, no standing grant, no self-approval "
+    "even under break-glass), a mandatory preview-hash binding, and a mandatory "
+    "blast-radius statement (the zone/name/type plus EVERY value that dies) the "
+    "four-eyes approver reads before deciding. The change is global: DNS has no "
+    "per-caller scoping, so on the audited post-approval resume the records are "
+    "gone for every consumer of this server."
+)
+
+
 WINDOWS_DNS_RECORD_REMOVE_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -467,15 +497,20 @@ _WINDOWS_DNS_RECORD_REMOVE_RESPONSE_SCHEMA: dict[str, Any] = {
 
 WINDOWS_DNS_RECORD_REMOVE_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
-        "Remove the record(s) matching (zone, name, RRType) from the "
-        "Windows DNS server via ``Remove-DnsServerResourceRecord ... "
-        "-Force``. " + _ADD_WARNING + " Use ``windns.record.get`` first "
-        "to confirm the current state."
+        "Clear every record of an RRType at a name -- e.g. an environment "
+        "teardown that retires a host's forward resolution -- from the Windows "
+        "DNS server via ``Remove-DnsServerResourceRecord ... -Force`` under "
+        "governance. " + _REMOVE_WARNING + " Use ``windns.record.get`` first "
+        "to confirm the current state; removing a record the server doesn't "
+        "serve is a no-op."
     ),
     "parameter_hints": {
         "zone": "Required. The DNS zone name.",
         "name": "Required. Owner name relative to the zone.",
-        "type": "Required. The RRType to remove (A / AAAA / CNAME / ...).",
+        "type": (
+            "Required. The RRType to clear (A / AAAA / CNAME / ...); ALL "
+            "values of that type at the name are removed."
+        ),
     },
     "output_shape": "{'zone', 'name', 'type', 'op_class': 'write'}.",
 }
@@ -529,17 +564,18 @@ RECORD_OPS: tuple[WindowsDnsOp, ...] = (
     WindowsDnsOp(
         op_id="windns.record.remove",
         handler_attr="windows_dns_record_remove",
-        summary="Remove matching records via ``Remove-DnsServerResourceRecord ... -Force``.",
+        summary="Clear every value of an RRType at a name -- governed destructive tier.",
         description=(
-            "Removes the record(s) matching (zone, name, RRType) via "
-            "``Remove-DnsServerResourceRecord ... -Force``. " + _ADD_WARNING
+            "Removes every record matching (zone, name, RRType) via "
+            "``Remove-DnsServerResourceRecord ... -Force`` -- an RRset clear, "
+            "not a single-value delete. " + _REMOVE_WARNING
         ),
         parameter_schema=WINDOWS_DNS_RECORD_REMOVE_PARAMETER_SCHEMA,
         response_schema=_WINDOWS_DNS_RECORD_REMOVE_RESPONSE_SCHEMA,
         group_key="record",
-        tags=("write", "record"),
-        safety_level="caution",
-        requires_approval=False,
+        tags=("write", "record", "delete", "destructive"),
+        safety_level="destructive",
+        requires_approval=True,
         llm_instructions=WINDOWS_DNS_RECORD_REMOVE_LLM_INSTRUCTIONS,
     ),
 )

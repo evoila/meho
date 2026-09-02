@@ -90,6 +90,34 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `TruffleHog Secret Scan` fails on `merge_group` refs, ejecting every merge-queue entry (#3307)
+
+- The `merge_group` trigger #3253 added to `secret-scan.yml` made the
+  required `TruffleHog Secret Scan` context *report* on queue refs, but
+  the trufflehog action's own scan-range derivation has no `merge_group`
+  branch (it handles only `push` / `pull_request` / `workflow_dispatch` /
+  `schedule`). On a `merge_group` event its `BASE`/`HEAD` stayed empty, so
+  it fell back to a **full-filesystem scan** of the whole tree; with
+  `--results=verified,unknown` that surfaced pre-existing unverified
+  Postgres false-positives living in repo test fixtures and `--fail`
+  exited non-zero — so the first real queue entry (#3306) was ejected
+  `failed_checks` in ~86 s and the merge queue was dead on arrival.
+- The scan is now pinned to the merge-group diff via
+  `base: ${{ github.event.merge_group.base_sha }}` /
+  `head: ${{ github.event.merge_group.head_sha }}`, matching PR
+  `base..head` semantics so the historical fixture findings are out of
+  scope and a clean queue entry passes. Off the queue
+  `github.event.merge_group` is null, both inputs are empty, and the
+  action keeps its own PR/push derivation — behaviour there is identical.
+- `docs/codebase/devops.md` gains a load-bearing note: a `merge_group`
+  trigger makes a workflow *run*, but any action that derives its own
+  scan range from the event payload must be handed the `merge_group`
+  range explicitly — the trigger alone is not enough. (Secondary
+  observation on the #3306 canary: the external `DCO` App posts no
+  check-run on `merge_group` refs; non-blocking under the queue's
+  `ALLGREEN` strategy since the ruleset carries no `required_status_checks`
+  rule — tracked as the next required-set decision, not fixed here.)
+
 ### Fixed — self-approval break-glass no longer permits dangerous-tier deletes (#3290 / #3198)
 
 - The unconditional self-approval refusal (#3198 — "no self-approval, even

@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-02
+
 ### Security — HttpNfcLease device-URL transfers pinned to the lease `sslThumbprint` (#3284)
 
 - The typed OVF import (`vm.import_from_library`, #3229) streams each disk to an
@@ -207,7 +209,7 @@ connector-related release-notes line.
   user-`sub` keying is unchanged (a different operator, or a different client
   carrying the same user, is unaffected — only genuine self-approval is
   refused).
-- `POST /api/v1/approvals/{id}/decide` now returns `decided_by` (the effective
+- `POST /api/v1/approvals/{request_id}/decide` now returns `decided_by` (the effective
   authenticated reviewer's `sub`) so a CLI / console can show *who* decided
   without a second lookup. Additive and optional — existing clients are
   unaffected.
@@ -340,7 +342,7 @@ connector-related release-notes line.
   token, aligned with `JWT_APPROVER_CLAIM_NAME` (default `approver`), and
   fail closed for everyone else. Includes decode + live decouple
   verification (a `read_only + approver` principal clears
-  `POST /api/v1/approvals/{id}/decide` but is refused 403 on
+  `POST /api/v1/approvals/{request_id}/decide` but is refused 403 on
   `POST /api/v1/operations/call`), a note that the operator console
   `/ui/approvals*` admits the same capability (#3282 / #3285), and a
   rollback note covering the access-token-TTL caveat. Forward-pointers
@@ -541,7 +543,7 @@ connector-related release-notes line.
 ### Added — approve-only RBAC capability: decouple the approvals plane from the dispatch gate (#3243)
 
 - A principal can now be granted the ability to **decide** approvals
-  (`GET/POST /api/v1/approvals/*` — list / show / approve / reject / decide)
+  (the `/api/v1/approvals` plane — list / show / approve / reject / decide)
   **without** also holding the dispatch right (`POST /api/v1/operations/call`).
   A new orthogonal `approver` capability — lifted from an optional, fail-closed
   JWT claim (default `approver`, override `JWT_APPROVER_CLAIM_NAME`) onto
@@ -656,7 +658,7 @@ connector-related release-notes line.
   after a human approves, retrieve the result the backplane produced when it
   re-dispatched the approved op — so it resumes in place by *polling the
   returned task id* instead of a second submit that would start a second
-  bring-up. New principal-scoped `GET /api/v1/approvals/{id}/result`: only the
+  bring-up. New principal-scoped `GET /api/v1/approvals/{request_id}/result`: only the
   request owner (`principal_sub`) reads it (any other principal, operator role
   or not, gets 403 `not_request_owner`), it writes a synchronous
   `approval.result` audit row, and the payload is the same reduced /
@@ -1474,7 +1476,7 @@ connector-related release-notes line.
   opens an orchestration run (a synthesized replay `session_id` + an
   `addon.orchestration` anchor audit row); every later dispatch for that
   work_ref resolves the same run and back-links to the anchor, so
-  `GET /api/v1/audit/sessions/{id}/replay` reconstructs the orchestration and
+  `GET /api/v1/audit/sessions/{session_id}/replay` reconstructs the orchestration and
   its resulting dispatches as one tree. Linkage is accepted **only** from a
   paired principal for its **own** work_refs — keyed by the caller's
   `keycloak_client_id`, so a different add-on presenting the same work_ref
@@ -1581,7 +1583,7 @@ connector-related release-notes line.
   then hard-deletes the pairing row, so an unpaired backplane is
   byte-identical to a never-paired one (the append-only audit log keeps the
   history). Pair / unpair run at `tenant_admin` over
-  `POST`/`DELETE /api/v1/addons/pairings`; every pairing's contract
+  `POST /api/v1/addons/pairings` / `DELETE /api/v1/addons/pairings/{name}`; every pairing's contract
   compatibility (re-evaluated live) and last liveness heartbeat surface in
   `/api/v1/health` (and so `meho_status` / `meho status`) and a read-only
   `/ui/pairing` console panel. The agent meta-tool surface is unchanged — an
@@ -1640,7 +1642,7 @@ connector-related release-notes line.
   persists its full `OperationResult` envelope on the row, so a dropped
   response is retrievable via the handle — the dropped-response class is
   eliminated.
-- `POST /api/v1/approvals/{id}/approve` gains the same opt-in **`async: true`**:
+- `POST /api/v1/approvals/{request_id}/approve` gains the same opt-in **`async: true`**:
   the decision is still recorded + audited synchronously, but the resumed op is
   dispatched on the background substrate and the route returns 202 + the run
   handle instead of blocking for the resumed op's full duration.
@@ -4371,7 +4373,7 @@ into a product-agnostic harness and rolled out across the fleet.
   replay surfaces now also return `excluded_null_session_count`, the
   tenant-wide tally of un-negotiated `method=MCP` rows, so an empty
   replay forest is distinguishable from an empty history — first on REST
-  (`GET /api/v1/audit/sessions/{id}/replay`, #2700), now at parity on the
+  (`GET /api/v1/audit/sessions/{session_id}/replay`, #2700), now at parity on the
   MCP `meho_audit_replay` and `query_audit` (`shape="tree"`) forensic
   tools (#2776).
 - **A failed dispatch now surfaces the upstream vendor detail to both the
@@ -8343,7 +8345,7 @@ advisory so a caller learns another principal is already active.
 
 ### Fixed — approval-gated dispatches reconstruct on the session-replay surface
 
-- **`GET /api/v1/audit/sessions/{id}/replay` now sees approval-gated
+- **`GET /api/v1/audit/sessions/{session_id}/replay` now sees approval-gated
   chains** (#2086): the park → decide → execute audit rows carried
   neither an `agent_session_id` anchor nor a `parent_audit_id`
   back-link (the approve/resume surfaces run on a different task than
@@ -8811,7 +8813,7 @@ advisory so a caller learns another principal is already active.
 
 ### Security — harbor `robot.create` gated behind four-eyes approval
 
-- **`harbor.robot.create` flipped to `requires_approval=True` so credential minting parks for a second operator** (#2173): the op mints a robot credential (`credential_mint`-classified) but shipped `requires_approval=False`, and the non-agent policy gate (`_non_agent_verdict`) keys the verdict solely on `requires_approval` — so a human `tenant_admin` could mint a Harbor robot credential with no second-operator approval. It now parks at `awaiting_approval` until approved via `POST /api/v1/approvals/{id}/decide`. `harbor.robot.delete` stays ungated (a recoverable `caution`-class access revoke, mirroring the bind9 precedent). Adds a no-bypass invariant asserting every `credential_mint` harbor op is approval-required.
+- **`harbor.robot.create` flipped to `requires_approval=True` so credential minting parks for a second operator** (#2173): the op mints a robot credential (`credential_mint`-classified) but shipped `requires_approval=False`, and the non-agent policy gate (`_non_agent_verdict`) keys the verdict solely on `requires_approval` — so a human `tenant_admin` could mint a Harbor robot credential with no second-operator approval. It now parks at `awaiting_approval` until approved via `POST /api/v1/approvals/{request_id}/decide`. `harbor.robot.delete` stays ungated (a recoverable `caution`-class access revoke, mirroring the bind9 precedent). Adds a no-bypass invariant asserting every `credential_mint` harbor op is approval-required.
 
 ### Security — bind9 dangerous config-apply ops require approval
 

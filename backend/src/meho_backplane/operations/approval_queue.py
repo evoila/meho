@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line durable approval
+# queue module; #3290 is a surgical guard fix, not a split.
 
 """Durable approval queue for ``requires_approval`` dispatches.
 
@@ -1334,6 +1336,15 @@ def _check_reviewer_role(operator: Operator) -> None:
         )
 
 
+#: Safety tiers whose self-approval refusal is *unconditional* — the
+#: ``APPROVAL_ALLOW_SELF_APPROVAL`` break-glass switch never re-enables
+#: self-approval for them. ``destructive`` (#3198) plus ``dangerous``
+#: (#3290): a delete-class op can register on the reversible ``dangerous``
+#: tier while still being the four-eyes-critical action #3198 protects.
+#: Break-glass still applies to ``caution`` / ``safe``.
+_NO_SELF_APPROVAL_TIERS = frozenset({"dangerous", "destructive"})
+
+
 def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     """Raise :class:`SelfApprovalForbiddenError` on a self-approval.
 
@@ -1344,14 +1355,21 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
     comparison is on the stable ``sub`` claim, so a renamed display name
     cannot launder a self-approval.
 
-    **The destructive tier does not honour break-glass (#3198).** For a
-    ``safety_level="destructive"`` request self-approval is refused
-    *unconditionally* — even under ``APPROVAL_ALLOW_SELF_APPROVAL`` — so a
-    governed delete is genuine four-eyes on every deployment (decision
+    **The dangerous and destructive tiers do not honour break-glass
+    (#3198, #3290).** For a ``safety_level`` of ``"dangerous"`` or
+    ``"destructive"`` self-approval is refused *unconditionally* — even
+    under ``APPROVAL_ALLOW_SELF_APPROVAL`` — so a governed delete is
+    genuine four-eyes on every deployment (decision
     ``governed-delete-operations.md`` requirement 1: "no self-approval, even
     under break-glass"; a single-operator tenant uses the agent-requester
-    pattern, never self-approval). The tier is read off the durable
-    ``proposed_effect`` envelope the dispatcher stamped at park time.
+    pattern, never self-approval). #3198 scoped this to ``destructive``
+    only, but a delete-class op can legitimately register on the
+    ``dangerous`` tier (a reversible soft-delete — e.g. a KV
+    secret-version delete) while still being exactly the four-eyes-critical
+    action #3198 protects; #3290 widened the refusal to cover it. Break-glass
+    still applies to the ``caution`` / ``safe`` tiers. The tier is read off
+    the durable ``proposed_effect`` envelope the dispatcher stamped at park
+    time.
 
     Imported lazily to keep the queue module decoupled from settings at
     import time (mirrors the local ``TenantRole`` import in
@@ -1361,11 +1379,11 @@ def _check_self_approval(operator: Operator, request: ApprovalRequest) -> None:
         return
 
     effect = request.proposed_effect or {}
-    is_destructive = effect.get("safety_level") == "destructive"
+    no_break_glass_tier = effect.get("safety_level") in _NO_SELF_APPROVAL_TIERS
 
     from meho_backplane.settings import get_settings
 
-    if not is_destructive and get_settings().approval_allow_self_approval:
+    if not no_break_glass_tier and get_settings().approval_allow_self_approval:
         _log.warning(
             "approval_self_approval_break_glass",
             approval_request_id=str(request.id),

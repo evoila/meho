@@ -541,6 +541,9 @@ async def test_decide_redispatch_executes_move_once(
 
     assert first.status_code == 200, first.text
     assert first.json()["dispatch_status"] == "ok"
+    # The decide response names the effective authenticated reviewer (#3290),
+    # so a CLI / console can show who decided without a second lookup.
+    assert first.json()["decided_by"] == "operator:decider"
     # The move executed exactly once on approval.
     assert len(fake.secrets.kv.v2.put_calls) == 1
     assert fake.secrets.kv.v2.put_calls[0]["secret"] == {"password": _SECRET_VALUE}

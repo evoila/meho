@@ -180,13 +180,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     "alias": (
         "Use for pfSense firewall-alias lifecycle: permanently deleting one "
-        "alias (``pfsense.alias.delete``). Call ``pfsense.alias.delete`` to "
-        "retire ONE alias by exact name -- a GOVERNED DESTRUCTIVE delete "
+        "alias (``pfsense.alias.delete``) or trimming ONE member out of a "
+        "shared alias without deleting it (``pfsense.alias.member.remove``). "
+        "Call ``pfsense.alias.delete`` to retire ONE alias by exact name -- it "
+        "refuses fail-closed when the alias is still referenced by any filter "
+        "rule, NAT rule, or other alias, naming every referrer. Call "
+        "``pfsense.alias.member.remove`` to remove one host / network entry "
+        "from an alias shared across environments while keeping the alias and "
+        "its other members -- it refuses ``last_member`` so a shared alias is "
+        "never emptied into deletion. Both are GOVERNED DESTRUCTIVE ops "
         "(safety_level=destructive, mandatory human approval, preview-hash "
-        "binding, blast-radius statement). It refuses fail-closed when the "
-        "alias is still referenced by any filter rule, NAT rule, or other "
-        "alias, naming every referrer. Read the current config first with "
-        "``pfsense.config.show``."
+        "binding, blast-radius statement, read-back verify). Read the current "
+        "config first with ``pfsense.config.show``."
     ),
     "network": (
         "Use for pfSense network-interface operations: listing all "
@@ -213,18 +218,22 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "lease start/end, and effective binding state."
     ),
     "routing": (
-        "Use for pfSense routing-plane provisioning writes: appending a "
-        "named gateway (``pfsense.gateway.add``) or a static route "
-        "(``pfsense.route.static.add``) to ``config.xml``. Call "
-        "``pfsense.gateway.add`` to define a next-hop -- including a "
-        "pre-staged one (``monitor_disable``) whose upstream device does "
-        "not exist yet -- then ``pfsense.route.static.add`` to point a "
-        "CIDR at it. Both are idempotent (re-adding an existing gateway "
-        "name or route network is a reported no-op) and surgical (they "
-        "touch only the gateway / static-route config, never interfaces), "
-        "so they are safe against a perimeter firewall carrying the "
-        "operator's own access path. Read the current state first with "
-        "``pfsense.gateway.list`` / ``pfsense.config.show``."
+        "Use for pfSense routing-plane provisioning and teardown: appending "
+        "a named gateway (``pfsense.gateway.add``) or a static route "
+        "(``pfsense.route.static.add``) to ``config.xml``, or reversing "
+        "either for a governed teardown -- ``pfsense.route.static.delete`` "
+        "(delete one route by canonical network) and ``pfsense.gateway.delete`` "
+        "(delete one gateway by name, refused fail-closed while any static "
+        "route / gateway group / default-gateway setting still uses it). The "
+        "two ``add`` ops are ``caution`` / no-approval and idempotent (re-adding "
+        "an existing gateway name or route network is a reported no-op); the "
+        "two teardown ops are GOVERNED DESTRUCTIVE deletes (``destructive``, "
+        "mandatory human approval, preview-hash binding, blast-radius "
+        "statement, read-back verify). All are surgical (they touch only the "
+        "gateway / static-route config, never interfaces), so they are safe "
+        "against a perimeter firewall carrying the operator's own access path. "
+        "Read the current state first with ``pfsense.gateway.list`` / "
+        "``pfsense.config.show``."
     ),
 }
 
@@ -718,6 +727,68 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_alias_delete(self, target, params, operator)
+
+    async def route_static_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.route.static.delete`` (#3313).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_route_static_delete`.
+        Governed destructive delete of one static route by canonical network --
+        the inverse of ``pfsense.route.static.add`` (``safety_level=destructive``
+        / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_delete import (
+            pfsense_route_static_delete as _pfsense_route_static_delete,
+        )
+
+        return await _pfsense_route_static_delete(self, target, params, operator)
+
+    async def gateway_delete(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.gateway.delete`` (#3313).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_gateway_delete`.
+        Governed destructive delete of one gateway by exact name, fail-closed on
+        any live reference (static route / gateway group / default-gateway
+        setting) -- the inverse of ``pfsense.gateway.add``
+        (``safety_level=destructive`` / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_delete import (
+            pfsense_gateway_delete as _pfsense_gateway_delete,
+        )
+
+        return await _pfsense_gateway_delete(self, target, params, operator)
+
+    async def alias_member_remove(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.alias.member.remove`` (#3313).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_delete.pfsense_alias_member_remove`.
+        Governed destructive removal of ONE member from a firewall alias without
+        deleting the alias (the shared-alias case), fail-closed on
+        ``not_found`` / ``member_not_found`` / ``ambiguous`` / ``last_member``
+        (``safety_level=destructive`` / ``requires_approval=True``).
+        """
+        from meho_backplane.connectors.pfsense.ops_delete import (
+            pfsense_alias_member_remove as _pfsense_alias_member_remove,
+        )
+
+        return await _pfsense_alias_member_remove(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

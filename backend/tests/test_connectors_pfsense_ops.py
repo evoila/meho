@@ -1040,9 +1040,10 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_thirteen_entries() -> None:
-    """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232) = 13."""
-    assert len(PFSENSE_OPS) == 13
+def test_pfsense_ops_has_sixteen_entries() -> None:
+    """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
+    + 3 teardown-inverse deletes (#3313) = 16."""
+    assert len(PFSENSE_OPS) == 16
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1058,9 +1059,16 @@ def test_pfsense_ops_all_have_pfsense_namespace() -> None:
 #: write), unlike the read/identity surface which is ``safe``.
 _WRITE_OP_IDS = {"pfsense.gateway.add", "pfsense.route.static.add"}
 
-#: The governed destructive deletes (#3232) -- classified ``destructive``
-#: and the only ops that require approval.
-_DELETE_OP_IDS = {"pfsense.nat.delete", "pfsense.alias.delete"}
+#: The governed destructive deletes (#3232 nat/alias; #3313 the three
+#: teardown-inverse ops) -- classified ``destructive`` and the only ops that
+#: require approval.
+_DELETE_OP_IDS = {
+    "pfsense.nat.delete",
+    "pfsense.alias.delete",
+    "pfsense.route.static.delete",
+    "pfsense.gateway.delete",
+    "pfsense.alias.member.remove",
+}
 
 
 def test_pfsense_read_ops_safe_write_ops_caution_delete_ops_destructive() -> None:
@@ -1108,6 +1116,9 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.route.static.add",
         "pfsense.nat.delete",
         "pfsense.alias.delete",
+        "pfsense.route.static.delete",
+        "pfsense.gateway.delete",
+        "pfsense.alias.member.remove",
     }
     assert op_ids == expected
 

@@ -302,11 +302,21 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
 #: (covered by ``test_connectors_pfsense_write_ops.py``).
 _WRITE_OP_IDS: frozenset[str] = frozenset({"pfsense.gateway.add", "pfsense.route.static.add"})
 
-#: The governed destructive deletes (#3232). Also held separate from the
-#: dispatch/audit sweep: they are ``safety_level='destructive'`` /
-#: ``requires_approval=True`` and take real params, so they park rather than
-#: execute inline (covered by ``test_connectors_pfsense_delete_ops.py``).
-_DELETE_OP_IDS: frozenset[str] = frozenset({"pfsense.nat.delete", "pfsense.alias.delete"})
+#: The governed destructive deletes (#3232 nat/alias; #3313 the three
+#: teardown-inverse ops). Also held separate from the dispatch/audit sweep:
+#: they are ``safety_level='destructive'`` / ``requires_approval=True`` and
+#: take real params, so they park rather than execute inline (covered by
+#: ``test_connectors_pfsense_delete_ops.py`` /
+#: ``test_connectors_pfsense_teardown_ops.py``).
+_DELETE_OP_IDS: frozenset[str] = frozenset(
+    {
+        "pfsense.nat.delete",
+        "pfsense.alias.delete",
+        "pfsense.route.static.delete",
+        "pfsense.gateway.delete",
+        "pfsense.alias.member.remove",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
@@ -418,11 +428,11 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 13 pfSense ops registered (9 read/identity + 2 write + 2 delete)."""
+    """All 16 pfSense ops registered (9 read/identity + 2 write + 5 delete)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
     missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 13, f"Expected 13 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 16, f"Expected 16 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:

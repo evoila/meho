@@ -90,7 +90,7 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — preview parity for approval-requiring typed ops + a destructive builder CI sweep (#3312)
+### Fixed — preview parity for approval-requiring typed ops + a destructive builder CI sweep (#3312 / #3316)
 
 - **`preview_operation` now serves the park-time effect for a `requires_approval`
   typed op, instead of `preview_unavailable`.** A `dangerous`-tier typed op

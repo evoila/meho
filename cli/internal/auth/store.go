@@ -67,8 +67,9 @@ type StoredToken struct {
 	// see"). Compared via time.Now().After() at request time.
 	Expiry time.Time `json:"expiry,omitempty"`
 	// SavedAt is the moment this entry was last persisted, in UTC.
-	// Stamped by fallbackStore.Save on every write so Load can
-	// reconcile a keyring/file split-brain by recency when both
+	// Stamped by every backend's Save (via stampSavedAt) on every
+	// write — keyring, file, and the fallback wrapper alike — so Load
+	// can reconcile a keyring/file split-brain by recency when both
 	// backends hold a usable token (#3320). Backwards-compatible: an
 	// entry written by a CLI that predates this field deserialises to
 	// the zero value, which sorts as "oldest" — so a freshly-written,
@@ -131,11 +132,26 @@ const DefaultService = "meho"
 // condition up front and falls back to fileStore.
 type keyringStore struct{}
 
+// stampSavedAt records the current time as the entry's persistence
+// moment. Called by every concrete backend's Save so a token carries a
+// fresh saved_at no matter which store wrote it — the reconciliation in
+// fallbackStore.Load compares this to break a keyring/file tie by
+// recency (#3320). Keeping it in one helper means every Save path agrees
+// on the stamp; single-backend semantics are unchanged (a bare
+// keyringStore / fileStore simply timestamps its own writes, and a
+// login performed under MEHO_KEYRING_DISABLE=1 no longer persists a zero
+// saved_at that a later stamped keyring entry could out-rank).
+func stampSavedAt(tok StoredToken) StoredToken {
+	tok.SavedAt = time.Now().UTC()
+	return tok
+}
+
 // Save serialises tok as JSON and stores it as a single keyring
 // secret. The serialisation keeps every field round-trippable, which
 // matters because the file fallback writes the identical JSON shape
 // and we want the two backends to be transparent to callers.
 func (keyringStore) Save(service, user string, tok StoredToken) error {
+	tok = stampSavedAt(tok)
 	blob, err := json.Marshal(tok)
 	if err != nil {
 		return fmt.Errorf("meho: marshal token: %w", err)
@@ -215,6 +231,7 @@ func fileKey(service, user string) string {
 }
 
 func (s *fileStore) Save(service, user string, tok StoredToken) error {
+	tok = stampSavedAt(tok)
 	blob, err := s.read()
 	if err != nil {
 		return err
@@ -459,13 +476,12 @@ func newFallbackStore(primary, secondary TokenStore) *fallbackStore {
 // propagates unchanged so unrelated keyring failures (locked Keychain,
 // D-Bus down) still surface to the operator.
 func (s *fallbackStore) Save(service, user string, tok StoredToken) error {
-	// Stamp the write time so Load can reconcile a keyring/file split
-	// by recency when both backends carry a usable token (#3320). Every
-	// Save is a fresh persistence event — including the post-refresh
-	// re-save, whose token is derived from an entry that already carries
-	// an older SavedAt — so the stamp is unconditional, not zero-guarded.
-	tok.SavedAt = time.Now().UTC()
-
+	// The saved_at stamp is applied by whichever concrete backend
+	// (keyringStore / fileStore) ends up writing — see stampSavedAt —
+	// so every Save path, wrapped or bare, records a fresh timestamp
+	// (#3320). Each Save is a fresh persistence event, including the
+	// post-refresh re-save whose token was derived from an entry that
+	// already carried an older SavedAt.
 	err := s.primary.Save(service, user, tok)
 	if err == nil {
 		s.mu.Lock()

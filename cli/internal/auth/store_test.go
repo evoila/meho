@@ -177,6 +177,35 @@ func TestFileStoreSupportsMultipleEntries(t *testing.T) {
 	}
 }
 
+// TestFileStoreSaveStampsSavedAt pins that a BARE fileStore.Save stamps
+// saved_at (#3320). Before the stamp was hoisted into every concrete
+// backend it lived only in fallbackStore.Save, so a login performed
+// under MEHO_KEYRING_DISABLE=1 (bare fileStore) persisted a zero
+// saved_at — which a later, stamped keyring entry could out-rank in the
+// reconciliation tie-break even when the file token was the newer one.
+func TestFileStoreSaveStampsSavedAt(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileStoreAt(filepath.Join(dir, "credentials.json"))
+
+	before := time.Now().UTC().Add(-time.Second)
+	// Save an entry that carries NO saved_at — the store must stamp it.
+	if err := store.Save(DefaultService, "https://a.example", StoredToken{AccessToken: "tok"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	after := time.Now().UTC().Add(time.Second)
+
+	got, err := store.Load(DefaultService, "https://a.example")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.SavedAt.IsZero() {
+		t.Fatal("bare fileStore.Save must stamp saved_at, got zero")
+	}
+	if got.SavedAt.Before(before) || got.SavedAt.After(after) {
+		t.Errorf("saved_at %v not within [%v, %v]", got.SavedAt, before, after)
+	}
+}
+
 // TestFileStoreDeleteAbsentIsNoop matches the documented
 // idempotency contract: deleting a non-existent entry returns nil
 // rather than a sentinel — callers don't have to special-case
@@ -717,6 +746,48 @@ func TestFallbackStoreLoadPrefersNewerWhenBothHaveRefreshTokens(t *testing.T) {
 	}
 	if got2.AccessToken != "keyring" {
 		t.Errorf("newer keyring entry should win; got %q", got2.AccessToken)
+	}
+}
+
+// TestFallbackStoreLoadNewerRealFileWinsOverOlderStampedKeyring is the
+// end-to-end proof of the every-Save-stamps fix (#3320): the file entry
+// is written through a REAL fileStore.Save (so its saved_at is stamped
+// "now", not hand-set), while the keyring holds an OLDER stamped entry.
+// Both carry a refresh_token, so the tie-break falls to recency — and
+// because the file save is now genuinely stamped, the newer file token
+// wins. Before the stamp was hoisted into the leaf stores this file
+// entry would have persisted a zero saved_at and LOST to the older
+// keyring stamp, which is the exact disable-mode-then-re-enable hazard.
+func TestFallbackStoreLoadNewerRealFileWinsOverOlderStampedKeyring(t *testing.T) {
+	// Keyring: an older, still-refreshable entry (hand-stamped in the past).
+	keyringSide := &fakeStore{label: "OS keyring"}
+	if err := keyringSide.Save(DefaultService, "https://x", StoredToken{
+		AccessToken:  "old-keyring",
+		RefreshToken: "kr",
+		SavedAt:      time.Now().UTC().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed keyring: %v", err)
+	}
+
+	// File: written through the REAL fileStore, which stamps saved_at=now.
+	dir := t.TempDir()
+	fileSide := NewFileStoreAt(filepath.Join(dir, "credentials.json"))
+	if err := fileSide.Save(DefaultService, "https://x", StoredToken{
+		AccessToken:  "new-file",
+		RefreshToken: "fr",
+		// No SavedAt set — the store stamps it (the previously-unstamped
+		// disable-mode shape, now correctly timestamped).
+	}); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	store := newFallbackStore(keyringSide, fileSide)
+	got, err := store.Load(DefaultService, "https://x")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.AccessToken != "new-file" {
+		t.Errorf("newer real-stamped file entry should win over older keyring entry; got %q", got.AccessToken)
 	}
 }
 

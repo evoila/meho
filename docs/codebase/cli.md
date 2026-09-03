@@ -612,11 +612,15 @@ the keyring (#3320). It reads both and returns the more usable
 entry: the one that still carries a `refresh_token` wins (it's the
 one the CLI can silently renew from), and when that doesn't decide
 it, the more recently written entry (by the `saved_at` stamp) wins.
-This is what stops a stale keyring entry — including one left with
-an empty/consumed `refresh_token`, or by a wholly different earlier
-backplane URL — from shadowing the fresh, refresh-token-bearing
-file token and tripping the "no refresh_token present" guard. It
-also closes the cross-invocation gap the old ErrTokenNotFound bridge
+This is what stops a stale keyring entry left for the same
+`(service, URL)` — e.g. one whose `refresh_token` is empty or already
+consumed — from shadowing the fresh, refresh-token-bearing file token
+and tripping the "no refresh_token present" guard. Entries for a
+*different* backplane URL don't shadow it in the first place: the store
+is keyed by `(service, URL)`, so `Load` only ever reads the current
+URL's key — the reconciliation is defence-in-depth for the case where
+the OS keyring hands back a mismatched-account blob. It also closes the
+cross-invocation gap the old ErrTokenNotFound bridge
 covered: when only one backend holds an entry, that entry is
 returned. A non-not-found primary error (locked Keychain, D-Bus
 unreachable, malformed entry) still surfaces unchanged, so a real

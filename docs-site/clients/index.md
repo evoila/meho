@@ -32,6 +32,24 @@ install and log in with the [`meho` CLI](cli.md) first. Two reasons:
 - The CLI is the fastest way to prove the realm, TLS trust, and token
   chain are correct before you add an MCP client's moving parts on top.
 
+## The fastest path: one-command onramps
+
+For the two Claude clients, you do not have to hand-write any MCP
+config. Each has a one-step onramp that wires everything for you:
+
+- **Claude Code** — a plugin from an in-repo marketplace:
+  `claude plugin marketplace add evoila/meho`, then
+  `/plugin install meho@meho`. See [Claude Code](claude-code.md).
+- **Claude Desktop** — a one-click `.mcpb` bundle: install by opening
+  the file and answering a short dialog. See
+  [Claude Desktop](claude-desktop.md).
+
+Both onramps still connect **from your VPN-connected machine** and
+expose nothing to the internet. The manual recipes below remain the
+fallback, and the path for every other client. Whichever you pick, an
+agent session lists a small, tiered set of meta-tools — see
+[MCP surface and scopes](mcp-surface-and-scopes.md).
+
 ## The MCP client matrix
 
 All three MCP paths are **internal-only** — the client, or the local
@@ -41,8 +59,8 @@ matches your client:
 
 | Client | How it connects | Page |
 |---|---|---|
-| **Claude Desktop** | A local [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim runs the OAuth 2.1 + PKCE flow and forwards to `/mcp`. The only Desktop path for an internal-only backplane. | [Claude Desktop](claude-desktop.md) |
-| **Claude Code** | Native HTTP MCP with a loopback PKCE flow, pinned to the pre-registered `meho-mcp` public client. The pattern both dogfood repos run daily. | [Claude Code](claude-code.md) |
+| **Claude Desktop** | One-click `.mcpb` bundle (recommended), or a manual local [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim running the OAuth 2.1 + PKCE flow and forwarding to `/mcp`. The shim is the only Desktop transport for an internal-only backplane. | [Claude Desktop](claude-desktop.md) |
+| **Claude Code** | One-command MEHO plugin (recommended), or a manual native-HTTP `.mcp.json` with a loopback PKCE flow pinned to the pre-registered `meho-mcp` public client. The pattern both dogfood repos run daily. | [Claude Code](claude-code.md) |
 | **Cursor and other clients that can't carry a `client_id`** | A generic `mcp-remote` stdio shim carrying a CLI-minted bearer token. | [Other MCP clients](mcp-remote-shim.md) |
 
 All three assume the realm already has the public `meho-mcp` OAuth

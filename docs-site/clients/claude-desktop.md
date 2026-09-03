@@ -4,8 +4,19 @@ Claude Desktop reaches an internal MEHO backplane through a **local
 [`mcp-remote`](https://github.com/geelen/mcp-remote) stdio→HTTP shim**
 that runs on your own VPN-connected machine. The shim runs the OAuth
 2.1 + PKCE flow against your internal Keycloak and forwards
-Streamable-HTTP calls to `/mcp`. This is the **only** Desktop path for
-an internal-only backplane.
+Streamable-HTTP calls to `/mcp`. This shim is the **only** Desktop
+transport for an internal-only backplane — but you have two ways to set
+it up:
+
+- **The one-click `.mcpb` bundle (recommended)** — install by opening a
+  file; a dialog asks for your backplane URL and an optional internal-CA
+  bundle, and no JSON editing is involved. Start here.
+- **A manual `claude_desktop_config.json`** — wire the same shim
+  yourself. Use it if you cannot install the bundle, or want to see
+  exactly what it runs.
+
+Either way, everything runs on your own VPN-connected machine and
+nothing is exposed to the internet.
 
 !!! danger "The remote Custom Connector is not applicable"
 
@@ -23,6 +34,30 @@ observed** result of the smoke test run against a standing internal
 deploy over VPN (issue
 [#2666](https://github.com/evoila/meho/issues/2666)) — not a
 design sketch.
+
+## The one-command path: the `.mcpb` bundle
+
+MEHO ships a Claude Desktop bundle in the MCPB format, distributed as an
+asset on each [GitHub Release](https://github.com/evoila/meho/releases).
+Install it by **opening the `.mcpb` file** in Claude Desktop: it wires
+the same `mcp-remote` shim and asks, in a dialog, for the two things
+that differ per deployment —
+
+- **MEHO MCP endpoint** — your backplane's `/mcp` URL (reachable over
+  your VPN).
+- **Internal CA bundle** *(optional)* — the PEM for the CA that signs
+  the backplane's TLS certificate; leave it empty on a public-CA deploy.
+
+Two advanced fields default to the working setup and rarely need
+changing: the OAuth **client id** (default `meho-mcp`) and the OAuth
+**scopes** (default `mcp:read mcp:execute`). To opt the session into the
+operator planes, add `mcp:admin` to the scopes field — see
+[MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).
+
+The bundle still expects the realm's public `meho-mcp` client with the
+shim's loopback redirect URIs registered (below), and — on an
+internal-CA deploy — the CA you point it at. If you cannot install the
+bundle, wire the shim by hand with the rest of this page.
 
 ## Prerequisites
 

@@ -13,6 +13,8 @@ land incrementally:
 
 ## Available now
 
+- [What's new](whats-new.md) — a plain-language summary of what landed
+  in recent releases, since v0.28.0.
 - [Feature maturity index](maturity.md) — every feature's tier, the
   milestone it targets, and where its road to GA is tracked, generated
   from the codebase registry on every release.

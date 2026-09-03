@@ -1,15 +1,56 @@
 # Claude Code
 
-Claude Code speaks MCP over **native HTTP** — no shim. You point a
-project-scoped `.mcp.json` at the backplane's `/mcp` route and pin the
-pre-registered `meho-mcp` public client; Claude Code runs the OAuth 2.1
-authorization-code + PKCE flow itself, listening on a loopback port for
-the callback. This is the pattern both MEHO dogfood repos run daily.
+There are two ways to connect Claude Code to a MEHO backplane:
 
-Like every client in this section, Claude Code must run on a machine
-**on the internal network / VPN** — MEHO is internal-only.
+- **The MEHO plugin (recommended)** — one command installs the MCP
+  wiring and MEHO's operating discipline as skills. Start here.
+- **A manual `.mcp.json`** — native HTTP MCP you configure yourself.
+  Use it for non-plugin clients, CI bots, or when you want the wiring
+  in the repo.
 
-## Configure `.mcp.json`
+Either way, Claude Code must run on a machine **on the internal network
+/ VPN** — MEHO is internal-only — and nothing is exposed to the
+internet.
+
+## The one-command path: the MEHO plugin
+
+MEHO ships an in-repo Claude Code plugin marketplace. Add it and install
+the plugin:
+
+```bash
+claude plugin marketplace add evoila/meho
+/plugin install meho@meho
+```
+
+The plugin carries the MCP server (over the bundled `mcp-remote` stdio
+shim, so no per-project `.mcp.json` editing) and loads the MEHO-first
+operating discipline as skills. Point it at your backplane by setting
+the endpoint once — either an environment variable or a small config
+file the plugin reads:
+
+```bash
+# ~/.config/meho/plugin.env
+MEHO_MCP_URL="https://meho.example.com/mcp"
+# MEHO_CA_CERT="/path/to/internal-ca.pem"   # only on internal-CA deploys
+```
+
+`MEHO_CA_CERT` is only needed on an internal-CA deploy (the plugin's
+shim runs on Node, which does not read the OS trust store). To opt a
+session into the operator planes, set `MEHO_MCP_SCOPES` to add
+`mcp:admin` — see
+[MCP surface and scopes](mcp-surface-and-scopes.md#how-a-client-requests-elevation).
+The realm still needs the public `meho-mcp` client and its loopback
+redirect URI, exactly as the manual path below (see
+[Keycloak realm setup](../install/keycloak-realm.md)).
+
+## The manual path: configure `.mcp.json`
+
+If you are not using the plugin, Claude Code also speaks MCP over
+**native HTTP** — no shim. You point a project-scoped `.mcp.json` at the
+backplane's `/mcp` route and pin the pre-registered `meho-mcp` public
+client; Claude Code runs the OAuth 2.1 authorization-code + PKCE flow
+itself, listening on a loopback port for the callback. This is the
+pattern both MEHO dogfood repos run daily.
 
 Add a `meho` server to the workspace `.mcp.json`. Claude Code reads it
 at session start; restart the session after edits:

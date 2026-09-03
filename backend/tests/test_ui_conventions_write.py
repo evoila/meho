@@ -598,6 +598,11 @@ def test_edit_modal_shows_kind_and_slug_readonly() -> None:
     # The title/priority/body editable fields are pre-filled.
     assert 'value="Editable"' in body
     assert "original body" in body
+    # #241: the edit form is migrated off dead daisyUI-v4 classes (removed
+    # in v5 — zero compiled rules — which collapsed the label-over-input
+    # column and misaligned the grids).
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_edit_patch_updates_title_priority_body() -> None:

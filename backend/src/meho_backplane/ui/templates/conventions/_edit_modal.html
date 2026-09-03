@@ -37,66 +37,66 @@
       <div id="conventions-write-result" aria-live="assertive"></div>
 
       <div class="grid gap-3 md:grid-cols-2">
-        <label class="form-control">
-          <span class="label-text">Slug <span class="opacity-60">(read-only)</span></span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Slug <span class="opacity-60 font-normal">(read-only)</span></span>
           <input
             type="text"
             value="{{ convention.slug }}"
             readonly
-            class="input input-bordered input-sm font-mono opacity-70"
+            class="input input-bordered input-sm font-mono opacity-70 w-full"
             data-readonly-slug
           />
         </label>
 
-        <label class="form-control">
-          <span class="label-text">Kind <span class="opacity-60">(read-only)</span></span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Kind <span class="opacity-60 font-normal">(read-only)</span></span>
           <input
             type="text"
             value="{{ convention.kind }}"
             readonly
-            class="input input-bordered input-sm font-mono opacity-70"
+            class="input input-bordered input-sm font-mono opacity-70 w-full"
             data-readonly-kind
           />
-          <span class="text-xs opacity-60 mt-1">
+          <span class="text-xs opacity-60">
             Delete + recreate to change the kind.
           </span>
         </label>
       </div>
 
-      <label class="form-control">
-        <span class="label-text">Title</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Title</span>
         <input
           type="text"
           name="title"
           required
           maxlength="{{ title_max_length }}"
           value="{{ convention.title }}"
-          class="input input-bordered input-sm"
+          class="input input-bordered input-sm w-full"
         />
       </label>
 
-      <label class="form-control max-w-[12rem]">
-        <span class="label-text">Priority</span>
+      <label class="flex flex-col gap-1 max-w-[12rem]">
+        <span class="text-sm font-medium">Priority</span>
         <input
           type="number"
           name="priority"
           value="{{ convention.priority }}"
           min="{{ priority_min }}"
           max="{{ priority_max }}"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
         />
       </label>
 
       <input type="hidden" name="kind" value="{{ convention.kind }}" data-preview-kind />
 
       <div class="grid gap-3 md:grid-cols-2">
-        <label class="form-control">
-          <span class="label-text">Body (Markdown)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Body (Markdown)</span>
           <textarea
             name="body"
             required
             maxlength="{{ body_max_length }}"
-            class="textarea textarea-bordered min-h-[14rem] font-mono text-sm"
+            class="textarea textarea-bordered min-h-[14rem] w-full font-mono text-sm"
             hx-post="/ui/conventions/preview"
             hx-trigger="keyup changed delay:300ms"
             hx-target="#conventions-token-preview"

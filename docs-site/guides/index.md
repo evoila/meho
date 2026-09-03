@@ -36,6 +36,7 @@ backplane — reach for whichever the task in front of you needs:
 | [Scheduler](scheduler.md) | Firing agent runs on cron / one-off triggers, and the durable-credential behavior that keeps them running unattended. |
 | [Event ingestion](event-ingestion.md) | Firing a governed agent run from an authenticated external webhook — a monitoring alert or a registry action. |
 | [Satellite gateway](satellite-gateway.md) | Remote check execution for networks the central instance cannot dial. |
+| [Windows estate and in-guest execution](windows-and-guest-execution.md) | Governing Windows Server, Active Directory, DNS, failover clustering, SQL Server, and Hyper-V, and running an approval-gated program inside a VM's guest OS. |
 | [Add-ons](add-ons.md) | How a separate product pairs with the backplane and stays under its policy, approvals, and audit. |
 
 !!! tip "When a guide and your deploy disagree"

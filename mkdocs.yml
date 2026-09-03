@@ -82,6 +82,7 @@ nav:
       - Scheduler: guides/scheduler.md
       - Event ingestion: guides/event-ingestion.md
       - Satellite gateway: guides/satellite-gateway.md
+      - Windows estate and in-guest execution: guides/windows-and-guest-execution.md
       - Add-ons: guides/add-ons.md
   - Reference:
       - reference/index.md

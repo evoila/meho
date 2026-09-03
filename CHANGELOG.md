@@ -90,6 +90,35 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — CLI credential store: reconcile the keyring/file split-brain (#3320)
+
+- **A stale OS-keyring entry can no longer shadow a newer file-fallback
+  token.** On macOS the Keychain caps a single value at ~4 KiB, so a full
+  OIDC bundle (access + refresh + id token) is transparently written to
+  `~/.config/meho/credentials.json` instead. The two backends could then
+  diverge: `Load` read the keyring first and returned whatever it found
+  there, so a smaller earlier login left in the keyring — even one with an
+  empty or already-consumed `refresh_token` — shadowed the fresh, refresh-
+  token-bearing file token. The next command tripped the refresh guard and
+  failed with `auth_expired: ... no refresh_token present` despite a valid
+  token on disk. The credential store now keeps the backends consistent:
+  `Load` reads **both** and returns the more usable entry (the one that
+  still carries a `refresh_token`, then the more recently written by a new
+  `saved_at` stamp); a size-triggered `Save` **evicts** the now-stale
+  keyring entry after falling back to the file; and `Delete` clears
+  **both** backends so no copy can be stranded to shadow a later login.
+- **Clearer auth-expiry messages.** When a refresh fails because the IdP
+  rejected the refresh token as `invalid_grant` (an expired/ended session),
+  `meho status` now exits `auth_expired` and says the session expired —
+  pointing at `meho login` (and `--offline` for a durable session) —
+  instead of the misleading `unreachable`. When no refresh token is present
+  at all, the remediation now also names the `MEHO_KEYRING_DISABLE=1`
+  escape hatch for the keyring/file-mismatch case.
+- A failed refresh never deletes or degrades the stored credential — the
+  still-valid refresh token is preserved. Backwards-compatible: an entry
+  written by an older CLI (no `saved_at`) sorts as oldest. No DB migration
+  and no CLI OpenAPI-snapshot change.
+
 ### Fixed — preview parity for approval-requiring typed ops + a destructive builder CI sweep (#3312 / #3316)
 
 - **`preview_operation` now serves the park-time effect for a `requires_approval`

@@ -66,6 +66,14 @@ type StoredToken struct {
 	// when the IdP omitted expires_in (treat as "unknown — try and
 	// see"). Compared via time.Now().After() at request time.
 	Expiry time.Time `json:"expiry,omitempty"`
+	// SavedAt is the moment this entry was last persisted, in UTC.
+	// Stamped by fallbackStore.Save on every write so Load can
+	// reconcile a keyring/file split-brain by recency when both
+	// backends hold a usable token (#3320). Backwards-compatible: an
+	// entry written by a CLI that predates this field deserialises to
+	// the zero value, which sorts as "oldest" — so a freshly-written,
+	// timestamped entry always wins over a legacy un-timestamped one.
+	SavedAt time.Time `json:"saved_at,omitempty"`
 }
 
 // TokenStore is the storage backend for credentials persisted across
@@ -404,21 +412,22 @@ func NewTokenStore() (TokenStore, error) {
 // so a future go-keyring release that rewords the error string can't
 // silently change which failures route to the file fallback.
 //
-// Load bridges to the secondary on ErrTokenNotFound only. A previous
-// CLI invocation that hit the size-rejection path on Save lands the
-// token in the secondary (file) store; the next invocation constructs
-// a fresh fallbackStore whose primary still reports "no entry" for
-// that (service, user) pair, and AC #1 ("a subsequent `meho status`
-// reads the bearer") would regress without this bridge. Every other
-// primary error — locked Keychain, D-Bus unreachable, malformed JSON,
-// etc. — surfaces unchanged so a real keyring outage still produces
-// the expected error rather than masking it with a stale file entry.
+// The two backends are kept from diverging into a split-brain (#3320):
 //
-// Delete goes to the primary only. After a size-triggered fallback,
-// the secondary still holds the token; an operator running `meho
-// logout` after re-login (which overwrites the secondary) won't see
-// a stale entry, and the asymmetry is documented for the rare case
-// where they need to scrub the credentials file by hand.
+//   - On a size-triggered fallback, Save also *evicts* any entry the
+//     keyring still holds for the same (service, user) — a smaller,
+//     now-stale login that fit under the cap — so a later Load can't
+//     hand back that shadow instead of the fresh file token.
+//   - Load reads *both* backends and returns the more usable one:
+//     the entry that still carries a refresh_token wins (it's the one
+//     that can silently renew the session), and when that doesn't
+//     decide it, the more recently written entry (by SavedAt) wins.
+//     It no longer unconditionally trusts the keyring. A non-not-found
+//     primary error (locked Keychain, D-Bus unreachable, malformed
+//     entry) still surfaces unchanged so a real keyring outage isn't
+//     masked by a possibly-stale file entry.
+//   - Delete clears *both* backends so no entry can be stranded to
+//     shadow a later login.
 type fallbackStore struct {
 	primary   TokenStore
 	secondary TokenStore
@@ -450,6 +459,13 @@ func newFallbackStore(primary, secondary TokenStore) *fallbackStore {
 // propagates unchanged so unrelated keyring failures (locked Keychain,
 // D-Bus down) still surface to the operator.
 func (s *fallbackStore) Save(service, user string, tok StoredToken) error {
+	// Stamp the write time so Load can reconcile a keyring/file split
+	// by recency when both backends carry a usable token (#3320). Every
+	// Save is a fresh persistence event — including the post-refresh
+	// re-save, whose token is derived from an entry that already carries
+	// an older SavedAt — so the stamp is unconditional, not zero-guarded.
+	tok.SavedAt = time.Now().UTC()
+
 	err := s.primary.Save(service, user, tok)
 	if err == nil {
 		s.mu.Lock()
@@ -467,37 +483,106 @@ func (s *fallbackStore) Save(service, user string, tok StoredToken) error {
 		// the file store at all.
 		return fmt.Errorf("meho: keyring rejected token by size (%v) and file fallback also failed: %w", err, ferr)
 	}
+	// The keyring can't hold this bundle (too big), but it may still
+	// hold a smaller, now-stale entry for the same (service, user) from
+	// an earlier login that fit under the cap. Evict it so a later Load
+	// can't return that shadow instead of the fresh file token (#3320).
+	// Best-effort: keyringStore.Delete already maps ErrNotFound to nil,
+	// and a delete failure must not fail a Save that already succeeded
+	// on the file backend.
+	_ = s.primary.Delete(service, user)
 	s.mu.Lock()
 	s.lastBackend = s.secondary
 	s.mu.Unlock()
 	return nil
 }
 
-// Load reads from the primary store, and bridges to the secondary
-// only when the primary reports ErrTokenNotFound. The bridge closes
-// the cross-invocation gap: a previous run that hit the size-fallback
-// path on Save persisted the token in the secondary, and a fresh
-// fallbackStore in the next process must surface that token rather
-// than report "please log in". Every other primary error (locked
-// Keychain, D-Bus unreachable, malformed entry) propagates unchanged
-// so a real keyring outage isn't masked by a stale file-store entry.
+// Load reconciles the two backends instead of blindly trusting the
+// keyring (#3320). It reads both and returns the more usable entry:
+//
+//   - A non-not-found error from the primary (locked Keychain, D-Bus
+//     unreachable, malformed entry) surfaces immediately — a real
+//     keyring outage must not be masked by a possibly-stale file entry,
+//     and the secondary is not even consulted.
+//   - When both backends hold an entry, preferUsable picks the one that
+//     still carries a refresh_token (the session it can silently renew),
+//     falling back to the more recently written (SavedAt) entry.
+//   - When only one backend holds an entry, that entry is returned. This
+//     also closes the cross-invocation gap: a previous run that hit the
+//     size-fallback path on Save left the token in the secondary, and a
+//     fresh fallbackStore in the next process finds it there.
+//   - When neither backend holds an entry, ErrTokenNotFound propagates.
+//
+// A malformed / unreadable secondary is tolerated when the primary
+// held a usable token; otherwise its error surfaces.
 func (s *fallbackStore) Load(service, user string) (StoredToken, error) {
-	tok, err := s.primary.Load(service, user)
-	if err == nil {
-		return tok, nil
+	primaryTok, primaryErr := s.primary.Load(service, user)
+	if primaryErr != nil && !errors.Is(primaryErr, ErrTokenNotFound) {
+		return StoredToken{}, primaryErr
 	}
-	if !errors.Is(err, ErrTokenNotFound) {
-		return StoredToken{}, err
+
+	secondaryTok, secondaryErr := s.secondary.Load(service, user)
+	if secondaryErr != nil && !errors.Is(secondaryErr, ErrTokenNotFound) {
+		// The file backend is genuinely broken. Prefer the primary's
+		// token if it had one rather than failing the command; only
+		// surface the secondary error when the primary had nothing.
+		if primaryErr == nil {
+			return primaryTok, nil
+		}
+		return StoredToken{}, secondaryErr
 	}
-	return s.secondary.Load(service, user)
+
+	primaryHas := primaryErr == nil
+	secondaryHas := secondaryErr == nil
+	switch {
+	case primaryHas && secondaryHas:
+		return preferUsable(primaryTok, secondaryTok), nil
+	case primaryHas:
+		return primaryTok, nil
+	case secondaryHas:
+		return secondaryTok, nil
+	default:
+		return StoredToken{}, ErrTokenNotFound
+	}
 }
 
-// Delete removes the entry from the primary store only. The secondary
-// is only ever written to after a Save fell back; if a previous run
-// produced a file-store entry, the operator should clean it up
-// explicitly (or re-run `meho login`, which will overwrite it).
+// preferUsable chooses between a keyring (primary) and file (secondary)
+// entry that both exist for the same (service, user). The entry that
+// still carries a refresh_token wins, because that is the one the CLI
+// can silently renew from after the short access-token lifetime; an
+// empty refresh_token is the stale-shadow signature this bug is about
+// (#3320). When both or neither carry a refresh_token, the more
+// recently written entry (by SavedAt) wins; ties — including two zero
+// timestamps from pre-#3320 CLIs — resolve to the primary, preserving
+// the keyring's status as the canonical backend.
+func preferUsable(primary, secondary StoredToken) StoredToken {
+	primaryRenewable := primary.RefreshToken != ""
+	secondaryRenewable := secondary.RefreshToken != ""
+	if primaryRenewable != secondaryRenewable {
+		if primaryRenewable {
+			return primary
+		}
+		return secondary
+	}
+	if secondary.SavedAt.After(primary.SavedAt) {
+		return secondary
+	}
+	return primary
+}
+
+// Delete clears the entry from BOTH backends so no copy can be
+// stranded to shadow a later login (#3320). Delete is idempotent in
+// each backend (absence maps to nil), so the combined result is nil
+// unless both backends returned a real error — in which case the
+// primary's is surfaced. A failure in one backend still lets the other
+// removal stand.
 func (s *fallbackStore) Delete(service, user string) error {
-	return s.primary.Delete(service, user)
+	primaryErr := s.primary.Delete(service, user)
+	secondaryErr := s.secondary.Delete(service, user)
+	if primaryErr != nil && secondaryErr != nil {
+		return primaryErr
+	}
+	return nil
 }
 
 // Describe names the backend that received the most recent Save. The

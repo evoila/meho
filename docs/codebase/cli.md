@@ -593,7 +593,11 @@ backend and remembers that fact so `Describe()` — which the success
 message prints — names the credentials file the operator can
 actually inspect. Every other keyring failure (locked Keychain,
 D-Bus unreachable, Wincred ACL denial) is left to surface unchanged
-so unrelated outages don't silently route tokens to disk.
+so unrelated outages don't silently route tokens to disk. On a
+size fallback the wrapper also **evicts** any entry the keyring
+still holds for the same `(service, user)` — a smaller earlier
+login that fit under the cap — so it can't linger as a stale shadow
+(#3320).
 
 An `offline_access` refresh token (from `meho login --offline`, #2902)
 is not time-boxed and rides in the same bundle, so on macOS it makes
@@ -603,21 +607,35 @@ then converges with gcloud's long-lived-refresh-token model. Keep the
 credentials file 0600 and the per-client offline-session idle bound
 tight.
 
-`Load` bridges to the secondary only on `ErrTokenNotFound` from the
-primary — the case where a previous invocation hit the size-fallback
-path on `Save` and the token sits in the file store. AC #1 ("a
-subsequent `meho status` reads the bearer") would regress without
-this bridge, because a fresh `fallbackStore` in the next process
-starts with the primary reporting "no entry" for that
-`(service, user)`. Every other primary error (locked Keychain, D-Bus
-unreachable, malformed entry) propagates unchanged, so a real
-keyring outage still surfaces as an error instead of masking it with
-a stale file-store entry.
+`Load` **reconciles** the two backends rather than blindly trusting
+the keyring (#3320). It reads both and returns the more usable
+entry: the one that still carries a `refresh_token` wins (it's the
+one the CLI can silently renew from), and when that doesn't decide
+it, the more recently written entry (by the `saved_at` stamp) wins.
+This is what stops a stale keyring entry — including one left with
+an empty/consumed `refresh_token`, or by a wholly different earlier
+backplane URL — from shadowing the fresh, refresh-token-bearing
+file token and tripping the "no refresh_token present" guard. It
+also closes the cross-invocation gap the old ErrTokenNotFound bridge
+covered: when only one backend holds an entry, that entry is
+returned. A non-not-found primary error (locked Keychain, D-Bus
+unreachable, malformed entry) still surfaces unchanged, so a real
+keyring outage isn't masked by a possibly-stale file entry.
 
-`Delete` goes to the primary store only. After a size-triggered
-fallback the secondary still holds the token, and an operator who
-needs to scrub the credentials file by hand is expected to do so
-explicitly — re-running `meho login` overwrites it in the normal
+`Delete` clears **both** backends so no copy can be stranded to
+shadow a later login (#3320). It is idempotent per backend (absence
+maps to nil), so the combined result is success unless both backends
+returned a real error — in which case the primary's is surfaced; a
+failure in one still lets the other removal stand.
+
+A failed refresh never deletes or degrades the stored credential:
+the still-valid refresh token is preserved and the command surfaces
+a `meho login` prompt. When the IdP rejects the refresh as
+`invalid_grant` (session expired / ended), `meho status` exits
+`auth_expired` with a "session expired, rerun `meho login`" message
+(and a `--offline` hint) rather than the misleading `unreachable`;
+when no refresh token is present, the remediation also names the
+`MEHO_KEYRING_DISABLE=1` escape hatch for the keyring/file-mismatch
 case.
 
 ### What's persisted
@@ -637,6 +655,11 @@ canonicalised backplane URL. Field set:
 * `id_token` — OIDC id_token, when issued.
 * `token_type` — almost always `Bearer`.
 * `expiry` — RFC3339 UTC expiration moment.
+* `saved_at` — RFC3339 UTC moment the entry was last persisted.
+  Stamped on every write so `Load` can reconcile a keyring/file
+  split by recency (#3320). Backwards-compatible: an entry from a
+  CLI that predates the field deserialises to the zero time, which
+  sorts as oldest.
 
 Field names are stable across CLI releases — renaming them would be
 a wire-compat break for tokens persisted by older CLI versions.

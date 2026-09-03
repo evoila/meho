@@ -232,6 +232,90 @@ func TestStatus_NoCreds_JSON_EmitsEnvelope(t *testing.T) {
 	}
 }
 
+// TestStatus_NoRefreshToken_AppendsKeyringDisableHint pins the #3320
+// error-UX: when the stored token carries no refresh_token and the
+// backplane rejects the bearer, the auth_expired remediation appends
+// the MEHO_KEYRING_DISABLE escape-hatch hint so a dogfooder hitting a
+// keyring/file mismatch is pointed at the workaround. Refresh
+// short-circuits on the empty refresh_token, so no IdP is needed.
+func TestStatus_NoRefreshToken_AppendsKeyringDisableHint(t *testing.T) {
+	xdg := withTempXDG(t)
+	url, _ := fakeBackplane(t, nil, http.StatusUnauthorized)
+	seedCreds(t, xdg, url, auth.StoredToken{
+		BackplaneURL: url,
+		AccessToken:  jwtMarker,
+		// No RefreshToken → refresh returns the no-refresh sentinel.
+		Expiry: time.Now().Add(time.Hour),
+	})
+
+	_, stderr, err := runStatus(t)
+	if err == nil {
+		t.Fatal("expected auth_expired error")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitAuthExpired {
+		t.Fatalf("expected auth_expired exit (%d), got %v (err=%v)", output.ExitAuthExpired, coder, err)
+	}
+	if !strings.Contains(stderr.String(), "MEHO_KEYRING_DISABLE=1") {
+		t.Errorf("expected keyring/file mismatch hint in stderr; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "#3320") {
+		t.Errorf("expected #3320 reference in stderr; got %q", stderr.String())
+	}
+}
+
+// TestStatus_RefreshRejected_ExitsAuthExpiredWithSessionMessage pins the
+// #3320 error-UX for a genuinely-expired session: the token carries a
+// refresh_token but the IdP rejects the exchange as invalid_grant. The
+// command must exit auth_expired (NOT unreachable, which is what the
+// pre-fix code returned) and say the session expired. A fake IdP serves
+// discovery + a token endpoint that returns invalid_grant.
+func TestStatus_RefreshRejected_ExitsAuthExpiredWithSessionMessage(t *testing.T) {
+	xdg := withTempXDG(t)
+
+	var idp *httptest.Server
+	idpMux := http.NewServeMux()
+	idpMux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(mustJSON(map[string]any{
+			"token_endpoint":                idp.URL + "/token",
+			"device_authorization_endpoint": idp.URL + "/device",
+		}))
+	})
+	idpMux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Token is not active"}`))
+	})
+	idp = httptest.NewServer(idpMux)
+	t.Cleanup(idp.Close)
+
+	url, _ := fakeBackplane(t, nil, http.StatusUnauthorized)
+	seedCreds(t, xdg, url, auth.StoredToken{
+		BackplaneURL: url,
+		AccessToken:  jwtMarker,
+		RefreshToken: "dead-refresh",
+		Issuer:       idp.URL,
+		ClientID:     "meho-cli",
+		Expiry:       time.Now().Add(-time.Hour),
+	})
+
+	_, stderr, err := runStatus(t)
+	if err == nil {
+		t.Fatal("expected auth_expired error")
+	}
+	var coder output.ExitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != output.ExitAuthExpired {
+		t.Fatalf("expected auth_expired exit (%d), got %v (err=%v)", output.ExitAuthExpired, coder, err)
+	}
+	if !strings.Contains(stderr.String(), "session expired") {
+		t.Errorf("expected 'session expired' in stderr; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--offline") {
+		t.Errorf("expected '--offline' durable-session hint in stderr; got %q", stderr.String())
+	}
+}
+
 func TestStatus_BackplaneUnreachable_ExitsUnreachable(t *testing.T) {
 	xdg := withTempXDG(t)
 	// Point the config at an unrouteable URL.

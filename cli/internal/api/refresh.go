@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"golang.org/x/oauth2"
@@ -20,6 +21,15 @@ import (
 // cobra command surfaces this as output.AuthExpired (the operator
 // must rerun `meho login`).
 var errNoRefreshToken = errors.New("meho: no refresh_token persisted; rerun `meho login`")
+
+// errRefreshRejected signals that a refresh_token *was* present but the
+// IdP rejected the exchange as invalid_grant (the refresh token is
+// expired, was consumed, or the session was ended) — Keycloak reports
+// this with error_description "Token is not active". Distinct from
+// errNoRefreshToken so the cobra command can tell "your session
+// expired, log in again" apart from "there was no session to refresh"
+// (#3320).
+var errRefreshRejected = errors.New("meho: refresh token rejected by identity provider; session expired, rerun `meho login`")
 
 // tokenBox holds the current access bearer plus enough state for a
 // best-effort 401-retry refresh. Encapsulated in a struct so the
@@ -107,6 +117,15 @@ func (b *tokenBox) refresh(ctx context.Context) error {
 	src := cfg.TokenSource(flowCtx, stale)
 	fresh, err := src.Token()
 	if err != nil {
+		if isInvalidGrant(err) {
+			// The refresh token itself is dead (expired / consumed /
+			// session ended). Wrap the sentinel so the command layer
+			// surfaces "session expired, rerun `meho login`" rather
+			// than a generic transport failure (#3320). The in-memory
+			// and on-disk tokens are left untouched — we never delete
+			// on a failed refresh.
+			return fmt.Errorf("%w: %v", errRefreshRejected, err)
+		}
 		return fmt.Errorf("meho: refresh exchange: %w", err)
 	}
 
@@ -144,6 +163,32 @@ func authorizationHeader(accessToken string) string {
 		return ""
 	}
 	return "Bearer " + accessToken
+}
+
+// isInvalidGrant reports whether a failed refresh exchange was
+// rejected by the IdP as invalid_grant — the RFC 6749 §5.2 error for
+// an expired, revoked, or already-consumed refresh token. golang.org/
+// x/oauth2 surfaces a token-endpoint error as *oauth2.RetrieveError,
+// whose ErrorCode carries RFC 6749's `error` parameter. Keycloak
+// returns error_description "Token is not active" for a dead offline/
+// refresh session, so we also match that description as a belt-and-
+// braces check for providers that don't set a clean ErrorCode. Network
+// / discovery failures don't produce a RetrieveError, so they fall
+// through as ordinary (retryable-looking) errors (#3320).
+func isInvalidGrant(err error) bool {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) {
+		return false
+	}
+	if strings.EqualFold(re.ErrorCode, "invalid_grant") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(re.ErrorDescription), "token is not active") {
+		return true
+	}
+	// Older/newer oauth2 releases may leave ErrorCode/ErrorDescription
+	// unparsed; fall back to the raw response body.
+	return strings.Contains(strings.ToLower(string(re.Body)), "token is not active")
 }
 
 // fetchDiscovery is the production bridge from refreshDiscoverer

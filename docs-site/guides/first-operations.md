@@ -299,3 +299,5 @@ a one-VM drill becomes a cluster-wide incident.
 | `handle_not_found` from `result_query` | Handle expired, or it belongs to another operator/tenant. | Re-run the producing operation; page promptly. |
 
 **Next:** [Watch your estate with sensors](sensors-quickstart.md).
+
+**See also:** [Govern the Windows estate and run programs in a guest](windows-and-guest-execution.md) — the same ladder against Windows, SQL, and in-guest execution.

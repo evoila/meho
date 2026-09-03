@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing multi-builder module, one
+# park-time preview builder per vmware write composite; the builders share
+# the ``PreviewContext`` contract + the ``_write`` resolution helpers, so
+# splitting them by group would scatter that shared surface for no
+# readability gain. Splitting the module is separate refactor work, out of
+# scope for #3332 (which only extends the three host builders).
 
 """Park-time ``proposed_effect`` preview builders for the vmware write composites.
 
@@ -162,6 +168,11 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _resolve_distributed_portgroup,
     _resolve_vm_list,
     _resolve_vm_name,
+)
+from meho_backplane.connectors.vmware_rest.host_target import (
+    HOST_FLAVOR_ESXI,
+    STANDALONE_ESXI_HOST_MOID,
+    classify_host_target,
 )
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -888,20 +899,51 @@ async def _vm_customize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return preview
 
 
+def _host_composite_preview_host(ctx: PreviewContext) -> str | None:
+    """Effective host label for a host-composite preview (call parity, #3332).
+
+    Takes the **same** branch the handler's :func:`_resolve_host_and_manager`
+    does. On a standalone-ESXi target the ``host`` param is ignored and the
+    host is the well-known :data:`STANDALONE_ESXI_HOST_MOID`, so the preview
+    builds even with no ``host`` param -- matching the call, which resolves
+    ``ha-host`` and does not deny (the #3312 preview/call parity rule: a
+    preview that passes on an ESXi target must not be denied at call).
+    Otherwise the operator's ``host`` param is echoed. Returns ``None``
+    (the builder then declines to the identifier-only default) in the two
+    cases the call itself refuses, so the preview never over-promises a
+    write the dispatch will reject: an **unsupported** target (a reachable
+    fingerprint that is neither vCenter nor ESXi -- the handler refuses
+    ``unsupported_host_target``) and a **vCenter** dispatch with no host
+    (the handler refuses ``host_required``).
+    """
+    flavor, refusal = classify_host_target(ctx.target)
+    if refusal is not None:
+        # Unsupported target -- the call fails closed, so the preview declines
+        # rather than parking an effect the dispatch will reject (#3312 parity).
+        return None
+    if flavor == HOST_FLAVOR_ESXI:
+        return STANDALONE_ESXI_HOST_MOID
+    host = ctx.params.get("host")
+    return host if isinstance(host, str) else None
+
+
 async def _host_datastore_mount_nfs_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``host.datastore_mount_nfs`` — echo the mount coordinates (no I/O).
 
     The params fully name the blast radius: which host, which NFS export,
     the local datastore name, and the access mode. Host resolution
-    (name→moref) and the config-manager read stay the handler's job, so no
-    live read is issued and the preview cannot drift from the approved
-    dispatch. Declines on malformed params.
+    (name→moref, or the standalone-ESXi ha-host branch, #3332) and the
+    config-manager read stay the handler's job, so no live read is issued
+    and the preview cannot drift from the approved dispatch. Declines on
+    malformed params.
     """
-    host = ctx.params.get("host")
+    host = _host_composite_preview_host(ctx)
     nfs_server = ctx.params.get("nfs_server")
     remote_path = ctx.params.get("remote_path")
     datastore_name = ctx.params.get("datastore_name")
-    if not all(isinstance(v, str) for v in (host, nfs_server, remote_path, datastore_name)):
+    if host is None or not all(
+        isinstance(v, str) for v in (nfs_server, remote_path, datastore_name)
+    ):
         return None
     return {
         "host": host,
@@ -924,12 +966,14 @@ async def _host_disk_mark_flash_preview(ctx: PreviewContext) -> dict[str, Any] |
 
     The disk UUID list is the blast radius; it is capped to
     :data:`_PREVIEW_RESOLVED_CAP` with ``total_disks`` carrying the true
-    count so a large batch does not balloon the durable row. Declines when
-    ``disk_uuids`` is not a non-empty list.
+    count so a large batch does not balloon the durable row. The host takes
+    the standalone-ESXi branch (#3332) so a disk-mark on an ESXi target with
+    no ``host`` param still previews. Declines when ``disk_uuids`` is not a
+    non-empty list.
     """
-    host = ctx.params.get("host")
+    host = _host_composite_preview_host(ctx)
     disk_uuids = ctx.params.get("disk_uuids")
-    if not isinstance(host, str) or not isinstance(disk_uuids, list) or not disk_uuids:
+    if host is None or not isinstance(disk_uuids, list) or not disk_uuids:
         return None
     uuids = [uuid for uuid in disk_uuids if isinstance(uuid, str)]
     return {
@@ -944,13 +988,14 @@ async def _host_service_control_preview(ctx: PreviewContext) -> dict[str, Any] |
     """Preview ``host.service_control`` — echo host + service + action + policy (no I/O).
 
     The params fully name the change (which service, which transition,
-    optional startup policy); the allowlist check and host resolution stay
-    the handler's job. Declines on malformed params.
+    optional startup policy); the allowlist check and host resolution
+    (incl. the standalone-ESXi ha-host branch, #3332) stay the handler's
+    job. Declines on malformed params.
     """
-    host = ctx.params.get("host")
+    host = _host_composite_preview_host(ctx)
     service = ctx.params.get("service")
     action = ctx.params.get("action")
-    if not all(isinstance(v, str) for v in (host, service, action)):
+    if host is None or not all(isinstance(v, str) for v in (service, action)):
         return None
     return {
         "host": host,

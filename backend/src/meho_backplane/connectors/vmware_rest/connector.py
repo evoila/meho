@@ -1150,6 +1150,40 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_vsan_health_impl(self, operator, target, params)
 
+    async def host_storage_devices(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.storage_devices`` -- per-host raw SCSI storage devices (#3332).
+
+        A ``source_kind="typed"`` op: the dispatcher binds this method to
+        the connector instance and invokes it with ``(operator, target,
+        params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`).
+        Resolves the host -- a vCenter name/moref via ``GET:/vcenter/host``,
+        or the standalone-ESXi ``ha-host`` when the target's probe
+        fingerprint is ``product=esxi`` (the host is the target) -- then
+        reads ``config.storageDevice.scsiLun`` via PropertyCollector
+        directly on the connector session, so it works on a fresh boot with
+        zero catalog ingest (the pre-vCenter standalone-ESXi case #3332
+        needs). Returns the per-LUN uuid + ssd/local flags +
+        capacity/model/vendor set (``is_boot`` best-effort null), the
+        runtime input ``host.disk_mark_flash`` needs.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices.host_storage_devices_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns
+        ``{"status": ..., "host": ..., "devices": [...], "device_count": ...}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (
+            host_storage_devices_impl,
+        )
+
+        return await host_storage_devices_impl(self, operator, target, params)
+
     async def vm_info(
         self,
         operator: Operator,

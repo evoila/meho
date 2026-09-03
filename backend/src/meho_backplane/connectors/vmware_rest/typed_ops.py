@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
+    "VMWARE_HOST_STORAGE_DEVICES_OP",
     "VMWARE_HOST_USAGE_OP",
     "VMWARE_HOST_VSAN_HEALTH_OP",
     "VMWARE_OBJECT_COLLECT_OP",
@@ -370,6 +371,11 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import
     HOST_NETWORK_UPLINKS_WHEN_TO_USE,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (  # noqa: E402
+    HOST_STORAGE_DEVICES_GROUP_KEY,
+    HOST_STORAGE_DEVICES_WHEN_TO_USE,
+    VMWARE_HOST_STORAGE_DEVICES_OP,
+)
 from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (  # noqa: E402
     HOST_VSAN_HEALTH_GROUP_KEY,
     HOST_VSAN_HEALTH_WHEN_TO_USE,
@@ -408,6 +414,7 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     HOST_NETWORK_UPLINKS_GROUP_KEY: HOST_NETWORK_UPLINKS_WHEN_TO_USE,
     HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
+    HOST_STORAGE_DEVICES_GROUP_KEY: HOST_STORAGE_DEVICES_WHEN_TO_USE,
     VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
     OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
     TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
@@ -482,13 +489,15 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 #: The typed ops :class:`VmwareRestConnector` registers at lifespan
 #: startup: ``vmware.host.usage`` (#2257); ``host.network_uplinks`` +
 #: ``host.vsan_health`` (#2258, re-shipped from the former composites);
-#: and the incident-survival reads ``vm.info`` + ``object.collect`` +
-#: ``tasks.recent`` (#2300). The tuple shape lets future typed reads join
-#: without touching the registrar.
+#: ``host.storage_devices`` (#3332, per-host raw SCSI devices, vCenter or
+#: standalone-ESXi); and the incident-survival reads ``vm.info`` +
+#: ``object.collect`` + ``tasks.recent`` (#2300). The tuple shape lets
+#: future typed reads join without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
     VMWARE_HOST_VSAN_HEALTH_OP,
+    VMWARE_HOST_STORAGE_DEVICES_OP,
     VMWARE_VM_INFO_OP,
     VMWARE_OBJECT_COLLECT_OP,
     VMWARE_TASKS_RECENT_OP,

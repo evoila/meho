@@ -270,6 +270,16 @@ func IsNoRefreshToken(err error) bool {
 	return errors.Is(err, errNoRefreshToken)
 }
 
+// IsRefreshRejected reports whether err is the "the IdP rejected the
+// refresh exchange as invalid_grant" sentinel — the refresh token was
+// present but is expired / consumed / the session ended. Lets the
+// cobra command surface a "your session expired, rerun `meho login`"
+// message (distinct from IsNoRefreshToken's "there was no session to
+// refresh") and still route to output.AuthExpired (#3320).
+func IsRefreshRejected(err error) bool {
+	return errors.Is(err, errRefreshRejected)
+}
+
 // capRoundTripper wraps an http.RoundTripper so every response body
 // is re-bound to an http.MaxBytesReader before the typed-client
 // parsers (oapi-codegen's generated `Parse*Response` helpers, which

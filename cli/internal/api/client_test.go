@@ -239,3 +239,55 @@ func TestTokenBox_Refresh_OmitsScopeToPreserveGrant(t *testing.T) {
 		t.Errorf("access token after refresh = %q, want fresh-access", got)
 	}
 }
+
+// TestTokenBox_Refresh_InvalidGrant_IsRefreshRejected pins the #3320
+// error-UX classification: when the IdP rejects the refresh exchange as
+// invalid_grant (Keycloak's "Token is not active" for a dead session),
+// refresh returns an error matched by IsRefreshRejected — so the command
+// layer can say "session expired, rerun `meho login`" — and NOT
+// IsNoRefreshToken (a refresh_token WAS present). The stored token must
+// survive: a failed refresh never wipes the credential.
+func TestTokenBox_Refresh_InvalidGrant_IsRefreshRejected(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant",` +
+			`"error_description":"Token is not active"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	box := &tokenBox{
+		current: auth.StoredToken{
+			AccessToken:  "stale-access",
+			RefreshToken: "dead-refresh",
+			TokenType:    "Bearer",
+			ClientID:     "meho-cli",
+			Issuer:       "https://kc.example/realms/evba",
+			Expiry:       time.Now().Add(-time.Hour),
+		},
+		httpClient: srv.Client(),
+		refreshDiscoverer: func(_ context.Context, _ *http.Client, _ string) (*auth.DiscoveryDocument, error) {
+			return &auth.DiscoveryDocument{TokenEndpoint: srv.URL + "/token"}, nil
+		},
+	}
+
+	err := box.refresh(context.Background())
+	if err == nil {
+		t.Fatal("expected refresh to fail on invalid_grant")
+	}
+	if !IsRefreshRejected(err) {
+		t.Errorf("expected IsRefreshRejected, got %v", err)
+	}
+	if IsNoRefreshToken(err) {
+		t.Errorf("invalid_grant must not classify as no-refresh-token: %v", err)
+	}
+	// The credential must be preserved — no delete-on-failure (#3320).
+	box.mu.Lock()
+	surviving := box.current.RefreshToken
+	box.mu.Unlock()
+	if surviving != "dead-refresh" {
+		t.Errorf("stored refresh_token must survive a failed refresh; got %q", surviving)
+	}
+}

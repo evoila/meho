@@ -1839,27 +1839,32 @@ jobs:
         working-directory: backend
         run: uv sync --locked --all-groups
 
-      - name: Regenerate OpenAPI snapshot + Go client
+      - name: Regenerate OpenAPI snapshot + Go client + CLI reference doc
         # Run the same Make targets the maintainer runs so the drift check
         # compares like-for-like. snapshot-openapi writes cli/api/openapi.json
         # (downgrading OpenAPI 3.1->3.0 for oapi-codegen v2, see the script
         # header); generate (which depends on `tools`) rebuilds
-        # cli/internal/api/client.gen.go from it. The regen is idempotent,
-        # so a clean tree means the committed artifacts are already current.
+        # cli/internal/api/client.gen.go from it; cli-docs re-renders the
+        # committed docs-site/reference/cli.md from the cobra command tree
+        # (cmd/docgen, discovery disabled — deterministic + offline). All
+        # three regens are idempotent, so a clean tree means the committed
+        # artifacts are already current.
         working-directory: cli
         run: |
           make snapshot-openapi
           make generate
+          make cli-docs
 
-      - name: Fail if the committed snapshot / client are stale
-        # The snapshot + generated client are checked-in artifacts derived
-        # from the backend OpenAPI document. If a backend route changed
-        # without re-running the two targets above, the working tree now
-        # differs from HEAD — fail with the remediation command. Same
-        # rationale as a `go mod tidy` / `uv.lock --locked` drift gate.
+      - name: Fail if the committed snapshot / client / CLI reference are stale
+        # The snapshot, generated client, and CLI reference are checked-in
+        # artifacts derived from the backend OpenAPI document and the cobra
+        # command tree. If a backend route or a CLI command changed without
+        # re-running the targets above, the working tree now differs from
+        # HEAD — fail with the remediation command. Same rationale as a
+        # `go mod tidy` / `uv.lock --locked` drift gate.
         run: |
-          if ! git diff --exit-code -- cli/api/openapi.json cli/internal/api/client.gen.go; then
-            echo "::error title=CLI API snapshot stale::cli/api/openapi.json and/or cli/internal/api/client.gen.go are out of date relative to the backend OpenAPI document. Run 'cd cli && make snapshot-openapi && make generate' and commit the result."
+          if ! git diff --exit-code -- cli/api/openapi.json cli/internal/api/client.gen.go docs-site/reference/cli.md; then
+            echo "::error title=CLI artifacts stale::cli/api/openapi.json, cli/internal/api/client.gen.go, and/or docs-site/reference/cli.md are out of date. Run 'cd cli && make snapshot-openapi && make generate && make cli-docs' and commit the result."
             exit 1
           fi
 

@@ -119,8 +119,11 @@ agent context.
 
 Capture is a governance decision, so it lives on the operator plane —
 **REST and CLI only, with no MCP tool** — and it is off until an operator
-enables it. Resolution runs per-target first, then per-tenant, then the
-global default.
+enables it. At dispatch time the resolver checks, highest precedence
+first: the **global kill switch** (below), then any **per-target
+override**, then the **per-tenant default** — which is off unless enabled,
+and is the true fallback. On any error it resolves to *off*: the recorder
+never captures more than it can prove it should.
 
 **Per-tenant policy** (`tenant_admin`):
 
@@ -144,9 +147,11 @@ sensitive system — through the target's own update path (the
 target PATCH route). It is tri-state: force on, force off, or clear back
 to inherit.
 
-**Global kill switch.** `FLIGHT_RECORDER_ENABLED` is read fail-open: set
-it off and the deployment captures nothing, without failing a single
-dispatch. It is the blunt instrument for turning the whole subsystem off.
+**Global kill switch.** `FLIGHT_RECORDER_ENABLED` sits at the top of that
+precedence and is read fail-open: set it off and the deployment captures
+nothing — overriding every tenant and target setting — without failing a
+single dispatch. It is the blunt instrument for turning the whole
+subsystem off.
 
 A policy change takes effect on the **next dispatch** — the resolver
 caches for a minute but each change invalidates that cache, so you never

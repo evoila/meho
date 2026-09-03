@@ -122,7 +122,7 @@ body verbatim under `raw`:
 {
   "status": "firing",
   "labels": {"severity": "critical", "alertname": "TargetDown"},
-  "source":     {"slug": "am-prod", "kind": "alertmanager"},
+  "source":     {"slug": "am-prod", "kind": "alertmanager", "id": "<uuid>"},
   "event_type": "firing",
   "received_at": "2026-08-18T10:00:00+00:00",
   "raw":        { "...": "the full sender body, verbatim" }

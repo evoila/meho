@@ -21,10 +21,14 @@ that exist today. It is not a setup guide for either product.
 A paired add-on is **not** a connector. A connector is a managed vendor
 system *below* the narrow waist — the agent reaches it through
 `call_operation`. An add-on is a peer control plane *beside* the
-backplane, integrated through the governance planes themselves. The agent
-surface is untouched by pairing: an add-on's name and the surfaces it
-advertises are **data** (rows in the backplane's database), never tool
-names. Pairing an add-on grows no agent tools.
+backplane, integrated through the governance planes themselves. Pairing
+keeps the agent surface narrow: a paired add-on's own entity identifiers
+— blueprint names, workflow names, vendor object names — are **data** in
+results, never tool names, so pairing never adds a per-blueprint or
+per-vendor tool. A tenant that has paired no add-on sees the working
+surface a build that never carried one would; a paired, contract-healthy
+add-on reveals at most a single family-level meta-tool for its family
+(detailed below).
 
 ## The pairing contract
 
@@ -44,10 +48,13 @@ Four things follow from a successful pairing:
   versions realign) rather than half-activating silently.
 - **Advertised surfaces, activated by health.** An add-on declares its
   surfaces — a meta-tool family, a CLI verb family, a console panel, an
-  event kind — as data. A compatible, healthy pairing lights those
-  operator-facing surfaces up, and they disappear cleanly on unpair.
-  Advertising a meta-tool family registers **no** MCP tool: the agent's
-  working surface stays byte-identical whether or not an add-on is paired.
+  event kind — as data. A compatible, healthy pairing activates them, and
+  they disappear cleanly on unpair. The agent's working surface is the
+  conservative case: a tenant with no add-on paired sees it byte-identical
+  to a build that never carried the family, and a paired, contract-healthy
+  add-on reveals **exactly one** family-level meta-tool — a discovery tool
+  for its family, gated on live pairing state. Advertising a family never
+  adds a per-blueprint or per-vendor tool.
 - **Shared governance.** The add-on's own approval outcomes and dispatch
   completions are pushed to a durable, resumable log scoped to its
   lineage, and an out-of-process orchestration's per-step dispatches

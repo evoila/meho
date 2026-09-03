@@ -31,9 +31,12 @@ backplane — reach for whichever the task in front of you needs:
 | [Broadcast](broadcast.md) | The cross-operator activity feed — read it, announce intent, watch it live, and the read-before-start discipline. |
 | [Memory and knowledge](memory-and-knowledge.md) | Two durable stores: scoped, TTL'd memory and the tenant knowledge base, and which belongs where. |
 | [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |
+| [Flight recorder](flight-recorder.md) | The redacted per-dispatch record of the vendor traffic behind an audit row — what it captures, and who can read it back. |
 | [Runbooks](runbooks.md) | Authoring versioned, multi-step procedures and running them one gated step at a time. |
 | [Scheduler](scheduler.md) | Firing agent runs on cron / one-off triggers, and the durable-credential behavior that keeps them running unattended. |
+| [Event ingestion](event-ingestion.md) | Firing a governed agent run from an authenticated external webhook — a monitoring alert or a registry action. |
 | [Satellite gateway](satellite-gateway.md) | Remote check execution for networks the central instance cannot dial. |
+| [Add-ons](add-ons.md) | How a separate product pairs with the backplane and stays under its policy, approvals, and audit. |
 
 !!! tip "When a guide and your deploy disagree"
 

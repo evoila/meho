@@ -351,14 +351,24 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   composites take, so the read works on the **pre-vCenter standalone
   ESXi** the `#3332` bring-up needs), then reads
   `HostSystem.config.storageDevice.scsiLun` (the host-side read mirror of
-  `HostStorageSystem.storageDeviceInfo.scsiLun`) via one PropertyCollector
+  `HostStorageSystem.storageDeviceInfo.scsiLun`) plus
+  `configManager.bootDeviceSystem` off one PropertyCollector
   `RetrievePropertiesEx`. Each LUN maps to
   `{uuid, canonical_name, device_type, capacity_bytes, ssd, local, model,
   vendor, is_boot}` — `ssd` / `local` / `capacity_bytes` are
-  `HostScsiDisk`-only (null on a non-disk LUN); `is_boot` is a best-effort
-  null (the `scsiLun` property surface carries no boot flag — a reliable
-  boot datum needs esxcli, reserved for a future enrichment). Set-shaped
-  (JSONFlux-reduced when large); the device read is fail-closed
+  `HostScsiDisk`-only (null on a non-disk LUN). **`is_boot` needs no
+  esxcli seam**: when the host exposes a `bootDeviceSystem`, the op calls
+  `HostBootDeviceSystem.QueryBootDevices` — a vim query over the *same*
+  VI-JSON seam the write composites use — and matches its
+  `currentBootDeviceKey` (which typically embeds the device's canonical
+  name / uuid) against the rows (`is_boot` true on the match, false on the
+  rest), so a caller can flash-mark "every non-boot disk" (`is_boot !=
+  true`). Boot resolution is **fail-safe**, not fail-closed: an absent
+  config manager, an unsupported/erroring query, or a missing key nulls
+  every `is_boot` and names the reason in the top-level
+  `boot_device_resolution` (`matched` / `no_match` / `unavailable`) +
+  `boot_device_note` — the device list is still returned. Set-shaped
+  (JSONFlux-reduced when large); the device read itself is fail-closed
   (`status='storage_devices_unreadable'` with an empty set on a VI-JSON
   failure), with `host_required` / `host_not_found` / `ambiguous_host` /
   `unsupported_host_target` covering the resolution refusals.

@@ -114,25 +114,41 @@ def _boxed_scsi_luns(luns: list[dict[str, Any]]) -> dict[str, Any]:
     return {"_typeName": "ArrayOfScsiLun", "_value": luns}
 
 
-def _retrieve_result(moid: str, scsi_lun_val: Any) -> dict[str, Any]:
-    """A RetrievePropertiesEx ``RetrieveResult`` carrying config.storageDevice.scsiLun."""
-    return {
-        "objects": [
+def _retrieve_result(
+    moid: str, scsi_lun_val: Any, boot_system_moid: str | None = None
+) -> dict[str, Any]:
+    """A RetrievePropertiesEx ``RetrieveResult`` carrying scsiLun (+ optional bootDeviceSystem)."""
+    prop_set: list[dict[str, Any]] = [{"name": "config.storageDevice.scsiLun", "val": scsi_lun_val}]
+    if boot_system_moid is not None:
+        prop_set.append(
             {
-                "obj": {"type": "HostSystem", "value": moid},
-                "propSet": [{"name": "config.storageDevice.scsiLun", "val": scsi_lun_val}],
+                "name": "configManager.bootDeviceSystem",
+                "val": {
+                    "_typeName": "ManagedObjectReference",
+                    "type": "HostBootDeviceSystem",
+                    "value": boot_system_moid,
+                },
             }
-        ]
-    }
+        )
+    return {"objects": [{"obj": {"type": "HostSystem", "value": moid}, "propSet": prop_set}]}
+
+
+def _boot_info(current_key: str | None) -> dict[str, Any]:
+    """A HostBootDeviceInfo QueryBootDevices response with the given currentBootDeviceKey."""
+    info: dict[str, Any] = {"_typeName": "HostBootDeviceInfo", "bootDevices": []}
+    if current_key is not None:
+        info["currentBootDeviceKey"] = current_key
+    return info
 
 
 class _FakeConnector:
     """Records the transport calls ``host_storage_devices_impl`` makes.
 
     Serves the host listing on :meth:`_get_json` (keyed off the
-    ``names`` / ``hosts`` filter, adapted to the mount flavor) and a
-    per-host RetrievePropertiesEx result on :meth:`_post_vmomi_json`
-    (keyed by the host MoRef in the request body's objectSet).
+    ``names`` / ``hosts`` filter, adapted to the mount flavor); on
+    :meth:`_post_vmomi_json` it serves the per-host RetrievePropertiesEx
+    result (keyed by the host MoRef in the request body's objectSet) and,
+    for a ``.../QueryBootDevices`` path, the configured boot info.
     """
 
     def __init__(
@@ -141,11 +157,15 @@ class _FakeConnector:
         hosts: list[dict[str, str]] | None = None,
         props_by_host: dict[str, Any] | None = None,
         post_error: Exception | None = None,
+        boot_info: dict[str, Any] | None = None,
+        boot_error: Exception | None = None,
         mount_prefix: str = "/api",
     ) -> None:
         self._hosts = hosts if hosts is not None else [{"host": "host-15", "name": "esxi-01"}]
         self._props_by_host = props_by_host or {}
         self._post_error = post_error
+        self._boot_info = boot_info
+        self._boot_error = boot_error
         self._mount_prefix = mount_prefix
         self.get_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.post_calls: list[tuple[str, dict[str, Any]]] = []
@@ -190,6 +210,10 @@ class _FakeConnector:
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
+        if path.endswith("/QueryBootDevices"):
+            if self._boot_error is not None:
+                raise self._boot_error
+            return self._boot_info
         if self._post_error is not None:
             raise self._post_error
         moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
@@ -226,7 +250,10 @@ async def test_esxi_target_resolves_ha_host_without_listing() -> None:
     assert len(conn.post_calls) == 1
     body = conn.post_calls[0][1]
     assert body["specSet"][0]["objectSet"][0]["obj"]["value"] == STANDALONE_ESXI_HOST_MOID
-    assert body["specSet"][0]["propSet"][0]["pathSet"] == ["config.storageDevice.scsiLun"]
+    assert body["specSet"][0]["propSet"][0]["pathSet"] == [
+        "config.storageDevice.scsiLun",
+        "configManager.bootDeviceSystem",
+    ]
 
 
 @pytest.mark.asyncio
@@ -297,7 +324,7 @@ async def test_vcenter_resolves_host_by_moref_fallback() -> None:
 
 def test_map_scsi_lun_disk_flags_and_capacity() -> None:
     """A HostScsiDisk maps uuid / flags / trimmed model+vendor / byte capacity."""
-    row = _map_scsi_lun(_DISK_LUN)
+    row = _map_scsi_lun(_DISK_LUN, None)
     assert row == {
         "uuid": "0200000000600a",
         "canonical_name": "naa.6000c290",
@@ -313,7 +340,7 @@ def test_map_scsi_lun_disk_flags_and_capacity() -> None:
 
 def test_map_scsi_lun_non_disk_nulls_disk_only_fields() -> None:
     """A non-disk ScsiLun (cdrom) nulls ssd / local / capacity_bytes."""
-    row = _map_scsi_lun(_CDROM_LUN)
+    row = _map_scsi_lun(_CDROM_LUN, None)
     assert row["device_type"] == "cdrom"
     assert row["ssd"] is None
     assert row["local"] is None
@@ -492,4 +519,129 @@ def test_op_metadata_is_a_safe_read() -> None:
 def test_retrieve_body_targets_the_scsi_lun_path() -> None:
     body = build_host_storage_devices_retrieve_params("host-15")
     assert body["specSet"][0]["objectSet"][0]["obj"]["value"] == "host-15"
-    assert body["specSet"][0]["propSet"][0]["pathSet"] == ["config.storageDevice.scsiLun"]
+    assert body["specSet"][0]["propSet"][0]["pathSet"] == [
+        "config.storageDevice.scsiLun",
+        "configManager.bootDeviceSystem",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Boot-device identification (HostBootDeviceSystem.QueryBootDevices)
+# ---------------------------------------------------------------------------
+
+_BOOT_SYSTEM_MOID = "bootDeviceSystem-1"
+
+
+def test_map_scsi_lun_matched_boot_key_sets_is_boot_true() -> None:
+    """A boot key embedding the LUN's canonical name marks it is_boot=true."""
+    row = _map_scsi_lun(_DISK_LUN, "key-vim.host.BootDevice-naa.6000c290:1")
+    assert row["is_boot"] is True
+
+
+def test_map_scsi_lun_unmatched_boot_key_sets_is_boot_false() -> None:
+    row = _map_scsi_lun(_DISK_LUN, "key-vim.host.BootDevice-naa.ffffffff:1")
+    assert row["is_boot"] is False
+
+
+@pytest.mark.asyncio
+async def test_boot_device_matched_flags_the_boot_lun() -> None:
+    """QueryBootDevices' currentBootDeviceKey marks the matching LUN is_boot=true."""
+    conn = _FakeConnector(
+        props_by_host={
+            STANDALONE_ESXI_HOST_MOID: _retrieve_result(
+                STANDALONE_ESXI_HOST_MOID,
+                _boxed_scsi_luns([_DISK_LUN, _CDROM_LUN]),
+                boot_system_moid=_BOOT_SYSTEM_MOID,
+            )
+        },
+        boot_info=_boot_info("key-vim.host.BootDevice-naa.6000c290:1"),
+    )
+    out = await host_storage_devices_impl(
+        conn,  # type: ignore[arg-type]
+        _make_operator(),
+        _esxi_target(),  # type: ignore[arg-type]
+        {},
+    )
+    assert out["boot_device_resolution"] == "matched"
+    assert out["current_boot_device_key"] == "key-vim.host.BootDevice-naa.6000c290:1"
+    assert out["boot_device_note"] is None
+    by_type = {d["device_type"]: d["is_boot"] for d in out["devices"]}
+    assert by_type == {"disk": True, "cdrom": False}
+    # The boot query rode the QueryBootDevices method on the bootDeviceSystem moid.
+    boot_calls = [p for p, _ in conn.post_calls if p.endswith("/QueryBootDevices")]
+    assert boot_calls == [f"/HostBootDeviceSystem/{_BOOT_SYSTEM_MOID}/QueryBootDevices"]
+
+
+@pytest.mark.asyncio
+async def test_boot_device_no_match_all_false_key_echoed() -> None:
+    """A resolved key that matches no LUN -> all is_boot false, key echoed, no_match."""
+    conn = _FakeConnector(
+        props_by_host={
+            STANDALONE_ESXI_HOST_MOID: _retrieve_result(
+                STANDALONE_ESXI_HOST_MOID,
+                _boxed_scsi_luns([_DISK_LUN, _CDROM_LUN]),
+                boot_system_moid=_BOOT_SYSTEM_MOID,
+            )
+        },
+        boot_info=_boot_info("key-vim.host.BootDevice-naa.ffffffff:1"),
+    )
+    out = await host_storage_devices_impl(
+        conn,  # type: ignore[arg-type]
+        _make_operator(),
+        _esxi_target(),  # type: ignore[arg-type]
+        {},
+    )
+    assert out["boot_device_resolution"] == "no_match"
+    assert out["current_boot_device_key"] == "key-vim.host.BootDevice-naa.ffffffff:1"
+    assert all(d["is_boot"] is False for d in out["devices"])
+
+
+@pytest.mark.asyncio
+async def test_boot_device_unavailable_when_no_config_manager() -> None:
+    """No configManager.bootDeviceSystem -> is_boot null, unavailable, no boot query."""
+    conn = _FakeConnector(
+        props_by_host={
+            STANDALONE_ESXI_HOST_MOID: _retrieve_result(
+                STANDALONE_ESXI_HOST_MOID, _boxed_scsi_luns([_DISK_LUN])
+            )
+        }
+    )
+    out = await host_storage_devices_impl(
+        conn,  # type: ignore[arg-type]
+        _make_operator(),
+        _esxi_target(),  # type: ignore[arg-type]
+        {},
+    )
+    assert out["boot_device_resolution"] == "unavailable"
+    assert out["current_boot_device_key"] is None
+    assert "bootDeviceSystem" in out["boot_device_note"]
+    assert out["devices"][0]["is_boot"] is None
+    # No QueryBootDevices call was issued (nothing to query).
+    assert all(not p.endswith("/QueryBootDevices") for p, _ in conn.post_calls)
+
+
+@pytest.mark.asyncio
+async def test_boot_device_unavailable_when_query_errors_is_fail_safe() -> None:
+    """A QueryBootDevices failure nulls is_boot but still returns the device listing."""
+    conn = _FakeConnector(
+        props_by_host={
+            STANDALONE_ESXI_HOST_MOID: _retrieve_result(
+                STANDALONE_ESXI_HOST_MOID,
+                _boxed_scsi_luns([_DISK_LUN]),
+                boot_system_moid=_BOOT_SYSTEM_MOID,
+            )
+        },
+        boot_error=httpx.ConnectError("boot query unsupported"),
+    )
+    out = await host_storage_devices_impl(
+        conn,  # type: ignore[arg-type]
+        _make_operator(),
+        _esxi_target(),  # type: ignore[arg-type]
+        {},
+    )
+    # Fail-safe: the listing is still returned, is_boot nulled with a reason.
+    assert out["status"] == "ok"
+    assert out["device_count"] == 1
+    assert out["boot_device_resolution"] == "unavailable"
+    assert out["devices"][0]["is_boot"] is None
+    assert "QueryBootDevices" in out["boot_device_note"]

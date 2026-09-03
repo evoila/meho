@@ -111,17 +111,21 @@ connector-related release-notes line.
   (the #3312 parity rule).
 - **New governed read op `vmware.host.storage_devices`** (safe tier, no
   approval) — enumerates a host's raw SCSI storage devices, the per-LUN
-  `uuid` + `ssd` / `local` flags + capacity + model / vendor that
-  `host.disk_mark_flash` needs as its runtime input (the other host
-  storage reads — `vsan_health` / `datastore.usage` / `network_uplinks` —
-  do not surface the raw device set). Reads
-  `HostSystem.config.storageDevice.scsiLun` via PropertyCollector directly
-  on the connector session (zero catalog ingest), on a vCenter target
-  (with host name/moref resolution) and on a standalone ESXi target alike.
-  Set-shaped (JSONFlux-reduced to a handle when large); `is_boot` is a
-  best-effort null (the property surface carries no boot flag). No DB
-  migration; the op registers at runtime, so the CLI OpenAPI snapshot is
-  unchanged.
+  `uuid` + `ssd` / `local` flags + capacity + model / vendor + `is_boot`
+  that `host.disk_mark_flash` needs to flash-mark "every non-boot disk"
+  (the other host storage reads — `vsan_health` / `datastore.usage` /
+  `network_uplinks` — do not surface the raw device set). Reads
+  `HostSystem.config.storageDevice.scsiLun` + `configManager.bootDeviceSystem`
+  via PropertyCollector directly on the connector session (zero catalog
+  ingest), on a vCenter target (with host name/moref resolution) and on a
+  standalone ESXi target alike. `is_boot` is resolved over the same
+  VI-JSON seam via `HostBootDeviceSystem.QueryBootDevices` (no esxcli
+  needed), matching its `currentBootDeviceKey` against the LUNs; boot
+  resolution is fail-safe (an absent/erroring boot query nulls `is_boot`
+  and records `boot_device_resolution` / `boot_device_note` without
+  sinking the device listing). Set-shaped (JSONFlux-reduced to a handle
+  when large). No DB migration; the op registers at runtime, so the CLI
+  OpenAPI snapshot is unchanged.
 
 ### Fixed — CLI credential store: reconcile the keyring/file split-brain (#3320)
 

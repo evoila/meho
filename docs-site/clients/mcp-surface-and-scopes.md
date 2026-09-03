@@ -127,7 +127,7 @@ right saves a round of `-32602` errors:
   target name, not the UUID that `list_targets` returns.
 - **The broadcast tools carry the `meho_` prefix** —
   `meho_broadcast_recent`, `meho_broadcast_announce`,
-  `meho_broadcast_watch`. A bare `broadcast_announce` is not a
+  `meho_broadcast_watch`. Drop the prefix and the name is not a
   registered tool.
 
 ## The full tool inventory

@@ -10,7 +10,9 @@ best-effort.
 
 This guide covers the `query_audit` filter surface, how to correlate an
 audit row with the live broadcast feed, and how to reconstruct an entire
-agent session end to end.
+agent session end to end. For the actual vendor request/response traffic
+behind a single dispatch — one level below the audit row — see the
+[flight recorder](flight-recorder.md).
 
 !!! note "Prerequisites, roles, and maturity"
 

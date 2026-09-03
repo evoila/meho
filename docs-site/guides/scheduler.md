@@ -73,6 +73,11 @@ event (`--event-filter`) rather than a clock. The knobs worth knowing:
 - `--work-ref` — a change-ticket reference stamped onto the run's audit
   and broadcast lineage.
 
+The external webhook sources that feed these events — Alertmanager,
+Grafana, VCF Operations, Harbor, and generic JSON senders — and how to
+write an `--event-filter` against them are covered in
+[Event ingestion](event-ingestion.md).
+
 List what's scheduled and its state:
 
 ```bash

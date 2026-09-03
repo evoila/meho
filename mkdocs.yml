@@ -76,9 +76,12 @@ nav:
       - Broadcast: guides/broadcast.md
       - Memory and knowledge: guides/memory-and-knowledge.md
       - Audit forensics: guides/audit-forensics.md
+      - Flight recorder: guides/flight-recorder.md
       - Runbooks: guides/runbooks.md
       - Scheduler: guides/scheduler.md
+      - Event ingestion: guides/event-ingestion.md
       - Satellite gateway: guides/satellite-gateway.md
+      - Add-ons: guides/add-ons.md
   - Reference:
       - reference/index.md
       # Generated from the feature-maturity registry by

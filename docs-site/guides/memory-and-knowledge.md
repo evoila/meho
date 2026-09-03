@@ -158,6 +158,51 @@ diagnoses a red dashboard it writes its structured finding into tenant
 memory under `checks-noise-<group-key>`, retrievable later via
 `search_memory` (see [Watch your estate with sensors](sensors-quickstart.md#the-investigator-optional-deep-tier)).
 
+## Grounded docs search (add-on)
+
+Memory and the kb hold what *your team* wrote down. A third, optional
+capability answers questions from a body of **documents** — runbooks,
+vendor documentation, internal standards — with a citation for every
+claim. It is the capability-gated **`meho-docs`** add-on, and it is
+distinct from both stores above.
+
+!!! note "Experimental"
+
+    The docs add-on is **experimental** — outside the 1.0 stability
+    promise, and may change (see the
+    [feature-maturity index](../reference/maturity.md#doc_collections)).
+    Memory and the kb are GA; this add-on is not.
+
+**What it is.** The backplane does not ingest or store documents. It
+**attaches to and searches** an external retrieval service —
+**MEHO Knowledge** — registered as a *doc collection*. Three agent
+tools sit on top of it:
+
+- `search_docs` — returns ranked passages, each with its source
+  citation.
+- `ask_docs` — composes one answer over the retrieved passages and
+  returns it with the sources it used.
+- `list_doc_collections` — lists the collections the caller may search.
+
+**The grounding contract.** Every claim in an answer carries a citation
+that resolves to a retrieved passage. When retrieval turns up nothing,
+the answer is a deterministic "no grounded answer" — never a guess. That
+contract is enforced in code, not just asked of the model.
+
+**Scoped, gated, audited.** A docs query must name a collection (an
+unscoped query is refused), and a tenant may only search a collection it
+holds the `meho-docs:<collection>` capability for. Each query writes an
+audit row under `meho.docs.*`, with the raw query text hashed rather
+than stored.
+
+**How it differs from memory and the kb.**
+
+| Tool | Answers from |
+|---|---|
+| `search_docs` | documents in an attached external collection |
+| `search_knowledge` | how *this team* does X (the durable kb) |
+| `search_memory` | scoped, shorter-lived cross-session state |
+
 ## What can go wrong here
 
 | Symptom | What it means | Fix |

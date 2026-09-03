@@ -10,8 +10,7 @@ typed Kubernetes connector — the same flow applies to every connector,
 including ones ingested from an OpenAPI spec.
 
 Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
-(for operators) — preview and `result_query` are MCP/REST-only, as the
-table below shows. Where both surfaces exist they share one backplane
+(for operators), and where both surfaces exist they share one backplane
 rather than two implementations. The rung that *dispatches* — `call` —
 runs the full path: policy gate, credential resolution, result
 reduction, audit. Preview deliberately stops short of it: it resolves
@@ -37,9 +36,9 @@ nothing, and writing no audit row.
 | Find the connector | `meho_connector_list` | `meho connector list` |
 | List operation groups | `list_operation_groups` | `meho operation groups <connector_id>` |
 | Search operations | `search_operations` | `meho operation search <connector_id> "<query>"` |
-| Preview the request | `preview_operation` | — (REST/MCP only) |
+| Preview the request | `preview_operation` | `meho operation preview <connector_id> <op_id>` |
 | Call | `call_operation` | `meho operation call <connector_id> <op_id>` |
-| Page a large result | `result_query` | — (MCP; agents drill in) |
+| Page a large result | `result_query` | `meho operation result-query <handle_id>` |
 
 ## Step 0 — find your connector id
 
@@ -48,6 +47,24 @@ Operations are addressed by **`connector_id`**, which has the form
 `vmware-rest-9.0`. It is *not* the bare product name; a product can
 have several connector implementations, and the resolver picks one
 per target.
+
+!!! note "Why one product can have two connector ids"
+
+    A product with more than one implementation — a modern REST
+    connector and a legacy one for older appliances — registers each as
+    its own `connector_id`. Each target carries a product and version
+    (a probe-derived fingerprint); each implementation advertises the
+    version ranges it supports; and the resolver matches the target's
+    fingerprint to one implementation, with tenant or operator
+    preference breaking a tie. You address the operation by its
+    `connector_id`, but you never hand-pick which implementation runs
+    against a given target. Real pairs today: `fleet-rest-9.0` /
+    `fleet-lcm-9.0`, `sddc-rest-9.0` / `sddc-vcf5-5.0`, `vcfa-rest-9.0`
+    / `vcfa-vra8-8.0`, `vrli-rest-9.0` / `vrli-vrli8-8.0`, and
+    `vrops-rest-9.0` / `vrops-vrops8-8.0`. So one estate that spans old
+    and new appliances resolves each system to the right implementation
+    on its own — useful when you read and inventory an existing estate
+    during onboarding.
 
 ```bash
 meho connector list
@@ -109,8 +126,8 @@ Two honest limits:
   operation (like the Kubernetes ops here) has no single literal HTTP
   request, so preview returns `status: "unavailable"` — that is the
   expected answer, not a failure.
-- It is available over MCP and REST (`POST
-  /api/v1/operations/preview`); there is no CLI verb for it today.
+- It is available over MCP, REST (`POST /api/v1/operations/preview`),
+  and the CLI (`meho operation preview <connector_id> <op_id>`).
 
 ## Step 4 — call
 
@@ -193,11 +210,38 @@ confused hour:
   has expired, or belongs to a different operator. Re-run the
   operation to get a fresh handle."* That is isolation working, not a
   bug.
-- `result_query` is the drill-in tool that ships today; aggregation
-  and export tools are on the roadmap but do not exist yet.
+- `result_query` is the one drill-in tool — over MCP, or as `meho
+  operation result-query <handle_id>` on the CLI (both wrap `POST
+  /api/v1/operations/result-query`). It pages the spilled set with
+  `offset` and `limit`; the full normalized rows are held server-side
+  in a per-operator, per-tenant store that expires on a TTL. There is
+  no `result_aggregate`, `result_export`, or `result_describe` tool —
+  those names are not callable; aggregation and export read-back tools
+  are future work.
 - When `drill_in.available` is `false`, the full set was *not*
   spilled (the `reason` field says why) — re-run the operation with
   narrower params instead of hunting for a handle.
+
+## Long-running operations
+
+A governed call holds the connection open until the operation finishes.
+For one that runs for minutes — a large import, a multi-step composite
+— that is a long-lived request whose result is lost if the connection
+drops. Two REST routes, `POST /api/v1/operations/call` and `POST
+/api/v1/approvals/{id}/approve`, take an opt-in **`async: true`** that
+returns **HTTP 202 and a durable run handle** immediately instead of
+waiting. You poll the handle for progress, or cancel it, and the
+completed result is persisted on the run so it survives a dropped
+response.
+
+Synchronous mode stays the default and is byte-for-byte identical to
+the path without `async` — nothing changes unless you ask for it.
+
+One safety property matters here: a governed operation can wrap a
+vendor write that is not safe to repeat, so an orphaned async run is
+**never** silently re-dispatched. If a run is interrupted, a reaper
+drives it to an audited `failed` state rather than executing it twice.
+The raw parameters are not stored on the run row — only a hash of them.
 
 ## Safety flags at first contact
 

@@ -203,6 +203,29 @@ It is off until you opt in, and it has real prerequisites:
 The investigator never executes a change: any write op its agent
 attempts parks in the approval queue like everyone else's.
 
+## Going further
+
+The quickstart above is the core loop. A few surfaces extend it:
+
+- **Threshold bands.** The assertion's `degraded` and `critical` bounds
+  (Step 2) let one sensor carry two severities from a single evaluation
+  — a soft warning and a hard alarm.
+- **Notifications on transition.** A dashboard can email its configured
+  recipients when its rollup crosses into a non-green state, so a red
+  estate reaches a person without anyone watching the console.
+- **Which items breached.** When a sensor fails on an aggregate (a count
+  over a threshold), its evidence carries a bounded **sample** of the
+  offending rows — the specific objects or series that broke the check —
+  so a notification or an investigation names *what* breached, not just
+  *that* something did. A healthy tick's evidence is unchanged.
+- **A broadcast feed.** Every dashboard rollup transition is also
+  published to the tenant broadcast feed, so operators and agents can
+  watch check-state changes the way they watch every other action
+  (`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`).
+- **The investigator.** The diagnose-only agent above turns a red
+  dashboard into a structured, retrievable finding — read-only by
+  design.
+
 ## Sensors and your credential backend
 
 The honest operational caveat: scheduled evaluations run in the

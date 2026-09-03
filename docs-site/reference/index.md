@@ -1,9 +1,8 @@
 # Reference
 
-!!! note "Stub — generated reference lands with the contract-freeze work, [evoila/meho#2662](https://github.com/evoila/meho/issues/2662)"
-
-This section will be **generated from contract snapshots**, so it
-cannot drift from the product without a red build:
+This section is **generated from contract snapshots**, so it cannot drift
+from the product without a red build. The pages are being filled in and
+land incrementally:
 
 - MCP tools — from the `tools/list` snapshot.
 - REST API — from the public OpenAPI snapshot.
@@ -12,5 +11,8 @@ cannot drift from the product without a red build:
 - Helm values — from `values.schema.json`.
 - Connector catalog — with per-connector maturity badges.
 
-It is deliberately not stubbed further: the pages appear when the
-snapshot tooling exists (v0.29 per the roadmap).
+## Available now
+
+- [Feature maturity index](maturity.md) — every feature's tier, the
+  milestone it targets, and where its road to GA is tracked, generated
+  from the codebase registry on every release.

@@ -75,8 +75,8 @@ same ones the product itself displays.
 |---|---|
 | **Start here** | This page, plus the [reference architecture](architecture.md). |
 | **[Install & operate](install/index.md)** | The [install trail](install/index.md) — one continuous path from a bare Kubernetes cluster to a running backplane and a successful login — plus [credential backends](install/credential-backends.md), [Keycloak realm setup](install/keycloak-realm.md), [TLS and ingress](install/tls-ingress.md), [upgrades](install/upgrades.md), and a [local quickstart](install/kind-quickstart.md). |
-| **[Connect clients](clients/index.md)** | Connecting the CLI and MCP clients (Claude Desktop, Claude Code, and others) to a running backplane. Content is being migrated — tracked by [evoila/meho#2672](https://github.com/evoila/meho/issues/2672). |
-| **[Do real work](guides/index.md)** | Task guides: register targets and secrets, run first operations, watch your estate. Content is being migrated — tracked by [evoila/meho#2673](https://github.com/evoila/meho/issues/2673). |
+| **[Connect clients](clients/index.md)** | Connecting the CLI and MCP clients (Claude Desktop, Claude Code, and others) to a running backplane. |
+| **[Do real work](guides/index.md)** | Task guides: register targets and secrets, run first operations, watch your estate. |
 | **[Reference](reference/index.md)** | Generated reference material, starting with the [feature maturity index](reference/maturity.md). |
 | **[Project](project/index.md)** | How the project is run: versioning, security policy, roadmap. |
 

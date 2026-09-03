@@ -156,11 +156,17 @@ With the flag on, the requester == approver guard is lifted and you can
 approve your own parked writes. Understand exactly what you traded away:
 
 - **It is posture-wide, not per-write.** The flag re-opens the
-  single-account *request-and-grant* hole for **every** operation, not
-  just the one you are trying to clear. There is no scoping.
+  single-account *request-and-grant* hole for every **lower-risk**
+  operation across the whole tenant, not just the one you are trying to
+  clear. There is no scoping to a single write.
+- **It never reaches a `dangerous` or `destructive` operation.**
+  Break-glass self-approval applies only to the `caution` and `safe`
+  tiers. A `dangerous` or `destructive` operation can never be
+  self-approved — flag or no flag, it always needs a second subject to
+  approve it.
 - **It is emergency-grade, not the solo default.** Reach for Option 1
-  first. Leaving this on turns four-eyes into no-eyes for the whole
-  tenant.
+  first. Leaving this on turns four-eyes into no-eyes for lower-risk
+  writes across the whole tenant.
 - **It is still audited.** Self-approval is not silent (see below). A
   reject never needs the flag.
 
@@ -169,6 +175,53 @@ approve your own parked writes. Understand exactly what you traded away:
     Prefer the agent-requester pattern for anything you do more than
     once. Set `APPROVAL_ALLOW_SELF_APPROVAL=true` for a real emergency,
     make the write, and turn it back off.
+
+## A third path: a segregated approver
+
+The two options above are about *one* person clearing the queue. A
+different need is **separation of duties** — someone who may approve
+gated writes but may never run an operation. MEHO expresses that
+directly: a principal can carry an **`approver`** capability,
+independent of its tenant role. An approver may list, inspect, approve,
+and reject parked requests, yet dispatch stays gated on the operator
+role — so an approver provisioned with the `read_only` role plus
+`approver=true` clears a four-eyes gate but is refused
+`call_operation` outright. "Approve, but never operate" is now a role,
+not a matter of discipline.
+
+The four-eyes rule still holds for an approver: it cannot approve a
+request it filed itself. And the capability grants only the queue — an
+approver does not gain the right to read the *result* of a dispatch it
+did not request. Provision the `approver` claim in your realm with the
+[Keycloak realm setup](../install/keycloak-realm.md#approve-only-principal).
+
+## Permanent deletes are gated hardest
+
+A permanent delete — a VM, a DNS record, a firewall rule, a secret —
+runs on the most restrictive tier, `destructive` (the safety order is
+`safe < caution < dangerous < destructive`). A destructive operation
+runs in a fixed order: it is previewed, a person approves it, the
+approval is bound to that exact preview, the system states exactly what
+will be removed, and only then does it run — with the whole sequence
+written to the audit log. Concretely:
+
+- **The approval is bound to the preview.** The preview returns a hash
+  of the exact resolved request. That hash is presented on the call and
+  re-checked at approve time, so the approval is tied to the preview a
+  human actually saw. If the parameters changed between preview and
+  approval, the approve is refused.
+- **A blast-radius statement is mandatory.** A destructive operation
+  cannot park without a block naming the object, its enumerated child
+  objects, and how irreversible the change is. The console renders it as
+  a "what this destroys" card above the request detail. An operation
+  that cannot produce that statement cannot be parked at all — it fails
+  closed.
+- **No self-approval, ever.** Break-glass self-approval never applies to
+  a `dangerous` or `destructive` operation; only lower-risk operations
+  can be self-approved. A destructive delete always needs a second
+  subject.
+- **The record shows who decided.** The decision names the approver, so
+  the audit answers "who signed off on this delete?" without inference.
 
 ## Proving which posture a deploy is running
 

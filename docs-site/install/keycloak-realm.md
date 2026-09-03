@@ -143,6 +143,34 @@ The five mappers and four default scopes apply identically. Which MCP
 client uses which flow — and everything else client-side — is the
 [Connect clients](../clients/index.md) section's territory.
 
+## Approve-only principal
+
+By default, clearing the approval queue needs the **operator** role. For
+separation of duties you can instead grant a dedicated approver the
+**`approver`** capability — an optional claim, orthogonal to the tenant
+role. A principal provisioned as `read_only` role **plus**
+`approver=true` may approve and reject parked requests but is refused
+`call_operation`: "approve, but never operate." (See
+[Approvals and break-glass](../guides/approvals-and-break-glass.md#a-third-path-a-segregated-approver).)
+
+The claim is fail-closed — absent or malformed means *not* an approver.
+Wire it as a boolean claim on the same access token the five mappers
+above produce:
+
+| Setting | Value |
+|---|---|
+| Token Claim Name | `approver` — must match the backplane's `JWT_APPROVER_CLAIM_NAME` (default `approver`) |
+| Claim JSON Type | `boolean` |
+| Add to access token | On |
+
+The cleanest realm shape is **group-driven**: create an `approvers`
+group, add a mapper that emits `approver: true` for its members and
+nothing for anyone else, then add each approver to that group. A realm
+that cannot model it as a group can instead stamp `approver=true` as a
+per-user attribute and map that attribute to the claim. Either way the
+principal keeps a low tenant role (`read_only`), so the capability adds
+approval power without adding dispatch power.
+
 ## Wire it into Helm
 
 Tell the chart which client the CLI should use (already shown in

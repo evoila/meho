@@ -908,11 +908,19 @@ def _host_composite_preview_host(ctx: PreviewContext) -> str | None:
     builds even with no ``host`` param -- matching the call, which resolves
     ``ha-host`` and does not deny (the #3312 preview/call parity rule: a
     preview that passes on an ESXi target must not be denied at call).
-    Otherwise the operator's ``host`` param is echoed. Returns ``None`` when
-    neither is available (a vCenter dispatch with no host, which the handler
-    refuses ``host_required`` -- the preview declines to match).
+    Otherwise the operator's ``host`` param is echoed. Returns ``None``
+    (the builder then declines to the identifier-only default) in the two
+    cases the call itself refuses, so the preview never over-promises a
+    write the dispatch will reject: an **unsupported** target (a reachable
+    fingerprint that is neither vCenter nor ESXi -- the handler refuses
+    ``unsupported_host_target``) and a **vCenter** dispatch with no host
+    (the handler refuses ``host_required``).
     """
-    flavor, _refusal = classify_host_target(ctx.target)
+    flavor, refusal = classify_host_target(ctx.target)
+    if refusal is not None:
+        # Unsupported target -- the call fails closed, so the preview declines
+        # rather than parking an effect the dispatch will reject (#3312 parity).
+        return None
     if flavor == HOST_FLAVOR_ESXI:
         return STANDALONE_ESXI_HOST_MOID
     host = ctx.params.get("host")

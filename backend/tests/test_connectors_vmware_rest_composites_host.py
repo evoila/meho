@@ -923,3 +923,26 @@ async def test_host_preview_declines_on_vcenter_without_host() -> None:
         )
     )
     assert preview is None
+
+
+@pytest.mark.asyncio
+async def test_host_previews_decline_on_unsupported_target() -> None:
+    """On a reachable non-vCenter/non-ESXi target the previews decline (call-parity).
+
+    The call fails closed ``unsupported_host_target`` (no write), so the
+    preview must not build+park an effect the dispatch will reject (#3312).
+    """
+    unsupported = _FingerprintTarget(product="frobnicator")
+    mount = await _host_datastore_mount_nfs_preview(
+        _preview_ctx(
+            unsupported,
+            {"host": "h", "nfs_server": "n", "remote_path": "/p", "datastore_name": "d"},
+        )
+    )
+    flash = await _host_disk_mark_flash_preview(
+        _preview_ctx(unsupported, {"host": "h", "disk_uuids": ["uuid-a"]})
+    )
+    svc = await _host_service_control_preview(
+        _preview_ctx(unsupported, {"host": "h", "service": "TSM-SSH", "action": "start"})
+    )
+    assert mount is None and flash is None and svc is None

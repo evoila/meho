@@ -131,10 +131,9 @@ is how the resolver later matches the target to its connector.
 ### SQL Server over TDS
 
 `mssql` is different: it speaks the SQL Server wire protocol directly on
-port 1433, so there is no SSH server to stand up. It is also the first
-connector to carry **two credentials in one secret** — a SQL login,
-stored as `sql_username` and `sql_password` rather than the usual
-`username` / `password`:
+port 1433, so there is no SSH server to stand up. It also carries **two
+credentials in one secret** — a SQL login stored as `sql_username` and
+`sql_password` rather than the usual `username` / `password`:
 
 ```yaml
 targets:
@@ -185,14 +184,27 @@ Windows Server ships PowerShell 5.1, not PowerShell 7, so these connectors
 target 5.1 explicitly — the cmdlet surface is stable across Windows Server
 2016 through 2025.
 
-!!! note "Preview is 'unavailable' for these operations"
+!!! note "How preview behaves for these operations"
 
-    `preview_operation` returns the literal HTTP request a spec-ingested
-    operation would send. A typed operation like these has no single such
-    request, so preview answers `status: "unavailable"` — that is the
-    expected result, not a failure. The meaningful preview for a
-    destructive operation is the **approval park preview** below, which
-    shows exactly what the operation would change.
+    `preview_operation` returns the literal request a spec-ingested
+    operation would send. These connectors are typed, so their `safe`
+    reads and `caution` writes have no single such request, and preview
+    answers `status: "unavailable"` — the expected result, not a failure.
+
+    The governed tiers *are* previewable. A `dangerous`-with-approval or
+    `destructive` operation returns a synthetic preview carrying the same
+    redacted proposed-effect the approval park shows the approver —
+    resolved with nothing sent, no park, and no audit row — so you can
+    read the would-be effect of, say, `msad.user.delete` or
+    `guest.file.write` before you submit it. A destructive delete such as
+    `windns.record.remove` is previewable too; the exact record set it
+    would remove is enumerated when it parks for approval.
+
+    One operation here stays `unavailable` on purpose: `guest.program.run`.
+    Because its `arguments` and `env` can carry a secret, it is treated as
+    a credential-class write and does not synthesize a preview — the
+    approver sees its redacted summary (program path, argument size,
+    env-var names) at approval time instead.
 
 ## Safety tiers of the write operations
 
@@ -243,6 +255,7 @@ alongside it, all on the same connector:
 |---|---|---|
 | `vmware.composite.vm.guest.process.list` | List running guest processes | `safe` |
 | `vmware.composite.vm.guest.file.read` | Read a guest file (content capped) | `safe` |
+| `vmware.composite.vm.guest.env.read` | Read a guest environment variable | `safe` |
 | `vmware.composite.vm.guest.net.show` | Guest NIC / IP state (Tools-reported, no guest login) | `safe` |
 | `vmware.composite.vm.guest.file.write` | Write a guest file | `dangerous` + approval |
 | `vmware.composite.vm.guest.program.run` | Run a program in the guest | `dangerous` + approval |

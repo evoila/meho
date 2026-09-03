@@ -44,6 +44,12 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._write_preview import (
+    _host_datastore_mount_nfs_preview,
+    _host_disk_mark_flash_preview,
+    _host_service_control_preview,
+)
+from meho_backplane.connectors.vmware_rest.host_target import STANDALONE_ESXI_HOST_MOID
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AgentPermission,
@@ -51,6 +57,7 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     PermissionVerdict,
 )
+from meho_backplane.operations._preview import PreviewContext
 from meho_backplane.settings import get_settings
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000031a6")
@@ -191,6 +198,9 @@ class _HostRecordingConnector:
         )
         self._fault_tasks = fault_tasks or set()
         self.writes: list[dict[str, Any]] = []
+        # Records every GET:/vcenter/host listing so a standalone-ESXi test
+        # can assert the vCenter listing was never issued (#3332).
+        self.get_calls: list[str] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"/api{path}"
@@ -204,6 +214,7 @@ class _HostRecordingConnector:
     async def _get_json(
         self, target: Any, path: str, *, operator: Operator, params: Any = None
     ) -> Any:
+        self.get_calls.append(path)
         params = params or {}
         names = params.get("names") or params.get("filter.names")
         if names:
@@ -727,3 +738,188 @@ async def test_service_control_human_operator_auto_executes(session: AsyncSessio
 async def test_service_control_allowlist_is_the_expected_bounded_set() -> None:
     """Pin the curated allowlist so an accidental widening is caught in review."""
     assert frozenset({"TSM-SSH", "TSM", "ntpd", "ptpd"}) == _host._SERVICE_ALLOWLIST
+
+
+# ===========================================================================
+# Standalone-ESXi host resolution (#3332)
+# ===========================================================================
+
+
+class _FingerprintTarget:
+    """Duck-typed target carrying a probe fingerprint dict for the classifier."""
+
+    def __init__(self, *, product: str, reachable: bool = True) -> None:
+        self.name = f"{product}-target"
+        self.fingerprint = {"product": product, "reachable": reachable, "version": "9.0"}
+
+
+def _esxi_target() -> _FingerprintTarget:
+    return _FingerprintTarget(product="esxi")
+
+
+def _vcenter_target() -> _FingerprintTarget:
+    return _FingerprintTarget(product="vcenter")
+
+
+def _preview_ctx(target: Any, params: dict[str, Any]) -> PreviewContext:
+    """A minimal PreviewContext for the param-echo host preview builders.
+
+    The host preview builders read only ``ctx.target`` + ``ctx.params``, so
+    the descriptor / connector instance are irrelevant here.
+    """
+    return PreviewContext(
+        descriptor=None,  # type: ignore[arg-type]
+        connector_instance=None,
+        operator=_operator(),
+        target=target,
+        params=params,
+    )
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_standalone_esxi_resolves_ha_host(gate: _GateRecorder) -> None:
+    """On an ESXi target the mount resolves ha-host via VI-JSON -- no vCenter listing."""
+    conn = _HostRecordingConnector()
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=_esxi_target(),
+        params={
+            "nfs_server": "10.0.0.5",
+            "remote_path": "/export/base",
+            "datastore_name": "base-nfs",
+        },  # no host param -- the host is the target
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "mounted"
+    assert out["host"] == STANDALONE_ESXI_HOST_MOID
+    # The GET:/vcenter/host listing was never issued (absent on a standalone ESXi).
+    assert conn.get_calls == []
+    # The config-manager read + the mount still landed through the vim seam.
+    assert conn.writes[0]["path"] == "/HostDatastoreSystem/datastoreSystem-15/CreateNasDatastore"
+
+
+@pytest.mark.asyncio
+async def test_disk_mark_flash_standalone_esxi_resolves_ha_host(gate: _GateRecorder) -> None:
+    conn = _HostRecordingConnector()
+    out = await disk_mark_flash_composite(
+        operator=_operator(),
+        target=_esxi_target(),
+        params={"disk_uuids": ["uuid-a"], "mode": "flash"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "marked"
+    assert out["host"] == STANDALONE_ESXI_HOST_MOID
+    assert conn.get_calls == []
+    assert conn.writes[0]["path"] == "/HostStorageSystem/storageSystem-15/MarkAsSsd_Task"
+
+
+@pytest.mark.asyncio
+async def test_service_control_standalone_esxi_resolves_ha_host(gate: _GateRecorder) -> None:
+    conn = _HostRecordingConnector()
+    out = await service_control_composite(
+        operator=_operator(),
+        target=_esxi_target(),
+        params={"service": "TSM-SSH", "action": "start"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "applied"
+    assert out["host"] == STANDALONE_ESXI_HOST_MOID
+    assert conn.get_calls == []
+    assert [w["path"] for w in conn.writes] == ["/HostServiceSystem/serviceSystem-15/StartService"]
+
+
+@pytest.mark.asyncio
+async def test_vcenter_target_still_uses_the_host_listing(gate: _GateRecorder) -> None:
+    """A managing-vCenter target keeps resolving through GET:/vcenter/host (no regression)."""
+    conn = _HostRecordingConnector()
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=_vcenter_target(),
+        params={
+            "host": "esxi-01",
+            "nfs_server": "10.0.0.5",
+            "remote_path": "/export/base",
+            "datastore_name": "base-nfs",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "mounted"
+    assert out["host"] == "host-15"
+    # The vCenter listing WAS consulted for name resolution.
+    assert any(path.endswith("/vcenter/host") for path in conn.get_calls)
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_unsupported_target_fails_closed(gate: _GateRecorder) -> None:
+    """A reachable target that is neither vCenter nor ESXi fails closed with no write."""
+    conn = _HostRecordingConnector()
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=_FingerprintTarget(product="frobnicator"),
+        params={
+            "host": "esxi-01",
+            "nfs_server": "10.0.0.5",
+            "remote_path": "/export/base",
+            "datastore_name": "base-nfs",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "unsupported_host_target"
+    assert out["target_product"] == "frobnicator"
+    assert conn.writes == []
+    assert conn.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_datastore_mount_nfs_vcenter_without_host_refuses(gate: _GateRecorder) -> None:
+    """A vCenter target given no host refuses host_required before any write."""
+    conn = _HostRecordingConnector()
+    out = await datastore_mount_nfs_composite(
+        operator=_operator(),
+        target=_vcenter_target(),
+        params={"nfs_server": "10.0.0.5", "remote_path": "/x", "datastore_name": "d"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "host_required"
+    assert conn.writes == []
+
+
+@pytest.mark.asyncio
+async def test_host_previews_parity_on_esxi_target() -> None:
+    """Preview builders take the standalone-ESXi branch too (#3312 call parity).
+
+    A preview that passes on an ESXi target (host param omitted) must not
+    then be denied at call -- both resolve to ha-host.
+    """
+    esxi = _esxi_target()
+    mount = await _host_datastore_mount_nfs_preview(
+        _preview_ctx(esxi, {"nfs_server": "n", "remote_path": "/p", "datastore_name": "d"})
+    )
+    assert mount is not None and mount["host"] == STANDALONE_ESXI_HOST_MOID
+
+    flash = await _host_disk_mark_flash_preview(
+        _preview_ctx(esxi, {"disk_uuids": ["uuid-a"], "mode": "flash"})
+    )
+    assert flash is not None and flash["host"] == STANDALONE_ESXI_HOST_MOID
+
+    svc = await _host_service_control_preview(
+        _preview_ctx(esxi, {"service": "TSM-SSH", "action": "start"})
+    )
+    assert svc is not None and svc["host"] == STANDALONE_ESXI_HOST_MOID
+
+
+@pytest.mark.asyncio
+async def test_host_preview_declines_on_vcenter_without_host() -> None:
+    """On a vCenter target with no host the preview declines -- matching host_required."""
+    preview = await _host_datastore_mount_nfs_preview(
+        _preview_ctx(
+            _vcenter_target(), {"nfs_server": "n", "remote_path": "/p", "datastore_name": "d"}
+        )
+    )
+    assert preview is None

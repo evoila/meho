@@ -211,14 +211,27 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   start/stop/restart + optional `UpdateServicePolicy` **bounded to a
   curated server-side allowlist** (`TSM-SSH` / `TSM` / `ntpd` / `ptpd`)
   — an out-of-list service name is refused (`status='service_not_allowed'`)
-  before any resolution or write, never passed through. The host is
-  selected by display name **or** moref (`GET:/vcenter/host` name lookup,
-  moref fallback, ambiguity refused). Because these vim methods live on
-  the per-host config sub-managers, not `HostSystem`, each handler first
-  reads the needed `HostSystem.configManager.{datastoreSystem,`
-  `storageSystem,serviceSystem}` MoRef (one un-gated `RetrievePropertiesEx`)
-  and mounts the method on it. Registered with T4's `dangerous` +
-  `requires_approval=True`.
+  before any resolution or write, never passed through. On a **vCenter**
+  target the host is selected by display name **or** moref
+  (`GET:/vcenter/host` name lookup, moref fallback, ambiguity refused).
+  On a **standalone-ESXi** target (`#3332`) — a host no vCenter manages
+  yet, distinguished by the probe fingerprint `product=esxi` via
+  `host_target.classify_host_target` — there is no `GET:/vcenter/host`
+  surface, so the handler resolves the well-known singleton `ha-host`
+  MoRef directly through the VI-JSON seam and the `host` param is
+  optional / ignored (the host is the target); a reachable target that is
+  neither vCenter nor ESXi fails closed (`status='unsupported_host_target'`)
+  and a vCenter target given no host refuses `host_required`. Because
+  these vim methods live on the per-host config sub-managers, not
+  `HostSystem`, each handler then reads the needed
+  `HostSystem.configManager.{datastoreSystem,storageSystem,serviceSystem}`
+  MoRef (one un-gated `RetrievePropertiesEx`, issued the same way for both
+  flavors — so a standalone ESXi that cannot answer it fails
+  `config_manager_unreadable` exactly like a vCenter host) and mounts the
+  method on it. The park-time preview builders take the same
+  `classify_host_target` branch, so a preview that passes on an ESXi
+  target is not denied at call (the `#3312` parity rule). Registered with
+  T4's `dangerous` + `requires_approval=True`.
 - **Guest-operations channel** (`#3100`, group `guest_ops`,
   `composites/_guest.py`) — the governed replacement for out-of-band
   `govc guest.run`, reaching *inside* a running VM's guest OS via VMware
@@ -326,6 +339,29 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
     state (`queued`/`running`/`success`/`error`), progress, cancelled
     flag, the queue/start/complete timestamps, and the localized error
     message when a task faulted.
+- **`vmware.host.storage_devices`** (`typed_ops_host_storage_devices.py`,
+  handler `host_storage_devices`, `#3332`) — per-host raw SCSI storage
+  devices, the `safe` read that supplies the runtime input
+  `vmware.composite.host.disk_mark_flash` needs (the other host storage
+  reads — `vsan_health` / `datastore.usage` / `network_uplinks` — do not
+  enumerate the raw device set). Resolves the host (a vCenter name/moref
+  via `GET:/vcenter/host`, or the standalone-ESXi `ha-host` when the
+  probe fingerprint is `product=esxi`, via the shared
+  `host_target.classify_host_target` — the same branch the host write
+  composites take, so the read works on the **pre-vCenter standalone
+  ESXi** the `#3332` bring-up needs), then reads
+  `HostSystem.config.storageDevice.scsiLun` (the host-side read mirror of
+  `HostStorageSystem.storageDeviceInfo.scsiLun`) via one PropertyCollector
+  `RetrievePropertiesEx`. Each LUN maps to
+  `{uuid, canonical_name, device_type, capacity_bytes, ssd, local, model,
+  vendor, is_boot}` — `ssd` / `local` / `capacity_bytes` are
+  `HostScsiDisk`-only (null on a non-disk LUN); `is_boot` is a best-effort
+  null (the `scsiLun` property surface carries no boot flag — a reliable
+  boot datum needs esxcli, reserved for a future enrichment). Set-shaped
+  (JSONFlux-reduced when large); the device read is fail-closed
+  (`status='storage_devices_unreadable'` with an empty set on a VI-JSON
+  failure), with `host_required` / `host_not_found` / `ambiguous_host` /
+  `unsupported_host_target` covering the resolution refusals.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

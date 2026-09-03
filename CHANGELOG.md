@@ -90,6 +90,39 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — standalone-ESXi host resolution (pre-vCenter) + a governed host storage-device read (#3332)
+
+- **The host-domain write composites now dispatch against a standalone
+  ESXi host that no vCenter manages yet.**
+  `vmware.composite.host.datastore_mount_nfs` / `disk_mark_flash` /
+  `service_control` previously resolved their target host only through
+  `GET:/vcenter/host` — i.e. they required a managing vCenter that already
+  inventoried the host. When the target's probe fingerprint is
+  `product=esxi` (a freshly-provisioned nested host during a
+  management-domain bring-up, before the SDDC vCenter exists) the
+  composites now resolve the well-known singleton `ha-host` MoRef directly
+  through the VI-JSON seam, and the `host` parameter becomes optional /
+  ignored (on an ESXi target the host is the target). A managing-vCenter
+  target resolves through `GET:/vcenter/host` exactly as before (no
+  regression); a reachable target that is neither vCenter nor ESXi fails
+  closed (`unsupported_host_target`), and a vCenter target given no host
+  refuses `host_required`. The park-time approval previews take the same
+  branch, so a preview that passes on an ESXi target is not denied at call
+  (the #3312 parity rule).
+- **New governed read op `vmware.host.storage_devices`** (safe tier, no
+  approval) — enumerates a host's raw SCSI storage devices, the per-LUN
+  `uuid` + `ssd` / `local` flags + capacity + model / vendor that
+  `host.disk_mark_flash` needs as its runtime input (the other host
+  storage reads — `vsan_health` / `datastore.usage` / `network_uplinks` —
+  do not surface the raw device set). Reads
+  `HostSystem.config.storageDevice.scsiLun` via PropertyCollector directly
+  on the connector session (zero catalog ingest), on a vCenter target
+  (with host name/moref resolution) and on a standalone ESXi target alike.
+  Set-shaped (JSONFlux-reduced to a handle when large); `is_boot` is a
+  best-effort null (the property surface carries no boot flag). No DB
+  migration; the op registers at runtime, so the CLI OpenAPI snapshot is
+  unchanged.
+
 ### Fixed — CLI credential store: reconcile the keyring/file split-brain (#3320)
 
 - **A stale OS-keyring entry can no longer shadow a newer file-fallback

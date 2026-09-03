@@ -23,8 +23,11 @@ disk-grow write established: every mutating vim method flows through
 :func:`~meho_backplane.connectors.vmware_rest.composites._write._write_vmomi_sub_op`
 (the #2254 ``enforce_subop_policy`` gate → ``_post_vmomi_json`` on the
 documented ``/sdk/vim25/{release}`` base) -- no ``pyvmomi`` SDK
-dependency. Target is the vCenter; the host is selected by display name
-**or** moref (:func:`_resolve_host_moid`).
+dependency. On a **vCenter** target the host is selected by display name
+**or** moref (:func:`_resolve_host_moid`); on a **standalone ESXi**
+target -- one no vCenter manages yet (#3332) -- the host *is* the target
+(the well-known ``ha-host``), resolved via the VI-JSON seam without any
+``GET:/vcenter/host`` listing (:func:`classify_host_target`).
 
 Config-manager indirection
 --------------------------
@@ -63,6 +66,11 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _read_sub_op,
     _unwrap_value,
     _write_vmomi_sub_op,
+)
+from meho_backplane.connectors.vmware_rest.host_target import (
+    HOST_FLAVOR_ESXI,
+    STANDALONE_ESXI_HOST_MOID,
+    classify_host_target,
 )
 from meho_backplane.connectors.vmware_rest.vim_body import (
     VIM_TYPE_NAME_KEY,
@@ -276,27 +284,45 @@ async def _resolve_host_and_manager(
     target: Any,
     operator: Operator,
     *,
-    host: str,
+    host: str | None,
     prop: str,
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
     """Resolve host moid + one config-manager sub-moid, or a refusal envelope.
 
     Returns ``(host_moid, manager_moid, None)`` on success or
-    ``(None, None, envelope)`` when the host does not resolve uniquely or
-    the config manager is unreadable -- the shared pre-write resolution the
-    three handlers run before building their vim body. The envelope's
-    ``status`` is ``host_not_found`` / ``ambiguous_host`` /
-    ``config_manager_unreadable``; ``candidate_hosts`` is present on
-    ambiguity.
+    ``(None, None, envelope)`` on a pre-write refusal. Branches on the
+    target's probe fingerprint (:func:`classify_host_target`, #3332): a
+    **standalone ESXi** target resolves to the well-known
+    :data:`STANDALONE_ESXI_HOST_MOID` (``ha-host``) directly -- no
+    ``GET:/vcenter/host`` listing (absent on a host no vCenter manages) and
+    the *host* selector is ignored (the host is the target); a **vCenter**
+    target resolves *host* (display name or moref) through the existing
+    ``GET:/vcenter/host`` ladder (unchanged); any **other reachable
+    product** fails closed. The config-manager read is issued the same way
+    for both flavors, so a standalone ESXi that cannot answer it fails
+    closed exactly like a vCenter host. Envelope ``status`` is
+    ``unsupported_host_target`` / ``host_required`` / ``host_not_found`` /
+    ``ambiguous_host`` / ``config_manager_unreadable``; ``candidate_hosts``
+    rides on ambiguity.
     """
-    host_moid, failure, candidates = await _resolve_host_moid(
-        connector, target, operator, host=host
-    )
-    if host_moid is None:
-        envelope: dict[str, Any] = {"status": failure, "host": host}
-        if candidates:
-            envelope["candidate_hosts"] = candidates
-        return None, None, envelope
+    flavor, refusal = classify_host_target(target)
+    if refusal is not None:
+        return None, None, {**refusal, "host": host}
+    if flavor == HOST_FLAVOR_ESXI:
+        host_moid = STANDALONE_ESXI_HOST_MOID
+    elif not host:
+        # vCenter path needs a host selector; ESXi never reaches here.
+        return None, None, {"status": "host_required", "host": host}
+    else:
+        resolved, failure, candidates = await _resolve_host_moid(
+            connector, target, operator, host=host
+        )
+        if resolved is None:
+            envelope: dict[str, Any] = {"status": failure, "host": host}
+            if candidates:
+                envelope["candidate_hosts"] = candidates
+            return None, None, envelope
+        host_moid = resolved
     manager_moid = await _resolve_config_manager_moid(
         connector, target, operator, host_moid=host_moid, prop=prop
     )
@@ -332,7 +358,7 @@ async def datastore_mount_nfs_composite(
     ``connector_error``.
     """
     host_moid, ds_system_moid, refusal = await _resolve_host_and_manager(
-        connector, target, operator, host=params["host"], prop=_PROP_CM_DATASTORE_SYSTEM
+        connector, target, operator, host=params.get("host"), prop=_PROP_CM_DATASTORE_SYSTEM
     )
     if refusal is not None:
         return {**refusal, "datastore": None}
@@ -407,7 +433,7 @@ async def disk_mark_flash_composite(
     target, principal).
     """
     host_moid, storage_system_moid, refusal = await _resolve_host_and_manager(
-        connector, target, operator, host=params["host"], prop=_PROP_CM_STORAGE_SYSTEM
+        connector, target, operator, host=params.get("host"), prop=_PROP_CM_STORAGE_SYSTEM
     )
     if refusal is not None:
         return {**refusal, "mode": params.get("mode", "flash"), "results": [], "summary": None}
@@ -510,7 +536,7 @@ async def service_control_composite(
     if service not in _SERVICE_ALLOWLIST:
         return {
             "status": "service_not_allowed",
-            "host": params["host"],
+            "host": params.get("host"),
             "service": service,
             "action": params.get("action"),
             "policy": params.get("policy"),
@@ -524,7 +550,7 @@ async def service_control_composite(
         }
 
     host_moid, service_system_moid, refusal = await _resolve_host_and_manager(
-        connector, target, operator, host=params["host"], prop=_PROP_CM_SERVICE_SYSTEM
+        connector, target, operator, host=params.get("host"), prop=_PROP_CM_SERVICE_SYSTEM
     )
     if refusal is not None:
         return {**refusal, "service": service, "action": params["action"], "policy_updated": False}

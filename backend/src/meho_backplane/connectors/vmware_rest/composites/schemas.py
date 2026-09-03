@@ -3627,10 +3627,14 @@ HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Host display name or moref (e.g. 'esxi-01.lab' or 'host-15'). "
+                "Host display name or moref (e.g. 'esxi-01' or 'host-15'). "
                 "Resolved via ``GET:/vcenter/host`` — a display-name lookup first, "
                 "falling back to a moref match; an ambiguous name is refused with "
-                "``status='ambiguous_host'`` before any write."
+                "``status='ambiguous_host'`` before any write. **Optional / ignored "
+                "on a standalone-ESXi target** (#3332): a target whose probe "
+                "fingerprint is product=esxi has exactly one host (the target "
+                "itself, the well-known ha-host), so ``host`` is not needed and is "
+                "ignored. Required on a vCenter target (else ``status='host_required'``)."
             ),
         },
         "nfs_server": {
@@ -3675,7 +3679,7 @@ HOST_DATASTORE_MOUNT_NFS_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["host", "nfs_server", "remote_path", "datastore_name"],
+    "required": ["nfs_server", "remote_path", "datastore_name"],
     "additionalProperties": False,
 }
 
@@ -3692,7 +3696,11 @@ HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA: dict[str, Any] = {
         "host": {
             "type": "string",
             "minLength": 1,
-            "description": "Host display name or moref (see host.datastore_mount_nfs).",
+            "description": (
+                "Host display name or moref (see host.datastore_mount_nfs). "
+                "Optional / ignored on a standalone-ESXi target (#3332); required "
+                "on a vCenter target."
+            ),
         },
         "disk_uuids": {
             "type": "array",
@@ -3716,7 +3724,7 @@ HOST_DISK_MARK_FLASH_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["host", "disk_uuids"],
+    "required": ["disk_uuids"],
     "additionalProperties": False,
 }
 
@@ -3734,7 +3742,11 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
         "host": {
             "type": "string",
             "minLength": 1,
-            "description": "Host display name or moref (see host.datastore_mount_nfs).",
+            "description": (
+                "Host display name or moref (see host.datastore_mount_nfs). "
+                "Optional / ignored on a standalone-ESXi target (#3332); required "
+                "on a vCenter target."
+            ),
         },
         "service": {
             "type": "string",
@@ -3765,7 +3777,7 @@ HOST_SERVICE_CONTROL_PARAMETER_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["host", "service", "action"],
+    "required": ["service", "action"],
     "additionalProperties": False,
 }
 
@@ -3776,14 +3788,30 @@ HOST_DATASTORE_MOUNT_NFS_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["mounted", "host_not_found", "ambiguous_host", "config_manager_unreadable"],
+            "enum": [
+                "mounted",
+                "host_not_found",
+                "ambiguous_host",
+                "config_manager_unreadable",
+                "unsupported_host_target",
+                "host_required",
+            ],
             "description": (
                 "``'mounted'`` — the datastore was created; the refusal statuses "
                 "are reached before any write (host name/moref did not resolve "
-                "uniquely, or the host's HostDatastoreSystem was unreadable)."
+                "uniquely, the host's HostDatastoreSystem was unreadable, the "
+                "target is neither vCenter nor standalone ESXi "
+                "(``unsupported_host_target``, #3332), or a vCenter target was "
+                "given no ``host`` (``host_required``))."
             ),
         },
-        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "host": {
+            "type": ["string", "null"],
+            "description": (
+                "Resolved host moid (``ha-host`` on a standalone-ESXi target), or "
+                "the input host on refusal (``null`` when none was supplied)."
+            ),
+        },
         "datastore": {
             "type": ["string", "null"],
             "description": "New datastore moid; ``null`` on any non-``mounted`` status.",
@@ -3818,14 +3846,23 @@ HOST_DISK_MARK_FLASH_RESPONSE_SCHEMA: dict[str, Any] = {
                 "host_not_found",
                 "ambiguous_host",
                 "config_manager_unreadable",
+                "unsupported_host_target",
+                "host_required",
             ],
             "description": (
                 "``'marked'`` — every disk reached SSD/HDD state; ``'partial'`` — "
                 "at least one disk faulted / timed out / errored (see per-disk "
-                "``results``); the refusal statuses are reached before any write."
+                "``results``); the refusal statuses (incl. ``unsupported_host_target`` "
+                "/ ``host_required``, #3332) are reached before any write."
             ),
         },
-        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "host": {
+            "type": ["string", "null"],
+            "description": (
+                "Resolved host moid (``ha-host`` on a standalone-ESXi target), or "
+                "the input host on refusal (``null`` when none was supplied)."
+            ),
+        },
         "mode": {"type": "string", "enum": ["flash", "non_flash"]},
         "results": {
             "type": "array",
@@ -3875,15 +3912,24 @@ HOST_SERVICE_CONTROL_RESPONSE_SCHEMA: dict[str, Any] = {
                 "host_not_found",
                 "ambiguous_host",
                 "config_manager_unreadable",
+                "unsupported_host_target",
+                "host_required",
             ],
             "description": (
                 "``'applied'`` — the action (and optional policy update) ran; "
                 "``'service_not_allowed'`` — the service is outside the curated "
                 "allowlist (refused before any resolution or write); the remaining "
-                "refusals are reached before any write."
+                "refusals (incl. ``unsupported_host_target`` / ``host_required``, "
+                "#3332) are reached before any write."
             ),
         },
-        "host": {"type": "string", "description": "Resolved host moid (or the input on refusal)."},
+        "host": {
+            "type": ["string", "null"],
+            "description": (
+                "Resolved host moid (``ha-host`` on a standalone-ESXi target), or "
+                "the input host on refusal (``null`` when none was supplied)."
+            ),
+        },
         "service": {"type": "string"},
         "action": {"type": ["string", "null"], "enum": ["start", "stop", "restart", None]},
         "policy": {"type": ["string", "null"], "enum": ["on", "automatic", "off", None]},

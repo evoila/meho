@@ -37,6 +37,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import
     HOST_STORAGE_DEVICES_GROUP_KEY,
     VMWARE_HOST_STORAGE_DEVICES_OP,
     _map_scsi_lun,
+    _matches_boot,
     build_host_storage_devices_retrieve_params,
     host_storage_devices_impl,
 )
@@ -532,15 +533,25 @@ def test_retrieve_body_targets_the_scsi_lun_path() -> None:
 _BOOT_SYSTEM_MOID = "bootDeviceSystem-1"
 
 
-def test_map_scsi_lun_matched_boot_key_sets_is_boot_true() -> None:
-    """A boot key embedding the LUN's canonical name marks it is_boot=true."""
-    row = _map_scsi_lun(_DISK_LUN, "key-vim.host.BootDevice-naa.6000c290:1")
-    assert row["is_boot"] is True
+def test_matches_boot_key_embedding_canonical_name() -> None:
+    """A boot key embedding the LUN's canonical name matches (containment)."""
+    assert _matches_boot("0200000000600a", "naa.6000c290", "key-vim.host.BootDevice-naa.6000c290:1")
 
 
-def test_map_scsi_lun_unmatched_boot_key_sets_is_boot_false() -> None:
-    row = _map_scsi_lun(_DISK_LUN, "key-vim.host.BootDevice-naa.ffffffff:1")
-    assert row["is_boot"] is False
+def test_matches_boot_unrelated_key_does_not_match() -> None:
+    assert not _matches_boot("0200000000600a", "naa.6000c290", "key-vim.host.BootDevice-naa.ffff:1")
+
+
+def test_matches_boot_short_key_cannot_spuriously_match() -> None:
+    """A key shorter than the min-match length never matches (fail-safe guard)."""
+    assert not _matches_boot("0200000000600a", "naa.6000c290", "sd")
+
+
+def test_map_scsi_lun_passes_through_is_boot_value() -> None:
+    """_map_scsi_lun echoes the caller-computed is_boot (True / False / None)."""
+    assert _map_scsi_lun(_DISK_LUN, True)["is_boot"] is True
+    assert _map_scsi_lun(_DISK_LUN, False)["is_boot"] is False
+    assert _map_scsi_lun(_DISK_LUN, None)["is_boot"] is None
 
 
 @pytest.mark.asyncio
@@ -573,8 +584,15 @@ async def test_boot_device_matched_flags_the_boot_lun() -> None:
 
 
 @pytest.mark.asyncio
-async def test_boot_device_no_match_all_false_key_echoed() -> None:
-    """A resolved key that matches no LUN -> all is_boot false, key echoed, no_match."""
+async def test_boot_device_no_match_all_null_key_echoed() -> None:
+    """B2: a resolved key matching no LUN -> EVERY is_boot null (never false), key echoed.
+
+    A resolved-but-unmatched key is ambiguous (the boot device may be a
+    non-SCSI device absent from scsiLun, or the vendor key format did not
+    align), so the op must report unknown, not assert false — otherwise a
+    caller flashing 'every disk where is_boot != true' could flash the boot
+    disk. is_boot is authoritative only under boot_device_resolution=='matched'.
+    """
     conn = _FakeConnector(
         props_by_host={
             STANDALONE_ESXI_HOST_MOID: _retrieve_result(
@@ -593,7 +611,7 @@ async def test_boot_device_no_match_all_false_key_echoed() -> None:
     )
     assert out["boot_device_resolution"] == "no_match"
     assert out["current_boot_device_key"] == "key-vim.host.BootDevice-naa.ffffffff:1"
-    assert all(d["is_boot"] is False for d in out["devices"])
+    assert all(d["is_boot"] is None for d in out["devices"])
 
 
 @pytest.mark.asyncio

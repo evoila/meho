@@ -6,36 +6,42 @@
 Enumerates a host's raw SCSI storage devices -- per-LUN ``uuid`` +
 ``canonical_name`` + ``ssd`` / ``local`` flags + capacity + model / vendor
 + a best-effort ``is_boot`` flag -- the runtime input
-``vmware.composite.host.disk_mark_flash`` needs to flash-mark "every
-non-boot disk" (the other host storage reads do not enumerate the raw
-device set).
+``vmware.composite.host.disk_mark_flash`` needs (the other host storage
+reads do not enumerate the raw device set).
 
 A ``source_kind="typed"`` bound method in the ``vmware.host.usage`` mould:
 reads directly on the connector session (no ``dispatch_child``, no ingested
 descriptor), so it works on a **fresh boot with zero catalog ingest** --
-load-bearing here, since the #3332 case is a **standalone ESXi** host no
-vCenter manages yet. Host resolution branches on the fingerprint
+load-bearing, since the #3332 case is a **standalone ESXi** host no vCenter
+manages yet. Host resolution branches on the fingerprint
 (:func:`~meho_backplane.connectors.vmware_rest.host_target.classify_host_target`):
-a standalone-ESXi target (``product=esxi``) resolves the well-known
-``ha-host`` (``host`` ignored); a vCenter target resolves the ``host``
-param (name / moref) via ``GET:/vcenter/host``.
+standalone-ESXi (``product=esxi``) -> the well-known ``ha-host`` (``host``
+ignored); vCenter -> the ``host`` param (name / moref) via GET:/vcenter/host.
 
-Device rows come from ``HostSystem.config.storageDevice.scsiLun`` (the
-read mirror of ``HostStorageSystem.storageDeviceInfo.scsiLun``), read via
-one PropertyCollector ``RetrievePropertiesEx`` on the VI-JSON
-``/sdk/vim25/{release}`` seam; set-shaped, so JSONFlux-reduced when large.
-``ssd`` / ``local`` / ``capacity_bytes`` are ``HostScsiDisk`` fields (the
-``deviceType="disk"`` subclass), ``null`` on a non-disk LUN.
+Device rows come from ``HostSystem.config.storageDevice.scsiLun`` (the read
+mirror of ``HostStorageSystem.storageDeviceInfo.scsiLun``) via one
+PropertyCollector ``RetrievePropertiesEx`` on the VI-JSON seam; set-shaped,
+JSONFlux-reduced when large. ``ssd`` / ``local`` / ``capacity_bytes`` are
+``HostScsiDisk`` fields, ``null`` on a non-disk LUN.
 
 Boot-device identification needs **no esxcli seam**: the same read also
 fetches ``configManager.bootDeviceSystem``, and when present the op calls
 ``HostBootDeviceSystem.QueryBootDevices`` (a vim query over the same seam)
-and matches its ``currentBootDeviceKey`` -- which typically embeds the
-device's canonical name / uuid -- against the rows (``is_boot`` true on
-the match, false on the rest). **Fail-safe**: an absent config manager, an
-unsupported / erroring query, or a missing key nulls every ``is_boot`` and
-names the reason in ``boot_device_resolution`` / ``boot_device_note`` --
-the listing is still returned.
+and matches its ``HostBootDeviceInfo.currentBootDeviceKey`` against the
+rows. That key is **vendor-defined** (it *typically* embeds the canonical
+name / uuid, but the format is not contractual, and ESXi frequently leaves
+``bootDeviceSystem`` unpopulated), so the match is a labelled best-effort
+heuristic and ``boot_device_resolution`` reports the outcome: ``matched``
+(a LUN positively matched -- then, and only then, ``is_boot`` is
+authoritative: true on the match, false on the rest), ``no_match`` (key
+resolved, matched no listed LUN), or ``unavailable`` (no config manager /
+an unsupported / erroring query -- an **expected** outcome, not an error).
+On ``no_match`` and ``unavailable`` every ``is_boot`` is ``null`` -- the op
+never asserts ``false`` in an ambiguous state -- and the listing is still
+returned. See the vSphere Web Services API reference for
+``HostBootDeviceSystem`` / ``HostBootDeviceInfo``
+(developer.broadcom.com/xapis/vsphere-web-services-api); follow-up to
+verify the key format on real hardware: evoila/meho#3336.
 """
 
 from __future__ import annotations
@@ -132,14 +138,14 @@ def _capacity_bytes(capacity: Any) -> int | None:
 
 
 def _matches_boot(uuid: str | None, canonical_name: str | None, boot_key: str) -> bool:
-    """Whether a scsiLun row is the current boot device.
+    """Best-effort: whether a scsiLun row is the current boot device.
 
-    ``currentBootDeviceKey`` typically embeds the canonical name / uuid;
-    match by containment either way, guarded to identifiers >=
-    :data:`_MIN_BOOT_MATCH_LEN` chars (fail-safe: no match on a missing id).
+    ``currentBootDeviceKey`` is a vendor-defined key that *typically* embeds
+    the canonical name / uuid (heuristic, see the module docstring); match by
+    containment either way, both sides >= :data:`_MIN_BOOT_MATCH_LEN` chars.
     """
     key_l = boot_key.strip().lower()
-    if not key_l:
+    if len(key_l) < _MIN_BOOT_MATCH_LEN:
         return False
     for ident in (canonical_name, uuid):
         if not ident:
@@ -150,29 +156,24 @@ def _matches_boot(uuid: str | None, canonical_name: str | None, boot_key: str) -
     return False
 
 
-def _map_scsi_lun(lun: dict[str, Any], boot_key: str | None) -> dict[str, Any]:
-    """Flatten one ``ScsiLun`` / ``HostScsiDisk`` row (``is_boot``: null when
-    *boot_key* is None, else whether this LUN matches the boot key)."""
-    uuid = _str_or_none(lun.get("uuid"))
-    canonical_name = _str_or_none(lun.get("canonicalName"))
+def _map_scsi_lun(lun: dict[str, Any], is_boot: bool | None) -> dict[str, Any]:
+    """Flatten one ``ScsiLun`` / ``HostScsiDisk`` row (*is_boot* is the
+    caller-computed flag: True/False only when matched, else None)."""
     return {
-        "uuid": uuid,
-        "canonical_name": canonical_name,
+        "uuid": _str_or_none(lun.get("uuid")),
+        "canonical_name": _str_or_none(lun.get("canonicalName")),
         "device_type": _str_or_none(lun.get("deviceType")),
         "capacity_bytes": _capacity_bytes(lun.get("capacity")),
         "ssd": _bool_or_none(lun.get("ssd")),
         "local": _bool_or_none(lun.get("localDisk")),
         "model": _str_or_none(lun.get("model")),
         "vendor": _str_or_none(lun.get("vendor")),
-        "is_boot": None if boot_key is None else _matches_boot(uuid, canonical_name, boot_key),
+        "is_boot": is_boot,
     }
 
 
 def _extract_host_props(retrieve_result: Any) -> dict[str, Any]:
-    """Flatten a single-host ``RetrievePropertiesEx`` result to ``{name: val}``.
-
-    Each ``val`` is un-boxed via :func:`unwrap_vim_value`.
-    """
+    """Flatten a single-host ``RetrievePropertiesEx`` result to ``{name: val}`` (val un-boxed)."""
     payload = _unwrap_value(retrieve_result)
     if isinstance(payload, dict):
         objects = payload.get("objects", [])
@@ -199,13 +200,7 @@ def _moref_value(val: Any) -> str | None:
 
 
 def build_host_storage_devices_retrieve_params(host_moid: str) -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` request body for one host.
-
-    One ``PropertyFilterSpec`` scoped to the ``HostSystem`` requesting
-    ``config.storageDevice.scsiLun`` (the device array) +
-    ``configManager.bootDeviceSystem`` (so the boot query needs no extra
-    read) -- ``_typeName``-annotated via the shared trio helper (#3103).
-    """
+    """RetrievePropertiesEx body: scsiLun + bootDeviceSystem (annotated, #3103)."""
     return retrieve_properties_body(_HOST_SYSTEM_MO_TYPE, [host_moid], _STORAGE_DEVICE_PATH_SET)
 
 
@@ -217,12 +212,10 @@ async def _resolve_boot_device_key(
 ) -> tuple[str | None, str | None]:
     """Best-effort current-boot-device key via ``HostBootDeviceSystem.QueryBootDevices``.
 
-    Returns ``(key, None)`` on success. **Fail-safe**: an absent config
-    manager, a transport / status / unsupported-method failure, or a missing
-    ``currentBootDeviceKey`` yields ``(None, reason)`` (``is_boot`` null, the
-    listing still returned). ``QueryBootDevices`` is a read, so it rides the
-    un-gated :meth:`VmwareRestConnector._post_vmomi_json` seam, not the write
-    sub-op seam.
+    ``(key, None)`` on success; **fail-safe** ``(None, reason)`` on an absent
+    config manager, a transport / status / unsupported-method failure, or a
+    missing ``currentBootDeviceKey``. A read, so it rides the un-gated
+    :meth:`VmwareRestConnector._post_vmomi_json` seam, not the write seam.
     """
     if not boot_system_moid:
         return None, "host exposes no configManager.bootDeviceSystem"
@@ -244,11 +237,8 @@ async def _list_host_moids(
     target: VsphereTargetLike,
     query: dict[str, Any],
 ) -> list[str]:
-    """Return the ``host`` moids from one ``GET:/vcenter/host`` listing.
-
-    Mounted via :meth:`mount_op_path` and filter-adapted via
-    :meth:`adapt_op_query` (#2298), like the sibling typed reads.
-    """
+    """Return the ``host`` moids from one ``GET:/vcenter/host`` listing (mount +
+    filter-adapted like the sibling typed reads, #2298)."""
     list_path = await connector.mount_op_path(target, _LIST_HOSTS_PATH, operator)
     listing_query = await connector.adapt_op_query(target, query, operator)
     listing = await connector._get_json(target, list_path, operator=operator, params=listing_query)
@@ -268,12 +258,10 @@ async def _resolve_host_moid(
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Resolve the target's host to a ``HostSystem`` moid, or a refusal envelope.
 
-    Branches on the fingerprint (:func:`classify_host_target`, #3332): a
-    standalone-ESXi target resolves the well-known
-    :data:`STANDALONE_ESXI_HOST_MOID` (``host`` ignored); a vCenter target
-    resolves ``host`` (name first, moref fallback) via ``GET:/vcenter/host``;
+    Branches on the fingerprint (:func:`classify_host_target`, #3332):
+    standalone-ESXi -> :data:`STANDALONE_ESXI_HOST_MOID` (``host`` ignored);
+    vCenter -> ``host`` (name first, moref fallback) via ``GET:/vcenter/host``;
     any other reachable product / missing / unresolved host fails closed.
-    Returns ``(moid, None)`` or ``(None, refusal)`` (the full op envelope).
     """
     flavor, refusal = classify_host_target(target)
     if refusal is not None:
@@ -316,12 +304,8 @@ async def host_storage_devices_impl(
     Resolves the host (#3332), reads ``config.storageDevice.scsiLun`` +
     ``configManager.bootDeviceSystem`` off one ``RetrievePropertiesEx``,
     best-effort resolves the boot device via ``QueryBootDevices``, and maps
-    each LUN. The device read is **fail-closed**
-    (``storage_devices_unreadable``); the boot resolution is **fail-safe**
-    (nulls ``is_boot`` + names the reason without sinking the listing).
-    Returns ``{status, host, devices[], device_count,
-    current_boot_device_key, boot_device_resolution, boot_device_note}`` --
-    set-shaped, JSONFlux-reduced when large.
+    each LUN. Device read **fail-closed** (``storage_devices_unreadable``);
+    boot resolution **fail-safe** (nulls ``is_boot`` + names the reason).
     """
     host_moid, refusal = await _resolve_host_moid(connector, operator, target, params.get("host"))
     if refusal is not None:
@@ -347,18 +331,40 @@ async def host_storage_devices_impl(
         }
     props = _extract_host_props(props_result)
     raw_luns = props.get(_PROP_SCSI_LUN)
-    scsi_luns = raw_luns if isinstance(raw_luns, list) else []
+    scsi_luns = (
+        [lun for lun in raw_luns if isinstance(lun, dict)] if isinstance(raw_luns, list) else []
+    )
     boot_system_moid = _moref_value(props.get(_PROP_BOOT_DEVICE_SYSTEM))
     boot_key, boot_note = await _resolve_boot_device_key(
         connector, operator, target, boot_system_moid
     )
-    devices = [_map_scsi_lun(lun, boot_key) for lun in scsi_luns if isinstance(lun, dict)]
+    # is_boot is authoritative ONLY when a key positively matched a listed LUN
+    # ("matched": true = boot, false = not-boot). A resolved-but-unmatched key
+    # ("no_match") or no key ("unavailable") is ambiguous -- the boot device
+    # may be a non-SCSI device absent from scsiLun, OR the vendor-defined key
+    # format did not align -- so every is_boot is null (unknown), never false (B2).
     if boot_key is None:
         boot_resolution = "unavailable"
-    elif any(device["is_boot"] for device in devices):
+        is_boot_flags: list[bool | None] = [None] * len(scsi_luns)
+    elif any(
+        _matches_boot(
+            _str_or_none(lun.get("uuid")), _str_or_none(lun.get("canonicalName")), boot_key
+        )
+        for lun in scsi_luns
+    ):
         boot_resolution = "matched"
+        is_boot_flags = [
+            _matches_boot(
+                _str_or_none(lun.get("uuid")), _str_or_none(lun.get("canonicalName")), boot_key
+            )
+            for lun in scsi_luns
+        ]
     else:
         boot_resolution = "no_match"
+        is_boot_flags = [None] * len(scsi_luns)
+    devices = [
+        _map_scsi_lun(lun, is_boot) for lun, is_boot in zip(scsi_luns, is_boot_flags, strict=True)
+    ]
     _log.info(
         "vmware_host_storage_devices_read",
         target=target.name,
@@ -388,14 +394,12 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Host display name or moref (e.g. 'esxi-01' or 'host-15') to "
-                "enumerate devices for. Resolved via GET:/vcenter/host — a "
-                "display-name lookup first, moref fallback; ambiguous names "
-                "return status='ambiguous_host'. Required on a vCenter target "
-                "(else status='host_required'). **Optional / ignored on a "
-                "standalone-ESXi target** (fingerprint product=esxi): that "
-                "target has exactly one host (the well-known ha-host), so the "
-                "host is the target and this param is not needed."
+                "Host display name or moref (e.g. 'esxi-01' / 'host-15'). "
+                "Resolved via GET:/vcenter/host (name first, moref fallback; "
+                "ambiguous -> status='ambiguous_host'). Required on a vCenter "
+                "target (else status='host_required'); **optional / ignored on "
+                "a standalone-ESXi target** (fingerprint product=esxi) — that "
+                "target's one host is the well-known ha-host, i.e. the target."
             ),
         },
     },
@@ -443,11 +447,11 @@ _DEVICE_ITEM_SCHEMA: dict[str, Any] = {
         "is_boot": {
             "type": ["boolean", "null"],
             "description": (
-                "Whether this LUN is the host's current boot device — matched "
-                "from QueryBootDevices' currentBootDeviceKey against "
-                "canonical_name / uuid. true = boot, false = not, null = boot "
-                "resolution unavailable (see boot_device_resolution). Lets a "
-                "caller flash-mark 'every non-boot disk' (is_boot != true)."
+                "Best-effort boot-device flag (matched from QueryBootDevices' "
+                "currentBootDeviceKey against canonical_name / uuid). "
+                "**Authoritative only when boot_device_resolution == 'matched'** "
+                "(true = boot, false = not); otherwise null on every row — treat "
+                "null as UNKNOWN, never as 'not the boot disk'."
             ),
         },
     },
@@ -476,7 +480,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "host": {
             "type": ["string", "null"],
             "description": (
-                "Resolved host moid (ha-host on a standalone-ESXi target), or the input on refusal."
+                "Resolved host moid (ha-host on standalone ESXi), or the input on refusal."
             ),
         },
         "devices": {
@@ -487,34 +491,28 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
         "device_count": {
             "type": "integer",
             "minimum": 0,
-            "description": (
-                "Length of ``devices`` (the true count; the array may be JSONFlux-reduced)."
-            ),
+            "description": "Length of ``devices`` (true count; array may be JSONFlux-reduced).",
         },
         "current_boot_device_key": {
             "type": ["string", "null"],
             "description": (
-                "HostBootDeviceInfo.currentBootDeviceKey echoed when the boot "
-                "query resolved; null when boot resolution was unavailable."
+                "currentBootDeviceKey when the boot query resolved; null on unavailable."
             ),
         },
         "boot_device_resolution": {
             "type": "string",
             "enum": ["matched", "no_match", "unavailable"],
             "description": (
-                "'matched' — a LUN matched the boot key (its is_boot true); "
-                "'no_match' — key resolved but matched no LUN (all false, key "
-                "echoed); 'unavailable' — boot query could not resolve (all "
-                "null; see boot_device_note). Only on 'ok'."
+                "'matched' — a LUN matched the boot key (is_boot authoritative: "
+                "match true, rest false); 'no_match' — key matched no LUN (all "
+                "is_boot null, key echoed); 'unavailable' — boot query did not "
+                "resolve (all null; see boot_device_note) — expected on many "
+                "hosts, not an error. Only on 'ok'."
             ),
         },
         "boot_device_note": {
             "type": ["string", "null"],
-            "description": (
-                "On boot_device_resolution='unavailable', the reason (no "
-                "bootDeviceSystem, QueryBootDevices failed, or no "
-                "currentBootDeviceKey); null otherwise."
-            ),
+            "description": "On 'unavailable', the reason; null otherwise.",
         },
         "candidate_hosts": {
             "type": "array",
@@ -532,15 +530,15 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
 
 #: Curated ``when_to_use`` blurb for the host-storage-devices group.
 HOST_STORAGE_DEVICES_WHEN_TO_USE = (
-    "Use to enumerate the raw SCSI storage devices on an ESXi host — each "
-    "LUN's uuid, canonical_name, device_type, capacity_bytes, the ssd / local "
-    "flags (plus model / vendor), and is_boot (the current boot device). The "
-    "one read that surfaces the per-disk UUIDs, flash state, and boot-device "
-    "flag vsan_health / datastore.usage / network_uplinks do not — the right "
-    "op for 'which disks does this host have?', 'which are flash (ssd)?', or "
-    "'which UUIDs do I feed host.disk_mark_flash to flash-mark every non-boot "
+    "Use to enumerate the raw SCSI storage devices on an ESXi host — per-LUN "
+    "uuid, canonical_name, device_type, capacity_bytes, ssd / local flags, "
+    "model / vendor, and is_boot (the boot device). The one read that surfaces "
+    "the per-disk UUIDs, flash state, and boot-device flag vsan_health / "
+    "datastore.usage / network_uplinks do not — the right op for 'which disks "
+    "does this host have?', 'which are flash (ssd)?', or 'which is the boot "
     "disk?', including on a standalone ESXi host no vCenter manages yet (host "
-    "param ignored — the host is the target). Read-only."
+    "param ignored). is_boot is advisory (authoritative only when "
+    "boot_device_resolution == 'matched'). Read-only."
 )
 
 VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
@@ -551,17 +549,18 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
         "capacity, model/vendor, and is_boot."
     ),
     description=(
-        "Returns one row per SCSI LUN on an ESXi host: uuid (ScsiLun.uuid — "
-        "the id host.disk_mark_flash takes), canonical_name, device_type, "
+        "Returns one row per SCSI LUN on an ESXi host: uuid (ScsiLun.uuid — the "
+        "id host.disk_mark_flash takes), canonical_name, device_type, "
         "capacity_bytes (null on non-disk LUNs), ssd (flash) and local from "
-        "HostScsiDisk, trimmed model / vendor, and is_boot (the current boot "
-        "device — matched from HostBootDeviceSystem.QueryBootDevices over the "
-        "same VI-JSON seam; null when unavailable, see boot_device_resolution). "
-        "Reads config.storageDevice.scsiLun + configManager.bootDeviceSystem "
-        "via a PropertyCollector RetrievePropertiesEx directly on the connector "
-        "session (zero catalog ingest), on a vCenter target (host name/moref "
-        "resolution) and a standalone ESXi target no vCenter manages yet (host "
-        "param ignored — the host is the target, #3332). Device read fail-closed "
+        "HostScsiDisk, trimmed model / vendor, and is_boot (the boot device, "
+        "matched via HostBootDeviceSystem.QueryBootDevices — authoritative only "
+        "when boot_device_resolution=='matched', else null; the key format is "
+        "vendor-defined so no_match/unavailable are expected). Reads "
+        "config.storageDevice.scsiLun + configManager.bootDeviceSystem via one "
+        "PropertyCollector RetrievePropertiesEx directly on the connector session "
+        "(zero catalog ingest), on a vCenter target (host name/moref resolution) "
+        "and a standalone ESXi target no vCenter manages yet (host param ignored "
+        "— the host is the target, #3332). Device read fail-closed "
         "(storage_devices_unreadable); boot resolution fail-safe. Set-shaped, "
         "JSONFlux-reduced when large. safety_level=safe, read-only."
     ),
@@ -573,11 +572,12 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
     requires_approval=False,
     llm_instructions={
         "when_to_use": (
-            "Call to discover a host's raw disks before flash-marking them — "
-            "the per-LUN uuid + ssd flag + is_boot host.disk_mark_flash needs to "
-            "flash-mark every non-boot disk, which the other host storage reads "
-            "do not surface. Works on a standalone ESXi host (no managing "
-            "vCenter) as well as through a vCenter."
+            "Call to discover a host's raw disks (uuid + ssd flag + is_boot) "
+            "before selecting disks to flash-mark, which the other host storage "
+            "reads do not surface. Works on a standalone ESXi host (no managing "
+            "vCenter) as well as through a vCenter. is_boot is advisory: trust "
+            "it to exclude the boot disk ONLY when boot_device_resolution == "
+            "'matched'; treat null as unknown, never as 'not the boot disk'."
         ),
         "parameter_hints": {
             "host": (
@@ -589,9 +589,10 @@ VMWARE_HOST_STORAGE_DEVICES_OP = VmwareTypedOp(
             "{status, host, devices: [{uuid, canonical_name, device_type, "
             "capacity_bytes, ssd, local, model, vendor, is_boot}], device_count, "
             "current_boot_device_key, boot_device_resolution, boot_device_note}. "
-            "To flash-mark non-boot disks, feed the uuids of rows where is_boot "
-            "!= true to host.disk_mark_flash. Refusals (host_required / "
-            "host_not_found / ambiguous_host / unsupported_host_target / "
+            "host.disk_mark_flash takes an explicit disk_uuids list; rely on "
+            "is_boot to exclude the boot disk only under boot_device_resolution "
+            "== 'matched'. Refusals (host_required / host_not_found / "
+            "ambiguous_host / unsupported_host_target / "
             "storage_devices_unreadable) carry an empty devices array."
         ),
     },

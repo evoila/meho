@@ -360,18 +360,27 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   esxcli seam**: when the host exposes a `bootDeviceSystem`, the op calls
   `HostBootDeviceSystem.QueryBootDevices` — a vim query over the *same*
   VI-JSON seam the write composites use — and matches its
-  `currentBootDeviceKey` (which typically embeds the device's canonical
-  name / uuid) against the rows (`is_boot` true on the match, false on the
-  rest), so a caller can flash-mark "every non-boot disk" (`is_boot !=
-  true`). Boot resolution is **fail-safe**, not fail-closed: an absent
-  config manager, an unsupported/erroring query, or a missing key nulls
-  every `is_boot` and names the reason in the top-level
-  `boot_device_resolution` (`matched` / `no_match` / `unavailable`) +
-  `boot_device_note` — the device list is still returned. Set-shaped
-  (JSONFlux-reduced when large); the device read itself is fail-closed
+  `currentBootDeviceKey` against the rows. That key is **vendor-defined**
+  (it *typically* embeds the canonical name / uuid, but the format is not
+  contractual, and ESXi frequently leaves `bootDeviceSystem` unpopulated),
+  so the match is a **labelled best-effort heuristic** whose outcome the
+  top-level `boot_device_resolution` reports: `matched` (a LUN positively
+  matched — then, and *only* then, `is_boot` is authoritative: `true` on
+  the match, `false` on the rest), `no_match` (the key resolved but matched
+  no LUN), or `unavailable` (no config manager, or an unsupported/erroring
+  query — an **expected** outcome on many hosts, not an error). On both
+  `no_match` and `unavailable` every `is_boot` is `null` — the op **never
+  asserts `false` in an ambiguous state**, so a caller must trust `is_boot`
+  for boot-exclusion only under `boot_device_resolution == 'matched'` and
+  treat `null` as unknown (this is the fail-safe #3332 review B2 hardened).
+  The follow-up to verify the key format on real hardware + tighten the
+  match is `#3336`. Boot resolution is **fail-safe** (an absent/erroring
+  boot query nulls `is_boot` and records `boot_device_note` without sinking
+  the listing); the device read itself is **fail-closed**
   (`status='storage_devices_unreadable'` with an empty set on a VI-JSON
-  failure), with `host_required` / `host_not_found` / `ambiguous_host` /
-  `unsupported_host_target` covering the resolution refusals.
+  failure). Set-shaped (JSONFlux-reduced when large), with `host_required`
+  / `host_not_found` / `ambiguous_host` / `unsupported_host_target`
+  covering the resolution refusals.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

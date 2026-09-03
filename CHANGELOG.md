@@ -120,12 +120,18 @@ connector-related release-notes line.
   ingest), on a vCenter target (with host name/moref resolution) and on a
   standalone ESXi target alike. `is_boot` is resolved over the same
   VI-JSON seam via `HostBootDeviceSystem.QueryBootDevices` (no esxcli
-  needed), matching its `currentBootDeviceKey` against the LUNs; boot
-  resolution is fail-safe (an absent/erroring boot query nulls `is_boot`
-  and records `boot_device_resolution` / `boot_device_note` without
-  sinking the device listing). Set-shaped (JSONFlux-reduced to a handle
-  when large). No DB migration; the op registers at runtime, so the CLI
-  OpenAPI snapshot is unchanged.
+  needed), matching its `currentBootDeviceKey` against the LUNs. The key
+  format is vendor-defined, so `is_boot` is a labelled best-effort signal:
+  it is authoritative only when the top-level `boot_device_resolution` is
+  `matched` (`true`/`false`); on `no_match` / `unavailable` every `is_boot`
+  is `null` (unknown) — the op never asserts `false` in an ambiguous state,
+  so a caller excludes the boot disk only under `matched` and treats `null`
+  as unknown. Boot resolution is fail-safe (an absent/erroring boot query
+  nulls `is_boot` without sinking the device listing); the device read
+  itself is fail-closed. Set-shaped (JSONFlux-reduced to a handle when
+  large). No DB migration; the op registers at runtime, so the CLI OpenAPI
+  snapshot is unchanged. (Follow-up to verify the boot-key format on real
+  hardware: #3336.)
 
 ### Fixed — CLI credential store: reconcile the keyring/file split-brain (#3320)
 

@@ -61,6 +61,7 @@ nav:
       - Local kind quickstart: install/kind-quickstart.md
   - Connect clients:
       - clients/index.md
+      - MCP surface and scopes: clients/mcp-surface-and-scopes.md
       - The meho CLI: clients/cli.md
       - Claude Desktop: clients/claude-desktop.md
       - Claude Code: clients/claude-code.md
@@ -84,6 +85,7 @@ nav:
       - Add-ons: guides/add-ons.md
   - Reference:
       - reference/index.md
+      - What's new: reference/whats-new.md
       # Generated from the feature-maturity registry by
       # backend/scripts/generate_maturity_index.py (#2678); freshness
       # is enforced by backend/tests/test_maturity_surface_drift.py.

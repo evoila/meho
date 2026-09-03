@@ -18,7 +18,9 @@ lives at [Feature maturity index](../reference/maturity.md).
 MEHO follows [SemVer](https://semver.org). The version lives only in
 the release tag; the backplane image, Helm chart, CLI tarballs, and
 this docs site all derive from it
-([release history](https://github.com/evoila/meho/releases)).
+([release history](https://github.com/evoila/meho/releases)). For a
+plain-language summary of what landed recently, see
+[What's new](../reference/whats-new.md).
 
 Pre-1.0, breaking changes still ship in minors — each one carries a
 **migration recipe** in the release notes (the smallest concrete edit

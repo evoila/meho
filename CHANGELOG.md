@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vmware-rest: DVS portgroup VLAN spec omitted `inherited: false`, creating untagged (VLAN 0) portgroups (#3356)
+
+- `network.portgroup.create` built its `defaultPortConfig.vlan` spec (access `VmwareDistributedVirtualSwitchVlanIdSpec` / trunk `VmwareDistributedVirtualSwitchTrunkVlanSpec`) without the required `InheritablePolicy.inherited` field. vCenter then defaulted `inherited: true` and dropped the `vlanId` / trunk ranges, so the create reported success while silently producing an untagged (VLAN 0) portgroup (verified live on vCenter 8.0.3). Both branches now send `inherited: false`. `network.portgroup.security.set` was audited and already correct.
+
 ## [0.33.1] - 2026-09-04
 
 ### Added — docs site: the satellite gateway guide now documents the opt-in remote-write tier (#3354)

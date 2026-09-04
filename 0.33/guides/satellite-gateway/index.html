@@ -1503,6 +1503,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#writes-through-a-satellite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writes through a satellite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#enroll-and-deploy-a-satellite" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1908,6 +1919,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#writes-through-a-satellite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Writes through a satellite
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#enroll-and-deploy-a-satellite" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2013,20 +2035,70 @@ Every connection is initiated by the satellite; the center is passive.</p>
 </ol>
 <p>Two properties make this safe to run in an untrusted segment:</p>
 <ul>
-<li><strong>Safe operations only.</strong> A satellite <strong>refuses</strong> any work item whose
-  <code>safety_level</code> is not <code>safe</code> — it evaluates read-class checks and
-  nothing else. It also refuses any handler not under the connector
-  package. There is no path by which a satellite performs a write.</li>
+<li><strong>Read-class checks by default.</strong> Out of the box a satellite runs only
+  safe, read-class work: it <strong>refuses</strong> any work item whose <code>safety_level</code>
+  is not <code>safe</code>, and any handler not under the connector package. A <em>change</em>
+  runs only on an additive, <strong>opt-in write tier</strong> that is off by default and
+  tightly bounded — see <a href="#writes-through-a-satellite">Writes through a satellite</a>.
+  Operations classified <code>dangerous</code> or <code>destructive</code> are <strong>never</strong> dispatched
+  to a satellite under any configuration.</li>
 <li><strong>Authorization, approval, and audit stay central.</strong> The satellite
   never self-authorizes: central mints the assignment, central holds the
   audit ledger, central runs the approval queue. A compromised satellite
-  can, at worst, decline to run its assigned reads — it cannot escalate.</li>
+  can, at worst, decline to run its assigned work — it cannot escalate.</li>
 </ul>
 <p>Resilience is built in for the flaky-uplink reality of a remote segment:
 results that fail to post are written to an on-disk <strong>spool</strong> and
 re-posted oldest-first; a failed assignment fetch keeps the <strong>cached</strong>
 assignment running, so the satellite keeps evaluating its last-known
 checks while the uplink is down.</p>
+<h2 id="writes-through-a-satellite">Writes through a satellite<a class="headerlink" href="#writes-through-a-satellite" title="Permanent link">&para;</a></h2>
+<p>A satellite is <strong>read-only by default.</strong> The write tier is <strong>additive and
+opt-in</strong> — it stays off until an operator turns it on, and even then it stays
+tightly bounded. Enabling it is <strong>per runner, per operation class, and per
+target</strong>: a <strong>tenant_admin</strong> grants a runner named capabilities through the
+write-allowlist route,
+<code>POST /api/v1/runner-principals/{name}/write-allowlist</code>. Each granted entry is
+an <code>op_pattern</code> token (all targets) or an <code>op_pattern@target_scope</code> token (one
+target scope) — together the runner's write blast radius. A runner is granted
+<strong>nothing</strong> at enrollment and <strong>cannot widen its own allowlist</strong>; only a
+tenant_admin can, and only through that route.</p>
+<p>No single control admits a write. A <code>caution</code>-level operation runs on a
+satellite only when <strong>all</strong> of these hold at once:</p>
+<ul>
+<li><strong>Fresh central approval</strong>, bound to the exact operation, target, and
+  parameters — the same human approval queue every central write goes through.</li>
+<li><strong>A centrally signed work item, verified offline at the edge.</strong> The satellite
+  checks central's signature <strong>before</strong> it runs anything, so a tampered,
+  re-pointed, or expired item fails closed without a call to central.</li>
+<li><strong>The allowlist re-checked independently at the edge</strong>, against the runner's
+  <strong>own</strong> provisioning configuration — so an item is refused if the runner's
+  local allowlist disagrees with what central minted.</li>
+<li><strong>A short-lived, single-use, single-target credential</strong>, brokered per work
+  item — never a standing secret the runner holds.</li>
+</ul>
+<p>Around that gate:</p>
+<ul>
+<li><strong><code>dangerous</code> and <code>destructive</code> operations never ride a satellite</strong> — anything
+  delete-shaped included. They always run centrally through the approval path,
+  under every configuration.</li>
+<li><strong>Every write is audited centrally.</strong> The remote effect is recorded
+  store-and-forward and tamper-evident, and central raises an <strong>alarm if a
+  minted write never reports</strong> it.</li>
+<li><strong>Revocation stops writes too.</strong> Revoking a runner's principal stops it
+  minting or receiving any further writes.</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">The write posture in one line</p>
+<p>A satellite is <strong>read-only by default</strong>; it performs a write only on an
+opt-in tier where a per-runner allowlist, a fresh central approval, an
+offline-verified signature, and a single-use scoped credential must <strong>all</strong>
+hold at once — and <code>dangerous</code> or <code>destructive</code> operations can <strong>never</strong> run
+on it.</p>
+</div>
+<p>The write tier is <strong>Beta</strong> — see the
+<a href="../../reference/maturity/#satellite_gateway">feature-maturity index</a>; treat it
+as opt-in and validate it in your own environment before you rely on it.</p>
 <h2 id="enroll-and-deploy-a-satellite">Enroll and deploy a satellite<a class="headerlink" href="#enroll-and-deploy-a-satellite" title="Permanent link">&para;</a></h2>
 <p><strong>1. Register a runner principal</strong> on central. This mints the
 satellite's identity (a Keycloak client tagged <code>kind=runner</code>) and its
@@ -2103,8 +2175,8 @@ target.</p>
 </tr>
 <tr>
 <td>A work item comes back <code>refused</code></td>
-<td>The satellite declined it — most often because its <code>safety_level</code> was not <code>safe</code>. Satellites never run writes.</td>
-<td>Only read-class checks belong on a satellite; a write must run centrally through the approval path.</td>
+<td>The satellite declined it — most often because the <code>safety_level</code> is one it is not authorised to run, or the opt-in write tier is not enabled for it.</td>
+<td>Read-class checks always belong on a satellite; a <em>change</em> runs only on the <a href="#writes-through-a-satellite">opt-in write tier</a>; <code>dangerous</code> / <code>destructive</code> work always runs centrally through the approval path.</td>
 </tr>
 <tr>
 <td>Results lag but eventually appear</td>

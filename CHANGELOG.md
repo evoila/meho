@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-09-04
+
+### Added — docs site: the satellite gateway guide now documents the opt-in remote-write tier (#3354)
+
+- The **satellite runner / gateway** guide previously told operators a satellite
+  had no path to write; it now documents the opt-in remote-write tier — the
+  composed approval-and-allowlist gate that lets a remote runner perform
+  governed, policy-checked, audited writes inside networks the central instance
+  cannot reach (never the destructive or dangerous tiers). Docs-site only; no
+  code, schema, or CLI OpenAPI-snapshot change.
+
 ### Fixed — service-principal grants: literal query-string op ids (`?action=…`) were refused as wildcards (#3350)
 
 - A standing grant whose `op_id` carried a literal query string (e.g.

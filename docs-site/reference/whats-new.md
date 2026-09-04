@@ -9,6 +9,39 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.33.0](https://github.com/evoila/meho/releases/tag/v0.33.0) — 2026-09-04
+
+- **A much bigger documentation site.** New do-real-work guides for the flight
+  recorder, external event ingestion, and add-ons; a guide to the Windows
+  estate and governed in-guest program execution; a client-onramp section for
+  Claude Code and Claude Desktop; an explainer of the MCP surface tiers — the
+  default working surface versus the operator planes behind the `mcp:admin`
+  scope; and this What's new page. An accuracy sweep also brought the existing
+  guides back in line with what the last release actually ships.
+- **Generated, always-current references.** The connector catalogue, the full
+  MCP tool inventory, and every CLI command are published as reference pages
+  generated straight from the code, with a CI check that fails the build if
+  they drift out of date.
+- **Standalone ESXi hosts, before any vCenter exists.** The host-setup
+  composites — mount an NFS datastore, mark a disk as flash, control a service
+  — now run directly against a freshly provisioned ESXi host that no vCenter
+  manages yet, the exact state you are in early in a management-domain
+  bring-up. A new read lists a host's raw storage devices so the disk it
+  flash-marks is chosen from real data.
+- **More governed deletes for pfSense.** Removing a static route, a gateway,
+  or a single member of a shared firewall alias each became a governed,
+  approval-gated delete that previews exactly what goes and refuses to strand a
+  route behind a gateway or empty a shared alias.
+- **Preview parity for approval-gated actions.** An agent can now preview the
+  exact effect of an approval-requiring action before it parks for a human,
+  matching what the approver sees — while actions that carry a secret in their
+  request stay deliberately un-previewable.
+- **Steadier CLI sign-in.** A stale system-keyring entry can no longer shadow
+  a newer saved token, and expiry messages now say plainly when a session has
+  ended and point at how to sign back in.
+- **Operator console polish.** The Conventions create and edit dialogs render
+  correctly again after a UI-framework upgrade.
+
 ## [v0.32.0](https://github.com/evoila/meho/releases/tag/v0.32.0) — 2026-09-02
 
 - **The Microsoft estate gains connectors.** New connectors for Windows

@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-04
+
+### Added — docs site: new guide pages, client onramps + MCP surface tiers, and a What's new page (#3334 / #3335 / #3342 / #3343 / #3346)
+
+- New Do-real-work guides on the docs site: **flight recorder**, **event
+  ingestion**, and **add-ons** (#3334); a **Windows estate and in-guest
+  execution** guide (#3342); a **client onramps** section (Claude Code, Claude
+  Desktop) with an **MCP surface-and-scopes** reference explaining the default
+  25-tool working surface vs the `mcp:admin` operator planes, and a new
+  **What's new** page summarising recent releases in plain language (#3343). A
+  truthfulness sweep also reconciled the existing guides — banners, CLI verbs,
+  approvals, the docs add-on, sensors, and upgrades — with the shipped v0.32.0
+  surface (#3335). Docs-site only; no code, schema, or CLI OpenAPI-snapshot
+  change.
+- **Generated reference pages** — the connector inventory, the MCP tool
+  reference, and the CLI command reference are now generated straight from the
+  code, published on the docs site under **Reference**, with a CI freshness
+  gate that fails the build if a published page drifts from the source (#3346).
+
 ### Added — standalone-ESXi host resolution (pre-vCenter) + a governed host storage-device read (#3332)
 
 - **The host-domain write composites now dispatch against a standalone
@@ -132,6 +151,19 @@ connector-related release-notes line.
   large). No DB migration; the op registers at runtime, so the CLI OpenAPI
   snapshot is unchanged. (Follow-up to verify the boot-key format on real
   hardware: #3336.)
+
+### Fixed — operator console: Conventions create + edit dialogs miscompiled under daisyUI v5 (#240 / #3309, #241 / #3321)
+
+- **The Conventions "New convention" create dialog and the detail-view edit
+  modal rendered with collapsed, misaligned fields.** Both used daisyUI v4
+  `form-control` / `label-text` classes, removed in v5 (zero compiled rules),
+  so the label-over-input columns collapsed and the two-column Slug/Kind and
+  Body/token-preview grids read misaligned. Both dialogs migrated to
+  `flex flex-col gap-1` label wrappers with `w-full` controls, preserving the
+  `max-w-[12rem]` Priority cap and the `md:grid-cols-2` layouts. Presentation
+  only — the create POST, edit PATCH, CSRF double-submit, the read-only
+  slug/kind contract, and the debounced token-cost preview are unchanged. No DB
+  migration; no CLI OpenAPI-snapshot change.
 
 ### Fixed — CLI credential store: reconcile the keyring/file split-brain (#3320)
 

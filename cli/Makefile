@@ -6,7 +6,7 @@
 # (which delegates here) or run targets directly from this directory.
 
 .PHONY: help build test lint tidy install clean generate snapshot-openapi tools \
-        release-check release-dry-run goreleaser
+        cli-docs release-check release-dry-run goreleaser
 
 # Version metadata gets baked into the binary via -ldflags -X.
 # Override on the command line for release builds:
@@ -86,6 +86,9 @@ $(OAPI_CODEGEN):
 
 generate: tools ## Regenerate the typed API client from api/openapi.json.
 	$(OAPI_CODEGEN) --config api/oapi.config.yaml api/openapi.json
+
+cli-docs: ## Regenerate the committed docs-site CLI reference from the command tree.
+	go run ./cmd/docgen ../docs-site/reference/cli.md
 
 snapshot-openapi: ## Re-snapshot api/openapi.json from the running backplane source.
 	@command -v uv >/dev/null 2>&1 || { echo "snapshot-openapi requires uv (see backend/README.md)"; exit 2; }

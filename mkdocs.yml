@@ -87,6 +87,14 @@ nav:
   - Reference:
       - reference/index.md
       - What's new: reference/whats-new.md
+      # Generated from the connector registry + MCP tool registry by
+      # backend/scripts/generate_reference_docs.py; freshness is enforced
+      # by backend/tests/test_reference_docs_drift.py.
+      - Connectors: reference/connectors.md
+      - MCP tools: reference/mcp-tools.md
+      # Generated from the cobra command tree by cli/cmd/docgen; freshness
+      # is enforced by the cli-api-snapshot-freshness CI job.
+      - CLI: reference/cli.md
       # Generated from the feature-maturity registry by
       # backend/scripts/generate_maturity_index.py (#2678); freshness
       # is enforced by backend/tests/test_maturity_surface_drift.py.

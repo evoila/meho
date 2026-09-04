@@ -25,6 +25,7 @@ from meho_backplane.operations.service_grant_schemas import ServiceGrantCreate
 from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
+    find_live_grant,
 )
 from meho_backplane.settings import get_settings
 
@@ -103,6 +104,76 @@ async def test_create_refuses_wildcards(field: str, payload_kwargs: dict[str, st
         await svc.create(_TENANT_ID, _CREATOR, _payload(**payload_kwargs))
     assert field in str(exc.value)
     assert "wildcard" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id",
+    [
+        # vCenter ?action= governance keys carry a literal query string as
+        # part of their exact op id (vm.power / vm.deploy / host-software).
+        "POST:/vcenter/vm/{vm}/power?action=start",
+        "POST:/vcenter/vm/{vm}/guest/power?action=shutdown",
+        "POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy",
+        # multi-param, including a hyphenated param name (vmw-task).
+        "POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true",
+    ],
+)
+async def test_create_accepts_literal_query_string_op_id(op_id: str) -> None:
+    """A literal ``?action=`` query string on an op_id is exact, not a glob."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    assert entry.op_id == op_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "op_id",
+    [
+        "POST:/vcenter/vm/*",  # glob in the path
+        "POST:/vcenter/vm/{vm}/power?action=*",  # glob in the value
+        "POST:/vcenter/vm/?",  # bare ? (no key=value)
+        "POST:/x?",  # ? with nothing after it
+        "POST:/x?a",  # key with no '='
+        "POST:/x?a=b?c=d",  # a second '?' (not '&')
+        "*.delete",  # typed-op glob
+    ],
+)
+async def test_create_refuses_malformed_query_or_glob_op_id(op_id: str) -> None:
+    """A malformed ``?`` use or any ``*`` in op_id is still refused."""
+    svc = ServicePrincipalGrantService()
+    with pytest.raises(GrantValidationError) as exc:
+        await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+    assert "op_id" in str(exc.value)
+    assert "wildcard" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_query_string_grant_round_trips_to_find_live_grant(
+    session: AsyncSession,
+) -> None:
+    """A query-param op id is created and matched by an exact-string dispatch.
+
+    Regression for the defect where ``?action=`` op ids were refused as
+    wildcards: without a creatable grant, the power/deploy composite sub-ops
+    always parked for service principals. Grant matching is exact string
+    equality, so the same string used to create must match at dispatch.
+    """
+    op_id = "POST:/vcenter/vm/{vm}/power?action=start"
+    svc = ServicePrincipalGrantService()
+    created = await svc.create(_TENANT_ID, _CREATOR, _payload(op_id=op_id))
+
+    matched = await find_live_grant(
+        session,
+        tenant_id=_TENANT_ID,
+        principal_sub=_PRINCIPAL,
+        op_id=op_id,
+        connector_id=_CONNECTOR,
+        target_id=None,
+    )
+    assert matched is not None
+    assert matched.id == created.id
+    assert matched.op_id == op_id
 
 
 @pytest.mark.asyncio

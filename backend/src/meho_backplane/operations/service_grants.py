@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: cohesive CRUD + enforcement unit (create-time review,
+# lookup, dispatch-time consult) that predates this change at ~650 lines;
+# splitting the grant service from its enforcement path is out of scope for a
+# surgical bug fix.
 
 """Standing scoped auto-approval grants for service principals (#3151 / #3152).
 
@@ -43,6 +47,7 @@ tag.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -99,25 +104,67 @@ class GrantValidationError(Exception):
 # ---------------------------------------------------------------------------
 
 
+#: A well-formed HTTP-style ``op_id`` ending in a **literal** query string.
+#:
+#: Several governed vCenter operations carry a ``?action=<verb>`` (or a
+#: multi-param) query string as a literal part of their canonical op id — the
+#: ``vm.power`` / ``vm.deploy_from_library`` / host-software composite sub-ops
+#: (``POST:/vcenter/vm/{vm}/power?action=start``,
+#: ``POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy``,
+#: ``POST:/esx/settings/hosts/{host}/software?action=apply&vmw-task=true``) and
+#: every ``?action=`` endpoint the ingest parser emits. That ``?`` is part of
+#: the exact op id, not a glob — grant matching is exact string equality (see
+#: :func:`find_live_grant`), so the literal is safe. This matches exactly one
+#: ``?`` (no ``*``), followed by one or more ``key=value`` pairs joined by
+#: ``&`` (keys / values are ``[A-Za-z0-9_.-]``, covering ``vmw-task``).
+_LITERAL_QUERY_STRING_OP_ID: re.Pattern[str] = re.compile(
+    r"^[A-Z]+:/[^?*]+\?[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+"
+    r"(?:&[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+)*$"
+)
+
+
 def _reject_wildcards(payload: ServiceGrantCreate) -> None:
-    """Refuse any glob metacharacter in the exact-scope fields (#3151).
+    """Refuse glob metacharacters in the exact-scope fields (#3151).
 
     Creating a grant is the operator's explicit per-op review, so
     ``op_id``, ``connector_id``, and ``principal_sub`` must each name one
-    exact value — a ``*`` / ``?`` would silently widen the unattended
-    surface past what the operator reviewed.
+    exact value — a ``*`` (or a bare ``?``) would silently widen the
+    unattended surface past what the operator reviewed. ``*`` is never
+    permitted anywhere.
+
+    The one exception is a **literal** query string on an HTTP-style
+    ``op_id`` (e.g. ``POST:/vcenter/vm/{vm}/power?action=start``): several
+    governed vCenter ops carry a ``?action=`` key as a literal part of their
+    exact op id, and grant matching is exact string equality, so such an op
+    id is accepted verbatim (see :data:`_LITERAL_QUERY_STRING_OP_ID`). A
+    ``?`` anywhere else — a malformed op id, or a ``connector_id`` /
+    ``principal_sub`` — is still a rejected glob.
     """
+
+    def _wildcard_error(field: str, value: str) -> GrantValidationError:
+        return GrantValidationError(
+            f"{field} must be an exact value; wildcards are not permitted "
+            f"(got {value!r}). A standing grant is the operator's explicit "
+            "per-op review, not a pattern."
+        )
+
     for field, value in (
         ("op_id", payload.op_id),
         ("connector_id", payload.connector_id),
         ("principal_sub", payload.principal_sub),
     ):
-        if "*" in value or "?" in value:
-            raise GrantValidationError(
-                f"{field} must be an exact value; wildcards are not permitted "
-                f"(got {value!r}). A standing grant is the operator's explicit "
-                "per-op review, not a pattern."
-            )
+        if "*" in value:
+            raise _wildcard_error(field, value)
+        if "?" in value:
+            if field == "op_id" and _LITERAL_QUERY_STRING_OP_ID.match(value):
+                continue
+            if field == "op_id":
+                raise GrantValidationError(
+                    "op_id may contain a literal query string like "
+                    f"'?action=start' (got {value!r}); glob wildcards are not "
+                    "permitted."
+                )
+            raise _wildcard_error(field, value)
 
 
 def _validate_expires_at(expires_at: datetime | None) -> None:

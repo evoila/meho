@@ -89,6 +89,17 @@ model). `target_id` is matched **exactly**, including the targetless
 (`NULL`) case — no any-target wildcard. Creating the grant IS the
 operator's upfront review, deny-by-default absent a match.
 
+An `op_id` **may** carry a literal query string (e.g.
+`POST:/vcenter/vm/{vm}/power?action=start`,
+`POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`): several
+governed vCenter ops key each `?action=` verb as its own exact op id, so the
+`?` there is a literal part of the id, not a glob. Such an op id is accepted
+verbatim and matched by exact string equality; a `*` anywhere — or a
+malformed `?` (no `key=value`) — is still refused as a wildcard. Without
+this, a service principal could never hold a standing grant for the
+`vm.power` / `vm.deploy_from_library` / host-software composite sub-ops, so
+those composites always parked for service principals.
+
 - **`reason` is required** (the review flow — the body carries the
   operator's justification).
 - **`expires_at`** optional (a standing grant is permanent by default).

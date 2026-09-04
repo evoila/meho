@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — service-principal grants: literal query-string op ids (`?action=…`) were refused as wildcards (#3350)
+
+- A standing grant whose `op_id` carried a literal query string (e.g.
+  `POST:/vcenter/vm/{vm}/power?action=start`,
+  `POST:/vcenter/ovf/library-item/{ovfLibraryItemId}?action=deploy`) was
+  rejected with a 422 "wildcards are not permitted", because `_reject_wildcards`
+  treated every `?` as a glob. Several governed vCenter ops key each `?action=`
+  verb as its own exact op id, so a service principal could never hold a grant
+  for them and the `vm.power` / `vm.create` power-on / `vm.deploy_from_library`
+  composites always parked. Grant creation now accepts a well-formed literal
+  query string on an HTTP-style op id (exactly one `?`, no `*`, `key=value`
+  pairs joined by `&`) and matches it by exact string equality; `*` anywhere and
+  a malformed `?` are still refused.
+
 ## [0.33.0] - 2026-09-04
 
 ### Added — docs site: new guide pages, client onramps + MCP surface tiers, and a What's new page (#3334 / #3335 / #3342 / #3343 / #3346)

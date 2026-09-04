@@ -9,6 +9,14 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.33.1](https://github.com/evoila/meho/releases/tag/v0.33.1) — 2026-09-04
+
+- **Standing grants for query-string actions.** A service principal can now
+  hold a standing grant for an operation whose id carries a literal `?action=`
+  verb — such as a vCenter power action or an OVF deploy. Before, these were
+  wrongly refused as wildcards, so an agent could never be granted them and the
+  power-on and deploy-from-library flows always had to park for a human.
+
 ## [v0.33.0](https://github.com/evoila/meho/releases/tag/v0.33.0) — 2026-09-04
 
 - **A much bigger documentation site.** New do-real-work guides for the flight

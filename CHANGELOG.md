@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-09-04
+
 ### Fixed — service-principal grants: literal query-string op ids (`?action=…`) were refused as wildcards (#3350)
 
 - A standing grant whose `op_id` carried a literal query string (e.g.

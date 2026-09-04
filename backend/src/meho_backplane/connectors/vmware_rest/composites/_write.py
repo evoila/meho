@@ -820,9 +820,12 @@ _OP_RECONFIGURE_DVPORTGROUP_TASK = (
 # ``_typeName`` discriminators for the two portgroup writes' request bodies
 # (every one is a spec-verified component schema in the pinned vi-json.yaml,
 # and every one is pinned in the write_body_reconcile lane's
-# ``_EMITTED_VIM_TYPE_NAMES``). ``DVSSecurityPolicy`` and ``BoolPolicy`` both
-# derive from ``InheritablePolicy``, whose ``inherited`` field the spec marks
-# required -- so both carry ``inherited=false`` ("explicitly set", not inherit).
+# ``_EMITTED_VIM_TYPE_NAMES``). ``DVSSecurityPolicy`` / ``BoolPolicy`` AND the
+# two VLAN specs (``...VlanIdSpec`` / ``...TrunkVlanSpec``) all derive from
+# ``InheritablePolicy``, whose ``inherited`` field the spec marks required -- so
+# every one carries ``inherited=false`` ("explicitly set", not inherit). Omitting
+# it makes vCenter default ``inherited=true`` and DROP the value: a portgroup
+# created with ``vlan_id`` then reads back untagged (``vlanId: 0``).
 _DVPORTGROUP_CONFIG_SPEC_TYPE = "DVPortgroupConfigSpec"
 _VMWARE_DVS_PORT_SETTING_TYPE = "VMwareDVSPortSetting"
 _DVS_SECURITY_POLICY_TYPE = "DVSSecurityPolicy"
@@ -4185,10 +4188,16 @@ def _build_portgroup_vlan_spec(
     access VLAN (``VmwareDistributedVirtualSwitchVlanIdSpec``) when *vlan_id*
     is set, or ``None`` when neither is given (the portgroup inherits the
     switch default). The caller enforces mutual exclusivity before calling.
+
+    Both spec kinds are ``InheritablePolicy`` subtypes, so each carries
+    ``inherited=false`` -- omitting it makes vCenter default ``inherited=true``
+    and drop the ``vlanId`` (the create succeeds but the portgroup reads back
+    untagged, ``vlanId: 0``).
     """
     if vlan_trunk_ranges is not None:
         return {
             _VMOMI_TYPE_NAME_KEY: _TRUNK_VLAN_SPEC_TYPE,
+            "inherited": False,
             "vlanId": [
                 {
                     _VMOMI_TYPE_NAME_KEY: _NUMERIC_RANGE_TYPE,
@@ -4199,7 +4208,7 @@ def _build_portgroup_vlan_spec(
             ],
         }
     if vlan_id is not None:
-        return {_VMOMI_TYPE_NAME_KEY: _VLAN_ID_SPEC_TYPE, "vlanId": vlan_id}
+        return {_VMOMI_TYPE_NAME_KEY: _VLAN_ID_SPEC_TYPE, "inherited": False, "vlanId": vlan_id}
     return None
 
 

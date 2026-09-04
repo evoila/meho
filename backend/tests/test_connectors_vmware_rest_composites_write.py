@@ -3372,6 +3372,9 @@ async def test_network_portgroup_create_trunk_happy_path(gate: _GateRecorder) ->
                         "_typeName": "VMwareDVSPortSetting",
                         "vlan": {
                             "_typeName": "VmwareDistributedVirtualSwitchTrunkVlanSpec",
+                            # InheritablePolicy subtype: inherited=false so vCenter
+                            # keeps the explicit ranges (omitting it -> untagged).
+                            "inherited": False,
                             "vlanId": [{"_typeName": "NumericRange", "start": 0, "end": 4094}],
                         },
                     },
@@ -3385,7 +3388,12 @@ async def test_network_portgroup_create_trunk_happy_path(gate: _GateRecorder) ->
 
 @pytest.mark.asyncio
 async def test_network_portgroup_create_access_vlan_spec(gate: _GateRecorder) -> None:
-    """Access-mode create sends a single-VLAN VmwareDistributedVirtualSwitchVlanIdSpec."""
+    """Access-mode create sends a single-VLAN VmwareDistributedVirtualSwitchVlanIdSpec.
+
+    The spec is an InheritablePolicy subtype, so the wire body must carry
+    inherited=false; without it vCenter silently creates an untagged (VLAN 0)
+    portgroup despite the vlan_id (verified live against vCenter 8.0.3).
+    """
     conn = _RecordingConnector(
         {},
         vmomi={
@@ -3406,6 +3414,9 @@ async def test_network_portgroup_create_access_vlan_spec(gate: _GateRecorder) ->
     create_body = next(b for p, b in conn.vmomi_calls if p.endswith("/CreateDVPortgroup_Task"))
     assert create_body["spec"]["defaultPortConfig"]["vlan"] == {
         "_typeName": "VmwareDistributedVirtualSwitchVlanIdSpec",
+        # InheritablePolicy subtype: the wire body MUST carry inherited=false, else
+        # vCenter defaults inherited=true and drops vlanId -> an untagged portgroup.
+        "inherited": False,
         "vlanId": 4003,
     }
     # numPorts omitted when not supplied.

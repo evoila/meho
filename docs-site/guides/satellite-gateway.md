@@ -38,20 +38,73 @@ Each tick, the satellite:
 
 Two properties make this safe to run in an untrusted segment:
 
-- **Safe operations only.** A satellite **refuses** any work item whose
-  `safety_level` is not `safe` — it evaluates read-class checks and
-  nothing else. It also refuses any handler not under the connector
-  package. There is no path by which a satellite performs a write.
+- **Read-class checks by default.** Out of the box a satellite runs only
+  safe, read-class work: it **refuses** any work item whose `safety_level`
+  is not `safe`, and any handler not under the connector package. A *change*
+  runs only on an additive, **opt-in write tier** that is off by default and
+  tightly bounded — see [Writes through a satellite](#writes-through-a-satellite).
+  Operations classified `dangerous` or `destructive` are **never** dispatched
+  to a satellite under any configuration.
 - **Authorization, approval, and audit stay central.** The satellite
   never self-authorizes: central mints the assignment, central holds the
   audit ledger, central runs the approval queue. A compromised satellite
-  can, at worst, decline to run its assigned reads — it cannot escalate.
+  can, at worst, decline to run its assigned work — it cannot escalate.
 
 Resilience is built in for the flaky-uplink reality of a remote segment:
 results that fail to post are written to an on-disk **spool** and
 re-posted oldest-first; a failed assignment fetch keeps the **cached**
 assignment running, so the satellite keeps evaluating its last-known
 checks while the uplink is down.
+
+## Writes through a satellite
+
+A satellite is **read-only by default.** The write tier is **additive and
+opt-in** — it stays off until an operator turns it on, and even then it stays
+tightly bounded. Enabling it is **per runner, per operation class, and per
+target**: a **tenant_admin** grants a runner named capabilities through the
+write-allowlist route,
+`POST /api/v1/runner-principals/{name}/write-allowlist`. Each granted entry is
+an `op_pattern` token (all targets) or an `op_pattern@target_scope` token (one
+target scope) — together the runner's write blast radius. A runner is granted
+**nothing** at enrollment and **cannot widen its own allowlist**; only a
+tenant_admin can, and only through that route.
+
+No single control admits a write. A `caution`-level operation runs on a
+satellite only when **all** of these hold at once:
+
+- **Fresh central approval**, bound to the exact operation, target, and
+  parameters — the same human approval queue every central write goes through.
+- **A centrally signed work item, verified offline at the edge.** The satellite
+  checks central's signature **before** it runs anything, so a tampered,
+  re-pointed, or expired item fails closed without a call to central.
+- **The allowlist re-checked independently at the edge**, against the runner's
+  **own** provisioning configuration — so an item is refused if the runner's
+  local allowlist disagrees with what central minted.
+- **A short-lived, single-use, single-target credential**, brokered per work
+  item — never a standing secret the runner holds.
+
+Around that gate:
+
+- **`dangerous` and `destructive` operations never ride a satellite** — anything
+  delete-shaped included. They always run centrally through the approval path,
+  under every configuration.
+- **Every write is audited centrally.** The remote effect is recorded
+  store-and-forward and tamper-evident, and central raises an **alarm if a
+  minted write never reports** it.
+- **Revocation stops writes too.** Revoking a runner's principal stops it
+  minting or receiving any further writes.
+
+!!! note "The write posture in one line"
+
+    A satellite is **read-only by default**; it performs a write only on an
+    opt-in tier where a per-runner allowlist, a fresh central approval, an
+    offline-verified signature, and a single-use scoped credential must **all**
+    hold at once — and `dangerous` or `destructive` operations can **never** run
+    on it.
+
+The write tier is **Beta** — see the
+[feature-maturity index](../reference/maturity.md#satellite_gateway); treat it
+as opt-in and validate it in your own environment before you rely on it.
 
 ## Enroll and deploy a satellite
 
@@ -131,7 +184,7 @@ target.
 |---|---|---|
 | The runner exits 1 at startup naming a variable | A required `MEHO_RUNNER_*` var (`CENTRAL_URL` / `ID` / `TOKEN`) is missing or malformed. | Set all three; the error names the offender. |
 | Checks on a satellite's targets go `unknown` after the satellite stops | The dead-man sweep flipped its assignments stale because `last_seen_at` fell behind — working as designed, not a false green. | Bring the satellite back; restart it or check its outbound path to `MEHO_RUNNER_CENTRAL_URL`. |
-| A work item comes back `refused` | The satellite declined it — most often because its `safety_level` was not `safe`. Satellites never run writes. | Only read-class checks belong on a satellite; a write must run centrally through the approval path. |
+| A work item comes back `refused` | The satellite declined it — most often because the `safety_level` is one it is not authorised to run, or the opt-in write tier is not enabled for it. | Read-class checks always belong on a satellite; a *change* runs only on the [opt-in write tier](#writes-through-a-satellite); `dangerous` / `destructive` work always runs centrally through the approval path. |
 | Results lag but eventually appear | The uplink was down; results spooled to disk and re-posted when it recovered. | Nothing — this is the spool working. If the spool fills (`SPOOL_MAX_FILES`), fix the uplink. |
 | `403` registering a runner principal | `meho runner-principal register` / `revoke` need **tenant_admin**. | Enroll under a tenant_admin session; `show` / `list` are operator-level. |
 

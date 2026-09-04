@@ -1,0 +1,2757 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Governance backplane for AI agents acting on infrastructure — policy-gated, audit-grade, MCP-native.">
+      
+      
+      
+        <link rel="canonical" href="https://evoila.github.io/meho/0.33/deployment-shapes/">
+      
+      
+        <link rel="prev" href="../architecture/">
+      
+      
+        <link rel="next" href="../install/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Deployment shapes - MEHO</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#deployment-shapes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MEHO" class="md-header__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MEHO
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Deployment shapes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href=".." class="md-tabs__link">
+          
+  
+  
+  Start here
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../install/" class="md-tabs__link">
+          
+  
+  
+  Install & operate
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../clients/" class="md-tabs__link">
+          
+  
+  
+  Connect clients
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../guides/" class="md-tabs__link">
+          
+  
+  
+  Do real work
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../reference/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../project/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MEHO" class="md-nav__button md-logo" aria-label="MEHO" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    MEHO
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/evoila/meho" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    evoila/meho
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment shapes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-shape-is-yours" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which shape is yours?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-every-shape-shares" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What every shape shares
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What every shape shares">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The components
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-private-address-guard-applies-to-every-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The private-address guard applies to every shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#broadcast-runs-single-replica-with-ephemeral-streams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Broadcast runs single-replica, with ephemeral streams
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-chart-fails-fast-on-invalid-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The chart fails fast on invalid values
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flat-lan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flat LAN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#segmented-network-with-satellite-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segmented network with satellite gateways
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#air-gapped" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Air-gapped
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cloud-native-without-vault-google-secret-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud-native without Vault (Google Secret Manager)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-tenant-msp-target-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-tenant MSP (target shape)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next step
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sources
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install & operate
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Install & operate
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The install trail
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/credential-backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credential backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/keycloak-realm/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keycloak realm setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/tls-ingress/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    TLS and ingress
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/upgrades/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Upgrades
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/kind-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local kind quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Connect clients
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect clients
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/mcp-surface-and-scopes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP surface and scopes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The meho CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/claude-desktop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Desktop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/claude-code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/mcp-remote-shim/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Other MCP clients (mcp-remote shim)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clients/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting auth walls
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Do real work
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Do real work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/targets-and-secrets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Register targets and secrets
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/first-operations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run your first operations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/sensors-quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Watch your estate with sensors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/approvals-and-break-glass/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Approvals and break-glass
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/topology/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topology
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/broadcast/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Broadcast
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/memory-and-knowledge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Memory and knowledge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/audit-forensics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audit forensics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/flight-recorder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Flight recorder
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/runbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/scheduler/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduler
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/event-ingestion/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Event ingestion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/satellite-gateway/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Satellite gateway
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/windows-and-guest-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows estate and in-guest execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/add-ons/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add-ons
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/whats-new/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    What's new
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/connectors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connectors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/mcp-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/maturity/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Maturity
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../project/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#which-shape-is-yours" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which shape is yours?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-every-shape-shares" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What every shape shares
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What every shape shares">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-components" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The components
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-private-address-guard-applies-to-every-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The private-address guard applies to every shape
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#broadcast-runs-single-replica-with-ephemeral-streams" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Broadcast runs single-replica, with ephemeral streams
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-chart-fails-fast-on-invalid-values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The chart fails fast on invalid values
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#flat-lan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Flat LAN
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#segmented-network-with-satellite-gateways" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Segmented network with satellite gateways
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#air-gapped" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Air-gapped
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cloud-native-without-vault-google-secret-manager" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cloud-native without Vault (Google Secret Manager)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-tenant-msp-target-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-tenant MSP (target shape)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-step" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next step
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sources" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sources
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/evoila/meho/edit/main/docs-site/deployment-shapes.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="deployment-shapes">Deployment shapes<a class="headerlink" href="#deployment-shapes" title="Permanent link">&para;</a></h1>
+<p>MEHO ships as <strong>one Helm chart</strong>. The five shapes below are not five
+products and not five installs — they are the five ways real estates
+differ: network topology, credential backend, and tenancy. Every shape
+runs the same chart with the same components; what changes is which
+network the backplane can dial, where credentials live, and how many
+customers share one release.</p>
+<p>Pick a shape before you start the install. It decides three things you
+cannot easily change later: which address ranges you allowlist, whether
+you need a credential store you don't already run, and whether any part
+of your estate needs a gateway rather than a route.</p>
+<h2 id="which-shape-is-yours">Which shape is yours?<a class="headerlink" href="#which-shape-is-yours" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>If your estate looks like this</th>
+<th>Your shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One network segment; the cluster can dial every target directly</td>
+<td><a href="#flat-lan">Flat LAN</a></td>
+</tr>
+<tr>
+<td>Several management segments, and at least one enclave the cluster can never dial</td>
+<td><a href="#segmented-network-with-satellite-gateways">Segmented network with satellite gateways</a></td>
+</tr>
+<tr>
+<td>No internet egress at all; every artefact arrives by one-time transfer</td>
+<td><a href="#air-gapped">Air-gapped</a></td>
+</tr>
+<tr>
+<td>GKE or GCP-adjacent, and you would rather not run Vault</td>
+<td><a href="#cloud-native-without-vault-google-secret-manager">Cloud-native without Vault</a></td>
+</tr>
+<tr>
+<td>One MEHO release governing several <em>customers'</em> estates</td>
+<td><a href="#multi-tenant-msp-target-shape">Multi-tenant MSP</a></td>
+</tr>
+</tbody>
+</table>
+<p>Air-gapped is the one shape that <strong>composes</strong> with the others: it adds
+an artefact-mirroring workstream on top of a flat-LAN, segmented, or
+cloud-native install rather than replacing it.</p>
+<h2 id="what-every-shape-shares">What every shape shares<a class="headerlink" href="#what-every-shape-shares" title="Permanent link">&para;</a></h2>
+<h3 id="the-components">The components<a class="headerlink" href="#the-components" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Who provides it</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MEHO backplane</td>
+<td>MEHO — <code>ghcr.io/evoila/meho</code></td>
+<td>One Deployment from the chart at <code>oci://ghcr.io/evoila/meho-chart</code>. Agents reach it over MCP; operators reach it over the REST API with the <code>meho</code> CLI and the optional browser console. Both fronts share one governed dispatch path — policy, approvals, audit, result handling.</td>
+</tr>
+<tr>
+<td>Keycloak realm</td>
+<td>You</td>
+<td>The OIDC issuer. The backplane needs a confidential client plus the public <code>meho-cli</code> device-code client with audience mappers.</td>
+</tr>
+<tr>
+<td>PostgreSQL + pgvector</td>
+<td>You</td>
+<td>Operator-managed; the <code>vector</code> extension is pre-created once by a superuser, and the chart expects an <code>asyncpg</code> DSN.</td>
+</tr>
+<tr>
+<td>Valkey broadcast</td>
+<td>MEHO — in-tree subchart</td>
+<td>Installed by the same release. See the availability posture below.</td>
+</tr>
+<tr>
+<td>Credential backend</td>
+<td>You</td>
+<td>HashiCorp Vault KV-v2 (the default) <strong>or</strong> Google Secret Manager, selected with <code>config.credentialBackend</code>.</td>
+</tr>
+<tr>
+<td>Targets</td>
+<td>You</td>
+<td>The governed systems. Each is registered with an address, a <em>reference</em> into the credential backend — never the secret itself — and its TLS trust settings.</td>
+</tr>
+</tbody>
+</table>
+<p>Prerequisites, the worked install commands, and the per-row verification
+checks for all of the above live in
+<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#deploy-from-cold--prerequisites-checklist"><code>docs/deploying.md</code></a>;
+sanitized values files for the on-premises and Google-Secret-Manager
+archetypes live in
+<a href="https://github.com/evoila/meho/tree/main/deploy/values-examples"><code>deploy/values-examples/</code></a>.</p>
+<h3 id="the-private-address-guard-applies-to-every-shape">The private-address guard applies to every shape<a class="headerlink" href="#the-private-address-guard-applies-to-every-shape" title="Permanent link">&para;</a></h3>
+<p>The backplane <strong>default-denies</strong> targets whose hostname resolves to a
+non-public address — loopback, RFC 1918, link-local, cloud metadata.
+Since MEHO exists to govern private infrastructure, essentially every
+production install has to name its own ranges in
+<code>config.targetSsrfAllowlist</code>, for example <code>"10.0.0.0/8,192.168.0.0/16"</code>.</p>
+<p>This is a scoped opt-in, never a global off-switch: an empty value keeps
+the guard fully on, and the intended posture is to list the ranges you
+actually manage. Plan the list before the first target registration —
+registering a target outside the allowlist is rejected, not warned
+about.
+(<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#operational-chart-knobs"><code>docs/deploying.md</code> § Operational chart knobs</a>.)</p>
+<h3 id="broadcast-runs-single-replica-with-ephemeral-streams">Broadcast runs single-replica, with ephemeral streams<a class="headerlink" href="#broadcast-runs-single-replica-with-ephemeral-streams" title="Permanent link">&para;</a></h3>
+<p>The activity-broadcast bus is deliberately <strong>one replica</strong> in the
+current chart: no Sentinel sidecar ships with it, streams are ephemeral
+by design, and the chart's values schema <em>rejects</em> any replica count
+above 1 rather than letting you configure a topology that would not
+actually be highly available. A restart therefore loses unconsumed
+stream history, and highly-available broadcast is explicitly deferred.
+(<a href="https://github.com/evoila/meho/blob/main/deploy/charts/meho/values.yaml"><code>deploy/charts/meho/values.yaml</code></a>
+<code>broadcast:</code> block and the matching
+<a href="https://github.com/evoila/meho/blob/main/deploy/charts/meho/values.schema.json"><code>values.schema.json</code></a>
+constraint.)</p>
+<p>This is the same posture in all five shapes, so it is stated once here
+rather than repeated below. Broadcast is a <strong>Beta</strong> feature — see the
+<a href="../reference/maturity/">feature maturity index</a>.</p>
+<h3 id="the-chart-fails-fast-on-invalid-values">The chart fails fast on invalid values<a class="headerlink" href="#the-chart-fails-fast-on-invalid-values" title="Permanent link">&para;</a></h3>
+<p>Chart values are validated by the chart's JSON schema, so a
+schema-invalid install fails during <code>helm template</code> / <code>helm install</code>
+before anything runs. The clearest example: if none of <code>ingress.host</code>,
+<code>config.backplaneUrl</code>, or <code>config.mcpResourceUri</code> resolves, the chart
+refuses to render rather than deploying a silently unusable MCP
+endpoint. What the schema cannot check is everything outside the
+chart — the pgvector extension, database reachability, DNS, CA trust,
+and credential-backend permissions surface at migration or first boot
+instead, row by row in the cold-start checklist.
+(<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#deploy-from-cold--prerequisites-checklist"><code>docs/deploying.md</code> § Deploy from cold</a>
+— the MCP-audience row for the example, the rest of the table for what
+surfaces later.)</p>
+<hr />
+<h2 id="flat-lan">Flat LAN<a class="headerlink" href="#flat-lan" title="Permanent link">&para;</a></h2>
+<p>The smallest production shape: one network segment, every target
+directly reachable from the cluster, one entry in the address
+allowlist.</p>
+<pre class="mermaid"><code>flowchart TB
+  agent["Agent front (MCP client)"]
+  op["Operator front (CLI and browser console)"]
+  subgraph cluster["Kubernetes cluster, namespace meho"]
+    bp["MEHO backplane (shared dispatch path)"]
+    valkey["Valkey broadcast (single replica, ephemeral streams)"]
+  end
+  kc["Keycloak realm"]
+  pg["PostgreSQL + pgvector"]
+  vault["Vault KV-v2 (or Google Secret Manager)"]
+  subgraph lan["Flat LAN, one allowlist entry"]
+    t1["Target A"]
+    t2["Target B"]
+    tn["Target N"]
+  end
+  agent --&gt;|"MCP, Bearer JWT"| bp
+  op --&gt;|"REST API, Bearer JWT"| bp
+  agent -.-&gt;|"OIDC"| kc
+  op -.-&gt;|"device-code login"| kc
+  bp -.-&gt;|"validate issuer and audience"| kc
+  bp --&gt; valkey
+  bp --&gt; pg
+  bp --&gt;|"credential reads"| vault
+  bp --&gt;|"governed operations"| t1
+  bp --&gt; t2
+  bp --&gt; tn</code></pre>
+<p><strong>Pick this shape when:</strong></p>
+<ul>
+<li>Your targets sit in one network segment that the cluster can already
+  reach.</li>
+<li>You already run a Keycloak realm and either a Vault or Google Secret
+  Manager.</li>
+<li>One team, one tenant, a handful of targets, interactive operators
+  only.</li>
+</ul>
+<p><strong>What it still costs you.</strong> "Flat" is a network statement, not an
+install shortcut. Every cold-install prerequisite applies unchanged: the
+pgvector extension step, the <code>asyncpg</code> DSN, the Keycloak clients and
+mappers, an internal-CA trust bundle where your services use private
+certificates, and a pinned immutable image tag. A flat LAN is still
+private address space, so the allowlist entry above is mandatory —
+there is no shape in which it is optional.</p>
+<h2 id="segmented-network-with-satellite-gateways">Segmented network with satellite gateways<a class="headerlink" href="#segmented-network-with-satellite-gateways" title="Permanent link">&para;</a></h2>
+<p>The standard enterprise on-premises shape: several management segments,
+the backplane given network identity into each segment it can reach, and
+a <strong>satellite gateway</strong> inside each enclave it cannot.</p>
+<pre class="mermaid"><code>flowchart TB
+  agent["Agent front (MCP client)"]
+  op["Operator front (CLI and browser console)"]
+  subgraph central["Central cluster, namespace meho"]
+    bp["MEHO backplane"]
+    valkey["Valkey broadcast (single replica)"]
+  end
+  kc["Keycloak realm"]
+  pg["PostgreSQL + pgvector"]
+  vault["Credential backend"]
+  subgraph segA["Segment A: directly reachable (allowlisted)"]
+    ta["Targets"]
+  end
+  subgraph segB["Segment B: reachable after routes, DNS and CA trust"]
+    tb["Targets"]
+  end
+  subgraph enclave["Enclave C: no inbound path from central"]
+    runner["Satellite gateway (read-only executor)"]
+    tc["Targets"]
+  end
+  agent --&gt; bp
+  op --&gt; bp
+  bp -.-&gt; kc
+  bp --&gt; valkey
+  bp --&gt; pg
+  bp --&gt; vault
+  bp --&gt;|"governed operations"| ta
+  bp --&gt;|"governed operations"| tb
+  runner --&gt;|"outbound-only poll and report"| bp
+  runner --&gt;|"read-only operations"| tc</code></pre>
+<p><strong>Pick this shape when:</strong></p>
+<ul>
+<li>Two or more network segments sit between the cluster and the targets.</li>
+<li>You can give the backplane routes, DNS resolution, and CA trust into
+  the management networks it <em>should</em> reach.</li>
+<li>At least one zone — a NAT-ed site, a private control plane, a
+  no-inbound network — will never accept a connection from the central
+  cluster.</li>
+</ul>
+<p><strong>Satellite gateways are read-only by design — and that is a planning
+constraint, not a limitation to work around.</strong> A gateway is a dumb
+executor of centrally authorised work. It runs the same container image
+in a different mode, holds no local database, broadcast bus, console, or
+MCP endpoint, and <strong>dials outbound only</strong> — it polls the central
+instance for its assignment, executes read-only operations locally
+against the same connector surface, and reports results back. All
+authorisation, approval, and audit stay central; a gateway never
+self-authorises.</p>
+<p>The consequence is worth stating plainly to whoever is planning the
+rollout: <strong>an enclave served only by a satellite gateway gets
+observation, not change automation.</strong> Write workflows require the
+central backplane to reach the target itself. Design the segment map
+around that before anyone promises otherwise. Implementation detail:
+<a href="https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md"><code>docs/codebase/satellite-runner.md</code></a>.
+The satellite gateway is a <strong>Beta</strong> feature — see the
+<a href="../reference/maturity/">feature maturity index</a>.</p>
+<p><strong>Every reachable segment is its own small project.</strong> Routes, DNS, CA
+trust, and one more entry in <code>config.targetSsrfAllowlist</code> per segment.
+Zones reachable only through a jump host or a remote-desktop gateway are
+outside all of this — classify them as observe-only and scope them out
+explicitly rather than discovering it mid-install.</p>
+<p><strong>Budget for the tail, not the registration.</strong> In one field
+deployment, twenty-two targets were registered in two days; the access,
+trust, and routing work behind them ran for weeks afterwards. Target
+registration is the fast part of this shape. Per-segment network
+identity is the slow part, and it is where the calendar actually goes.</p>
+<h2 id="air-gapped">Air-gapped<a class="headerlink" href="#air-gapped" title="Permanent link">&para;</a></h2>
+<p>The no-egress shape: every artefact is mirrored into the estate once,
+the MEHO-published ones signature-verified on the way in, and the
+platform then runs with no internet path at all.</p>
+<pre class="mermaid"><code>flowchart TB
+  subgraph outside["Outside, one-time offline transfer"]
+    src["Published artefacts: backplane image, Helm chart, Valkey image"]
+  end
+  subgraph estate["Air-gapped estate, no internet egress"]
+    mirror["Local registry mirror (MEHO artefacts signature-verified at import)"]
+    subgraph cluster["Cluster, namespace meho"]
+      bp["MEHO backplane (default embedding model baked into the image)"]
+      valkey["Valkey broadcast (single replica)"]
+    end
+    kc["Keycloak realm"]
+    pg["PostgreSQL + pgvector"]
+    vault["Credential backend"]
+    local["Local MCP clients and the meho CLI"]
+    targets["Targets (allowlisted internal ranges)"]
+  end
+  src --&gt;|"mirrored offline"| mirror
+  mirror --&gt;|"image and chart pulls"| cluster
+  local --&gt; bp
+  bp -.-&gt; kc
+  bp --&gt; valkey
+  bp --&gt; pg
+  bp --&gt; vault
+  bp --&gt;|"governed operations"| targets</code></pre>
+<p><strong>Pick this shape when</strong> your estate has no internet egress — or when
+registry pulls must go through a mirror you control. It adds a mirroring
+workstream to whichever of the other shapes describes your network; it
+does not change the architecture.</p>
+<p><strong>A default install needs no internet egress.</strong> The default embedding
+model (<code>BAAI/bge-small-en-v1.5</code>) is baked into the container image:
+offline, version-locked, no model download and no cache volume. The
+caveat is one-directional — setting a <strong>custom</strong>
+<code>config.retrievalEmbeddingModel</code> makes the backplane download it at
+runtime, which is exactly what an air-gapped estate cannot do. Keep the
+default model.</p>
+<p><strong>Three artefacts have to be mirrored:</strong></p>
+<ol>
+<li>the backplane image, <code>ghcr.io/evoila/meho</code>;</li>
+<li>the Helm chart, <code>oci://ghcr.io/evoila/meho-chart</code>;</li>
+<li>the broadcast subchart's Valkey image, <code>valkey/valkey</code> — it comes
+   from Docker Hub, not from the MEHO registry, and it is the one people
+   forget.</li>
+</ol>
+<p>The two MEHO-published artefacts — the backplane image and the Helm
+chart — are cosign keyless-signed, so the mirror import step can verify
+their provenance before they enter the estate; the verification commands
+are in the
+<a href="https://github.com/evoila/meho#verify-image--chart--cli-signatures">repository README</a>.
+The Valkey image is an upstream third-party image from Docker Hub and
+carries no MEHO signature — mirror it under whatever provenance policy
+your registry already applies to third-party base images.</p>
+<p><strong>Cloud-hosted AI clients do not work here, and cannot be made to.</strong>
+A hosted MCP client has to reach your backplane over the public
+internet. An air-gapped estate has no such path by definition, so this
+shape is local MCP clients and the <code>meho</code> CLI only. Set that expectation
+during planning rather than at handover — it is the single most common
+air-gap surprise.</p>
+<h2 id="cloud-native-without-vault-google-secret-manager">Cloud-native without Vault (Google Secret Manager)<a class="headerlink" href="#cloud-native-without-vault-google-secret-manager" title="Permanent link">&para;</a></h2>
+<p>The GCP-native shape: no Vault anywhere. Target credentials live in
+Google Secret Manager and are read under GKE Workload Identity — no
+service-account JSON keys — while the governed estate itself stays on
+private RFC 1918 ranges behind a VPN or interconnect.</p>
+<pre class="mermaid"><code>flowchart TB
+  agent["Agent front (MCP client)"]
+  op["Operator front (CLI and browser console)"]
+  subgraph gke["GKE cluster, namespace meho"]
+    bp["MEHO backplane (Workload Identity SA, no SA keys)"]
+    valkey["Valkey broadcast (single replica)"]
+  end
+  kc["Keycloak realm"]
+  pg["PostgreSQL + pgvector"]
+  gsm["Google Secret Manager"]
+  sts["Google STS (optional per-operator federation)"]
+  subgraph estate["RFC 1918 estate (VPN or interconnect)"]
+    targets["Targets (allowlisted private ranges)"]
+  end
+  agent --&gt; bp
+  op --&gt; bp
+  bp -.-&gt; kc
+  bp --&gt; valkey
+  bp --&gt; pg
+  bp --&gt;|"credential reads via Workload Identity"| gsm
+  bp -.-&gt;|"exchange operator JWT (optional)"| sts
+  bp --&gt;|"governed operations"| targets</code></pre>
+<p><strong>Pick this shape when</strong> you want out of running Vault, your platform is
+GKE or GCP-adjacent, and you would rather not couple "read a credential"
+to "be on a particular network" — a managed secret store removes that
+coupling, since where the store lives becomes a cloud decision instead
+of a network one.</p>
+<p><strong>Setting it up.</strong> <code>config.credentialBackend: gsm</code> selects the backend;
+<code>vault.address</code> stays blank, because the chart schema requires it only
+for the Vault backend. The health check's federation proof then reads
+through Secret Manager instead of Vault. Worked example:
+<a href="https://github.com/evoila/meho/blob/main/deploy/values-examples/values-gsm-example.yaml"><code>values-gsm-example.yaml</code></a>;
+narrative in
+<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#gsm--vault-free"><code>docs/deploying.md</code> § GSM / Vault-free</a>.</p>
+<p><strong>Three things to plan for:</strong></p>
+<ul>
+<li><strong>The private-address guard still applies.</strong> Cloud-hosted backplane,
+  private estate — the RFC 1918 ranges behind your VPN or interconnect
+  must be allowlisted exactly as they would be on-premises.</li>
+<li><strong>Per-target IAM is real work.</strong> The reading identity needs
+  <code>roles/secretmanager.secretAccessor</code> <strong>on each target secret</strong>. That is
+  least privilege working as intended, but it is a per-secret grant, not
+  a one-time project-level toggle, and it is the step most likely to be
+  discovered at first probe rather than during planning.
+  (<a href="https://github.com/evoila/meho/blob/main/docs/codebase/connectors-shared-vault-creds.md#gcp-secret-manager-backend-gsm"><code>docs/codebase/connectors-shared-vault-creds.md</code> § GCP Secret Manager backend</a>.)</li>
+<li><strong>Per-operator attribution obligates a background-dispatch
+  decision.</strong> Turning on Workload Identity Federation
+  (<code>gsm.workloadIdentityFederation.audience</code>) makes credential reads run
+  as the <em>calling operator</em>, so Google's own audit log names the human
+  rather than the platform service account. But scheduled work — sensor
+  evaluations and other callers with no operator behind them — has no
+  token to federate. On a cluster without ambient pod identity you must
+  configure the <code>checkRunner.*</code> principal, or credentialed sensors
+  evaluate <code>unknown</code> forever. The full decision matrix is in
+  <a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#per-operator-wif-and-background-dispatch-2642"><code>docs/deploying.md</code> § Per-operator WIF and background dispatch</a>.</li>
+</ul>
+<p>The Google Secret Manager backend is a <strong>Beta</strong> feature — see the
+<a href="../reference/maturity/">feature maturity index</a>.</p>
+<h2 id="multi-tenant-msp-target-shape">Multi-tenant MSP (target shape)<a class="headerlink" href="#multi-tenant-msp-target-shape" title="Permanent link">&para;</a></h2>
+<div class="admonition warning">
+<p class="admonition-title">This is a target shape, not a field-proven one</p>
+<p>The platform's tenancy primitives are real and shipped —
+per-tenant token claims, tenant-scoped credential namespaces,
+tenant-scoped policy and audit. What has <em>not</em> happened yet is a
+production multi-customer estate running on them. Read the diagram
+below as the design the primitives support, and treat a
+multi-customer engagement as pioneering work rather than a
+repeat of something already done. This label is deliberate: MEHO
+publishes a <a href="../reference/maturity/">feature maturity index</a> so
+adopters can tell shipped-and-proven from shipped-and-untested,
+and this shape belongs on the honest side of that line.</p>
+</div>
+<pre class="mermaid"><code>flowchart TB
+  subgraph tenA["Tenant A"]
+    agentA["Agent (MCP, tenant A claims)"]
+    opA["Operators (CLI and console, tenant A claims)"]
+  end
+  subgraph tenB["Tenant B"]
+    agentB["Agent (MCP, tenant B claims)"]
+    opB["Operators (CLI and console, tenant B claims)"]
+  end
+  subgraph central["MSP-operated cluster, namespace meho"]
+    bp["MEHO backplane (tenant-scoped policy, audit, approvals)"]
+    valkey["Valkey broadcast (single replica, shared)"]
+  end
+  kc["Keycloak (per-tenant identity claims)"]
+  pg["PostgreSQL + pgvector"]
+  vault["Vault KV-v2 (per-tenant subtree)"]
+  subgraph estateA["Customer A estate"]
+    targetsA["Targets (tenant A)"]
+  end
+  subgraph estateB["Customer B estate"]
+    targetsB["Targets (tenant B)"]
+  end
+  agentA --&gt; bp
+  opA --&gt; bp
+  agentB --&gt; bp
+  opB --&gt; bp
+  bp -.-&gt; kc
+  bp --&gt; valkey
+  bp --&gt; pg
+  bp --&gt; vault
+  bp --&gt;|"tenant-A-scoped operations"| targetsA
+  bp --&gt;|"tenant-B-scoped operations"| targetsB</code></pre>
+<p><strong>Pick this shape only when</strong> you genuinely need one MEHO release
+governing several <em>customers'</em> estates, with per-tenant identity,
+credentials, targets, policy, and audit scoping. A single organisation
+with several internal teams does not need this — that is one tenant with
+several roles.</p>
+<p><strong>Tenant identity rides on token claims.</strong> Every principal carries
+tenant claims from your Keycloak realm, and on the Vault backend the KV
+tenant-scope guard pins credential references under
+<code>secret/tenants/{tenant_id}/</code> — default-on since v0.15.0. The per-tenant
+layout is a first-class platform contract, not something bolted on for
+service providers.
+(<a href="https://github.com/evoila/meho/blob/main/docs/deploying.md#version-specific-upgrade-notes"><code>docs/deploying.md</code> § Version-specific upgrade notes</a>.)</p>
+<p><strong>Network reality multiplies per tenant.</strong> Each customer estate brings
+its own segments, allowlist ranges, CA trust, and possibly its own
+enclaves — the
+<a href="#segmented-network-with-satellite-gateways">segmented shape</a> applies
+<em>inside every tenant</em>, and the effort scales with the number of
+estates, not the number of MEHO releases.</p>
+<p><strong>Two honest gaps to weigh up front.</strong> There is no shipped worked
+example for this shape — no per-tenant values file ships with the chart,
+so the first deployment writes it. And the broadcast bus described
+<a href="#broadcast-runs-single-replica-with-ephemeral-streams">above</a> is shared
+across all tenants: a restart loses unconsumed stream history for every
+tenant at once, and there is no per-tenant broadcast isolation today.
+For a service provider that is a real posture conversation, not a
+footnote.</p>
+<h2 id="next-step">Next step<a class="headerlink" href="#next-step" title="Permanent link">&para;</a></h2>
+<p>Once you have picked a shape, follow the
+<a href="../install/">install trail</a> — the prerequisites and the
+credential-backend decision there are the same in every shape; the
+allowlist, the segment map, and the mirroring workstream are the parts
+your shape decides.</p>
+<h2 id="sources">Sources<a class="headerlink" href="#sources" title="Permanent link">&para;</a></h2>
+<p>Every operational claim on this page traces to a file in this
+repository:</p>
+<ul>
+<li><a href="https://github.com/evoila/meho/blob/main/docs/deploying.md"><code>docs/deploying.md</code></a>
+  — cold-install prerequisites (pgvector, <code>asyncpg</code> DSN, Keycloak
+  clients, MCP audience, CA bundle, pinned tag, baked-in default
+  embedding model); the Vault and Google Secret Manager install paths;
+  per-operator Workload Identity Federation and background dispatch;
+  operational chart knobs including <code>config.targetSsrfAllowlist</code>;
+  version-specific upgrade notes including the Vault tenant-scope
+  guard.</li>
+<li><a href="https://github.com/evoila/meho/blob/main/deploy/charts/meho/values.yaml"><code>deploy/charts/meho/values.yaml</code></a>
+  and
+  <a href="https://github.com/evoila/meho/blob/main/deploy/charts/meho/values.schema.json"><code>values.schema.json</code></a>
+  — the <code>broadcast:</code> block: single replica, schema-rejected replica
+  counts above 1, ephemeral streams, and the Valkey image source.</li>
+<li><a href="https://github.com/evoila/meho/tree/main/deploy/values-examples"><code>deploy/values-examples/</code></a>
+  — the sanitized on-premises archetype
+  (<code>values-rdc-example.yaml</code>), the Google Secret Manager archetype
+  (<code>values-gsm-example.yaml</code>), and the local rehearsal overlay
+  (<code>values-kind.yaml</code>, explicitly <em>not</em> a functional federation
+  deploy).</li>
+<li><a href="https://github.com/evoila/meho/blob/main/docs/codebase/satellite-runner.md"><code>docs/codebase/satellite-runner.md</code></a>
+  — the satellite gateway's outbound-only, read-only, no-local-state
+  design.</li>
+<li><a href="https://github.com/evoila/meho#verify-image--chart--cli-signatures">Repository README</a>
+  — cosign keyless verification for the image, chart, and CLI.</li>
+<li><a href="../reference/maturity/">Feature maturity index</a> — the shipped tier of
+  broadcast, the satellite gateway, the Google Secret Manager backend,
+  and every other non-GA feature named above.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../architecture/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Reference architecture">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Reference architecture
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../install/" class="md-footer__link md-footer__link--next" aria-label="Next: The install trail">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                The install trail
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2026 evoila Group — Apache 2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.footer", "navigation.top", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

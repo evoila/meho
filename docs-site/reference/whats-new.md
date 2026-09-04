@@ -16,6 +16,11 @@ notes.
   verb — such as a vCenter power action or an OVF deploy. Before, these were
   wrongly refused as wildcards, so an agent could never be granted them and the
   power-on and deploy-from-library flows always had to park for a human.
+- **The satellite gateway guide now covers remote writes.** The guide for
+  running checks and operations through a remote runner used to say a satellite
+  had no way to write; it now documents the opt-in tier that lets that runner
+  perform governed, approval-gated, audited writes inside networks the central
+  instance cannot reach.
 
 ## [v0.33.0](https://github.com/evoila/meho/releases/tag/v0.33.0) — 2026-09-04
 

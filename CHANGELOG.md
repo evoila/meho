@@ -92,7 +92,7 @@ connector-related release-notes line.
 
 ## [0.33.0] - 2026-09-04
 
-### Added — docs site: new guide pages, client onramps + MCP surface tiers, and a What's new page (#3334 / #3335 / #3342 / #3343)
+### Added — docs site: new guide pages, client onramps + MCP surface tiers, and a What's new page (#3334 / #3335 / #3342 / #3343 / #3346)
 
 - New Do-real-work guides on the docs site: **flight recorder**, **event
   ingestion**, and **add-ons** (#3334); a **Windows estate and in-guest
@@ -104,6 +104,10 @@ connector-related release-notes line.
   approvals, the docs add-on, sensors, and upgrades — with the shipped v0.32.0
   surface (#3335). Docs-site only; no code, schema, or CLI OpenAPI-snapshot
   change.
+- **Generated reference pages** — the connector inventory, the MCP tool
+  reference, and the CLI command reference are now generated straight from the
+  code, published on the docs site under **Reference**, with a CI freshness
+  gate that fails the build if a published page drifts from the source (#3346).
 
 ### Added — standalone-ESXi host resolution (pre-vCenter) + a governed host storage-device read (#3332)
 

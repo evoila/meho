@@ -67,8 +67,13 @@ from meho_backplane.operations.meta_tools import (
 from meho_backplane.operations.operation_run_service import get_operation_run_service
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
+    QueryContractError,
     ResultHandleNotFoundError,
+    ResultQueryOutputTooLargeError,
+    ResultQuerySpec,
+    ResultQueryTimeoutError,
     read_result_window,
+    run_result_query,
 )
 
 #: Shared OpenAPI metadata for the ``connector_id`` query param on the
@@ -326,8 +331,13 @@ class ResultQueryBody(BaseModel):
     validate identically. ``extra="forbid"`` rejects unknown body fields with
     a 422, matching the sibling ``CallOperationBody`` posture.
 
-    Filtering / projection is out of scope (issue #3179 non-goal): parity is
-    the same offset/limit window the MCP tool serves, not more.
+    ``query`` (#3366) is the optional structured query: when present, the
+    handle is queried server-side as one bounded read-only ``SELECT``
+    (filter / project / group / aggregate) and ``offset`` / ``limit`` are
+    ignored. It mirrors the MCP tool's ``query`` argument exactly (the same
+    :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the
+    two surfaces stay in lockstep; there is deliberately no raw-SQL argument
+    on either.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -343,8 +353,8 @@ class ResultQueryBody(BaseModel):
         default=0,
         ge=0,
         description=(
-            "Zero-based index of the first row to return. Page by advancing "
-            "this by the previous `limit`."
+            "Zero-based index of the first row to return (paging mode). Page "
+            "by advancing this by the previous `limit`."
         ),
     )
     limit: int = Field(
@@ -352,8 +362,18 @@ class ResultQueryBody(BaseModel):
         ge=1,
         le=MAX_LIMIT,
         description=(
-            f"Page size. Default 50; max {MAX_LIMIT}. Matches the "
-            "`result_query` MCP tool's upper bound."
+            f"Page size (paging mode). Default 50; max {MAX_LIMIT}. Matches "
+            "the `result_query` MCP tool's upper bound."
+        ),
+    )
+    query: ResultQuerySpec | None = Field(
+        default=None,
+        description=(
+            "Optional structured query. When present, the handle is queried "
+            "server-side (filter / select / group_by / aggregate / order_by / "
+            "limit) as one bounded read-only SELECT and `offset` / `limit` are "
+            "ignored. Every referenced field must be a column on the handle; "
+            "there is no raw-SQL argument."
         ),
     )
 
@@ -387,6 +407,8 @@ async def post_result_query(
     UUID) or an out-of-range ``offset`` / ``limit`` is a ``422`` at the
     Pydantic layer before the handler runs.
     """
+    if body.query is not None:
+        return await _run_result_query_body(operator, body)
     try:
         return await read_result_window(operator, body.handle_id, body.offset, body.limit)
     except ResultHandleNotFoundError as exc:
@@ -397,6 +419,50 @@ async def post_result_query(
                 "reason": "handle_not_found",
                 "handle_id": str(body.handle_id),
             },
+        ) from exc
+
+
+async def _run_result_query_body(
+    operator: Operator,
+    body: ResultQueryBody,
+) -> dict[str, Any]:
+    """Run the structured-query branch of ``POST /result-query`` (#3366).
+
+    The Pydantic layer already validated ``body.query`` shape (caps,
+    operator/aggregate allow-lists, unknown sub-keys → 422). Field-vs-schema,
+    time-budget, and output-byte violations surface from the core here: a
+    contract violation is a ``422`` (``reason=invalid_query``), a timeout a
+    ``422`` (``reason=query_timeout``), an over-budget result a ``422``
+    (``reason=output_too_large``), and a missing handle the same ``404`` as
+    the paging branch. Each carries a structured ``detail`` so the caller can
+    narrow and retry.
+    """
+    assert body.query is not None  # guarded by the caller's branch (mypy narrowing)
+    try:
+        return await run_result_query(operator, body.handle_id, body.query)
+    except ResultHandleNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": str(exc),
+                "reason": "handle_not_found",
+                "handle_id": str(body.handle_id),
+            },
+        ) from exc
+    except QueryContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "invalid_query"},
+        ) from exc
+    except ResultQueryTimeoutError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "query_timeout"},
+        ) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "output_too_large"},
         ) from exc
 
 

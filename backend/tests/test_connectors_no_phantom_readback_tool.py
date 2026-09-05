@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
@@ -342,16 +343,36 @@ def test_phantom_name_set_is_sourced_from_the_shared_denylist() -> None:
 
 
 def test_legal_result_query_args_are_derived_from_the_registered_schema() -> None:
-    """The legal-arg set comes from the registered tool and is paging-only today."""
+    """The legal-arg set comes from the registered tool; #3366 added `query`.
+
+    Before #3366 the tool was paging-only (``handle_id`` / ``offset`` /
+    ``limit``); the bounded structured-query surface (#3366) added the
+    ``query`` argument, which widens the derived set beyond the shipped paging
+    contract and flips ``_RESULT_QUERY_IS_PAGING_ONLY`` to ``False`` — exactly
+    the automatic relaxation this guard was designed for (issue #3370, "Out of
+    scope"). The SQL/aggregate/jq drift rules go dormant as a result.
+    """
     assert "handle_id" in _LEGAL_RESULT_QUERY_ARGS
-    assert sorted(_LEGAL_RESULT_QUERY_ARGS) == ["handle_id", "limit", "offset"]
-    assert _RESULT_QUERY_IS_PAGING_ONLY is True
+    assert sorted(_LEGAL_RESULT_QUERY_ARGS) == ["handle_id", "limit", "offset", "query"]
+    assert _RESULT_QUERY_IS_PAGING_ONLY is False
 
 
 def test_paging_only_gate_relaxes_when_a_query_arg_ships() -> None:
     """A simulated query-surface widening disables the SQL/aggregate rules."""
     widened = _LEGAL_RESULT_QUERY_ARGS | {"query"}
     assert not (widened <= _SHIPPED_PAGING_CONTRACT_ARGS)
+
+
+def _force_paging_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the paging-only gate ON for the dormant-rule logic fixtures.
+
+    #3366 shipped the ``query`` argument, so live ``_RESULT_QUERY_IS_PAGING_ONLY``
+    is now ``False`` and the SQL/aggregate/jq drift rules are dormant (that is
+    the guard's designed auto-relaxation). The fixtures below still verify the
+    rule *logic* — should the surface ever be removed and the tool revert to
+    paging-only — by forcing the gate back ON.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_RESULT_QUERY_IS_PAGING_ONLY", True)
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +392,11 @@ def test_paging_only_gate_relaxes_when_a_query_arg_ships() -> None:
     ],
 )
 def test_phantom_readback_name_is_flagged(name: str) -> None:
-    """Each phantom name (underscore and hyphen spelling) trips Rule A."""
+    """Each phantom name (underscore and hyphen spelling) trips Rule A.
+
+    Rule A (and Rule H) is unconditional — it fires regardless of the
+    paging-only gate — so this needs no gate override.
+    """
     offenses = find_offenses("connectors/x.py", f"drill in with {name} for the rows")
     assert [o.rule for o in offenses] == ["phantom-readback-name"]
 
@@ -390,27 +415,51 @@ def test_phantom_readback_name_is_flagged(name: str) -> None:
         ("sum ... by", "reduced to a result handle; sum memoryMB by org."),
     ],
 )
-def test_sql_guidance_near_a_handle_anchor_is_flagged(label: str, text: str) -> None:
-    """Each SQL/aggregate phrase near a handle anchor trips Rule B."""
+def test_sql_guidance_near_a_handle_anchor_is_flagged(
+    label: str, text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each SQL/aggregate phrase near a handle anchor trips Rule B (when paging-only)."""
+    _force_paging_only(monkeypatch)
     offenses = find_offenses("connectors/x.py", text)
     assert any(o.rule == f"sql-guidance:{label}" for o in offenses), offenses
 
 
-def test_aggregate_over_the_handle_is_flagged() -> None:
-    """The self-anchored ``aggregate over the handle`` phrase trips Rule B."""
+def test_aggregate_over_the_handle_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The self-anchored ``aggregate over the handle`` phrase trips Rule B (when paging-only)."""
+    _force_paging_only(monkeypatch)
     offenses = find_offenses(
         "connectors/x.py", "aggregate over the handle for host/version counts."
     )
     assert [o.rule for o in offenses] == ["aggregate-over-handle"]
 
 
-def test_jq_positional_argument_to_result_query_is_flagged() -> None:
-    """A jq-style positional passed to ``result-query`` trips Rule B."""
+def test_jq_positional_argument_to_result_query_is_flagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A jq-style positional passed to ``result-query`` trips Rule B (when paging-only)."""
+    _force_paging_only(monkeypatch)
     offenses = find_offenses(
         "docs/cross-repo/x.md",
         "meho operation result-query <handle_id> '.[] | .server.server_ip'",
     )
     assert any(o.rule == "jq-argument-to-result_query" for o in offenses), offenses
+
+
+def test_sql_guidance_is_dormant_now_that_query_surface_shipped() -> None:
+    """Live (post-#3366) the SQL/aggregate/jq rules are dormant, not firing.
+
+    ``result_query`` now has a real query surface, so guidance describing a
+    filter / group / aggregate over the handle is accurate, not drift. The
+    live gate must therefore let those phrases through — only the phantom-name
+    and HandleStore rules stay active.
+    """
+    assert _RESULT_QUERY_IS_PAGING_ONLY is False
+    text = "narrow with result_query (e.g. count by projectId); GROUP BY guestOs"
+    assert find_offenses("connectors/x.py", text) == []
+    # But a phantom read-back name is still caught, gate or no gate.
+    assert find_offenses("connectors/x.py", "use result_aggregate") == [
+        Offense(1, "phantom-readback-name", "use result_aggregate")
+    ]
 
 
 def test_phantom_handlestore_phrase_is_flagged() -> None:

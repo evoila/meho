@@ -45,7 +45,7 @@ from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
-from meho_backplane.connectors.result_handle_store import SpilledWindow
+from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.middleware import RequestContextMiddleware
@@ -876,6 +876,18 @@ class _FakeResultStore:
             truncated=False,
         )
 
+    async def fetch_rows(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        handle_id: uuid.UUID,
+    ) -> SpilledRowSet | None:
+        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
+        if rows is None:
+            return None
+        return SpilledRowSet(rows=rows, total_rows=len(rows), stored_rows=len(rows))
+
 
 @pytest.fixture
 def fake_result_store(monkeypatch: pytest.MonkeyPatch) -> _FakeResultStore:
@@ -1118,13 +1130,117 @@ def test_post_result_query_rejects_extra_body_field(
     client: TestClient,
     fake_result_store: _FakeResultStore,
 ) -> None:
-    """extra='forbid' rejects an unknown body field with a 422 (typo-loud)."""
+    """#3366 relaxed this to reject only *genuinely* unknown body fields.
+
+    A bogus top-level field is still a 422 (``extra="forbid"``), but the
+    newly-legal ``query`` field is accepted — the schema widened for the real
+    query surface, not for arbitrary fields.
+    """
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"id": 1}],
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        bogus = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(uuid.uuid4()), "bogus": 1},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        assert bogus.status_code == 422
+        ok = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "query": {"select": ["id"]}},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert ok.status_code == 200
+
+
+def test_post_result_query_query_mode_filters_server_side(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A ``query`` body filters + aggregates server-side (REST twin of MCP)."""
+    handle = uuid.uuid4()
+    rows = [
+        {"id": i, "severity": "high" if i % 2 else "low", "project": f"p{i % 3}"} for i in range(30)
+    ]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        filtered = client.post(
+            "/api/v1/operations/result-query",
+            json={
+                "handle_id": str(handle),
+                "query": {"filter": [{"field": "severity", "op": "=", "value": "high"}]},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+        grouped = client.post(
+            "/api/v1/operations/result-query",
+            json={
+                "handle_id": str(handle),
+                "query": {"group_by": ["project"], "aggregate": [{"func": "COUNT"}]},
+            },
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert filtered.status_code == 200
+    fbody = filtered.json()
+    assert fbody["returned_rows"] == 15
+    assert fbody["coverage"] == "complete"
+    assert grouped.status_code == 200
+    counts = {r["project"]: r["count"] for r in grouped.json()["rows"]}
+    assert counts == {"p0": 10, "p1": 10, "p2": 10}
+
+
+def test_post_result_query_query_mode_unknown_field_is_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """A field not on the handle's schema is a 422 with reason=invalid_query."""
+    handle = uuid.uuid4()
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=[{"id": 1}],
+    )
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         response = client.post(
             "/api/v1/operations/result-query",
-            json={"handle_id": str(uuid.uuid4()), "bogus": 1},
+            json={"handle_id": str(handle), "query": {"select": ["nope"]}},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "invalid_query"
+
+
+def test_post_result_query_query_mode_bad_operator_is_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+) -> None:
+    """An operator outside the allow-list fails Pydantic body validation (422)."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={
+                "handle_id": str(uuid.uuid4()),
+                "query": {"filter": [{"field": "id", "op": "LIKE", "value": 1}]},
+            },
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
     assert response.status_code == 422

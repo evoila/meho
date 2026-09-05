@@ -31,6 +31,7 @@ from meho_backplane.jsonflux.query.contract import (
     ResultQuerySpec,
     compile_query,
 )
+from meho_backplane.jsonflux.query.engine import QueryEngine
 
 _COLUMNS = ["id", "severity", "project", "memoryMB", "host"]
 
@@ -182,6 +183,33 @@ def test_more_than_four_order_by_is_rejected() -> None:
         )
 
 
+def test_more_than_1000_in_values_is_rejected() -> None:
+    """An `IN` value list past the cap fails at construction (bounds expansion)."""
+    with pytest.raises(ValidationError):
+        ResultQuerySpec(filter=[{"field": "id", "op": "IN", "value": list(range(1001))}])
+
+
+def test_in_value_list_at_cap_compiles() -> None:
+    """A 1000-element `IN` list constructs and compiles to one placeholder each."""
+    values = list(range(1000))
+    sql, params = _compile(ResultQuerySpec(filter=[{"field": "id", "op": "IN", "value": values}]))
+    assert sql.count("?") == 1000
+    assert params == values
+
+
+def test_more_than_64_select_columns_is_rejected() -> None:
+    """A `select` projection past the cap fails at construction (bounds expansion)."""
+    with pytest.raises(ValidationError):
+        ResultQuerySpec(select=["id"] * 65)
+
+
+def test_select_at_cap_compiles() -> None:
+    """A 64-column `select` constructs and compiles."""
+    sql, _ = _compile(ResultQuerySpec(select=["id"] * 64))
+    assert sql.startswith("SELECT ")
+    assert sql.count('"id"') == 64
+
+
 def test_extra_top_level_argument_is_rejected() -> None:
     with pytest.raises(ValidationError):
         ResultQuerySpec(bogus=1)  # type: ignore[call-arg]
@@ -249,3 +277,53 @@ def test_caller_limit_below_max_is_honoured() -> None:
     compiled = compile_query(ResultQuerySpec(limit=10), _COLUMNS, max_limit=_MAX)
     assert compiled.effective_limit == 10
     assert compiled.sql.endswith("LIMIT 11")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end inertness: a DROP payload as a filter value executes as data
+# ---------------------------------------------------------------------------
+
+
+def test_drop_payload_executes_inert() -> None:
+    """A `DROP TABLE` payload bound as a filter value cannot mutate the store.
+
+    This closes the loop that ``test_filter_value_is_bound_not_interpolated``
+    only proves at the SQL-string level: register real rows in a hardened
+    :class:`QueryEngine`, compile a spec whose filter value is a multi-statement
+    SQL payload, actually run the compiled statement with its bound params, and
+    assert the ``result`` table survives with an unchanged row count — the
+    payload lands as a parameter (matching nothing), never as executed SQL.
+    """
+    payload = "1; DROP TABLE result; --"
+    rows = [
+        {"id": 1, "name": "alpha"},
+        {"id": 2, "name": "beta"},
+        {"id": 3, "name": "gamma"},
+    ]
+    engine = QueryEngine()
+    try:
+        engine.register(RESULT_TABLE, rows, unwrap="auto")
+        # Mirror the core's schema discovery (operations.result_query._known_columns).
+        columns = [c[0] for c in engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()]
+        before = engine.conn.execute(f"SELECT COUNT(*) FROM {RESULT_TABLE}").fetchone()[0]
+        assert before == len(rows)
+
+        compiled = compile_query(
+            ResultQuerySpec(filter=[{"field": "name", "op": "=", "value": payload}]),
+            columns,
+            max_limit=_MAX,
+        )
+        assert "DROP" not in compiled.sql
+        assert compiled.params == [payload]
+
+        # Execute the compiled SELECT exactly as the core does: bound params.
+        matched = engine.conn.execute(compiled.sql, compiled.params).fetchall()
+        assert matched == []  # the payload string matches no row
+
+        # The table still exists and its row count is untouched.
+        after = engine.conn.execute(f"SELECT COUNT(*) FROM {RESULT_TABLE}").fetchone()[0]
+        assert after == before
+        # DESCRIBE would raise CatalogException if the table had been dropped.
+        assert engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
+    finally:
+        engine.close()

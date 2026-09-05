@@ -1256,9 +1256,11 @@ type ApprovalRequestView struct {
 	OpId           string                 `json:"op_id"`
 	ParamsHash     string                 `json:"params_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
+	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
 	ReviewedBy     *string                `json:"reviewed_by"`
+	ReviewedByName *string                `json:"reviewed_by_name"`
 	RunId          *openapi_types.UUID    `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
@@ -3997,9 +3999,16 @@ type DecideRequestBody struct {
 // stable “sub“) whose credential made this decision, so a CLI / console
 // can show *who* decided without a second lookup (#3290). Additive and
 // optional — a client that ignores it is unaffected.
+//
+// “decided_by_name“ carries the reviewer's human display name alongside
+// “decided_by“ (#3300), from the deciding operator's JWT “name“ claim,
+// so a client renders *who* without resolving the GUID itself. “None“
+// when the token carried no name — the client fails open to “decided_by“.
+// Display name only: no email or other profile field is added here.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
 	DecidedBy         *string                            `json:"decided_by"`
+	DecidedByName     *string                            `json:"decided_by_name"`
 	Decision          string                             `json:"decision"`
 	DispatchError     *string                            `json:"dispatch_error"`
 	DispatchOpId      *string                            `json:"dispatch_op_id"`

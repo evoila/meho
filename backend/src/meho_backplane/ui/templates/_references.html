@@ -14,6 +14,7 @@
   Macros:
     what_happened(refs)          -- the plain-language "what happened" banner
     principal_chip(principal)    -- display name + service marker (title=sub)
+    subject(ref)                 -- display name alongside a bare sub, no PII
     operation_ref(operation)     -- summary + group + op_id
     target_ref(target)           -- linked target name, or raw id + unresolved
     status_badge(status)         -- toned badge with human label + code
@@ -47,6 +48,25 @@
       <span class="badge badge-outline badge-xs" title="Non-interactive principal (agent session or delegated actor), not a person.">service</span>
     {% endif %}
   </span>
+{%- endmacro -%}
+
+{#- Render an identity ``sub`` with its display name alongside (#3300).
+
+  Takes a ``SubjectRef`` (``meho_backplane.ui.references.subject_ref``):
+  ``.resolved`` / ``.name`` / ``.sub``. When a name resolved, the human name
+  leads and the ``sub`` follows in a muted mono span (and on the name's
+  ``title``) -- name **alongside** the GUID, never instead. When no name was
+  recorded the raw ``sub`` renders alone (fail-open). A ``None`` ref renders
+  nothing, so a caller can pass an undecided request's reviewer directly.
+  Deliberately no email / service marker -- unlike ``principal_chip`` this is
+  the display-name-only shape for surfaces whose contract forbids other PII. -#}
+{%- macro subject(ref) -%}
+  {%- if ref and ref.resolved -%}
+    <span class="font-medium" title="{{ ref.sub }}">{{ ref.name }}</span>
+    <span class="font-mono text-xs opacity-60 break-all">{{ ref.sub }}</span>
+  {%- elif ref -%}
+    <span class="font-mono text-xs break-all" title="OIDC subject (no display name recorded)">{{ ref.sub }}</span>
+  {%- endif -%}
 {%- endmacro -%}
 
 {%- macro operation_ref(operation) -%}

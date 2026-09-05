@@ -37,9 +37,11 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.references import (
+    SubjectRef,
     humanize_relative,
     resolve_audit_references,
     resolve_status,
+    subject_ref,
 )
 
 _TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -108,6 +110,38 @@ def test_humanize_relative_buckets() -> None:
     assert humanize_relative(naive, now=now) == "2 min ago"
     # Future timestamp (clock skew) collapses to "just now", never negative.
     assert humanize_relative(now + timedelta(minutes=5), now=now) == "just now"
+
+
+def test_subject_ref_resolves_name_alongside_sub() -> None:
+    """A recorded display name resolves; the sub stays reachable alongside it."""
+    ref = subject_ref("user-abc", "Alice Operator")
+    assert isinstance(ref, SubjectRef)
+    assert ref.resolved is True
+    assert ref.name == "Alice Operator"
+    assert ref.sub == "user-abc"
+    # ``display`` leads with the name; the raw sub is never discarded.
+    assert ref.display == "Alice Operator"
+
+
+def test_subject_ref_fails_open_to_sub_when_no_name() -> None:
+    """No name recorded (nameless token / pre-0097 row) degrades to the sub.
+
+    This is the fail-open contract the surfaces depend on: resolution never
+    raises and never blocks a decision, and the raw ``sub`` always renders
+    when no display name is available.
+    """
+    for missing in (None, ""):
+        ref = subject_ref("user-abc", missing)
+        assert isinstance(ref, SubjectRef)
+        assert ref.resolved is False
+        assert ref.name is None
+        assert ref.display == "user-abc"
+
+
+def test_subject_ref_none_when_no_sub() -> None:
+    """A falsy sub (e.g. an undecided request's reviewer) yields no ref."""
+    assert subject_ref(None, "Alice Operator") is None
+    assert subject_ref("", None) is None
 
 
 # ---------------------------------------------------------------------------

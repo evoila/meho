@@ -5847,6 +5847,15 @@ class ApprovalRequest(Base):
       has a responsible principal); ``act`` nullable (NULL for direct human
       calls without delegation).
 
+    * ``principal_name`` -- Text nullable. The requester's human display
+      name, captured at park time from the JWT ``name`` claim
+      (``Operator.name``) so approvals surfaces render a name alongside
+      ``principal_sub`` without a second lookup (#3300). Same
+      hoist-at-write pattern as ``audit_log.principal_name`` (#1212); NULL
+      when the token carried no name (fail-open) and on pre-0097 rows.
+      Display name only -- never email or other profile fields. Added by
+      migration ``0097``.
+
     * ``op_id`` / ``connector_id`` -- the operation + connector the
       dispatcher was asked to call. Stored verbatim for resume.
 
@@ -5887,6 +5896,13 @@ class ApprovalRequest(Base):
     * ``status`` -- Closed enum, DB ``CHECK``, default ``'pending'``.
 
     * ``reviewed_by`` -- Text nullable. ``sub`` of the approver / rejecter.
+
+    * ``reviewed_by_name`` -- Text nullable. The reviewer's human display
+      name, captured at decision time from the deciding operator's JWT
+      ``name`` claim -- the peer of ``principal_name`` for ``reviewed_by``
+      (#3300). NULL before a decision, when the reviewer's token carried
+      no name (fail-open), and on pre-0097 rows. Added by migration
+      ``0097``.
 
     * ``decided_at`` -- ``timestamptz`` nullable. Stamped on decision.
 
@@ -5985,6 +6001,17 @@ class ApprovalRequest(Base):
     # RFC 8693 delegation pair -- mirrors agent_run.identity_sub / _act.
     principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
     principal_act: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Requester display name, captured at park time from the JWT ``name``
+    # claim (``Operator.name``) so every approvals surface can render a
+    # human name alongside ``principal_sub`` without a second identity
+    # lookup (#3300). The same hoist-at-write pattern ``audit_log`` uses for
+    # ``principal_name`` (#1212): there is no ``sub`` -> name join table, so
+    # the name is cached on the row at the moment the requester's credential
+    # parked the op. NULL when the token carried no name (fail-open: the
+    # surface degrades to the raw sub it shows today) and for pre-0097 rows.
+    # Display name only -- no email / groups / other profile fields. Added
+    # by migration ``0097``.
+    principal_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     # Dispatch coordinates for resume.
     op_id: Mapped[str] = mapped_column(Text, nullable=False)
     connector_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -6024,6 +6051,13 @@ class ApprovalRequest(Base):
         default=ApprovalRequestStatus.PENDING.value,
     )
     reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Reviewer display name, captured at decision time from the deciding
+    # operator's JWT ``name`` claim (``Operator.name``), the peer of
+    # ``principal_name`` for the ``reviewed_by`` sub (#3300). NULL until a
+    # decision lands, when the reviewer's token carried no name (fail-open
+    # to the raw ``reviewed_by`` sub), and on pre-0097 rows. Display name
+    # only. Added by migration ``0097``.
+    reviewed_by_name: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

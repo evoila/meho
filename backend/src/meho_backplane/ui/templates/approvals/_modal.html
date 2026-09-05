@@ -65,6 +65,7 @@
     error_message         -- str | None: a failed-decision human detail
 -#}
 {% from "_icons.html" import icon %}
+{% from "_references.html" import subject %}
 {#- Mirror of the ops-launcher ``safety_badge`` mold (``operations/_results.html``):
     ``safety_level`` is the closed ``safe`` / ``caution`` / ``dangerous`` /
     ``destructive`` enum stamped on every parked envelope (#1855, +#3197 tier).
@@ -176,7 +177,7 @@
         <div>
           <h4 class="font-semibold">
             {{ decision_verb }}
-            {% if request.reviewed_by %}by <span class="font-mono">{{ request.reviewed_by }}</span>{% endif %}
+            {% if request.reviewer %}by {{ subject(request.reviewer) }}{% endif %}
           </h4>
           {% if decision_ts %}
             <p class="text-sm opacity-90">
@@ -201,7 +202,7 @@
       </div>
       <div class="flex items-baseline justify-between gap-4">
         <dt class="shrink-0 text-base-content/55">Requested by</dt>
-        <dd class="font-mono">{{ request.principal_sub }}</dd>
+        <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
       {% if request.created_at %}
         <div class="flex items-baseline justify-between gap-4">

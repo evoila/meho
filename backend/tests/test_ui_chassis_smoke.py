@@ -479,6 +479,10 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     assert "dashboardFeedTray({" in body
     assert '<script src="/ui/static/src/app/dashboard-feed.js" defer></script>' in body
     assert "Connecting to live feed" in body
+    # The compact feed row prefers the resolved ``principal_name``
+    # already carried on the ``BroadcastEvent`` frame, falling back to
+    # the raw ``principal_sub`` (#3338) — mirroring broadcast/_event_row.
+    assert 'x-text="ev.principal_name || ev.principal_sub"' in body
     # Version footer renders the deployed-build label the chassis env
     # binds from CHART_VERSION / GIT_SHA (#1698). No hardcoded ``v``
     # prefix anymore -- the label carries its own when it is a release

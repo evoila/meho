@@ -327,13 +327,17 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 	fmt.Fprintf(w, "%-22s %-12s %-18s %-26s %-16s %s\n",
 		"TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
+		principal := strDeref(row.PrincipalName)
+		if principal == "" {
+			principal = row.PrincipalSub
+		}
 		target := strDeref(row.TargetName)
 		if target == "" {
 			target = "-"
 		}
 		fmt.Fprintf(w, "%-22s %-12s %-18s %-26s %-16s %s\n",
 			truncate(formatTS(row.Ts), 22),
-			truncate(row.PrincipalSub, 12),
+			truncate(principal, 12),
 			truncate(target, 18),
 			truncate(row.OpId, 26),
 			truncate(row.OpClass, 16),

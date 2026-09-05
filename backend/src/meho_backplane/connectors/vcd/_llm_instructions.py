@@ -93,10 +93,10 @@ _VM_LIST_INSTRUCTIONS: dict[str, object] = {
         "result_query(handle_id, offset, limit) and read memoryMB / org per row."
     ),
     "next_step": (
-        "Aggregate over the handle for capacity planning (count / vCPU / memory "
-        "by org or vdc), or group by guestOs to flag OSes needing special "
-        "migration handling. Map containerName back to vcd.vapp.list for the "
-        "move-together boundary."
+        "For capacity planning, page the handle with result_query(handle_id, "
+        "offset, limit) and tally vCPU / memory per org or vdc client-side, or "
+        "read guestOs per row to flag OSes needing special migration handling. "
+        "Map containerName back to vcd.vapp.list for the move-together boundary."
     ),
 }
 

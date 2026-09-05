@@ -17,6 +17,7 @@
                  proposed_effect / created_at)
 -#}
 {% from "_icons.html" import icon %}
+{% from "_references.html" import subject %}
 <dialog id="meho-approvals-modal" class="modal" aria-label="Pending approvals">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -46,7 +47,7 @@
               <p class="truncate text-xs text-base-content/55">
                 <span>{{ req.connector_id }}</span>
                 <span aria-hidden="true">&middot;</span>
-                <span>requested by {{ req.principal_sub }}</span>
+                <span>requested by {{ subject(req.requester) }}</span>
               </p>
             </div>
             <button

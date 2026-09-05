@@ -113,6 +113,59 @@ bound) and an autonomous agent run both resolve to `principal_act=NULL`.
 (Before #1481 the field read a nonexistent `Operator.identity_act`
 attribute and was always `NULL`.)
 
+### Display-name resolution alongside the sub (#3300)
+
+Every operator-facing approvals surface — CLI `approve` / `show` /
+`list`, the `/decide` response, and the console approvals modal /
+history / panel — historically rendered `principal_sub` (the requester)
+and `reviewed_by` (the approver) as bare OIDC `sub` GUIDs, so an
+operator reviewing or auditing an approval saw an identity GUID at the
+moment they most needed to know *who*. These surfaces now render a human
+display name **alongside** the `sub`, never instead — the `sub` stays
+the stable, machine-truthful key. This is the first slice of Initiative
+#3301 (console + CLI GUID-to-name resolution).
+
+**No live lookup — the name is hoisted at write time.** There is no
+`sub` → name join table (the agent / runner principal tables key on the
+Keycloak client id, not the token `sub`; see
+`meho_backplane.ui.references`), so the name cannot be resolved after the
+fact. Migration `0097` adds two nullable `approval_request` columns:
+
+- `principal_name` — the requester's name, set in
+  `create_pending_request` from the parking `Operator.name`.
+- `reviewed_by_name` — the approver's name, set in `approve_request` /
+  `reject_request` from the deciding `Operator.name`.
+
+Both come from the JWT `name` claim — the same hoist-at-write pattern
+`audit_log.principal_name` uses (#1212). The approval audit rows
+(`_write_audit_row`) carry the same `payload['principal_name']` so the
+name-aware audit views resolve the row's `operator_sub` too, and the
+`/decide` response gains an additive `decided_by_name` beside
+`decided_by`.
+
+**Fail-open contract.** Resolution can never fail or slow a decision: no
+identity provider is called; the surface reads a column already loaded on
+the row. When no name was recorded — a token without a `name` claim, or a
+pre-`0097` row — the column is `NULL` and every surface degrades cleanly
+to the raw `sub` it showed before. The shared resolver
+`meho_backplane.ui.references.subject_ref(sub, name)` returns a
+`SubjectRef` whose `.display` is `name or sub` (and `None` when there is
+no sub at all, e.g. an undecided request's reviewer); the console
+`subject(ref)` macro in `_references.html` renders the name leading with
+the `sub` alongside in a muted mono span. The CLI mirrors this:
+`principalLabel` renders `<name> (<sub>)` for single-line fields
+(`approve`, `show`); `principalScanLabel` renders the name for the
+width-constrained `list` PRINCIPAL column, where the full sub stays
+reachable via `show` / `--json`.
+
+**No PII beyond the display name.** These surfaces resolve to a human
+display name only — never email, groups, or other profile fields.
+`SubjectRef` is deliberately distinct from `PrincipalRef` (the audit /
+broadcast drawer's principal, which also carries email and a service
+marker): the approvals contract keeps PII off these surfaces, and #1212
+already carries email on audit rows where it exists — that is not
+widened here.
+
 ## MCP audit status for post-gate rejections (#1481)
 
 A `tools/call` that a tool handler rejects *after* the dispatch gates

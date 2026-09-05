@@ -21972,6 +21972,11 @@
             "nullable": true,
             "title": "Principal Act"
           },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
           "op_id": {
             "type": "string",
             "title": "Op Id"
@@ -22002,6 +22007,11 @@
             "type": "string",
             "nullable": true,
             "title": "Reviewed By"
+          },
+          "reviewed_by_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reviewed By Name"
           },
           "decided_at": {
             "type": "string",
@@ -26342,6 +26352,11 @@
             "nullable": true,
             "title": "Decided By"
           },
+          "decided_by_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Decided By Name"
+          },
           "dispatch_status": {
             "type": "string",
             "nullable": true,
@@ -26379,7 +26394,7 @@
           "reason"
         ],
         "title": "DecideResponseBody",
-        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected."
+        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection.\n\n``decided_by`` names the effective authenticated user (the reviewer's\nstable ``sub``) whose credential made this decision, so a CLI / console\ncan show *who* decided without a second lookup (#3290). Additive and\noptional \u2014 a client that ignores it is unaffected.\n\n``decided_by_name`` carries the reviewer's human display name alongside\n``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,\nso a client renders *who* without resolving the GUID itself. ``None``\nwhen the token carried no name \u2014 the client fails open to ``decided_by``.\nDisplay name only: no email or other profile field is added here."
       },
       "DeclareCapabilitiesRequest": {
         "properties": {

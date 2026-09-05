@@ -133,7 +133,7 @@ func runDecision(
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "approval_request %s → %s\n", idArg, string(detail.Status))
 	if detail.ReviewedBy != nil {
-		fmt.Fprintf(w, "reviewed by: %s\n", *detail.ReviewedBy)
+		fmt.Fprintf(w, "reviewed by: %s\n", principalLabel(*detail.ReviewedBy, detail.ReviewedByName))
 	}
 	if detail.DecidedAt != nil {
 		fmt.Fprintf(w, "decided at:  %s\n", *detail.DecidedAt)

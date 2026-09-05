@@ -34,8 +34,16 @@ These are the failure modes each test would catch if the fix regressed:
 
 * :func:`test_nondryrun_large_spec_ingest_keeps_event_loop_responsive` —
   a register/commit pass that stopped yielding (one big synchronous
-  batch) would collapse the heartbeat's tick count and spike a single
-  gap past the ceiling.
+  batch) would freeze the loop *while the DB-commit runs* and so collapse
+  the heartbeats that land inside that window. The proof is that in-window
+  tick count, *not* the magnitude of any single gap: on a shared runner
+  ambient scheduler jitter (~1.5 s observed, #2706) overlaps the ~1.7 s a
+  non-yielding register batch would freeze for, so a wall-clock gap
+  ceiling cannot tell load from a regression — but the in-window tick
+  count can (a frozen register ticks near zero *during* its window
+  regardless of runner speed). The register call is wrapped to stamp its
+  window; the parse before it runs in ``asyncio.to_thread`` and would pad
+  a whole-run count, which is why the window is measured on its own.
 * :func:`test_blocking_parse_stays_off_the_event_loop` — dropping the
   ``asyncio.to_thread`` hop (running the parse on the loop) would freeze
   the loop for the whole parse; the deterministic injected block makes
@@ -85,19 +93,42 @@ _OP_COUNT = 1275
 #: larger than this means the loop was starved for that long.
 _HEARTBEAT_INTERVAL_S = 0.01
 
-#: Ceiling on any single observed heartbeat gap during the real
-#: end-to-end ingest. The parse (in ``to_thread``) contends for the GIL
-#: and produces a single ~0.1 s gap locally; the register pass yields
-#: per-op with gaps <= ~0.03 s. 0.5 s is ~5x over the observed worst
-#: case (CI-slack headroom) yet an order of magnitude below the ~1.7 s a
-#: non-yielding register batch, or the ~30 s the pre-fix synchronous
-#: pass, would produce.
-_MAX_GAP_CEILING_S = 0.5
-
-#: A ~2 s ingest polled every 10 ms yields ~170 ticks locally. Requiring
-#: >= 50 proves the loop ran *throughout* the ingest, not just before and
-#: after it — a starved loop would tick only a handful of times.
+#: Whole-run liveness floor: heartbeats that must land anywhere across
+#: the ingest. A secondary sanity that the loop ran at all — the primary
+#: teeth is ``_MIN_TICKS_DURING_REGISTER`` below. A ~1 s ingest polled
+#: every 10 ms yields ~80 ticks locally; requiring >= 50 keeps a wide
+#: margin. (This count alone is a *weak* signal for the register pass:
+#: the parse runs in ``asyncio.to_thread`` and keeps the loop free, so
+#: its ticks can pad the total even if the register froze — which is
+#: exactly why the register window is measured separately.)
 _MIN_TICKS = 50
+
+#: **The primary, load-robust responsiveness signal.** Heartbeats that
+#: must land *inside* the DB-commit window — the ``register_ingested_
+#: operations`` call, stamped in the test by wrapping it. This is the leg
+#: the crash signal implicated ("the DB-commit pass yields per-op rather
+#: than blocking the loop for the whole batch"), so it is measured
+#: directly rather than inferred from the whole run. Healthy: the 1275
+#: per-op ``await session.flush()`` yields let the 10 ms heartbeat tick
+#: ~72 times in the window (~269 under 8x CPU contention — a slower runner
+#: *stretches* the window and ticks *more*, so the floor has headroom in
+#: the safe direction). A register that stopped yielding (reverted to a
+#: synchronous batch) freezes the window and ticks ~0 across it,
+#: regardless of runner speed. 10 sits an order of magnitude below the
+#: healthy count and infinitely above a regression — the same presence-
+#: vs-absence shape #2706 gave the sibling parse-offload test.
+#:
+#: There is deliberately *no* ceiling on the magnitude of any single gap.
+#: The earlier absolute 0.5 s single-gap ceiling false-failed on
+#: loaded ``meho-runners-ci`` runners (1.203 s on #3384, 1.003 s on the
+#: #3382 merge_group build, which ejected #3382 from the queue) while the
+#: offload was working perfectly, because ambient scheduler jitter on a
+#: saturated pool (~1.5 s observed in #2706) *overlaps* the ~1.7 s a
+#: non-yielding register batch would freeze for — so no magnitude
+#: threshold, absolute or ratio, can separate load from a regression on a
+#: shared box. #2706 removed the same magnitude threshold from the sibling
+#: parse-offload test for exactly this reason.
+_MIN_TICKS_DURING_REGISTER = 10
 
 #: Heartbeats that must land *inside* the injected 0.3 s parse block for
 #: the offload to count as proven. At the 10 ms cadence an idle runner
@@ -265,11 +296,35 @@ async def test_nondryrun_large_spec_ingest_keeps_event_loop_responsive(
     the one leg the crash signal implicated that was not yet pinned
     end-to-end — while a heartbeat measures loop lag. Asserts the commit
     landed all 1275 ops (so this is genuinely the non-dry-run path, not a
-    parse-only dry run) and that the loop kept ticking throughout with no
-    single gap past the ceiling.
+    parse-only dry run) and, as the load-robust responsiveness guarantee,
+    that the loop kept ticking *inside the DB-commit window* — the
+    register call is wrapped to stamp its start/end so the heartbeats that
+    landed during it can be counted directly. That in-window tick count,
+    not the magnitude of any single gap, is the proof (see
+    ``_MIN_TICKS_DURING_REGISTER`` for why a wall-clock ceiling cannot
+    survive a shared runner).
     """
+    from meho_backplane.operations.ingest import pipeline as _pipeline_mod
+
     service = _service(monkeypatch)
     spec = SpecSource(uri="spec:loadtest-large", content=_synth_openapi_spec(_OP_COUNT))
+
+    # Wrap the DB-commit call to stamp the window it runs in. The register
+    # is where the per-op yielding the crash fix introduced must hold; the
+    # parse before it runs in ``asyncio.to_thread`` and would pad a
+    # whole-run count even if the register froze, so the register window is
+    # measured on its own. Same shape as the sibling parse-offload test,
+    # which stamps its injected block window.
+    real_register = _pipeline_mod.register_ingested_operations
+    register_window: list[float] = []
+
+    async def _timed_register(*args: Any, **kwargs: Any) -> Any:
+        register_window.append(time.monotonic())
+        result = await real_register(*args, **kwargs)
+        register_window.append(time.monotonic())
+        return result
+
+    monkeypatch.setattr(_pipeline_mod, "register_ingested_operations", _timed_register)
 
     result, beats = await _run_with_heartbeat(
         service.ingest(
@@ -281,22 +336,38 @@ async def test_nondryrun_large_spec_ingest_keeps_event_loop_responsive(
             dry_run=False,
         )
     )
-    gaps = [gap for _wake, gap in beats]
 
     # The full non-dry-run commit landed — every op persisted.
     assert result.ingestion.inserted_count == _OP_COUNT, result.ingestion
     assert result.ingestion.connector_registered is True
 
-    # The loop made progress *during* the ingest (not just around it), and
-    # never froze for a materially long stretch.
-    assert len(gaps) >= _MIN_TICKS, (
-        f"heartbeat only ticked {len(gaps)} times during the ingest; "
-        "the event loop was starved (a non-yielding commit pass would do this)"
+    # The register ran exactly once (single spec) so the window is
+    # unambiguous.
+    assert len(register_window) == 2, "the DB-commit pass did not run exactly once"
+    register_start, register_end = register_window
+
+    # The guarantee: the loop kept ticking *while the DB-commit pass ran*.
+    # A register that stopped yielding (one synchronous batch) freezes the
+    # window and this count collapses to ~0, regardless of runner speed; a
+    # yielding register ticks ~72 in the window healthy, more under load.
+    # Magnitude of any single gap is deliberately NOT asserted: on a shared
+    # runner ambient jitter (~1.5 s, #2706) overlaps a register-freeze
+    # regression (~1.7 s), so only the in-window tick count separates load
+    # from a real regression. See _MIN_TICKS_DURING_REGISTER for the full
+    # rationale.
+    ticks_in_register = [gap for wake, gap in beats if register_start <= wake <= register_end]
+    assert len(ticks_in_register) >= _MIN_TICKS_DURING_REGISTER, (
+        f"only {len(ticks_in_register)} heartbeats landed inside the "
+        f"{register_end - register_start:.3f}s DB-commit window "
+        f"(need >= {_MIN_TICKS_DURING_REGISTER}); the register/commit pass "
+        "stopped yielding — it is blocking the loop for the whole batch "
+        "rather than awaiting per-op"
     )
-    worst = max(gaps)
-    assert worst < _MAX_GAP_CEILING_S, (
-        f"event loop stalled for {worst:.3f}s during the ingest "
-        f"(ceiling {_MAX_GAP_CEILING_S}s); the parse/commit pass is blocking the loop"
+
+    # Secondary sanity: the loop had overall liveness across the whole run.
+    assert len(beats) >= _MIN_TICKS, (
+        f"heartbeat only ticked {len(beats)} times across the ingest "
+        f"(need >= {_MIN_TICKS}); the event loop was starved"
     )
 
 

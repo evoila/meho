@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — a single cohesive typed op (schemas +
+# helpers + blocking handler + async wrapper + registrar) that was already
+# over the 600-line block limit before #3375's surgical field addition;
+# splitting it is out of scope for this change (precedent: bff30915).
 
 """Network-diagnostics typed op ``net.tls_inspect`` + its registrar.
 
@@ -53,6 +57,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 from OpenSSL import SSL
 
@@ -146,6 +151,15 @@ _CHAIN_ITEM_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "True iff subject == issuer (a root or self-signed leaf).",
         },
+        "pem": {
+            "type": "string",
+            "description": (
+                "The presented certificate as PEM (public handshake material, "
+                "never a private key). Load leaf.pem as a register_target "
+                "tls_ca_pin for a self-signed appliance; for a CA-signed one "
+                "pin the issuer/root PEM from a later chain[] entry."
+            ),
+        },
     },
     "required": [
         "subject",
@@ -156,6 +170,7 @@ _CHAIN_ITEM_SCHEMA: dict[str, Any] = {
         "days_to_expiry",
         "serial",
         "self_signed",
+        "pem",
     ],
     "additionalProperties": False,
 }
@@ -404,6 +419,12 @@ def _cert_to_dict(cert: x509.Certificate, now: datetime) -> dict[str, Any]:
     can bite on for cert-expiry early warning, computed against a single
     probe-time *now* the caller injects so every cert in one chain shares
     the same reference instant.
+
+    ``pem`` is the presented certificate serialised as PEM — public
+    handshake material, never a secret and never any private key. It lets
+    a consumer turn a governed probe into a ``register_target``
+    ``tls_ca_pin`` (the leaf for a self-signed appliance; the issuer/root
+    from ``chain[]`` for a CA-signed one).
     """
     return {
         "subject": cert.subject.rfc4514_string(),
@@ -414,6 +435,7 @@ def _cert_to_dict(cert: x509.Certificate, now: datetime) -> dict[str, Any]:
         "days_to_expiry": (cert.not_valid_after_utc - now).total_seconds() / 86400.0,
         "serial": str(cert.serial_number),
         "self_signed": cert.subject == cert.issuer,
+        "pem": cert.public_bytes(serialization.Encoding.PEM).decode("ascii"),
     }
 
 

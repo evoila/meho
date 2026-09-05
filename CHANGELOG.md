@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — net.tls_inspect returns the presented certificate PEM, closing the probe → `tls_ca_pin` loop (#3375)
+
+- `net.tls_inspect` now emits a `pem` field on every presented chain entry
+  (and so on `leaf`, its `chain[0]` alias) — the certificate serialised as
+  PEM, alongside the metadata it already returned. This closes the governed
+  **probe → pin** path for target registration: `register_target` accepts a
+  `tls_ca_pin` (PEM, fed verbatim to `ssl.SSLContext.load_verify_locations`)
+  to pin a target's identity when hostname verification can never match — an
+  appliance dialled through a NAT alias, say — but until now the only governed
+  way to observe a target's certificate returned every fact *about* the cert
+  except the bytes the pin needs. An operator now probes the endpoint and pins
+  the right trust anchor from the result: `leaf.pem` directly for a self-signed
+  appliance (the leaf is its own anchor), or an issuer/root from a later
+  `chain[]` entry for a CA-signed one — paired with `tls_server_name` from the
+  emitted SAN. The PEM is the **public** certificate material the server
+  presents in the handshake — never a secret, never any private key. Response
+  stays inline (a certificate is a few KB; no JSONFlux handle-threshold change);
+  `san` (DNS + IP) is unchanged. Typed-op response-schema addition only — no
+  CLI OpenAPI-snapshot change.
+
 ## [0.33.2] - 2026-09-05
 
 ### Fixed — vmware-rest: standalone ESXi host ops now speak SOAP over `/sdk` (#3363)

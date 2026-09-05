@@ -415,7 +415,7 @@ Control flow (`connectors/net/tls.py`):
    clamped timeout, so a stalled peer cannot pin the worker thread.
 4. Each presented cert is flattened to
    `{subject, issuer, san, not_before, not_after, days_to_expiry, serial,
-   self_signed}` (leaf-first). `serial` is stringified (a serial is a
+   self_signed, pem}` (leaf-first). `serial` is stringified (a serial is a
    large integer a JSON number consumer would truncate); timestamps use
    the tz-aware `not_valid_*_utc` accessors. `days_to_expiry` is
    `(not_valid_after_utc - now) / 86400` as a float (negative once
@@ -475,6 +475,49 @@ every chain entry, `{"select": {"path": "$.chain[*].days_to_expiry",
 (an intermediate included) with the same comparator. `FreshnessCompare`
 stays untouched and past-oriented; the two are complementary, not
 alternatives.
+
+### Probe → `tls_ca_pin` — the presented certificate PEM (#3375)
+
+Every chain entry (and so `leaf`, its `chain[0]` alias) carries a `pem`
+field: the presented certificate serialised as PEM
+(`cert.public_bytes(serialization.Encoding.PEM)`), alongside the metadata.
+
+**Safety — public, not a secret.** `pem` is the public certificate
+material the server *presents in the TLS handshake* to every client that
+connects; it is not confidential and carries **no private key**. Only the
+certificate is serialised — no private material is ever returned, on any
+path. It is safe to log, store in the audit row, and hand to an agent.
+
+This closes the governed **probe → pin** loop for target registration.
+`register_target` accepts a `tls_ca_pin` (PEM) that is fed verbatim to
+`ssl.SSLContext.load_verify_locations(cadata=...)` (validated at the API
+boundary by `targets/schemas.py::validate_ca_pin_pem`), which is how an
+operator pins a target's identity when hostname verification can never
+match — e.g. an appliance dialled through a NAT alias. Before this field
+the only governed way to observe a target's certificate (`net.tls_inspect`)
+returned every fact *about* the cert but not the bytes the pin needs. Now:
+
+1. Probe the endpoint: `net.tls_inspect(host, port, server_name?)`.
+2. Pick the trust anchor from the result and register the target with it
+   as `tls_ca_pin`, plus `tls_server_name` = the name to verify against
+   (a SAN entry from `leaf.san`, since the dialled alias won't match).
+
+Which entry to pin depends on how the appliance's cert is issued:
+
+- **Self-signed appliance** (the common case; `leaf.self_signed == true`):
+  the leaf is its own trust anchor — `leaf.pem` loads directly as
+  `tls_ca_pin`.
+- **CA-signed appliance**: the leaf is *not* a CA and cannot validate
+  itself via `cadata`; pin the issuer/root instead — a later `chain[]`
+  entry's `pem` (whichever CA the operator wants to trust). Per-chain-item
+  `pem` (not leaf-only) is exactly why the field lives on every entry:
+  the consumer picks the right anchor from the already-returned chain.
+
+Behaviour for chains: `pem` is present on the **leaf and each presented
+chain entry** (leaf, intermediates, and the root when the server sends
+one) — leaf-only when the server presents only the leaf. The response
+stays inline (a certificate is a few KB; no JSONFlux handle threshold
+changes).
 
 ## ICMP cohort — `net.ping` / `net.trace` / `net.path_mtu` (T6, #2411)
 

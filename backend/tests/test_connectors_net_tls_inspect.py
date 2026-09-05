@@ -57,6 +57,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.schemas import validate_ca_pin_pem
 
 _CONNECTOR_ID = "net-probe-1.x"
 _OP_ID = "net.tls_inspect"
@@ -744,3 +745,108 @@ async def test_days_to_expiry_threshold_sensor_bands_end_to_end(
     outcome = evaluate_assertion(spec, body, now=datetime.datetime.now(datetime.UTC))
     assert outcome.state == expected_state
     assert outcome.value == body["days_to_expiry"]
+
+
+# ---------------------------------------------------------------------------
+# pem — the presented certificate material, for probe -> tls_ca_pin (#3375)
+# ---------------------------------------------------------------------------
+
+
+async def test_leaf_pem_round_trips_to_the_minted_cert(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _registered_tls_inspect_op: None,
+) -> None:
+    """``leaf.pem`` is the exact PEM the server presented and parses back identically."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    key = _new_key()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _LEAF_CN)])
+    cert = _sign(_LEAF_CN, key, name, key, san_dns=[_LEAF_CN])
+    server = _TLSServer(tmp_path, _pem(cert), _key_pem(key))
+    try:
+        result = await _dispatch_inspect(
+            {"host": "127.0.0.1", "port": server.port, "server_name": _LEAF_CN}
+        )
+    finally:
+        server.stop()
+    assert result.status == "ok", result.error
+    body = result.result
+    leaf_pem = body["leaf"]["pem"]
+    # Byte-for-byte the certificate the server presented.
+    assert leaf_pem == _pem(cert).decode("ascii")
+    # Parseable, and the *same* certificate (fingerprint identity).
+    parsed = x509.load_pem_x509_certificate(leaf_pem.encode("ascii"))
+    assert parsed.fingerprint(hashes.SHA256()) == cert.fingerprint(hashes.SHA256())
+    assert str(parsed.serial_number) == body["leaf"]["serial"]
+
+
+async def test_pem_present_on_every_chain_entry_no_private_material(
+    monkeypatch: pytest.MonkeyPatch,
+    multi_cert_server: _TLSServer,
+    _registered_tls_inspect_op: None,
+) -> None:
+    """Each chain[] entry carries a public-only PEM matching its metadata, leaf-first."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    result = await _dispatch_inspect(
+        {"host": "127.0.0.1", "port": multi_cert_server.port, "server_name": _LEAF_CN}
+    )
+    assert result.status == "ok", result.error
+    body = result.result
+    assert len(body["chain"]) == 3
+    for entry in body["chain"]:
+        pem = entry["pem"]
+        # Public certificate material only — never a private key.
+        assert pem.startswith("-----BEGIN CERTIFICATE-----")
+        assert "PRIVATE KEY" not in pem
+        # The PEM parses back to the cert whose metadata this entry reports,
+        # so leaf-first ordering is preserved through the pem field too.
+        parsed = x509.load_pem_x509_certificate(pem.encode("ascii"))
+        assert parsed.subject.rfc4514_string() == entry["subject"]
+        assert str(parsed.serial_number) == entry["serial"]
+    # leaf is the convenience alias for chain[0], pem included.
+    assert body["leaf"]["pem"] == body["chain"][0]["pem"]
+
+
+async def test_self_signed_leaf_pem_loads_as_target_tls_ca_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _registered_tls_inspect_op: None,
+) -> None:
+    """A self-signed appliance's leaf.pem is directly usable as a tls_ca_pin.
+
+    The probe -> pin path the #2907 backplane-first coverage needs: the leaf
+    PEM a governed ``net.tls_inspect`` returns is accepted verbatim by the
+    target contract's ``validate_ca_pin_pem`` (ssl load_verify_locations
+    cadata=...), paired with a ``tls_server_name`` from the emitted SAN.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    server = _self_signed_server(tmp_path)
+    try:
+        result = await _dispatch_inspect(
+            {"host": "127.0.0.1", "port": server.port, "server_name": _LEAF_CN}
+        )
+    finally:
+        server.stop()
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["leaf"]["self_signed"] is True
+    # The probed leaf PEM passes the target's tls_ca_pin validator unchanged.
+    assert validate_ca_pin_pem(body["leaf"]["pem"]) == body["leaf"]["pem"]
+    # tls_server_name pairs with the already-emitted leaf SAN (no new field).
+    assert _LEAF_CN in body["leaf"]["san"]
+
+
+def test_cert_to_dict_pem_is_public_material_only() -> None:
+    """``_cert_to_dict`` emits a parseable certificate PEM and no private key."""
+    now = datetime.datetime.now(datetime.UTC)
+    key = _new_key()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _LEAF_CN)])
+    cert = _sign(_LEAF_CN, key, name, key, san_dns=[_LEAF_CN])
+    flat = net_tls._cert_to_dict(cert, now)
+    pem = flat["pem"]
+    assert pem == _pem(cert).decode("ascii")
+    assert pem.startswith("-----BEGIN CERTIFICATE-----")
+    assert "PRIVATE KEY" not in pem
+    # Round-trips to the same certificate.
+    parsed = x509.load_pem_x509_certificate(pem.encode("ascii"))
+    assert parsed.fingerprint(hashes.SHA256()) == cert.fingerprint(hashes.SHA256())

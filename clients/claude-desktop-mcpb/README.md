@@ -31,9 +31,9 @@ because the shim runs on a machine already on the VPN.
 | Path | Role |
 |---|---|
 | `manifest.json` | MCPB manifest (`manifest_version` 0.3). Committed with a `0.0.0` placeholder version; `build.sh` injects the real version at pack time. |
-| `server/index.mjs` | The bundle's entry point. A thin stdio launcher that spawns the vendored `mcp-remote` through the bundle's own runtime, guards the internal-CA path, and presents the pre-registered `meho-mcp` OAuth client. |
+| `server/index.mjs` | The bundle's entry point. A thin stdio launcher that runs the vendored `mcp-remote` in-process (imports its CLI entry — spawns nothing), and presents the pre-registered `meho-mcp` OAuth client. |
 | `package.json` + `package-lock.json` | Pin `mcp-remote@0.1.38` and its full, integrity-checked dependency tree. `build.sh` runs `npm ci --omit=dev` from the lock to vendor `node_modules` into the bundle. Never committed: `node_modules/`. |
-| `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's spawn contract and guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
+| `test/index.test.mjs` | Behavioral suite (`node --test`) for the launcher's in-process invocation contract and guards. Runs on every PR (`mcpb-bundle.yml`); not shipped in the bundle. |
 | `build.sh` | Vendors dependencies, then validates + packs the bundle via the pinned `@anthropic-ai/mcpb` CLI. |
 
 ## Building locally
@@ -61,47 +61,62 @@ and [`.github/workflows/cli-release.yml`](../../.github/workflows/cli-release.ym
 ## How the launcher works
 
 The manifest's `mcp_config.command` is `node`, running `server/index.mjs`
-with the operator's backplane URL as its argument, the optional CA path
-delivered as the `MEHO_CA_CERT` environment variable, the OAuth client id
-delivered as `MEHO_MCP_CLIENT_ID`, and the requested OAuth scopes delivered
-as `MEHO_MCP_SCOPES`. The launcher:
+with the operator's backplane URL as its argument, the optional internal-CA
+path delivered as the `NODE_EXTRA_CA_CERTS` environment variable, the OAuth
+client id delivered as `MEHO_MCP_CLIENT_ID`, and the requested OAuth scopes
+delivered as `MEHO_MCP_SCOPES`. The launcher:
 
 1. Validates that the URL is a well-formed `https` URL.
-2. Exports `NODE_EXTRA_CA_CERTS` to the child **only** when a non-empty
-   CA path was supplied. An unset optional file must not become the
-   child's TLS trust path, and the MCPB host's substitution of an unset
-   optional value is undocumented — so the guard lives in code rather
-   than depending on that behavior.
-3. Resolves the OAuth client id from `MEHO_MCP_CLIENT_ID`, falling back to
+2. Resolves the OAuth client id from `MEHO_MCP_CLIENT_ID`, falling back to
    `meho-mcp` when the host substitutes an empty value for the untouched
    optional `client_id` config — so an operator who never opens the
-   advanced field still authenticates.
-4. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
+   advanced field still authenticates. The seam variable is scrubbed from
+   the environment `mcp-remote` inherits.
+3. Resolves the requested OAuth scopes from `MEHO_MCP_SCOPES`, falling back
    to the default working surface `mcp:read mcp:execute` when the host
    substitutes an empty/whitespace value for the untouched optional
    `scopes` config. Setting it to an elevated value (e.g.
    `mcp:read mcp:execute mcp:admin`) is the deliberate opt-in to
-   [operator mode](#elevated-operator-mode-opt-in).
-5. Spawns the vendored `mcp-remote@0.1.38` with inherited stdio, passing
-   `--static-oauth-client-info '{"client_id": "…"}'` and
-   `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'`.
-   The static client info is load-bearing: MEHO's Keycloak realm blocks
-   anonymous RFC 7591 Dynamic Client Registration (default Trusted Hosts
-   policy → `403 "Host not trusted"`), so a bare `mcp-remote` could never
-   complete OAuth on a fresh install. Presenting the pre-registered public
-   `meho-mcp` client skips DCR entirely. `mcp-remote` then runs its OAuth
-   2.1 + PKCE flow and forwards Streamable-HTTP calls to `/mcp`.
+   [operator mode](#elevated-operator-mode-opt-in). The seam variable is
+   scrubbed from the environment `mcp-remote` inherits.
+4. Sets `process.argv` to the `mcp-remote` invocation — the backplane URL,
+   plus `--static-oauth-client-info '{"client_id": "…"}'` and
+   `--static-oauth-client-metadata '{"scope": "<resolved scopes>"}'` — and
+   **imports** the vendored `mcp-remote@0.1.38` CLI entry into this
+   process. `mcp-remote` reads `process.argv` at import and takes over the
+   launcher's stdio; nothing is spawned. The static client info is
+   load-bearing: MEHO's Keycloak realm blocks anonymous RFC 7591 Dynamic
+   Client Registration (default Trusted Hosts policy → `403 "Host not
+   trusted"`), so a bare `mcp-remote` could never complete OAuth on a fresh
+   install. Presenting the pre-registered public `meho-mcp` client skips DCR
+   entirely. `mcp-remote` then runs its OAuth 2.1 + PKCE flow and forwards
+   Streamable-HTTP calls to `/mcp`.
 
-The spawn is a direct `process.execPath` + args-array call — the same
-runtime already executing `index.mjs`, with `ELECTRON_RUN_AS_NODE=1` in
-the child env so it runs as plain Node whether `execPath` is a standalone
-`node` or Claude Desktop's Electron helper. There is **no `npx`, no PATH
-lookup, and no per-platform shell**: `mcp-remote` is vendored in the
-bundle's `node_modules` (MCPB Node servers ship their dependencies), and
-the launcher resolves its entry from there. This is what fixes the
-field-test failure where Claude Desktop's UtilityProcess GUI PATH (no
-Homebrew / nvm entries) made the old `npx` spawn die with
-`spawn npx ENOENT` before OAuth (#3143).
+`mcp-remote` runs **in-process** — the launcher imports its CLI entry
+rather than spawning it — so it runs under the exact Node runtime Claude
+Desktop already started for the launcher. This is what fixes field-test
+finding **F6** (#3341): #3144 spawned `mcp-remote` by launching the
+bundle's own runtime (`process.execPath`) with `ELECTRON_RUN_AS_NODE=1`, on
+the assumption that flag makes the child run as plain Node whether
+`execPath` is a standalone `node` or Claude Desktop's Electron helper. On
+Claude Desktop 1.40609.0 that is false: `execPath` is the `Claude Helper
+(Plugin)` Electron binary, which FATALs when spawned as Node even with
+`ELECTRON_RUN_AS_NODE=1` (`Unable to find helper app`), so the child never
+started and Desktop cancelled `initialize` after 60 s. Importing the entry
+sidesteps `execPath` entirely — there is no child, no `npx`, no PATH
+lookup, and no per-platform shell. (The earlier `npx`-based launcher died
+with `spawn npx ENOENT` under Claude Desktop's UtilityProcess GUI PATH,
+fixed by #3144; F6 was the deeper failure that vendoring alone left.)
+
+Internal-CA trust is delivered as `NODE_EXTRA_CA_CERTS` by the manifest
+`env` block, which Claude Desktop applies to the launcher's environment
+*before Node boots*. That is the only workable route for the in-process
+launcher: `NODE_EXTRA_CA_CERTS` is read once at Node startup and cannot be
+set from launcher code afterwards, and there is no child environment to
+export it to. When the optional CA field is left empty (the default fresh
+install) the value is empty and Node treats it as "no extra certs" — the
+default trust store is untouched and public-CA deploys keep working; a
+non-empty path is added to the trust store `mcp-remote`'s `fetch` uses.
 
 The `meho-mcp` client (or whatever name `client_id` overrides it to) must
 already exist on the realm — see

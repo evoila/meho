@@ -104,6 +104,8 @@ async def _result_query_handler(
         return await read_result_window(operator, handle_id, offset, limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
 
 
 async def _run_query(

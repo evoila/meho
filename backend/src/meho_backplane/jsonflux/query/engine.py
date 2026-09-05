@@ -175,12 +175,25 @@ class QueryEngine:
         (``conn.register``); DuckDB never reads files or URLs itself. These
         settings make that contract enforced rather than incidental, closing
         the latent arbitrary-file-read / SSRF / untrusted-extension surface
-        that arbitrary SQL (e.g. a future ``result_query`` drill-in) would
-        otherwise expose. ``lock_configuration`` must be applied last because
-        it freezes all further configuration changes.
+        that arbitrary SQL (e.g. the ``result_query`` drill-in, #3366) would
+        otherwise expose.
+
+        Resource ceilings (``max_memory`` / ``threads``) and the
+        extension-autoload switches are applied here too so every engine — in
+        particular the ``result_query`` compiler running a caller-shaped
+        ``SELECT`` — is bounded in memory and single-threaded and can neither
+        auto-install nor auto-load an extension. These are ``SET`` statements,
+        so they MUST precede ``lock_configuration=true`` (a post-lock ``SET``
+        raises ``InvalidInputException`` on the pinned duckdb 1.5.5).
+        ``lock_configuration`` is therefore applied **last** — it freezes all
+        further configuration changes.
         """
         self.conn.execute("SET enable_external_access=false")
         self.conn.execute("SET allow_community_extensions=false")
+        self.conn.execute("SET autoinstall_known_extensions=false")
+        self.conn.execute("SET autoload_known_extensions=false")
+        self.conn.execute("SET max_memory='256MB'")
+        self.conn.execute("SET threads=1")
         self.conn.execute("SET lock_configuration=true")
 
     def register(  # NOSONAR (cognitive complexity)

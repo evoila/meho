@@ -195,6 +195,50 @@ def _summarize_sources(
     return rows, False
 
 
+def _build_summary(
+    *,
+    leg_stats: dict[str, dict[str, int]],
+    non_sanctioned: dict[tuple[str, str], dict[str, Any]],
+    unexpected: dict[tuple[str, str], dict[str, Any]],
+    sanctioned_source_count: int,
+    total: int,
+    sanctioned_states: int,
+    non_sanctioned_states: int,
+    unparsed: int,
+) -> dict[str, Any]:
+    """Render the classifier's accumulators into the final summary object."""
+    ns_list, ns_trunc = _summarize_sources(non_sanctioned, cap=_MAX_NON_SANCTIONED_SOURCES)
+    ux_list, _ = _summarize_sources(unexpected, cap=None)
+    legs_out = {
+        leg: {
+            "sanctioned_states": st["sanctioned_states"],
+            "non_sanctioned_states": st["non_sanctioned_states"],
+            "coverage_pct": (
+                round(100.0 * st["sanctioned_states"] / tot, 1)
+                if (tot := st["sanctioned_states"] + st["non_sanctioned_states"])
+                else None
+            ),
+        }
+        for leg, st in sorted(leg_stats.items())
+    }
+    grand = sanctioned_states + non_sanctioned_states
+    return {
+        "legs": legs_out,
+        "total_states_classified": total,
+        "unparsed_lines": unparsed,
+        "sanctioned_state_count": sanctioned_states,
+        "non_sanctioned_state_count": non_sanctioned_states,
+        "sanctioned_source_count": sanctioned_source_count,
+        "non_sanctioned_source_count": len(non_sanctioned),
+        "unexpected_source_count": len(unexpected),
+        "coverage_pct": round(100.0 * sanctioned_states / grand, 1) if grand else None,
+        "non_sanctioned_sources": ns_list,
+        "non_sanctioned_sources_truncated": ns_trunc,
+        "unexpected_sources": ux_list,
+        "caveat": _CAVEAT,
+    }
+
+
 def classify_mgmt_flows(
     state_rows: list[dict[str, Any]],
     *,
@@ -214,6 +258,12 @@ def classify_mgmt_flows(
     asserts on (``$.unexpected_source_count`` scalar, or an aggregate
     ``count`` over ``$.unexpected_sources`` so the breach evidence names
     each ``{src, leg, ports}``).
+
+    A state line the parser could not structure (``proto`` is ``None`` --
+    a truncated/unknown form or a NAT-translated first endpoint) is counted
+    in ``unparsed_lines`` and never classified, so an unrecognised state can
+    never be silently absorbed into a clean summary. A Sensor pins
+    ``$.unparsed_lines <= 0`` alongside the source assertion to catch that.
     """
     ports = {int(p) for p in mgmt_ports} if mgmt_ports else set(_DEFAULT_MGMT_PORTS)
     sanctioned_nets = _compile_nets(sanctioned_src)
@@ -225,9 +275,21 @@ def classify_mgmt_flows(
     unexpected: dict[tuple[str, str], dict[str, Any]] = {}
     sanctioned_sources: set[tuple[str, str]] = set()
     total = sanctioned_states = non_sanctioned_states = 0
+    unparsed = 0
 
     for row in state_rows:
-        if row.get("proto") != "tcp":
+        proto = row.get("proto")
+        if proto is None:
+            # A line ``parse_pfctl_states`` could not structure at all: a
+            # truncated / unknown form, or a NAT-translated first endpoint
+            # (``addr:port (xlate:port) <dir> ...`` -- out of scope for this
+            # port-based classifier). Counted in ``unparsed_lines`` so a pinned
+            # Sensor can assert ``$.unparsed_lines <= 0`` and treat an
+            # unrecognised state as a breach signal, NOT a silent all-clear.
+            # Never counted as classified.
+            unparsed += 1
+            continue
+        if proto != "tcp":
             continue
         src_hp = _split_host_port(row.get("src"))
         dst_hp = _split_host_port(row.get("dst"))
@@ -262,35 +324,16 @@ def classify_mgmt_flows(
             uent["ports"].add(server_port)
             uent["states"] += 1
 
-    ns_list, ns_trunc = _summarize_sources(non_sanctioned, cap=_MAX_NON_SANCTIONED_SOURCES)
-    ux_list, _ = _summarize_sources(unexpected, cap=None)
-    legs_out = {
-        leg: {
-            "sanctioned_states": st["sanctioned_states"],
-            "non_sanctioned_states": st["non_sanctioned_states"],
-            "coverage_pct": (
-                round(100.0 * st["sanctioned_states"] / tot, 1)
-                if (tot := st["sanctioned_states"] + st["non_sanctioned_states"])
-                else None
-            ),
-        }
-        for leg, st in sorted(leg_stats.items())
-    }
-    grand = sanctioned_states + non_sanctioned_states
-    return {
-        "legs": legs_out,
-        "total_states_classified": total,
-        "sanctioned_state_count": sanctioned_states,
-        "non_sanctioned_state_count": non_sanctioned_states,
-        "sanctioned_source_count": len(sanctioned_sources),
-        "non_sanctioned_source_count": len(non_sanctioned),
-        "unexpected_source_count": len(unexpected),
-        "coverage_pct": round(100.0 * sanctioned_states / grand, 1) if grand else None,
-        "non_sanctioned_sources": ns_list,
-        "non_sanctioned_sources_truncated": ns_trunc,
-        "unexpected_sources": ux_list,
-        "caveat": _CAVEAT,
-    }
+    return _build_summary(
+        leg_stats=leg_stats,
+        non_sanctioned=non_sanctioned,
+        unexpected=unexpected,
+        sanctioned_source_count=len(sanctioned_sources),
+        total=total,
+        sanctioned_states=sanctioned_states,
+        non_sanctioned_states=non_sanctioned_states,
+        unparsed=unparsed,
+    )
 
 
 async def pfsense_mgmt_flow_summary(
@@ -331,9 +374,11 @@ _WHEN_TO_USE_MGMT_FLOW = (
     "satellite / island tooling) vs non-sanctioned, with the non-sanctioned "
     "sources that are not in a known baseline flagged as 'unexpected'. Pin it "
     "to a Sensor (assert ``$.unexpected_source_count <= 0``, or aggregate "
-    "``count`` over ``$.unexpected_sources`` so the breach names each source) "
-    "to alert when a NEW out-of-band source appears. Read-only; classifies the "
-    "live state table and changes nothing on the firewall."
+    "``count`` over ``$.unexpected_sources`` so the breach names each source; "
+    "pin ``$.unparsed_lines <= 0`` alongside so an unrecognised state line is "
+    "not silently read as an all-clear) to alert when a NEW out-of-band source "
+    "appears. Read-only; classifies the live state table and changes nothing "
+    "on the firewall."
 )
 
 _MGMT_NET_ITEM_SCHEMA = {
@@ -374,9 +419,11 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
         "Returns a compact per-leg summary (open-state counts + coverage %) "
         "plus the distinct ``non_sanctioned_sources`` (capped) and "
         "``unexpected_sources`` (complete) as ``{src, leg, ports, states}`` "
-        "rows, and the ``*_source_count`` scalars. No firewall change; reads "
-        "the live state table (zero-change measurement). A failed read raises "
-        "so a pinned Sensor evaluates ``unknown`` rather than a false "
+        "rows, and the ``*_source_count`` scalars, plus an ``unparsed_lines`` "
+        "count of state rows the parser could not structure (assert it is 0 so "
+        "an unrecognised line is not a silent all-clear). No firewall change; "
+        "reads the live state table (zero-change measurement). A failed read "
+        "raises so a pinned Sensor evaluates ``unknown`` rather than a false "
         "all-clear. Same-subnet flows do not transit the pfSense and are "
         "invisible (see ``caveat``)."
     ),
@@ -441,6 +488,7 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
                 },
             },
             "total_states_classified": {"type": "integer"},
+            "unparsed_lines": {"type": "integer"},
             "sanctioned_state_count": {"type": "integer"},
             "non_sanctioned_state_count": {"type": "integer"},
             "sanctioned_source_count": {"type": "integer"},
@@ -468,14 +516,17 @@ MGMT_FLOW_SUMMARY_OP = PfSenseOp(
         },
         "output_shape": (
             "``{legs: {<leg>: {sanctioned_states, non_sanctioned_states, "
-            "coverage_pct}}, total_states_classified, sanctioned_state_count, "
+            "coverage_pct}}, total_states_classified, unparsed_lines, "
+            "sanctioned_state_count, "
             "non_sanctioned_state_count, sanctioned_source_count, "
             "non_sanctioned_source_count, unexpected_source_count, "
             "coverage_pct, non_sanctioned_sources: [{src, leg, ports, "
             "states}], non_sanctioned_sources_truncated, unexpected_sources: "
             "[{src, leg, ports, states}], caveat}``. The ``*_source_count`` "
             "scalars are always exact; ``non_sanctioned_sources`` is capped "
-            "while ``unexpected_sources`` is complete."
+            "while ``unexpected_sources`` is complete. ``unparsed_lines`` "
+            "counts state rows the parser could not structure (assert it "
+            "is 0 so an unrecognised state is not a silent all-clear)."
         ),
     },
 )

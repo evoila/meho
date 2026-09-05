@@ -94,10 +94,12 @@ _FIXTURE_PFCTL_SR = (
     "block drop in log quick on em0 proto tcp from <bruteforce> to any port = 22\n"
 )
 
+# Real captured pfctl -ss format: interface first, protocol second
+# (pfSense 2.7; pf state format, redmine #2121).
 _FIXTURE_PFCTL_SS = (
-    "tcp em0 10.0.0.1:55234 -> 93.184.216.34:443: ESTABLISHED:ESTABLISHED\n"
-    "udp em0 10.0.0.2:1234 <-> 8.8.8.8:53\n"
-    "tcp em0 10.0.0.3:44100 -> 1.1.1.1:443: ESTABLISHED:ESTABLISHED\n"
+    "em0 tcp 93.184.216.34:443 <- 10.0.0.1:55234  ESTABLISHED:ESTABLISHED\n"
+    "em0 udp 10.0.0.2:1234 <-> 8.8.8.8:53\n"
+    "em0 tcp 1.1.1.1:443 <- 10.0.0.3:44100  ESTABLISHED:ESTABLISHED\n"
 )
 
 _FIXTURE_PFCTL_SN = "nat on em0 from 192.168.1.0/24 to any -> (em0)\n"

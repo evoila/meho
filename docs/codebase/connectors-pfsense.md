@@ -91,7 +91,13 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 - **Read op parsers** (`ops_read.py`) — pure parsers for pfctl, config.xml, and
   the ISC dhcpd lease DB, plus the handler functions and the `READ_OPS` tuple:
   - `parse_pfctl_rules` / `parse_pfctl_states` / `parse_pfctl_nat` — pfctl
-    output parsers.
+    output parsers. `parse_pfctl_states` reads the real `pfctl -ss` field
+    order — **interface first, protocol second** (`<if> <proto> <ep1>
+    <-|-> <ep2>  <state>`, pfSense 2.7 / pf state format, redmine #2121);
+    the `proto`/`iface` capture groups were transposed before #252, which
+    mislabelled every row (and, latently, `pfsense.firewall.state`'s
+    output). A NAT-translated first endpoint (`addr:port (xlate:port)`) does
+    not match and is returned unparsed (`proto=None`) rather than misparsed.
   - `parse_ifconfig` / `_netmask_to_cidr` — ifconfig output parser.
   - `parse_gateways_xml` — XML parser for the `<gateways>` block.
   - `parse_dhcp_leases` (#2849) — parses `/var/dhcpd/var/db/dhcpd.leases`
@@ -314,6 +320,13 @@ Design notes:
   the dispatch fails and a pinned Sensor evaluates `unknown` rather than a
   false all-clear (the sensor contract: a refusal must fail the dispatch, not
   return a reading). An empty (exit 0) state table classifies to zeros.
+- **Unparsed lines are counted, not dropped.** A *successful* read whose lines
+  the parser cannot structure (a truncated/unknown form, or a NAT-translated
+  first endpoint `addr:port (xlate:port) <dir> ...` — out of scope for this
+  port-based classifier) is counted in the result's `unparsed_lines` scalar and
+  never classified. A Sensor pins `$.unparsed_lines <= 0` alongside the source
+  assertion so an unrecognised state cannot be silently absorbed into a clean
+  summary (the second false-all-clear the field-order fix closed for #252).
 - **Same-subnet caveat.** A pfSense only sees flows it routes between two of
   its segments; same-subnet flows are invisible. The op echoes this on every
   result's `caveat` field.

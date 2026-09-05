@@ -239,8 +239,9 @@ dispatched operator threads in and is forwarded to `auth_headers` →
    `vulnerabilities` is the single set-shaped field, so the dispatcher's
    JSONFlux reducer materialises it into a result handle when a real image's
    CVE list crosses the ~50-row / 4 KB threshold (postulate 6). A named-CVE
-   lookup against that handle is a `result_query`
-   `SELECT ... WHERE id = 'CVE-…'` away. A never-scanned artifact returns
+   lookup means paging that handle with `result_query(handle_id, offset,
+   limit)` and scanning the rows client-side (no server-side filtering). A
+   never-scanned artifact returns
    Harbor 404 → `httpx.HTTPStatusError` → `connector_error`.
 
 ### project_summary(operator, target, params)
@@ -288,7 +289,8 @@ suffix), `safety_level=safe`, no approval. `operator` threads the same way.
    `hard`/`used` are `ResourceList` maps (`storage` in bytes). The dispatcher's
    JSONFlux reducer materialises the list into a result handle when the fleet
    crosses the ~50-row / 4 KB threshold (postulate 6); a "projects over N bytes
-   used" filter is a `result_query` away.
+   used" question means paging that handle with `result_query(handle_id,
+   offset, limit)` and comparing rows client-side (no server-side filtering).
 
 ### execute() shim
 

@@ -298,14 +298,12 @@ Large server lists (>~50 rows / 4 KB) return a JSONFlux handle instead of a
 raw array. The handle's `handle_id` is used to drill in:
 
 ```bash
-meho operation result-query <handle_id> '.[] | .server.server_ip'
-meho operation result-aggregate <handle_id> --group dc
+meho operation result-query <handle_id> --offset 0 --limit 50
 ```
 
-In v0.2 the production reducer ships as `PassThroughReducer` — handles are
-only produced by the test-only `ForceHandleReducer` in acceptance tests.
-Real JSONFlux reduction (MinIO/S3 spill, `result_query`) is a v0.2.next
-concern per Goal #214.
+The dispatcher's default `JsonFluxReducer` spills large lists to a
+Valkey-backed handle; `result_query` pages the spilled rows by `offset` /
+`limit` a window at a time and takes no filter/aggregate argument.
 
 ## Write ops — form-encoded bodies (future reference)
 

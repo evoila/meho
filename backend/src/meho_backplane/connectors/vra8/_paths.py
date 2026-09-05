@@ -108,12 +108,14 @@ _CATALOG_ITEMS_PATH = "/catalog/api/admin/items"
 #: The OData pagination params the list reads forward — ``$top`` / ``$skip``, which
 #: every vRA 8 list surface accepts with identical (lowercase) casing and which bound
 #: the fetch size before the dispatcher reduces the result to a JSONFlux handle.
-#: **Sorting/filtering is deliberately NOT forwarded to the vendor:** MEHO postulate 6
-#: makes the result handle the canonical narrow surface (``result_query`` /
-#: ``result_aggregate``), so a vendor ``$orderby`` would be redundant — and vRA 8's
-#: casing for it is *not* uniform (IaaS ``/iaas/api/projects`` uses ``$orderBy``, the
-#: Service Broker / Blueprint services ``$orderby``), so forwarding one spelling would
-#: silently drop the sort on the other. The agent sorts through the handle instead.
+#: **Sorting/filtering is deliberately NOT forwarded to the vendor:** the result
+#: handle is the agent's post-fetch surface, and ``result_query`` pages it by
+#: ``offset`` / ``limit`` only — server-side sort/filter over a handle is not
+#: available. A vendor ``$orderby`` would be inconsistent anyway: vRA 8's casing
+#: for it is *not* uniform (IaaS ``/iaas/api/projects`` uses ``$orderBy``, the
+#: Service Broker / Blueprint services ``$orderby``), so forwarding one spelling
+#: would silently drop the sort on the other. The agent pages the handle and
+#: reads rows client-side instead.
 ODATA_LIST_PARAM_KEYS: tuple[str, ...] = ("$top", "$skip")
 
 

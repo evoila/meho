@@ -554,9 +554,10 @@ _RKE2_ETCD_SNAPSHOT_LIST_OP = Rke2Op(
         "output_shape": (
             "``{snapshots: [{name, location, size_bytes, created_at}, "
             "...]}``. A set-shaped payload: above the reducer threshold it "
-            "is returned as a JSONFlux result handle -- drill in with "
-            "``result_query`` / ``result_aggregate`` (e.g. newest "
-            "``created_at``) rather than expecting every row inline. "
+            "is returned as a JSONFlux result handle -- page it with "
+            "``result_query(handle_id, offset, limit)`` and scan the rows "
+            "(e.g. for the newest ``created_at``) rather than expecting every "
+            "row inline. "
             "``location`` is whatever RKE2 reports (``local`` / a "
             "``file://`` URL / a bare path / an ``s3://`` URL). "
             "``size_bytes`` is the integer byte count, or null when RKE2 "

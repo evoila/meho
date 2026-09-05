@@ -49,9 +49,9 @@ func newPodListCmd() *cobra.Command {
 		Long: "list dispatches holodeck.pod.list and renders one row per\n" +
 			"active nested pod (pod ID / name / state / primary network /\n" +
 			"VM count). Returns the JSONFlux-shaped `{rows, total}`\n" +
-			"envelope; future JSONFlux reducer will spill large pod lists\n" +
-			"to the HandleStore via the standard result_describe /\n" +
-			"result_query flow.\n\n" +
+			"envelope; a future JSONFlux reducer will spill large pod lists\n" +
+			"into a result handle you page with result_query(handle_id,\n" +
+			"offset, limit).\n\n" +
 			"The human render caps at 20 rows; --json emits the full\n" +
 			"OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +

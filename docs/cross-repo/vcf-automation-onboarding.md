@@ -293,8 +293,8 @@ Tenant-plane only. `deployment list` dispatches the typed
 dispatches the typed `vcfa.tenant.deployment.get` (#2960).
 The largest payload on the tenant surface; large
 tenants return hundreds of deployments. The dispatcher's JSONFlux
-seam wraps oversized responses in a `ResultHandle`; use the
-`result_describe` / `result_query` meta-tools to navigate. The
+seam wraps oversized responses in a `ResultHandle`; page it with the
+`result_query(handle_id, offset, limit)` meta-tool. The
 `--json` rendering of the list verb shows the raw envelope; the
 default human render shows `id`, `name`, `status`, `blueprintId`.
 
@@ -351,7 +351,7 @@ write workflows stay in the wrapper.
 | Org detail | `vcf-automation.sh org <id>` | `meho vcf-automation org get <id> --target rdc-vcfa` | |
 | Region (VDC) listing | `vcf-automation.sh regions` | `meho vcf-automation region list --target rdc-vcfa` | |
 | Project listing | `vcf-automation.sh projects` | `meho vcf-automation project list --target rdc-vcfa` | |
-| Deployment listing | `vcf-automation.sh deployments` | `meho vcf-automation deployment list --target rdc-vcfa` | JSONFlux handle returned on large tenants — use `result_describe` |
+| Deployment listing | `vcf-automation.sh deployments` | `meho vcf-automation deployment list --target rdc-vcfa` | JSONFlux handle returned on large tenants — page it with `result_query` |
 | Deployment detail | `vcf-automation.sh deployment <id>` | `meho vcf-automation deployment get <id> --target rdc-vcfa` | |
 | Blueprint listing | `vcf-automation.sh blueprints` | `meho vcf-automation blueprint list --target rdc-vcfa` | |
 
@@ -489,7 +489,7 @@ The fix:
 | `status=denied` | `read_only` role, or a tenant policy denied the dispatch. | Use an `operator`-role token. |
 | Connection times out | VCFA appliance unreachable from the backplane host. | Verify the FQDN resolves from the backplane; check firewall rules (port 443 from backplane → VCFA). |
 | Probe fails with TLS error | Self-signed or expired certificate, or wrong CA bundle. | Mount the correct CA bundle in the backplane container and set `MEHO_TLS_CA_BUNDLE`; or replace the VCFA cert with a CA-signed one. |
-| Deployment list returns a handle envelope without rows | JSONFlux reducer wrapped the payload because it exceeded the inline threshold. | Use `result_describe <handle_id>` + `result_query <handle_id> …` to navigate; or pass `--json` to inspect the full envelope. |
+| Deployment list returns a handle envelope without rows | JSONFlux reducer wrapped the payload because it exceeded the inline threshold. | Page the handle with `result_query(handle_id, offset, limit)`; or pass `--json` to inspect the full envelope. |
 
 ## References
 

@@ -64,7 +64,7 @@ against the **vRLI v2 API corpus**:
    sets are large) is exercised non-interactively through the
    per-op `output_shape` + `next_step` text — every `vrli.event.query`
    reference in the curated `llm_instructions` directs the agent
-   to `result_describe` / `result_query` for the actual rows.
+   to `result_query(handle_id, offset, limit)` for the actual rows.
    Real JSONFlux reduction is a v0.5.next concern per Goal #214
    scope.
 
@@ -302,8 +302,8 @@ meho operation call vrli-rest-9.0 \
 The production reducer
 [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) is now
 the default, so large event result sets return as a `ResultHandle`; the
-agent will read them via `result_describe` + `result_query` once those
-meta-tools land (a follow-on Initiative). Until then, handles are
+agent reads them by paging the handle with `result_query(handle_id,
+offset, limit)`. Handles are also
 exercised non-interactively via the per-op `llm_instructions` advertising
 the shape (assert covered by
 [`test_vrli_core_groups_event_query_op_is_jsonflux_handle_shaped`](../../backend/tests/test_connectors_vcf_logs_core_ops.py)).

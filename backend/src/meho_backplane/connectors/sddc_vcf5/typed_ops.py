@@ -237,7 +237,9 @@ _HOST_LIST = SddcVcf5TypedOp(
         when_to_use=(
             "Call to enumerate ESXi hosts — the migration's physical footprint. "
             "Narrow with domainId / clusterId / status when the operator named one; "
-            "aggregate over the handle for host/version counts."
+            "a large list is reduced to a JSONFlux handle you page with "
+            "result_query(handle_id, offset, limit), reading host/version fields "
+            "per row."
         ),
         output_shape=(
             "{elements: [{id, fqdn, esxiVersion, ipAddresses, domain, cluster, "

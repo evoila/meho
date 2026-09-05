@@ -235,9 +235,8 @@ The default reducer is the threshold-aware
 [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) — a
 `vault.kv.list` whose key count exceeds ~50 rows / 4 KB returns a sample
 + `ResultHandle`; a smaller list passes through inline with
-`handle is None`. The `result_query` / `result_aggregate` /
-`result_describe` / `result_export` meta-tools that drill into a handle
-ship in a follow-on Initiative. `tests/test_vault_kv_list_jsonflux.py`
+`handle is None`. A handle is paged with `result_query(handle_id, offset,
+limit)`, a row-window at a time. `tests/test_vault_kv_list_jsonflux.py`
 (G3.3-T4 #548/#566) pins both halves of the contract: ≤50 keys stays
 inline with no handle, and >50 keys produces a `sample` + `ResultHandle`.
 Operationally: large `meho vault kv list` results return a handle and you

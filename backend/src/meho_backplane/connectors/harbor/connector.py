@@ -702,8 +702,9 @@ class HarborConnector(HttpConnector):
         ``vulnerabilities`` is the single set-shaped field, so the dispatcher's
         JSONFlux reducer materialises it into a result handle when a real
         image's CVE list crosses the ~50-row / 4 KB threshold (CLAUDE.md
-        postulate 6); a named-CVE lookup against that handle is a
-        ``result_query`` ``WHERE id = ...`` away.
+        postulate 6); a named-CVE lookup means paging that handle with
+        ``result_query(handle_id, offset, limit)`` and scanning the rows
+        client-side -- server-side filtering is not available.
 
         Uses :meth:`_request_json` (not :meth:`_get_json`) because the read
         needs the per-call ``X-Accept-Vulnerabilities`` header, which
@@ -878,7 +879,9 @@ class HarborConnector(HttpConnector):
         one set-shaped field — so the dispatcher's JSONFlux reducer
         materialises them into a result handle once the fleet crosses the
         ~50-row / 4 KB threshold (CLAUDE.md postulate 6); a "projects over N
-        bytes used" filter is a ``result_query`` away.
+        bytes used" question means paging that handle with
+        ``result_query(handle_id, offset, limit)`` and comparing rows
+        client-side -- server-side filtering is not available.
 
         Uses :meth:`_get_json` (idempotent GET with query params; no per-call
         header needed). The dispatched ``operator`` threads to the

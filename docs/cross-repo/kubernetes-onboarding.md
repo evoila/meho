@@ -399,9 +399,8 @@ The default reducer is the threshold-aware
 [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) — a list
 op whose result exceeds ~50 rows / 4 KB returns a sample + `ResultHandle`
 rather than the full inline list; smaller results pass through unchanged.
-The `result_query` / `result_aggregate` / `result_describe` /
-`result_export` meta-tools that drill into a handle ship in a follow-on
-Initiative. Operationally: large `meho k8s pod list` / `deployment list` /
+A handle is paged with `result_query(handle_id, offset, limit)`, a
+row-window at a time. Operationally: large `meho k8s pod list` / `deployment list` /
 `event list` results return a handle and you drill in with the `meho
 operation` result verbs exactly as for any other connector's set-shaped
 op; small results land inline as before.

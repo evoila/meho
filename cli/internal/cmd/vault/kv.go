@@ -132,9 +132,9 @@ func newKVListCmd() *cobra.Command {
 			"\"vault-1.x\". Lists the child keys at <mount>/<path> via the\n" +
 			"KV-v2 metadata endpoint. The result is set-shaped: when the key\n" +
 			"count crosses the backplane's JSONFlux threshold the envelope\n" +
-			"carries a result handle + sample instead of the full list — drill\n" +
-			"in with `meho operation` result verbs (result_query / result_export)\n" +
-			"exactly as for any other connector's set-shaped op.\n\n" +
+			"carries a result handle + sample instead of the full list — page\n" +
+			"it with the `meho operation result-query` verb (handle_id, offset,\n" +
+			"limit) exactly as for any other connector's set-shaped op.\n\n" +
 			"Exit codes mirror meho operation call.",
 		Example: "  meho vault kv list --target rdc-vault secret meho\n" +
 			"  meho vault kv list --target rdc-vault secret meho/test --json",

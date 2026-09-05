@@ -305,9 +305,10 @@ VRLI_EVENT_QUERY_OP = VrliTypedOp(
         "output_shape": (
             "{events: [{timestamp, text, hostname, source, ...}, ...], "
             "complete: bool}. Large result sets return a JSONFlux ResultHandle "
-            "with a bounded inline sample plus a fetch_more envelope; drill via "
-            "result_describe / result_query rather than expecting the full "
-            "payload inline. complete=false means the limit / index truncated the "
+            "with a bounded inline sample plus a fetch_more envelope; page it "
+            "with result_query(handle_id, offset, limit) rather than expecting "
+            "the full payload inline. complete=false means the limit / index "
+            "truncated the "
             "set — re-run with a narrower constraint or time range."
         ),
         "next_step": (

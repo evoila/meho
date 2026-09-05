@@ -42,9 +42,9 @@ func newEnvironmentListCmd() *cobra.Command {
 		Short: "List Fleet-managed environments (the primary inventory unit)",
 		Long: "list dispatches fleet.environment.list against\n" +
 			"connector_id=\"fleet-rest-9.0\". Each environment groups one or more\n" +
-			"product deployments. Large appliances may return a JSONFlux handle\n" +
-			"through the shared HandleStore — use result_describe / result_query\n" +
-			"to navigate the full set when present.\n\n" +
+			"product deployments. Large appliances may return a JSONFlux result\n" +
+			"handle — page it with result_query(handle_id, offset, limit) to\n" +
+			"read the full set a row-window at a time when present.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example:       "  meho vcf-fleet environment list --target rdc-fleet",
 		Args:          cobra.NoArgs,

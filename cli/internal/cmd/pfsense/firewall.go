@@ -127,8 +127,8 @@ func newFirewallStateCmd() *cobra.Command {
 			"dst rows. On busy firewalls the table can contain thousands of\n" +
 			"rows — use --json and pipe through `jq` for filtering.\n\n" +
 			"When the JSONFlux reducer is configured and the row count\n" +
-			"exceeds the threshold, the result includes a handle for\n" +
-			"paging via result_describe / result_query.\n\n" +
+			"exceeds the threshold, the result includes a handle you page\n" +
+			"with result_query(handle_id, offset, limit).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired,\n" +
 			"3=unreachable, 4=unexpected.",
 		Example: "  meho pfsense firewall state --target pfsense-hetzner-dc\n" +

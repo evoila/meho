@@ -215,10 +215,11 @@ the moment the connector loads.
 totalElements, numberOfElements, ...}` wrapper). The reads forward `$top` / `$skip`
 and each list op's `output_shape` tells the agent to check `totalElements` and page
 — a default (first-page) call is never a *silent* truncation because the wrapper
-self-describes the total. Sorting/filtering is done through the JSONFlux result
-handle (`result_query` / `result_aggregate`), not vendor query params (MEHO
-postulate 6); `$orderby` is deliberately not forwarded — vRA 8's casing for it is
-not uniform across services (IaaS `$orderBy` vs `$orderby`).
+self-describes the total. The agent pages the JSONFlux result handle with
+`result_query(handle_id, offset, limit)` and sorts/filters client-side —
+server-side sort/filter over a handle is not available, and `$orderby` is
+deliberately not forwarded to the vendor either (vRA 8's casing for it is not
+uniform across services: IaaS `$orderBy` vs `$orderby`).
 
 ## Spec reconcile lane
 

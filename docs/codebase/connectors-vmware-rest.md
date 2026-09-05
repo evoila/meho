@@ -218,11 +218,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   yet, distinguished by the probe fingerprint `product=esxi` via
   `host_target.classify_host_target` — there is no `GET:/vcenter/host`
   surface, so the handler resolves the well-known singleton `ha-host`
-  MoRef directly through the VI-JSON seam and the `host` param is
+  MoRef directly through the host vmomi seam (`_post_vmomi_json`, which is
+  hand-rolled SOAP over `/sdk` on ESXi) and the `host` param is
   optional / ignored (the host is the target). Obtaining the session on
-  such a target is the ESXi-native VI-JSON `SessionManager.Login` branch
+  such a target is the standalone-ESXi SOAP `SessionManager.Login` branch
   (`#3363`; see the standalone-ESXi session branch under **Per-target
-  session**) — `#3332` shipped the host resolution + VI-JSON seam but not
+  session**) — `#3332` shipped the host resolution + vmomi seam but not
   the session, so before `#3363` these ops could not authenticate. A
   reachable target that is
   neither vCenter nor ESXi fails closed (`status='unsupported_host_target'`)
@@ -471,37 +472,95 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `auth_headers()`, gets `{"vmware-api-session-id": "<token>"}`, sends
    it on every dispatched op against this target.
 
-**Standalone-ESXi session branch (`#3363`).** A standalone ESXi host —
-the pre-vCenter case `#3332` exists to support — serves `/api/*` through
-a **JSON-RPC 2.0** handler, not the vSphere-Automation vAPI: a bodyless
-`POST /api/session` there answers **HTTP 400** (not 404) with a
-`{"jsonrpc":"2.0","error":{"code":400,...}}` body and never mints a
-token, so the modern→legacy 404 fallback dead-ends. ESXi mints its
-session over VI-JSON instead, on the well-known `ha-sessionmgr`
-`SessionManager` singleton (the sibling of the `ha-host` MoRef `#3332`
-resolves): `POST /sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login`
-with the method-arg body `{"userName", "password", "locale": "en_US"}`
-(the invoked MoRef rides the URL path, so the body carries no HTTP
-Basic — verified against govmomi `vim25` `LoginRequestType`). The
-`{release}` is discovered from the unauthenticated
-`/sdk/vimServiceVersions.xml` document (`urn:vim25` version, e.g.
-`9.1.0.0`), and the minted session id is read from the
-`vmware-api-session-id` **response header** (govmomi's VI-JSON transport
-`json_client`), then cached exactly as the vAPI token is. **Branch
-selection:** by the target's probe fingerprint (`product=esxi`, via
-`classify_host_target` — the same `#3332`/`#3312` distinguisher every
-host op uses) once probed; and for the **very first probe, before any
-fingerprint exists**, by the `POST /api/session` JSON-RPC-400 signature.
-A vCenter target — fingerprint absent / vcenter / unreachable, or a
-genuine non-JSON-RPC 400 — never takes this branch, so the vAPI path
-above stays byte-for-byte unchanged. The discovered release is also
-cached in `_about_versions`, and `_session_paths` is left unset, so the
-subsequent VI-JSON host reads/writes (`_post_vmomi_json`) resolve the
-`/sdk/vim25/{release}` mount transparently; the ESXi flavor is recorded
-in `_session_flavors` so teardown picks `Logout` over `DELETE`.
-Credentials never appear in logs, errors, or results — the Login body is
-never logged, and a failed Login names only the target, the path
-template, and the status.
+**Standalone-ESXi session branch (`#3363`) — hand-rolled SOAP over `/sdk`.**
+A standalone ESXi host — the pre-vCenter case `#3332` exists to support —
+does **not** serve the VI-JSON surface and its `/api/*` is a **JSON-RPC
+2.0** handler, not the vSphere-Automation vAPI. Two things follow:
+
+- *Disproven premise (kept for history).* `#3363` was first filed for a
+  VI-JSON `SessionManager.Login` POST to `/sdk/vim25/{release}/…`. That
+  premise is **disproven live against a standalone ESXi 9.1 host in a lab**
+  (and against the vendor corpus): the VI-JSON surface `/sdk/vim25/{release}/…`
+  is **vCenter-only** — every VI-JSON POST there returns **HTTP 500** with a
+  SOAP expat fault because `/sdk` XML-parses the body. And `POST /api/session`
+  answers **HTTP 400** ("Unsupported content type") — the JSON-RPC handler,
+  never a token — so the modern→legacy 404 fallback dead-ends.
+- *Chosen transport.* ESXi serves vmomi only as **hand-rolled SOAP 1.1 over
+  `POST /sdk`** (proven live end-to-end: `RetrieveServiceContent` → 200
+  `apiType=HostAgent`; `SessionManager.Login` → 200 sets a
+  `vmware_soap_session` cookie; `RetrievePropertiesEx` → 200). The codec —
+  `defusedxml` parser, per-method string-template envelope builders with a
+  local XML escaper, parsers that return the **exact VI-JSON dict shapes**
+  the unchanged downstream consumers already read — lives in
+  `connectors/vmware_rest/soap.py`; the connector wires it onto the pooled
+  `httpx` client (inheriting its TLS-pin → insecure → default precedence and
+  `sni_hostname` extension for free — no separate `SSLContext`). **No new
+  dependency, no `pyvmomi`, no resolver change, no separate impl class.**
+
+*Establish.* Two ordered SOAP posts on `/sdk` (`_establish_esxi_session`):
+(1) unauthenticated `ServiceInstance.RetrieveServiceContent` → the
+HostAgent's `propertyCollector` + `sessionManager` MoRefs (which are **not**
+the vCenter `propertyCollector` / `ha-sessionmgr` literals — they are read
+from ServiceContent, cached in `_esxi_pc_moids` / `_esxi_session_manager_moids`)
+and `about` (`version`, `apiType == "HostAgent"`); (2) `SessionManager.Login`
+on the ServiceContent SessionManager moid → a 200 sets the
+`vmware_soap_session` cookie, which `httpx` keeps in the pooled client's
+cookie jar. That cookie is the auth for every subsequent `/sdk` POST, so
+`auth_headers()` adds **no header** for an ESXi session (the cached sentinel
+token is the opaque cookie value, never the password).
+
+*Branch selection.* By the target's probe fingerprint (`product=esxi`, via
+`classify_host_target` — the same `#3332`/`#3312` distinguisher every host
+op uses) once probed; and for the **very first probe, before any fingerprint
+exists**, by the `POST /api/session` **HTTP 400** signature (status alone is
+diagnostic — vCenter answers 401 / a token there, never 400) confirmed by
+the JSON-RPC discriminator or the `"Unsupported content type"` body text. A
+vCenter target — fingerprint absent / vcenter / unreachable, or a genuine
+non-400 / non-JSON-RPC response — never takes this branch, so the vAPI path
+above stays **byte-for-byte** unchanged.
+
+*moid remap.* The host reads/writes bake the vCenter `propertyCollector`
+literal into their `RetrievePropertiesEx` path; `_post_soap` substitutes the
+ServiceContent-provided PC moid **only** when the caller's moid equals that
+literal (a guarded substitution — any other PC moid is left untouched).
+
+*vim method map (all on `POST /sdk`, SOAP 1.1, `urn:vim25`).* Eight methods
+total — three session/bootstrap + five op methods, each with a builder +
+parser in `soap.py`; `_post_vmomi_json`'s esxi guard routes the op methods
+through `_post_soap`, whose parsers return the same VI-JSON dict shapes the
+unchanged consumers read:
+
+| Consumer | vim method | `_this` | Response shape |
+|---|---|---|---|
+| establish + fingerprint | `RetrieveServiceContent` | `ServiceInstance` | ServiceContent (PC/SessionManager moids, `about`) |
+| establish | `SessionManager.Login` | SessionManager moid | cookie set (success) |
+| teardown | `SessionManager.Logout` | SessionManager moid | empty |
+| storage_devices, config-mgr reads, task polls | `PropertyCollector.RetrievePropertiesEx` | PC moid **from ServiceContent** | `{objects:[{obj,propSet:[{name,val}]}]}` |
+| storage_devices (best-effort) | `HostBootDeviceSystem.QueryBootDevices` | boot-device-system moid | `HostBootDeviceInfo` |
+| datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
+| disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
+
+*Native primitive typing (the codec crux).* The deserialiser coerces leaf
+primitives by expected type — a **bare** `<ssd>true</ssd>` / `<local>true</local>`
+(no `xsi:type`, the real `scsiLun` shape) becomes a Python `bool`, not the
+string `"true"` a schema-less walker would emit and the downstream
+`_bool_or_none` would silently null (the exact `#3332` corruption class,
+moved but not reintroduced — proven `ssd is True` through `_map_scsi_lun`).
+
+*Credential posture.* Credentials never appear in logs, errors, results, or
+the flight-recorder vendor-call span (`#3214`): the Login envelope is the
+only place the password lives (XML-escaped) and it is never logged nor handed
+to the span — `_soap_post` records the `#3214` span with **no request body**,
+so the `/sdk` envelope cannot leak into a captured span. A rejected credential
+(`InvalidLogin` / `NoPermission` fault) → `ConnectorAuthError` (the SOAP
+analogue of a vCenter 401/403, same restage remediation + the dispatcher's
+one cold re-login); any other fault → `RuntimeError` naming only the target.
+
+*Readiness.* **State 1 (unit-proven against SOAP envelopes)** until the
+documented **State-2** live run against a standalone ESXi 9.1 host in a lab
+lands the captured-envelope respx fixtures + the verification note; the
+"works on real hardware" claim is gated on that run, not on green units
+(mocks are exactly what let the disproven VI-JSON premise ship green).
 
 ### fingerprint() / probe()
 
@@ -540,14 +599,16 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
 4. **Standalone ESXi (`#3363`):** on a JSON-RPC ESXi host `GET /api/about`
    answers **HTTP 400** (empty), not 404, so the step-2 fallback (gated on
    exactly 404) never fires. But establishing the session for that GET
-   already recognised the host as ESXi and minted a VI-JSON session (see
-   the standalone-ESXi session branch above); when it did — detected via
+   already recognised the host as ESXi and minted a SOAP session (see the
+   standalone-ESXi session branch above); when it did — detected via
    `_session_flavors[...] == "esxi"` — `fingerprint` returns
-   `reachable=True`, `product="esxi"`, `version` = the `urn:vim25` release
-   the login discovered (cached in `_about_versions`), and `probe_method`
-   names the VI-JSON login + the service-versions document. So a
-   standalone ESXi target now fingerprints reachable instead of
-   dead-ending on the vAPI-only `/api/about`.
+   `reachable=True`, `product="esxi"`, `version` = the `about.version` the
+   unauthenticated `RetrieveServiceContent` already returned (cached in
+   `_about_versions`, exact e.g. `9.1.0`), `extras.api_type == "HostAgent"`,
+   and `probe_method` names the `GET /api/about` 400 → SOAP
+   `RetrieveServiceContent` chain. So a standalone ESXi target now
+   fingerprints reachable instead of dead-ending on the vAPI-only
+   `/api/about`.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,
@@ -561,15 +622,16 @@ probe observed nothing (#2765).
 
 ### aclose()
 
-1. Snapshot the cached session tokens (+ paths, flavors, versions,
-   extensions), clear the dicts.
+1. Snapshot the cached session tokens (+ paths, flavors, SessionManager
+   moids, extensions), clear the dicts.
 2. For each `(cache_key, token)` pair: a **vCenter** session revokes with
    `DELETE /api/session` (or the legacy `/rest/...` path it was minted at)
    carrying the `vmware-api-session-id` header; an **ESXi**-flavored
    session (`#3363`) has no `DELETE /api/session` on its JSON-RPC vAPI, so
-   it revokes with `POST /sdk/vim25/{release}/SessionManager/ha-sessionmgr/Logout`
-   instead (`_esxi_logout_quiet`). Either way a failure (5xx, transport
-   error, 401 from an expired session) is logged via structlog
+   it revokes with a SOAP `SessionManager.Logout` (`POST /sdk`) on the
+   ServiceContent-provided SessionManager moid — cookie-carried, no header
+   — instead (`_esxi_logout_quiet`). Either way a failure (5xx, transport
+   error, an expired session) is logged via structlog
    `vsphere_session_revoke_failed` / `vsphere_session_revoke_non_2xx`
    but doesn't block shutdown — Kubernetes' 30 s
    `terminationGracePeriod` would otherwise be at risk.
@@ -577,14 +639,17 @@ probe observed nothing (#2765).
    clients.
 
 `invalidate_session(target)` — the duck-typed 401-recovery hook — drops
-the cached token + flavor + release so the next dispatch cold-re-establishes
-(vCenter re-runs the `/api/session` fallback; ESXi cold-re-runs the VI-JSON
-Login). For an ESXi-flavored session it additionally issues a best-effort
+the cached token + flavor + version + SOAP moids so the next dispatch
+cold-re-establishes (vCenter re-runs the `/api/session` fallback; ESXi
+cold-re-runs the SOAP `RetrieveServiceContent` + `Login`). For an
+ESXi-flavored session it additionally issues a best-effort SOAP
 `SessionManager.Logout` after dropping the cache entry, so the server-side
-session is released too; it is best-effort by design (a stale token — the
+session is released too; it is best-effort by design (a stale cookie — the
 common 401 case — fails harmlessly), and the vCenter path stays
 network-free here (its `DELETE` lives in `aclose`), so vCenter behaviour is
-unchanged.
+unchanged. An `InvalidLogin` fault surfacing mid-op on `_post_soap` maps to
+`ConnectorAuthError`, which is exactly what drives the dispatcher into this
+hook + one cold re-login.
 
 ### execute()
 

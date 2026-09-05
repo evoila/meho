@@ -14,13 +14,20 @@ prove the SOAP branch produces the exact dict shapes those consumers
 already read -- the parity guarantee the ticket gates the "works" claim
 on.
 
-Envelopes are realistic hand-written vim25 shapes (modelled on the WSDL),
-not live captures -- the committed live-envelope fixtures land with the
-State-2 run.
+Two envelope sources sit side by side. The rule-by-rule codec tests use
+compact hand-written vim25 fragments (each isolates one shape). The
+``Live-envelope replay`` section at the foot feeds the **captured,
+scrubbed** envelopes from the #3363 State-2 run against a standalone ESXi
+9.1 host (``tests/fixtures/vmware_esxi_soap/``) through the same parsers
+and the unchanged consumers -- so the suite now replays real hardware
+shapes (bare ``<ssd>`` primitives, the ``ArrayOfScsiLun`` box, the
+``currentBootDeviceKey`` string, the Task/Datastore MoRefs, the
+``TaskInfo`` poll), not only WSDL-modelled ones.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from defusedxml.ElementTree import fromstring
@@ -55,6 +62,14 @@ from meho_backplane.connectors.vmware_rest.vim_body import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_LIVE_FIXTURES = Path(__file__).parent / "fixtures" / "vmware_esxi_soap"
+
+
+def _live(name: str) -> str:
+    """Read a captured+scrubbed State-2 envelope fixture (#3363)."""
+    return (_LIVE_FIXTURES / name).read_text()
 
 
 def _val_of(xml_fragment: str) -> Any:
@@ -223,9 +238,9 @@ def test_codec_rule5_arrayof_multi_element() -> None:
 
 
 def test_codec_rule6_cardinality_repeated_siblings_list() -> None:
-    """Rule 6: repeated non-forced sibling tags -> list."""
+    """Rule 6: repeated non-forced sibling tags -> list (bare numerics stay str)."""
     val = _val_of("<parent><item>1</item><item>2</item><item>3</item></parent>")
-    assert val == {"item": [1, 2, 3]}
+    assert val == {"item": ["1", "2", "3"]}
 
 
 def test_codec_rule6_cardinality_single_scalar() -> None:
@@ -253,12 +268,20 @@ def test_primitive_bare_boolean_coerced_to_bool() -> None:
     assert _val_of("<local>false</local>") is False
 
 
-def test_primitive_bare_int_coerced_to_int() -> None:
-    """Rule 8: a bare strict integer literal -> int; zero-padded ids stay str."""
-    assert _val_of("<block>209715200</block>") == 209715200
-    assert isinstance(_val_of("<block>209715200</block>"), int)
-    assert _val_of("<lun>0</lun>") == 0
-    assert _val_of("<key>007</key>") == "007"  # zero-padded -> not coerced
+def test_primitive_bare_numeric_stays_str() -> None:
+    """Rule 8: a bare numeric leaf (no xsi:type) stays a **string**.
+
+    vim25 carries string-typed keys whose values read as integers
+    (``HostBootDeviceInfo.currentBootDeviceKey == "8"``, the ``bootDevices``
+    key), so value-based ``int`` coercion silently broke the ``isinstance(str)``
+    consumer on real hardware (#3363 State-2). Bare numerics are left as text;
+    the genuinely-integer consumers (``capacity`` ``block`` / ``blockSize``)
+    normalise the numeric string through ``_int_or_none``, proved end-to-end by
+    ``test_scsi_lun_array_flows_through_extract_host_props`` below."""
+    assert _val_of("<block>209715200</block>") == "209715200"
+    assert _val_of("<lun>0</lun>") == "0"
+    assert _val_of("<currentBootDeviceKey>8</currentBootDeviceKey>") == "8"
+    assert _val_of("<key>007</key>") == "007"  # zero-padded ids also stay str
 
 
 def test_primitive_xsi_typed_boolean_and_int() -> None:
@@ -607,3 +630,116 @@ def test_login_credential_never_in_fault_repr_or_parse() -> None:
     assert secret not in repr(fault)
     assert "sup3r-s3cr3t" not in repr(fault)
     assert secret not in (fault.faultstring or "")
+
+
+# ---------------------------------------------------------------------------
+# Live-envelope replay (#3363 State-2 -- captured + scrubbed real hardware)
+# ---------------------------------------------------------------------------
+# The envelopes below are the exact bytes a standalone ESXi 9.1 host returned
+# during the #3363 State-2 run, scrubbed of lab-identifying tokens (host name,
+# IPs, volume/session UUIDs, timestamps) with structure and types kept exact.
+# Each is fed through the same parsers + unchanged consumers the live run
+# drove, so the unit suite replays real hardware, not only WSDL models.
+
+
+def test_live_service_content_carries_moids_and_api_version() -> None:
+    """Live RetrieveServiceContent -> PC/SM moids + about.apiVersion (SOAPAction src)."""
+    content = parse_service_content(_live("service_content.xml"))
+    assert content["propertyCollector"] == {
+        "type": "PropertyCollector",
+        "value": "ha-property-collector",
+    }
+    assert content["sessionManager"] == {"type": "SessionManager", "value": "ha-sessionmgr"}
+    about = content["about"]
+    assert about["apiType"] == "HostAgent"
+    assert about["version"] == "9.1.0"
+    assert about["apiVersion"] == "9.1.0.0"  # the exact SOAPAction version (#3363)
+
+
+def test_live_scsi_luns_flow_through_map_scsi_lun() -> None:
+    """Live scsiLun read: bare <ssd>/<localDisk> -> bool, capacity -> int, cdrom -> None."""
+    props = _extract_host_props(parse_retrieve_result(_live("retrieve_scsi_luns.xml")))
+    luns = props["config.storageDevice.scsiLun"]
+    assert isinstance(luns, list) and len(luns) == 2
+    disk = _map_scsi_lun(luns[0], None)
+    assert disk["device_type"] == "disk"
+    assert disk["ssd"] is False  # bare <ssd>false</ssd> -> real bool (not the string)
+    assert disk["local"] is True  # bare <localDisk>true</localDisk> -> real bool
+    assert isinstance(disk["capacity_bytes"], int) and disk["capacity_bytes"] > 0
+    assert disk["model"] == "Virtual disk"  # trailing padding stripped by consumer
+    cdrom = _map_scsi_lun(luns[1], None)
+    assert cdrom["device_type"] == "cdrom"
+    assert cdrom["ssd"] is None and cdrom["local"] is None and cdrom["capacity_bytes"] is None
+    # the bootDeviceSystem MoRef property resolves to its moid
+    assert _moref_value(props["configManager.bootDeviceSystem"]) == "bootDeviceSystem"
+
+
+def test_live_marked_disk_ssd_is_true_through_map_scsi_lun() -> None:
+    """The #3332 crux on real bytes: a disk marked SSD reads back ``ssd is True``.
+
+    Captured immediately after ``MarkAsSsd_Task`` in the State-2 run -- the
+    bare ``<ssd>true</ssd>`` survives to a Python ``True`` through the
+    unchanged ``_map_scsi_lun``, the corruption class that broke #3332."""
+    props = _extract_host_props(parse_retrieve_result(_live("retrieve_scsi_luns_marked_ssd.xml")))
+    disk = _map_scsi_lun(props["config.storageDevice.scsiLun"][0], None)
+    assert disk["ssd"] is True
+
+
+def test_live_query_boot_devices_current_key_is_string() -> None:
+    """Live QueryBootDevices: currentBootDeviceKey stays a **string** (#3363 fix).
+
+    ESXi sends ``<currentBootDeviceKey>8</currentBootDeviceKey>`` bare; the
+    codec must NOT coerce it to int (vim25 types it ``xsd:string``), or the
+    consumer's ``isinstance(str)`` guard drops it and boot resolution
+    misreports 'no currentBootDeviceKey'."""
+    info = parse_boot_devices(_live("query_boot_devices.xml"))
+    assert info["currentBootDeviceKey"] == "8"
+    assert isinstance(info["currentBootDeviceKey"], str)
+    assert isinstance(info["bootDevices"], list)
+
+
+def test_live_create_nas_datastore_returnval_is_datastore_moref() -> None:
+    """Live CreateNasDatastore -> a synchronous Datastore MoRef (rule 2)."""
+    ref = parse_moref_result(_live("create_nas_datastore.xml"), "CreateNasDatastore")
+    assert ref == {"type": "Datastore", "value": "nas01.example.invalid:/exports/share"}
+
+
+def test_live_mark_ssd_task_returnval_is_task_moref() -> None:
+    """Live MarkAsSsd_Task / MarkAsNonSsd_Task -> a Task MoRef the caller polls."""
+    ssd = parse_moref_result(_live("mark_as_ssd_task.xml"), "MarkAsSsd_Task")
+    assert ssd is not None and ssd["type"] == "Task"
+    non = parse_moref_result(_live("mark_as_non_ssd_task.xml"), "MarkAsNonSsd_Task")
+    assert non is not None and non["type"] == "Task"
+
+
+def test_live_task_info_poll_reaches_terminal_success() -> None:
+    """Live Task.info poll -> TaskInfo with state=success (the poll's terminal read)."""
+    result = parse_retrieve_result(_live("task_info_ssd_success.xml"))
+    info = unwrap_vim_value(result["objects"][0]["propSet"][0]["val"])
+    assert info["_typeName"] == "TaskInfo"
+    assert info["state"] == "success"
+    assert info["task"] == {"type": "Task", "value": info["key"]}
+
+
+def test_live_datastore_summary_readback_preserves_xsd_string_vals() -> None:
+    """Live datastore readback: xsi:type=xsd:string vals stay strings (name/type/url)."""
+    result = parse_retrieve_result(_live("retrieve_datastore_summary.xml"))
+    props = {p["name"]: p["val"] for p in result["objects"][0]["propSet"]}
+    assert props["summary.name"] == "t3363-validate"
+    assert props["summary.type"] == "NFS"
+    assert props["summary.url"].startswith("/vmfs/volumes/")
+
+
+def test_live_config_manager_reads_resolve_submanager_morefs() -> None:
+    """Live configManager.{datastore,storage}System reads -> the sub-manager MoRefs."""
+    ds = parse_retrieve_result(_live("retrieve_config_manager_datastore.xml"))
+    ds_val = unwrap_vim_value(ds["objects"][0]["propSet"][0]["val"])
+    assert ds_val == {"type": "HostDatastoreSystem", "value": "ha-datastoresystem"}
+    ss = parse_retrieve_result(_live("retrieve_config_manager_storage.xml"))
+    ss_val = unwrap_vim_value(ss["objects"][0]["propSet"][0]["val"])
+    assert ss_val == {"type": "HostStorageSystem", "value": "storageSystem"}
+
+
+def test_live_remove_datastore_response_has_no_returnval() -> None:
+    """Live RemoveDatastore -> an empty (void) response; MoRef parse degrades to None."""
+    assert parse_moref_result(_live("remove_datastore.xml"), "RemoveDatastore") is None

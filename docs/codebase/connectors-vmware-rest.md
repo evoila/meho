@@ -502,12 +502,25 @@ does **not** serve the VI-JSON surface and its `/api/*` is a **JSON-RPC
 HostAgent's `propertyCollector` + `sessionManager` MoRefs (which are **not**
 the vCenter `propertyCollector` / `ha-sessionmgr` literals — they are read
 from ServiceContent, cached in `_esxi_pc_moids` / `_esxi_session_manager_moids`)
-and `about` (`version`, `apiType == "HostAgent"`); (2) `SessionManager.Login`
+and `about` (`version`, `apiType == "HostAgent"`, and `apiVersion` — cached
+in `_esxi_api_versions`); (2) `SessionManager.Login`
 on the ServiceContent SessionManager moid → a 200 sets the
 `vmware_soap_session` cookie, which `httpx` keeps in the pooled client's
 cookie jar. That cookie is the auth for every subsequent `/sdk` POST, so
 `auth_headers()` adds **no header** for an ESXi session (the cached sentinel
 token is the opaque cookie value, never the password).
+
+*SOAPAction / vim API version (`#3363` State-2 fix).* An **empty**
+`SOAPAction` header resolves a `/sdk` method against the host's *baseline*
+schema — live-observed on a standalone ESXi 9.1 host as `vim.version.version3`
+(`vim25/2.5u2`), which predates `RetrievePropertiesEx` (vim API 4.1),
+`MarkAs*_Task` (5.x), and the datastore-mount write, so those posts fault
+`InvalidRequest: Unable to resolve WSDL method name … in vim.version.version3`.
+The bootstrap `RetrieveServiceContent` + `Login` resolve on the baseline
+(they exist there, and the version is not yet known), so they post an empty
+action; every op past the bootstrap carries
+`SOAPAction: urn:vim25/<about.apiVersion>` (`soap.soap_action_for_version`),
+binding it to the host's own schema (`9.1.0.0`).
 
 *Branch selection.* By the target's probe fingerprint (`product=esxi`, via
 `classify_host_target` — the same `#3332`/`#3312` distinguisher every host
@@ -540,12 +553,22 @@ unchanged consumers read:
 | datastore_mount_nfs | `HostDatastoreSystem.CreateNasDatastore` | `configManager.datastoreSystem` moid | Datastore MoRef (synchronous) |
 | disk_mark_flash | `HostStorageSystem.MarkAsSsd_Task` / `MarkAsNonSsd_Task` | `configManager.storageSystem` moid | Task MoRef → poll `Task.info` |
 
-*Native primitive typing (the codec crux).* The deserialiser coerces leaf
-primitives by expected type — a **bare** `<ssd>true</ssd>` / `<local>true</local>`
-(no `xsi:type`, the real `scsiLun` shape) becomes a Python `bool`, not the
-string `"true"` a schema-less walker would emit and the downstream
-`_bool_or_none` would silently null (the exact `#3332` corruption class,
-moved but not reintroduced — proven `ssd is True` through `_map_scsi_lun`).
+*Native primitive typing (the codec crux).* An **explicit** `xsi:type` is
+authoritative (`xsd:boolean` → `bool`, integer → `int`, float → `float`, any
+other annotated leaf → its raw text). For a **bare** leaf — the ESXi norm,
+which sends primitives with no `xsi:type` — only `"true"` / `"false"` is
+coerced, to `bool`: the real `scsiLun` shape carries a bare
+`<ssd>true</ssd>` / `<localDisk>true</localDisk>` that a schema-less walker
+would leave as the string `"true"` and the downstream `_bool_or_none` would
+silently null (the exact `#3332` corruption class — proven `ssd is True`
+through `_map_scsi_lun`). A bare **numeric** leaf is deliberately left as
+text: vim25 carries string-typed keys whose values read as integers
+(`HostBootDeviceInfo.currentBootDeviceKey == "8"`), and value-based `int`
+coercion broke the consumer's `isinstance(str)` guard live (`#3363`
+State-2 — boot resolution misreported "no currentBootDeviceKey"); the
+genuinely-integer consumers (`HostScsiDisk.capacity` `block` / `blockSize`)
+normalise a numeric string through `_int_or_none` already, so `capacity_bytes`
+lands as `int` either way and output parity holds.
 
 *Credential posture.* Credentials never appear in logs, errors, results, or
 the flight-recorder vendor-call span (`#3214`): the Login envelope is the
@@ -556,11 +579,20 @@ so the `/sdk` envelope cannot leak into a captured span. A rejected credential
 analogue of a vCenter 401/403, same restage remediation + the dispatcher's
 one cold re-login); any other fault → `RuntimeError` naming only the target.
 
-*Readiness.* **State 1 (unit-proven against SOAP envelopes)** until the
-documented **State-2** live run against a standalone ESXi 9.1 host in a lab
-lands the captured-envelope respx fixtures + the verification note; the
-"works on real hardware" claim is gated on that run, not on green units
-(mocks are exactly what let the disproven VI-JSON premise ship green).
+*Readiness.* **State 2 (live-proven).** The full surface was exercised
+against a standalone ESXi 9.1 host in a lab: probe → `product=esxi` /
+`version 9.1.0`; `storage_devices` → the host's SCSI LUNs with `ssd`/`local`
+as Python `bool` and integer capacities; `datastore_mount_nfs` →
+`CreateNasDatastore` returned a usable Datastore MoRef, confirmed by a
+follow-up `summary.name` read (then removed via `RemoveDatastore` to leave
+host state unchanged); `disk_mark_flash` → `MarkAsSsd_Task` polled to
+terminal and read back `ssd is True`, reverted via `MarkAsNonSsd_Task`. The
+run surfaced and fixed two live-only defects (the `SOAPAction` baseline-schema
+fault above; the bare-numeric `currentBootDeviceKey` mis-coercion), and its
+captured, scrubbed envelopes are committed as respx fixtures
+(`backend/tests/fixtures/vmware_esxi_soap/`) wired into the codec + session
+suites — so the units now replay real hardware bytes, the trap that let the
+disproven VI-JSON premise ship green under mocks.
 
 ### fingerprint() / probe()
 

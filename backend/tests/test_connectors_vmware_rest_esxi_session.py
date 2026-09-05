@@ -43,15 +43,21 @@ Coverage matrix (per #3363 acceptance criteria):
 * **Flight-recorder span.** The vendor-call span never serialises the ``/sdk``
   SOAP envelope (the Login ``<password>`` cannot leak into a captured span).
 
-Envelopes are realistic hand-written vim25 shapes (modelled on the WSDL),
-not live captures — the committed live-envelope fixtures land with the
-State-2 run.
+The SOAP wire envelopes are the **captured, scrubbed** responses from the
+#3363 State-2 run against a standalone ESXi 9.1 host
+(``tests/fixtures/vmware_esxi_soap/``) -- so the session tests exercise the
+establish → read → write → teardown wire against real hardware bytes, not
+WSDL models. The ``/api/session`` 400 body is the exact live JSON-RPC
+answer. The ``set-cookie`` header (the auth) is synthesised: it is a
+transport header, not part of the captured response body.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -87,6 +93,13 @@ _COOKIE_VALUE = "52a1b2c3-cookie-value"
 _SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
 _XSI = "http://www.w3.org/2001/XMLSchema-instance"
 
+_LIVE_FIXTURES = Path(__file__).parent / "fixtures" / "vmware_esxi_soap"
+
+
+def _live(name: str) -> str:
+    """Read a captured+scrubbed #3363 State-2 envelope fixture (real hardware bytes)."""
+    return (_LIVE_FIXTURES / name).read_text()
+
 
 def _envelope(inner: str) -> str:
     return (
@@ -95,51 +108,29 @@ def _envelope(inner: str) -> str:
     )
 
 
-_SERVICE_CONTENT_XML = _envelope(
-    '<RetrieveServiceContentResponse xmlns="urn:vim25"><returnval>'
-    f'<propertyCollector type="PropertyCollector">{_PC_MOID}</propertyCollector>'
-    f'<sessionManager type="SessionManager">{_SM_MOID}</sessionManager>'
-    f"<about><version>{_ABOUT_VERSION}</version><apiType>HostAgent</apiType>"
-    "<fullName>VMware ESXi 9.1.0 build-00000000</fullName></about>"
-    "</returnval></RetrieveServiceContentResponse>"
-)
+# The establish / read / write / teardown wire, replayed from the captured
+# live envelopes. ``service_content.xml`` carries the same ``_PC_MOID`` /
+# ``_SM_MOID`` / ``_ABOUT_VERSION`` the constants above name (they are the
+# vendor-universal HostAgent singletons) plus the real ``about.apiVersion``.
+_SERVICE_CONTENT_XML = _live("service_content.xml")
+_LOGIN_OK_XML = _live("login.xml")
+_LOGOUT_OK_XML = _live("logout.xml")
 
-_LOGIN_OK_XML = _envelope(
-    '<LoginResponse xmlns="urn:vim25"><returnval>'
-    "<key>52abcd</key><userName>root</userName></returnval></LoginResponse>"
-)
+#: The live scsiLun read captured **after** ``MarkAsSsd_Task`` -- one
+#: HostScsiDisk whose bare ``<ssd>true</ssd>`` proves the #3332 typing trap on
+#: real bytes, fed through the unchanged consumer extractors for parity.
+_SCSI_LUN_RETRIEVE_XML = _live("retrieve_scsi_luns_marked_ssd.xml")
+#: The T3 disk's real capacity in that envelope (512-byte blocks x block count).
+_SCSI_LUN_CAPACITY_BYTES = 322122547200
 
-_LOGOUT_OK_XML = _envelope('<LogoutResponse xmlns="urn:vim25"/>')
+#: Synchronous MoRef returnvals for the two host write methods (live).
+_CREATE_NAS_OK_XML = _live("create_nas_datastore.xml")
+_DATASTORE_MOID = "nas01.example.invalid:/exports/share"  # the scrubbed live Datastore moid
+_MARK_SSD_TASK_OK_XML = _live("mark_as_ssd_task.xml")
 
-#: A minimal ``RetrievePropertiesEx`` result carrying one scsiLun with the
-#: bare ``<ssd>true</ssd>`` primitive-typing trap (#3332). Fed through the
-#: unchanged consumer extractors to prove parity.
-_SCSI_LUN_RETRIEVE_XML = _envelope(
-    '<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval><objects>'
-    '<obj type="HostSystem">ha-host</obj>'
-    "<propSet><name>config.storageDevice.scsiLun</name>"
-    '<val xsi:type="ArrayOfScsiLun">'
-    '<ScsiLun xsi:type="HostScsiDisk">'
-    "<uuid>0200000000naa.6000c290</uuid><canonicalName>naa.6000c290</canonicalName>"
-    "<deviceType>disk</deviceType><ssd>true</ssd><localDisk>true</localDisk>"
-    "<model>Virtual disk    </model><vendor>VMware  </vendor>"
-    "<capacity><blockSize>512</blockSize><block>209715200</block></capacity>"
-    "</ScsiLun></val></propSet>"
-    "</objects></returnval></RetrievePropertiesExResponse>"
-)
-
-#: Synchronous MoRef returnvals for the two host write methods.
-_CREATE_NAS_OK_XML = _envelope(
-    '<CreateNasDatastoreResponse xmlns="urn:vim25">'
-    '<returnval type="Datastore">datastore-42</returnval>'
-    "</CreateNasDatastoreResponse>"
-)
-_MARK_SSD_TASK_OK_XML = _envelope(
-    '<MarkAsSsd_TaskResponse xmlns="urn:vim25">'
-    '<returnval type="Task">haTask-ha-host-vim.host.StorageSystem.markAsSsd-1</returnval>'
-    "</MarkAsSsd_TaskResponse>"
-)
-
+# The two fault envelopes stay hand-written vim25 shapes: the State-2 run
+# authenticated and every write succeeded, so no InvalidLogin / HostConfigFault
+# was captured. They model the vendor fault shape the connector maps.
 _INVALID_LOGIN_FAULT_XML = _envelope(
     "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
     "<faultstring>Cannot complete login due to an incorrect user name or password."
@@ -156,12 +147,11 @@ _HOST_CONFIG_FAULT_XML = _envelope(
     "</soapenv:Fault>"
 )
 
-#: ESXi's JSON-RPC 2.0 answer to a bodyless POST /api/session (Basic auth),
-#: modelled on the live diagnosis — HTTP 400, not 404.
-_JSONRPC_400_BODY: dict[str, Any] = {
-    "jsonrpc": "2.0",
-    "error": {"code": 400, "message": "Unsupported content type: "},
-}
+#: ESXi's JSON-RPC 2.0 answer to a bodyless POST /api/session (Basic auth) --
+#: the **exact** live body captured in the #3363 State-2 run (HTTP 400,
+#: content-type ``text/plain``, ``id: null``, "Unsupported content type: "),
+#: loaded from the committed fixture so it stays the single source of truth.
+_JSONRPC_400_BODY: dict[str, Any] = json.loads(_live("api_session_400.json"))
 
 
 def _soap_method(body: str) -> str:
@@ -186,12 +176,14 @@ class _SdkRouter:
 
     All SOAP posts hit the one ``POST /sdk`` endpoint, so the route branches
     on the method element in the request envelope. Records the ordered method
-    names and the raw request bodies for assertions.
+    names, the raw request bodies, and the ``SOAPAction`` header per call for
+    assertions.
     """
 
     def __init__(self, *, login_fault: bool = False, retrieve_xml: str | None = None) -> None:
         self.methods: list[str] = []
         self.bodies: list[str] = []
+        self.soap_actions: list[str] = []
         self._login_fault = login_fault
         self._retrieve_xml = retrieve_xml
 
@@ -200,6 +192,7 @@ class _SdkRouter:
         method = _soap_method(body)
         self.methods.append(method)
         self.bodies.append(body)
+        self.soap_actions.append(request.headers.get("SOAPAction", ""))
         if method == "RetrieveServiceContent":
             return httpx.Response(200, text=_SERVICE_CONTENT_XML)
         if method == "Login":
@@ -295,6 +288,7 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
         connector._about_versions.clear()
         connector._esxi_pc_moids.clear()
         connector._esxi_session_manager_moids.clear()
+        connector._esxi_api_versions.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
@@ -455,6 +449,38 @@ async def test_retrieve_properties_ex_remaps_property_collector_moid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ops_carry_versioned_soap_action_bootstrap_does_not() -> None:
+    """Every op past the bootstrap pins ``SOAPAction: urn:vim25/<about.apiVersion>``.
+
+    Live regression (#3363 State-2): an empty ``SOAPAction`` resolves the
+    method against the host baseline (2.5u2) schema, which lacks
+    ``RetrievePropertiesEx`` -- the host 500s ``InvalidRequest: Unable to
+    resolve WSDL method name``. ``RetrieveServiceContent`` + ``Login`` ride the
+    baseline (empty action); the connector reads ``about.apiVersion`` from
+    ServiceContent and pins it on every subsequent ``/sdk`` POST."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector._post_vmomi_json(
+            target,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=_make_operator(),
+            json=build_host_storage_devices_retrieve_params("ha-host"),
+        )
+
+    actions = dict(zip(router.methods, router.soap_actions, strict=True))
+    # Bootstrap pair rides the baseline schema -> no version announced.
+    assert actions["RetrieveServiceContent"] == ""
+    assert actions["Login"] == ""
+    # The op announces the host's own apiVersion (9.1.0.0 in service_content.xml).
+    assert actions["RetrievePropertiesEx"] == "urn:vim25/9.1.0.0"
+
+
+@pytest.mark.asyncio
 async def test_host_read_deserialises_to_vijson_shape_through_consumers() -> None:
     """A RetrievePropertiesEx read parses back into the exact shape the consumers read."""
     connector = _make_connector()
@@ -480,7 +506,7 @@ async def test_host_read_deserialises_to_vijson_shape_through_consumers() -> Non
     disk = _map_scsi_lun(luns[0], None)
     assert disk["ssd"] is True
     assert disk["local"] is True
-    assert disk["capacity_bytes"] == 512 * 209715200
+    assert disk["capacity_bytes"] == _SCSI_LUN_CAPACITY_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +540,7 @@ async def test_create_nas_datastore_routes_through_soap_and_returns_moref() -> N
             },
         )
 
-    assert payload == {"type": "Datastore", "value": "datastore-42"}
+    assert payload == {"type": "Datastore", "value": _DATASTORE_MOID}
     # The spec fields serialise into the envelope; _typeName is dropped (SOAP
     # announces types by position).
     body = router.bodies[-1]

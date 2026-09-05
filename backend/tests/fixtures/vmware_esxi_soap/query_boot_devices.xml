@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"
+ xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<soapenv:Body>
+<QueryBootDevicesResponse xmlns="urn:vim25"><returnval><bootDevices><key>0</key><description>EFI Virtual disk (0.0)</description></bootDevices><bootDevices><key>1</key><description>EFI Virtual disk (1.0)</description></bootDevices><bootDevices><key>2</key><description>EFI Virtual disk (2.0)</description></bootDevices><bootDevices><key>3</key><description>EFI Virtual disk (3.0)</description></bootDevices><bootDevices><key>4</key><description>EFI VMware Virtual SATA CDROM Drive (0.0)</description></bootDevices><bootDevices><key>5</key><description>EFI Network</description></bootDevices><bootDevices><key>6</key><description>EFI Network 1</description></bootDevices><bootDevices><key>7</key><description>EFI Internal Shell (Unsupported option)</description></bootDevices><bootDevices><key>8</key><description>VMware ESXi</description></bootDevices><currentBootDeviceKey>8</currentBootDeviceKey></returnval></QueryBootDevicesResponse>
+</soapenv:Body>
+</soapenv:Envelope>

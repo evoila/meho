@@ -54,18 +54,23 @@ rule:
    val, xsi:type preserved>}`` (the generic complex walk yields this).
 8. **Native primitive typing (the schema-less trap).** A schema-less
    walker emits leaf text as strings; the real ``scsiLun`` envelope
-   carries **bare** ``<ssd>true</ssd>`` / ``<local>true</local>`` with
-   **no** ``xsi:type``, and the downstream ``_bool_or_none("true")``
+   carries **bare** ``<ssd>true</ssd>`` / ``<localDisk>true</localDisk>``
+   with **no** ``xsi:type``, and the downstream ``_bool_or_none("true")``
    returns ``None`` -- silently dropping the flags (the #3332 corruption
-   class). :func:`_coerce_leaf` coerces leaf primitives: an ``xsi:type``
-   of ``xsd:boolean`` / an integer / a float type drives the coercion
-   when present, and a **bare** ``"true"`` / ``"false"`` or a strict
-   integer literal is coerced by value when it is not.
+   class). :func:`_coerce_leaf` honours an **explicit** ``xsi:type``
+   (``xsd:boolean`` -> ``bool``, integer -> ``int``, float -> ``float``,
+   any other annotated leaf -> its raw text), and for a **bare** leaf
+   coerces only ``"true"`` / ``"false"`` to ``bool``. A bare numeric leaf
+   is left as text: vim25 carries string-typed keys whose values read as
+   integers (``currentBootDeviceKey == "8"``), and coercing those to
+   ``int`` by value broke the ``isinstance(..., str)`` consumer on real
+   hardware (#3363 State-2); the genuinely-integer consumers
+   (``capacity`` ``block`` / ``blockSize``) normalise a numeric string via
+   ``_int_or_none`` already, so ``capacity_bytes`` is ``int`` either way.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -75,6 +80,7 @@ from defusedxml.ElementTree import ParseError, fromstring
 from meho_backplane.connectors.vmware_rest.vim_body import VIM_TYPE_NAME_KEY
 
 __all__ = [
+    "SOAP_CONTENT_TYPE",
     "SoapFault",
     "build_create_nas_datastore_envelope",
     "build_login_envelope",
@@ -88,6 +94,7 @@ __all__ = [
     "parse_retrieve_result",
     "parse_service_content",
     "parse_soap_fault",
+    "soap_action_for_version",
 ]
 
 # --- Wire constants --------------------------------------------------------
@@ -105,6 +112,23 @@ _XSI_TYPE_ATTR: Final = f"{{{_XSI_NS}}}type"
 
 #: ``Content-Type`` every ``/sdk`` SOAP POST carries.
 SOAP_CONTENT_TYPE: Final = "text/xml; charset=utf-8"
+
+
+def soap_action_for_version(api_version: str) -> str:
+    """The ``SOAPAction`` header value that pins a ``/sdk`` POST to a vim API version.
+
+    An **empty** ``SOAPAction`` resolves the method against the host's
+    baseline schema -- live-observed on standalone ESXi 9.1 as ``vim25/2.5u2``,
+    which predates ``RetrievePropertiesEx`` (4.1), ``MarkAs*_Task`` (5.x), and
+    the datastore-mount write, so those posts fault ``InvalidRequest: Unable to
+    resolve WSDL method name`` (#3363 State-2). Announcing the host's
+    ``ServiceContent.about.apiVersion`` (``9.1.0.0``) binds the post to that
+    schema instead. Only ``RetrieveServiceContent`` + ``SessionManager.Login``
+    ride the baseline (they exist there, and the version is unknown until the
+    former returns it); every op past the bootstrap carries this.
+    """
+    return f"{_VIM_NS}/{api_version}"
+
 
 #: The ``ServiceInstance`` singleton MoRef -- the fixed bootstrap object
 #: ``RetrieveServiceContent`` is invoked on (type == moId == the literal).
@@ -136,11 +160,6 @@ _INT_XSD_TYPES: Final = frozenset(
 )
 #: ``xsd`` primitive local-names coerced to :class:`float` (codec rule 8).
 _FLOAT_XSD_TYPES: Final = frozenset({"double", "float", "decimal"})
-#: A strict base-10 integer literal (optional sign, no leading zero) --
-#: the value-based fallback of codec rule 8. Deliberately rejects
-#: zero-padded identifiers (``007``) so they stay strings.
-_INT_LITERAL_RE: Final = re.compile(r"^-?(?:0|[1-9][0-9]*)$")
-
 #: Canonical child order of a ``HostNasVolumeSpec`` (vim25 WSDL sequence);
 #: only present, non-``None`` fields are serialised (#3363 datastore mount).
 _HOST_NAS_VOLUME_SPEC_FIELDS: Final = (
@@ -375,12 +394,25 @@ def build_mark_ssd_envelope(
 def _coerce_leaf(text: str | None, xsi_type_raw: str | None) -> bool | int | float | str:
     """Codec rule 8: coerce a leaf's text to a native primitive.
 
-    When an ``xsi:type`` is present it drives the coercion
-    (``xsd:boolean`` -> ``bool``, an integer type -> ``int``, a float
-    type -> ``float``); when it is absent -- the real ``scsiLun`` case --
-    a bare ``"true"`` / ``"false"`` becomes ``bool`` and a strict integer
-    literal becomes ``int`` by value. Anything else is returned as the
-    original (un-stripped) text so trailing-padded strings (``model`` /
+    An **explicit** ``xsi:type`` is authoritative: ``xsd:boolean`` ->
+    ``bool``, an integer type -> ``int``, a float type -> ``float``, and
+    every other annotated leaf (``xsd:string`` included) is returned as its
+    raw text -- so a string whose value happens to read as a number or as
+    ``"true"`` is never re-typed against its own annotation.
+
+    A **bare** leaf (no ``xsi:type`` -- the ESXi norm for primitives, #3363
+    live) coerces only ``"true"`` / ``"false"`` to ``bool``: the real
+    ``scsiLun`` envelope carries bare ``<ssd>true</ssd>`` / ``<localDisk>``,
+    and the downstream ``_bool_or_none`` needs a real ``bool``. A bare
+    numeric leaf is deliberately **left as text** -- vim25 carries
+    string-typed keys whose values read as integers
+    (``HostBootDeviceInfo.currentBootDeviceKey == "8"``, the ``bootDevices``
+    key), and value-based ``int`` coercion silently broke the consumer's
+    ``isinstance(..., str)`` guard on real hardware; the genuinely-integer
+    consumers (``HostScsiDisk.capacity`` ``block`` / ``blockSize``) already
+    normalise a numeric string through ``_int_or_none``, so ``capacity_bytes``
+    lands as ``int`` either way and output parity holds. The original
+    (un-stripped) text is returned so trailing-padded strings (``model`` /
     ``vendor``) survive for the consumer's own ``.strip()``.
     """
     raw = text if text is not None else ""
@@ -399,12 +431,11 @@ def _coerce_leaf(text: str | None, xsi_type_raw: str | None) -> bool | int | flo
                 return float(stripped)
             except ValueError:
                 return raw
+        return raw
     if stripped == "true":
         return True
     if stripped == "false":
         return False
-    if _INT_LITERAL_RE.match(stripped):
-        return int(stripped)
     return raw
 
 

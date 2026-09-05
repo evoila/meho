@@ -147,6 +147,7 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_retrieve_result,
     parse_service_content,
     parse_soap_fault,
+    soap_action_for_version,
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
@@ -228,8 +229,6 @@ _VIM25_NAMESPACE = "urn:vim25"
 # exact VI-JSON dict shapes the unchanged downstream consumers already read.
 #: The single vmomi SOAP endpoint on a HostAgent (and on vCenter).
 _SDK_PATH = "/sdk"
-#: Headers every ``/sdk`` SOAP POST carries (SOAP 1.1, empty SOAPAction).
-_SOAP_HEADERS = {"Content-Type": SOAP_CONTENT_TYPE, "SOAPAction": ""}
 #: SessionManager.Login's locale arg (govmomi defaults it to ``en_US``).
 _ESXI_LOGIN_LOCALE = "en_US"
 #: The auth cookie ``SessionManager.Login`` sets; carried in the pooled
@@ -453,6 +452,15 @@ class VmwareRestConnector(HttpConnector):
         # for a vCenter target.
         self._esxi_pc_moids: dict[tuple[str, str], str] = {}
         self._esxi_session_manager_moids: dict[tuple[str, str], str] = {}
+        # The host's ``ServiceContent.about.apiVersion`` (e.g. ``9.1.0.0``),
+        # read from the unauthenticated ``RetrieveServiceContent`` at establish
+        # time. Every ``/sdk`` op past the ``RetrieveServiceContent`` + Login
+        # bootstrap MUST announce it as ``SOAPAction: urn:vim25/<apiVersion>``
+        # or the host resolves the method against its baseline (2.5u2) schema
+        # and 500s ``InvalidRequest`` on ``RetrievePropertiesEx`` /
+        # ``MarkAs*_Task`` / ``CreateNasDatastore`` (#3363 State-2). Empty for a
+        # vCenter target.
+        self._esxi_api_versions: dict[tuple[str, str], str] = {}
         # Per-target httpx ``extensions`` (the ``tls_server_name`` SNI /
         # cert-verify override, evoila/meho#2398) captured at establish
         # time, keyed on the same tenant-unique tuple. :meth:`aclose`
@@ -989,6 +997,7 @@ class VmwareRestConnector(HttpConnector):
             )
         about = content.get("about")
         version = about.get("version") if isinstance(about, dict) else None
+        api_version = about.get("apiVersion") if isinstance(about, dict) else None
         # 2. Login on the ServiceContent-provided SessionManager moid.
         username, password = auth
         login_resp = await self._soap_post(
@@ -1021,6 +1030,11 @@ class VmwareRestConnector(HttpConnector):
         self._session_extensions[cache_key] = extensions
         self._esxi_pc_moids[cache_key] = pc_moid
         self._esxi_session_manager_moids[cache_key] = sm_moid
+        # Pin every subsequent /sdk op to the host's own vim API version (the
+        # bootstrap RetrieveServiceContent + Login above ran on the baseline
+        # schema, which lacks RetrievePropertiesEx / the writes -- #3363).
+        if isinstance(api_version, str) and api_version:
+            self._esxi_api_versions[cache_key] = api_version
         # Cache about.version so ``_fingerprint_esxi`` reads it without a
         # re-probe (GET /api/about 400s on ESXi). Unlike the vCenter path,
         # this is the display version (e.g. "9.1.0"), not a VI-JSON release:
@@ -1040,6 +1054,8 @@ class VmwareRestConnector(HttpConnector):
         client: httpx.AsyncClient,
         envelope: str,
         extensions: dict[str, Any],
+        *,
+        soap_action: str = "",
     ) -> httpx.Response:
         """POST a SOAP 1.1 *envelope* on ``/sdk``, recording a body-free span.
 
@@ -1054,12 +1070,20 @@ class VmwareRestConnector(HttpConnector):
         serialised into a captured span (which routing through ``_post_json``
         would do). The pooled client contributes its TLS-pin → insecure →
         default precedence and the ``sni_hostname`` extension for free.
+
+        *soap_action* is the ``SOAPAction`` header. The bootstrap pair
+        (``RetrieveServiceContent`` + ``Login``) leaves it empty — those
+        resolve on the host's baseline schema and the version is not yet known
+        — while :meth:`_post_soap` passes ``urn:vim25/<about.apiVersion>`` so
+        the op resolves on the host's own schema instead of the baseline
+        (2.5u2) one, which lacks ``RetrievePropertiesEx`` / ``MarkAs*_Task`` /
+        the datastore write (#3363 State-2).
         """
         _fr_start = flight_recorder_capture.span_start()
         resp = await client.post(
             _SDK_PATH,
             content=envelope.encode("utf-8"),
-            headers=_SOAP_HEADERS,
+            headers={"Content-Type": SOAP_CONTENT_TYPE, "SOAPAction": soap_action},
             extensions=extensions,
         )
         flight_recorder_capture.record_vendor_call(
@@ -1111,7 +1135,14 @@ class VmwareRestConnector(HttpConnector):
         extensions = self._request_extensions(target)
         mo_type, moid, method = self._parse_vmomi_path(vmomi_path)
         envelope = self._build_esxi_soap_envelope(cache_key, mo_type, moid, method, json or {})
-        resp = await self._soap_post(client, envelope, extensions)
+        # Pin the op to the host's own vim API version (cached at establish
+        # from ServiceContent.about.apiVersion); the baseline schema an empty
+        # SOAPAction selects lacks these methods (#3363 State-2). Absent only
+        # if establish somehow read no apiVersion -- fall back to empty so the
+        # host faults loud rather than the connector silently mis-versioning.
+        api_version = self._esxi_api_versions.get(cache_key)
+        soap_action = soap_action_for_version(api_version) if api_version else ""
+        resp = await self._soap_post(client, envelope, extensions, soap_action=soap_action)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
@@ -1344,6 +1375,7 @@ class VmwareRestConnector(HttpConnector):
             # SessionManager moid is captured first for the SOAP Logout below.
             self._about_versions.pop(cache_key, None)
             self._esxi_pc_moids.pop(cache_key, None)
+            self._esxi_api_versions.pop(cache_key, None)
             sm_moid = self._esxi_session_manager_moids.pop(cache_key, None)
         if flavor == HOST_FLAVOR_ESXI and token is not None:
             await self._esxi_logout_quiet(cache_key, sm_moid, extensions or {})
@@ -1924,6 +1956,7 @@ class VmwareRestConnector(HttpConnector):
             self._about_versions.clear()
             self._esxi_pc_moids.clear()
             self._esxi_session_manager_moids.clear()
+            self._esxi_api_versions.clear()
         for cache_key, token in tokens.items():
             extensions = extensions_by_key.get(cache_key, {})
             if flavors.get(cache_key) == HOST_FLAVOR_ESXI:

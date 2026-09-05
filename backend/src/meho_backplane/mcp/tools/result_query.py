@@ -243,7 +243,8 @@ register_mcp_tool(
                                     "value": {
                                         "description": (
                                             "Bound as a parameter. Omit for `IS NULL`; "
-                                            "a list for `IN`; a scalar otherwise."
+                                            "a list for `IN` (max 1000 elements); a "
+                                            "scalar otherwise."
                                         ),
                                     },
                                 },
@@ -252,10 +253,11 @@ register_mcp_tool(
                         },
                         "select": {
                             "type": "array",
+                            "maxItems": 64,
                             "items": {"type": "string", "minLength": 1},
                             "description": (
-                                "Columns to return. Omit for all columns. Not allowed "
-                                "with `aggregate`."
+                                "Columns to return (max 64). Omit for all columns. Not "
+                                "allowed with `aggregate`."
                             ),
                         },
                         "group_by": {

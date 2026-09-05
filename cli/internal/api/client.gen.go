@@ -6410,10 +6410,11 @@ type ResultQueryBody struct {
 	//
 	// Every field is optional: an empty spec compiles to ``SELECT * FROM
 	// result LIMIT <max>`` — a full read-back capped at the output ceiling.
-	// The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4)
-	// and the operator/aggregate allow-lists are enforced here, at
-	// construction; field-vs-schema validation needs the handle's columns and
-	// happens in :func:`compile_query`.
+	// The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4,
+	// ``select`` ≤ 64, and each ``IN`` value list ≤ 1000) and the
+	// operator/aggregate allow-lists are enforced here, at construction;
+	// field-vs-schema validation needs the handle's columns and happens in
+	// :func:`compile_query`.
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6421,10 +6422,11 @@ type ResultQueryBody struct {
 //
 // Every field is optional: an empty spec compiles to “SELECT * FROM
 // result LIMIT <max>“ — a full read-back capped at the output ceiling.
-// The list caps (“filter“ ≤ 10, “group_by“ ≤ 4, “order_by“ ≤ 4)
-// and the operator/aggregate allow-lists are enforced here, at
-// construction; field-vs-schema validation needs the handle's columns and
-// happens in :func:`compile_query`.
+// The list caps (“filter“ ≤ 10, “group_by“ ≤ 4, “order_by“ ≤ 4,
+// “select“ ≤ 64, and each “IN“ value list ≤ 1000) and the
+// operator/aggregate allow-lists are enforced here, at construction;
+// field-vs-schema validation needs the handle's columns and happens in
+// :func:`compile_query`.
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6441,7 +6443,7 @@ type ResultQuerySpec struct {
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
 
-	// Select Projection: columns to return. Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
+	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
 }
 

@@ -30031,8 +30031,9 @@
               "type": "string"
             },
             "type": "array",
+            "maxItems": 64,
             "title": "Select",
-            "description": "Projection: columns to return. Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates)."
+            "description": "Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates)."
           },
           "group_by": {
             "items": {
@@ -30071,7 +30072,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ResultQuerySpec",
-        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``group_by`` \u2264 4, ``order_by`` \u2264 4)\nand the operator/aggregate allow-lists are enforced here, at\nconstruction; field-vs-schema validation needs the handle's columns and\nhappens in :func:`compile_query`."
+        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``group_by`` \u2264 4, ``order_by`` \u2264 4,\n``select`` \u2264 64, and each ``IN`` value list \u2264 1000) and the\noperator/aggregate allow-lists are enforced here, at construction;\nfield-vs-schema validation needs the handle's columns and happens in\n:func:`compile_query`."
       },
       "RetireChecklistReport": {
         "properties": {

@@ -248,16 +248,22 @@ for *inconvenient* governance.** Stated against the two sibling decisions:
 
 - **Satellite write path** (satellite-write-path.md): satellite writes are minted
   only within a minimal per-runner allowlist, and **delete-shaped operations are
-  never minted to a satellite** — the tier is **fail-closed**. Break-glass does not
-  loosen that. When the backplane is up, that gate is the path. Break-glass is only
-  the arm for when the governance plane cannot be consulted **at all**.
+  never minted to a satellite** — the tier is **fail-closed**. That decision names
+  the arm explicitly: delete-shaped work "stays **central-or-break-glass**." Where
+  the central path is a live backplane, that gate is the path; **this decision
+  defines the break-glass half of that arm** — the human override for when the
+  governance plane cannot be consulted **at all**.
 - **Governed delete operations** (governed-delete-operations.md): delete-shaped ops
   require mandatory human approval + preview-hash binding + a blast-radius statement,
   behind a dedicated `destructive` tier excluded by default everywhere — also
-  **fail-closed**. Both sibling decisions explicitly name a **central-or-break-glass**
-  arm for the hardest work (deletes "stay central-or-break-glass"). **This decision
-  defines that arm**: it is exactly this offline-anchored, edge-expired, recorded,
-  audit-imported *human* path — **not** a standing "drop to local tools" escape.
+  **fail-closed**, and routed through the **central** approvals plane (it does not
+  itself define a network break-glass; its only "break-glass" mention is the
+  self-approval switch this decision is distinct from). Its central human-approval
+  path is precisely what becomes unreachable when the backplane is down — the case
+  **this decision** answers. The break-glass arm is this offline-anchored,
+  edge-expired, recorded, audit-imported *human* path — **not** a standing "drop to
+  local tools" escape, and **not** a way to skip the destructive-tier gate while the
+  backplane is up.
 - **The reversal this enables.** Today the informal break-glass *is* "drop to local
   vendor tools" over the operator VPN. That informal escape is precisely what
   stage-3 deny removes. This decision **replaces the informal escape with a governed
@@ -369,10 +375,12 @@ checklist is updated to these at accept time:
   evoila-bosnia/meho-internal#248 (the design/build/cold-test home); Task
   evoila-bosnia/meho-internal#251 (this decision).
 - Sibling decisions this composes with: [satellite-write-path.md](satellite-write-path.md)
-  (fail-closed scoped-hybrid remote writes; the store-and-forward effect audit +
-  un-reported-mint dead-man this decision's import contract mirrors) and
-  [governed-delete-operations.md](governed-delete-operations.md) (fail-closed
-  destructive tier; the central-or-break-glass arm this decision defines).
+  (fail-closed scoped-hybrid remote writes; it names the **central-or-break-glass**
+  arm this decision defines the break-glass half of, and its store-and-forward effect
+  audit + un-reported-mint dead-man are what this decision's import contract mirrors)
+  and [governed-delete-operations.md](governed-delete-operations.md) (fail-closed
+  destructive tier routed through the central approvals plane — the central path this
+  break-glass backstops when the backplane is down).
 - v0.1-spec §6 (audit is the complete record — the invariant the after-the-fact
   import preserves) and §7 (approval is a human decision — the approvals-plane gate
   this reuses).

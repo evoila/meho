@@ -37,14 +37,62 @@ The handle itself is minted **unconditionally** on every reduce — a
 skipped spill never suppresses the handle, it only flips the drill-in
 branch to `available=false`.
 
+## Read-back modes: paging vs. query (#3366)
+
+`result_query` reads a spilled handle back two ways, on both transports
+(the MCP tool and `POST /api/v1/operations/result-query`), through one
+shared core:
+
+- **Paging** (`handle_id` + `offset` + `limit`) — `read_result_window`
+  returns a row window, unchanged since #3179.
+- **Query** (`handle_id` + a `query` object) — `run_result_query`
+  compiles the structured arguments into **exactly one parameterized,
+  read-only `SELECT`** over the handle's rows and returns just the
+  matching rows or the per-group aggregates. The `query` grammar is
+  filter predicates (≤10; operators `=, !=, <, <=, >, >=, IN, IS NULL`),
+  `select` projection, `group_by` (≤4), aggregates
+  (`COUNT/SUM/MIN/MAX/AVG`), `order_by` (≤4), and `limit`. There is **no
+  raw-SQL argument** on any transport.
+
+The query runs inside the reduce-time `QueryEngine`'s sandbox rebuilt
+per call: the full authorized rows come back from `fetch_rows`, are
+`register`ed under the table name `result`, and the compiled statement
+is the only thing that touches them. Every referenced field is validated
+against the handle's known columns (unknown field → rejected); operators
+and aggregate functions are fixed allow-lists; caller values bind as
+DuckDB prepared-statement parameters, never string-interpolated. See
+[`docs/architecture/jsonflux.md`](../architecture/jsonflux.md#query-surface-3366)
+for why compiling from a fixed template is a stronger safety property
+than sanitizing a caller SQL string (verified on the pinned
+`duckdb==1.5.5`).
+
+### Bounds and coverage
+
+Every query result is bounded: output rows are capped at
+`RESULT_QUERY_MAX_OUTPUT_ROWS` (default 500) with an explicit
+`truncated` flag (grouped results capped identically); the serialized
+output is capped at `RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB)
+**after** the row cap, with an actionable over-budget error; and each
+compiled `SELECT` runs under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5)
+wall-time budget enforced by running `conn.execute()` on a worker thread
+and calling `conn.interrupt()` on expiry.
+
+Because the spill itself is capped at `RESULT_HANDLE_MAX_SPILL_ROWS`, a
+query may run over a subset of the true collection. The result carries
+`coverage`: `complete` when `stored_rows == total_rows`, else `partial`
+plus a `coverage_note` — so a `COUNT` over a capped spill is labelled as
+covering the stored subset, **never** presented as a whole-inventory
+total.
+
 ## Key types
 
 | Symbol | Where | Role |
 |---|---|---|
 | `JsonFluxReducer._spill` / `_SpillOutcome` | `backend/src/meho_backplane/operations/jsonflux_reducer.py` | Persists the materialized rows; reports `stored_rows` **or** a machine-readable `skip_reason` |
 | `FetchMoreDrillIn.reason` / `DrillInUnavailableReason` | `backend/src/meho_backplane/connectors/schemas.py` | The two-valued no-spill cause on the wire (#1629) |
-| `ResultHandleStore.spill` / `fetch_window` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back |
-| `read_result_window` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core both surfaces wrap (#3179); misses raise the recoverable not-found error |
+| `ResultHandleStore.spill` / `fetch_window` / `fetch_rows` | `backend/src/meho_backplane/connectors/result_handle_store.py` | Fail-open Valkey persistence + operator/tenant-scoped read-back; `fetch_rows` returns the full authorized set for the query surface (#3366) |
+| `read_result_window` / `run_result_query` / `ResultHandleNotFoundError` | `backend/src/meho_backplane/operations/result_query.py` | Transport-neutral windowed-read core (#3179) + bounded query core (#3366) both surfaces wrap; misses raise the recoverable not-found error |
+| `compile_query` / `ResultQuerySpec` / `QueryContractError` | `backend/src/meho_backplane/jsonflux/query/contract.py` | Compiles the validated query grammar to one parameterized read-only `SELECT` (#3366) |
 | `result_query` (MCP) | `backend/src/meho_backplane/mcp/tools/result_query.py` | MCP read surface; misses surface as recoverable `handle_not_found` (`-32602`) |
 | `POST /api/v1/operations/result-query` | `backend/src/meho_backplane/api/v1/operations.py` | REST read surface; misses surface as a `404` with `reason=handle_not_found` (#3179) |
 | `_reduce_or_error` | `backend/src/meho_backplane/operations/dispatcher.py` | Builds `reducer_context` (`tenant_id`, `operator_sub`, `op_id`, hints) from the authenticated `Operator` |
@@ -137,6 +185,12 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 - `RESULT_HANDLE_MAX_SPILL_ROWS` (default 10000, validated `> 0`) caps
   the per-key value size; `ttl_seconds` (reducer default 3600) bounds
   lifetime server-side.
+- `RESULT_QUERY_MAX_OUTPUT_ROWS` (500) / `RESULT_QUERY_MAX_OUTPUT_BYTES`
+  (256 KB) / `RESULT_QUERY_TIMEOUT_SECONDS` (5) bound a single query's
+  output rows, serialized size, and wall time (#3366); all validated
+  `> 0`.
+- `duckdb==1.5.5` / `pyarrow==25.0.1` (pinned) — the sandboxed
+  `QueryEngine` the compiled query runs inside.
 
 ## Known issues
 
@@ -149,6 +203,8 @@ code-level diagnosis at `v0.13.0` (`f6ee330`):
 ## References
 
 - #1507 — spill store + `result_query` + drill-in (G0.20-T7).
+- #3366 — bounded validated query surface over the handle (filter /
+  project / group / aggregate, no raw SQL).
 - #1629 — no-spill `reason` surfacing + skip logging + this diagnosis
   (G0.23-T3, RDC cycle-8 signal `k8s-logs-mcp-five-row-sample-cap`).
 - #1479 — tail sample ordering for log-shaped ops (G0.19-T1).

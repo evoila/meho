@@ -447,7 +447,7 @@ add-on-family gate.
 | `meho_status` | read_only | — | Return caller identity + backplane dependency status. |
 | `preview_operation` | operator | — | Preview an operation without running it. |
 | `query_topology` | operator | — | Query the topology graph (dependents, blast radius, timeline). |
-| `result_query` | operator | — | Read rows back from a JSONFlux result handle. |
+| `result_query` | operator | — | Read rows back from a JSONFlux result handle: page a window, or run a bounded structured query (filter / project / group / aggregate) server-side. |
 | `search_docs` | operator | `meho-docs` | Search a vendor-document collection for an authoritative fact. |
 | `search_knowledge` | operator | — | Search the tenant knowledge base. |
 | `search_memory` | operator | — | Search the operator's accessible memories. |

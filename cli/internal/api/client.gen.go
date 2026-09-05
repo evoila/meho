@@ -569,6 +569,7 @@ const (
 	TargetCreateProductInstaller  TargetCreateProduct = "installer"
 	TargetCreateProductK8s        TargetCreateProduct = "k8s"
 	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"
+	TargetCreateProductLinux      TargetCreateProduct = "linux"
 	TargetCreateProductLoki       TargetCreateProduct = "loki"
 	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
 	TargetCreateProductMsad       TargetCreateProduct = "msad"

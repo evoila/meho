@@ -41,11 +41,14 @@ import structlog
 from pymongo.errors import (
     ConnectionFailure,
     OperationFailure,
+    PyMongoError,
     ServerSelectionTimeoutError,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.mongodb import (
     MONGO_OPS,
     MONGO_READ_COMMANDS,
@@ -55,6 +58,7 @@ from meho_backplane.connectors.mongodb import (
 )
 from meho_backplane.connectors.mongodb import connector as connector_module
 from meho_backplane.connectors.mongodb import session as session_module
+from meho_backplane.connectors.mongodb.connector import _classify_fingerprint_error
 from meho_backplane.connectors.mongodb.session import (
     DEFAULT_AUTH_SOURCE,
     DEFAULT_PORT,
@@ -682,7 +686,57 @@ async def test_fingerprint_unreachable_maps_to_not_reachable(
     )
     fp = await MongoDbConnector().fingerprint(_MongoTarget(), _make_operator())
     assert fp.reachable is False
-    assert "error" in fp.extras
+    # type name + classified reason only -- never the raw driver message (#3297).
+    assert fp.extras["error"] == "ServerSelectionTimeoutError: tcp_unreachable"
+    assert "no server" not in fp.extras["error"]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_auth_failure_never_leaks_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3297: a pymongo auth rejection echoes the connecting username; it must
+
+    never reach ``extras['error']`` or the ``mongodb_fingerprint_unreachable``
+    warning log verbatim -- only the type name + classified ``auth_failed``.
+    """
+    monkeypatch.setattr(
+        connector_module,
+        "connect_client",
+        AsyncMock(
+            side_effect=OperationFailure("Authentication failed for user 'mongo_svc_acct'", code=18)
+        ),
+    )
+    with capture_logs() as captured:
+        fp = await MongoDbConnector().fingerprint(_MongoTarget(), _make_operator())
+
+    assert fp.reachable is False
+    assert fp.extras["error"] == "OperationFailure: auth_failed"
+    assert "mongo_svc_acct" not in fp.extras["error"]
+
+    warnings = [e for e in captured if e.get("event") == "mongodb_fingerprint_unreachable"]
+    assert warnings, "expected a mongodb_fingerprint_unreachable warning"
+    assert warnings[0]["error"] == "OperationFailure: auth_failed"
+    assert "mongo_svc_acct" not in warnings[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        (CredentialsReadError("no operator jwt"), "auth_failed"),
+        (ValueError("operator-less"), "auth_failed"),
+        (OperationFailure("auth", code=18), "auth_failed"),
+        (OperationFailure("unauthorized", code=13), "auth_failed"),
+        (OperationFailure("boom", code=999), "connect_failed"),
+        (OSError("no route to host"), "tcp_unreachable"),
+        (ServerSelectionTimeoutError("no route"), "tcp_unreachable"),
+        (ConnectionFailure("reset"), "tcp_unreachable"),
+        (PyMongoError("other server-side failure"), "connect_failed"),
+    ],
+)
+def test_classify_fingerprint_error_mirrors_probe(exc: Exception, reason: str) -> None:
+    """The fingerprint classifier matches the probe taxonomy (#3297)."""
+    assert _classify_fingerprint_error(exc) == reason
 
 
 # ---------------------------------------------------------------------------

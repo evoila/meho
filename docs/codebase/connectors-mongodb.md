@@ -121,6 +121,12 @@ op wired to a command off the allowlist fails closed.
 (wire-protocol version range, replica-set name + primary + derived member
 roles), and the slim `serverStatus` (storage engine); any connect/credential
 failure maps to `reachable=False` with the error under `extras` (never raises).
+The `extras["error"]` value and the paired `mongodb_fingerprint_unreachable`
+warning log carry only the exception type name plus a classified reason (the
+same `auth_failed` / `tcp_unreachable` / `connect_failed` taxonomy the probe
+uses), never `str(exc)` — a pymongo `OperationFailure` on an auth rejection
+echoes the connecting username, so the raw driver message must not reach either
+surface (#3297; redaction seam `connectors/_shared/fingerprint.py`).
 `probe()` is a `hello` handshake carrying no operator, so its failure reasons are
 `auth_failed` (bad/unresolvable credential, or a MongoDB auth error code 13/18 —
 a credentialled target on the operator-less probe path resolves here),

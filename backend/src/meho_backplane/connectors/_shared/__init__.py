@@ -26,6 +26,11 @@ Exports:
   tenant-unique ``(tenant_id, id)`` per-target cache key (#1642). Every
   connector credential / session / client cache derives its key here so
   same-named targets in different tenants never collapse to one entry.
+* :mod:`meho_backplane.connectors._shared.fingerprint` — the redaction
+  seam for the direct-protocol connectors' ``fingerprint`` failure arms
+  (#3297). Emits the exception type name plus a classified reason, never
+  the raw driver message (which echoes the Vault-sourced username on an
+  auth failure).
 * :mod:`meho_backplane.connectors._shared.wrapped_creds` — the per-work-item
   short-lived response-wrapped credential broker + runner unwrap backend
   (#3191, satellite write-path mechanism 3), registered under kind
@@ -41,6 +46,7 @@ rather than growing this package into a god-module.
 
 from meho_backplane.connectors._shared import (
     cache_key,
+    fingerprint,
     gsm_creds,
     system_operator,
     vault_creds,
@@ -50,6 +56,7 @@ from meho_backplane.connectors._shared import (
 
 __all__ = [
     "cache_key",
+    "fingerprint",
     "gsm_creds",
     "system_operator",
     "vault_creds",

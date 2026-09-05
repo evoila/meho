@@ -47,6 +47,10 @@ import asyncpg
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.fingerprint import (
+    FingerprintFailureReason,
+    redact_fingerprint_error,
+)
 from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.postgres import queries
@@ -71,6 +75,30 @@ type Target = Any
 
 #: Default row cap for the free-form ``postgres.query`` op.
 _DEFAULT_MAX_ROWS = 1000
+
+
+def _classify_fingerprint_error(exc: Exception) -> FingerprintFailureReason:
+    """Map a fingerprint failure exception to a classified reason (#3297).
+
+    Mirrors the :meth:`PostgresConnector.probe` taxonomy so a target degrades
+    the same way whether the failure surfaces on ``fingerprint`` or ``probe``:
+    a rejected / unresolvable credential is ``auth_failed`` (never the raw
+    driver auth message, which echoes the connecting username), a TCP-level
+    failure is ``tcp_unreachable``, and any other server-side startup failure
+    is ``connect_failed``. Only ever called for an exception the fingerprint
+    arm catches, so :exc:`asyncpg.PostgresError` is the residual.
+    """
+    if isinstance(
+        exc,
+        asyncpg.InvalidPasswordError
+        | asyncpg.InvalidAuthorizationSpecificationError
+        | CredentialsReadError
+        | ValueError,
+    ):
+        return "auth_failed"
+    if isinstance(exc, OSError):
+        return "tcp_unreachable"
+    return "connect_failed"
 
 
 class PostgresConnector(Connector):
@@ -222,10 +250,11 @@ class PostgresConnector(Connector):
             CredentialsReadError,
             ValueError,
         ) as exc:
+            error = redact_fingerprint_error(exc, _classify_fingerprint_error(exc))
             _log.warning(
                 "postgres_fingerprint_unreachable",
                 target=getattr(target, "name", None),
-                error=f"{type(exc).__name__}: {exc}",
+                error=error,
             )
             return FingerprintResult(
                 vendor="postgresql",
@@ -233,7 +262,7 @@ class PostgresConnector(Connector):
                 reachable=False,
                 probed_at=probed_at,
                 probe_method="asyncpg: server_version",
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+                extras={"error": error},
             )
 
         version = identity.pop("server_version", None)

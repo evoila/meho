@@ -212,12 +212,18 @@ confused hour:
   bug.
 - `result_query` is the one drill-in tool — over MCP, or as `meho
   operation result-query <handle_id>` on the CLI (both wrap `POST
-  /api/v1/operations/result-query`). It pages the spilled set with
-  `offset` and `limit`; the full normalized rows are held server-side
-  in a per-operator, per-tenant store that expires on a TTL. There is
+  /api/v1/operations/result-query`). It reads the spilled set back two
+  ways: **paging** the raw row window with `offset` and `limit`, or a
+  **query** mode where a structured `query` object — filter predicates,
+  a `select` projection, `group_by`, aggregates (`COUNT` / `SUM` /
+  `MIN` / `MAX` / `AVG`), and `order_by` — compiles to exactly one
+  bounded, parameterized, read-only `SELECT` over the handle's rows (no
+  raw SQL is accepted on any transport). The full normalized rows are
+  held server-side in a per-operator, per-tenant store that expires on
+  a TTL. There is
   no `result_aggregate`, `result_export`, or `result_describe` tool —
-  those names are not callable; aggregation and export read-back tools
-  are future work.
+  those names are not callable; aggregation is a mode of `result_query`,
+  not a separate tool, and export read-back is still not available.
 - When `drill_in.available` is `false`, the full set was *not*
   spilled (the `reason` field says why) — re-run the operation with
   narrower params instead of hunting for a handle.

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"
+ xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<soapenv:Body>
+<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval><objects><obj type="Datastore">nas01.example.invalid:/exports/share</obj><propSet><name>summary.name</name><val xsi:type="xsd:string">t3363-validate</val></propSet><propSet><name>summary.type</name><val xsi:type="xsd:string">NFS</val></propSet><propSet><name>summary.url</name><val xsi:type="xsd:string">/vmfs/volumes/00000000-11111111</val></propSet></objects></returnval></RetrievePropertiesExResponse>
+</soapenv:Body>
+</soapenv:Envelope>

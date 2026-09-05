@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from meho_backplane.connectors.vmware_rest.typed_ops import _unwrap_value
+from meho_backplane.connectors.vmware_rest.typed_ops import _int_or_none, _unwrap_value
 from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
     build_task_info_retrieve_params,
 )
@@ -233,9 +233,15 @@ def _fault_message(info: dict[str, Any]) -> str | None:
 
 
 def _progress(info: dict[str, Any]) -> int | None:
-    """Return ``TaskInfo.progress`` as an int, else ``None``."""
-    value = info.get("progress")
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    """Return ``TaskInfo.progress`` as an int, else ``None``.
+
+    vCenter's VI-JSON delivers ``progress`` as a JSON int; ESXi's SOAP
+    transport delivers it bare (no ``xsi:type``), which the codec's rule 8
+    leaves as a numeric string. :func:`_int_or_none` coerces either shape to
+    ``int`` so this shared consumer restores progress parity across both
+    transports (and still rejects ``bool``, an ``int`` subclass).
+    """
+    return _int_or_none(info.get("progress"))
 
 
 async def poll_vim_task(

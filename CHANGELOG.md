@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.33.3] - 2026-09-05
+
 ### Added — net.tls_inspect returns the presented certificate PEM, closing the probe → `tls_ca_pin` loop (#3375)
 
 - `net.tls_inspect` now emits a `pem` field on every presented chain entry
@@ -109,6 +111,19 @@ connector-related release-notes line.
   stays inline (a certificate is a few KB; no JSONFlux handle-threshold change);
   `san` (DNS + IP) is unchanged. Typed-op response-schema addition only — no
   CLI OpenAPI-snapshot change.
+
+### Fixed — result_query guidance corrected to the shipped paging contract (#3369 / #3372)
+
+- Connector `llm_instructions` (ingested into `endpoint_descriptor` and read by
+  the agent at call time), CLI command help, cross-repo onboarding guides, and
+  internal docs described an aspirational result-handle query surface —
+  `result_aggregate` / `result_describe`, and `SELECT` / `WHERE` / `GROUP BY`
+  arguments to `result_query` — that was never registered, sending agents at
+  tools they could never call. All 36 drift sites now describe only the shipped
+  contract — `result_query(handle_id, offset, limit)` paging — and pre-announce
+  no future query surface; the reducer's spill-backend note is corrected
+  (Valkey, not MinIO/S3). Guidance and documentation only — no operation
+  behaviour or CLI OpenAPI-snapshot change.
 
 ## [0.33.2] - 2026-09-05
 

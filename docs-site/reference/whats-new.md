@@ -9,6 +9,22 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.33.3](https://github.com/evoila/meho/releases/tag/v0.33.3) — 2026-09-05
+
+- **Probe a target's certificate, then pin it — in one step.** `net.tls_inspect`
+  now returns each presented certificate as PEM (on the leaf and every chain
+  entry), not just facts about it. You can probe an endpoint and feed the right
+  trust anchor straight into a target's `tls_ca_pin` — the leaf for a
+  self-signed appliance, or an issuer/root for a CA-signed one — which is what
+  you need to register a target reachable only through a NAT alias, where
+  ordinary hostname verification can never match. The PEM is public handshake
+  material, never a private key.
+- **The assistant no longer points at result-handle features that don't exist.**
+  The guidance the agent reads, the CLI help, and the onboarding guides had
+  described a result-handle query surface — aggregation, filtering, describe —
+  that was never built. That text now matches what actually ships: paging a
+  result handle by offset and limit, and nothing it cannot do.
+
 ## [v0.33.2](https://github.com/evoila/meho/releases/tag/v0.33.2) — 2026-09-05
 
 - **Standalone ESXi host operations now actually reach the host.** The

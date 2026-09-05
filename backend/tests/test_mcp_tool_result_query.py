@@ -18,6 +18,7 @@ retrievable over MCP:
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -183,6 +184,39 @@ def test_result_query_unknown_handle_is_recoverable_invalid_params(
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert body["error"]["data"]["reason"] == "handle_not_found"
+
+
+def test_result_query_paging_over_budget_is_recoverable_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paging window over the byte budget maps to a recoverable -32602.
+
+    Same shape as the query branch's over-budget error: ``INVALID_PARAMS``
+    with ``data.reason == "output_too_large"`` (#3387).
+    """
+    client, op = client_with_operator
+    handle = uuid4()
+    rows = [{"i": i, "blob": "x" * 5000} for i in range(50)]
+    fake_store.seed(
+        tenant_id=OPERATOR_TENANT_ID,
+        operator_sub=op.sub,
+        handle_id=handle,
+        rows=rows,
+    )
+    monkeypatch.setattr(
+        result_query_core,
+        "get_settings",
+        lambda: SimpleNamespace(result_query_max_output_bytes=2048),
+    )
+    response = _call(client, {"handle_id": str(handle), "offset": 0, "limit": 50})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "output_too_large"
+    # Paging remediation names a smaller `limit`, not `select` / `filter`.
+    assert "limit" in body["error"]["message"].lower()
 
 
 def test_result_query_cross_operator_is_a_miss(

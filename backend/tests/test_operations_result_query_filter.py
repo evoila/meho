@@ -22,7 +22,7 @@ import pytest
 
 import meho_backplane.operations.result_query as rq
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledRowSet
+from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
 from meho_backplane.jsonflux.query.contract import QueryContractError, ResultQuerySpec
 
 _TENANT = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
@@ -68,6 +68,25 @@ class _FakeStore:
         if operator_sub != self._owner:
             return None
         return SpilledRowSet(rows=self._rows, total_rows=self._total, stored_rows=len(self._rows))
+
+    async def fetch_window(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        operator_sub: str,
+        handle_id: uuid.UUID,
+        offset: int,
+        limit: int,
+    ) -> SpilledWindow | None:
+        if operator_sub != self._owner:
+            return None
+        window = self._rows[offset : offset + limit] if limit > 0 else []
+        return SpilledWindow(
+            rows=window,
+            total_rows=self._total,
+            stored_rows=len(self._rows),
+            truncated=False,
+        )
 
 
 def _stub_settings(*, rows: int = 500, out_bytes: int = 262144, timeout: int = 5) -> Any:
@@ -279,3 +298,34 @@ def test_core_reuses_the_hardened_engine() -> None:
             engine.conn.execute("SET threads=4")
     finally:
         engine.close()
+
+
+# ---------------------------------------------------------------------------
+# Paging read: serialized-output byte cap shared with the query path (#3387)
+# ---------------------------------------------------------------------------
+
+
+async def test_paging_window_over_byte_cap_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A window within the row cap but over the byte budget is rejected.
+
+    The paging read applies the same ``result_query_max_output_bytes`` ceiling
+    the query path does, so no agent ever receives an over-budget page.
+    """
+    wide = [{"id": i, "blob": "x" * 5000} for i in range(50)]
+    _install(monkeypatch, _FakeStore(wide), _stub_settings(out_bytes=2048))
+    with pytest.raises(rq.ResultQueryOutputTooLargeError) as exc:
+        await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
+    # Paging remediation names a smaller `limit` — never `select` / `filter`.
+    msg = str(exc.value).lower()
+    assert "limit" in msg
+    assert "select" not in msg and "filter" not in msg
+
+
+async def test_paging_window_in_budget_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An in-budget window is returned verbatim — the byte check is transparent."""
+    rows = _sample_rows(10)
+    _install(monkeypatch, _FakeStore(rows), _stub_settings(out_bytes=262144))
+    result = await rq.read_result_window(_operator(), uuid.uuid4(), offset=0, limit=50)
+    assert result["returned_rows"] == 10
+    assert result["rows"] == rows
+    assert result["truncated"] is False

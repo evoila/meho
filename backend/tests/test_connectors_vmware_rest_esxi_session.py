@@ -531,7 +531,7 @@ async def test_create_nas_datastore_routes_through_soap_and_returns_moref() -> N
             json={
                 "spec": {
                     "_typeName": "HostNasVolumeSpec",
-                    "remoteHost": "10.0.0.9",
+                    "remoteHost": "nas01.example.invalid",
                     "remotePath": "/export/nfs",
                     "localPath": "nfs-ds",
                     "accessMode": "readWrite",
@@ -544,7 +544,7 @@ async def test_create_nas_datastore_routes_through_soap_and_returns_moref() -> N
     # The spec fields serialise into the envelope; _typeName is dropped (SOAP
     # announces types by position).
     body = router.bodies[-1]
-    assert "<remoteHost>10.0.0.9</remoteHost>" in body
+    assert "<remoteHost>nas01.example.invalid</remoteHost>" in body
     assert "<localPath>nfs-ds</localPath>" in body
     assert "_typeName" not in body
 
@@ -598,7 +598,7 @@ async def test_write_fault_raises_runtime_error_with_fault_type() -> None:
                 target,
                 "/HostDatastoreSystem/ha-datastoresystem/CreateNasDatastore",
                 operator=_make_operator(),
-                json={"spec": {"remoteHost": "10.0.0.9"}},
+                json={"spec": {"remoteHost": "nas01.example.invalid"}},
             )
 
     # A write fault is not auth-class, so it does not become ConnectorAuthError.

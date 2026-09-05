@@ -1499,7 +1499,8 @@ class VmwareRestConnector(HttpConnector):
         chain (``about.apiType == "HostAgent"``). A session established, so the
         target is reachable by construction.
         """
-        version = self._about_versions.get(target_cache_key(target))
+        cache_key = target_cache_key(target)
+        version = self._about_versions.get(cache_key)
         return FingerprintResult(
             vendor="vmware",
             product=HOST_FLAVOR_ESXI,
@@ -1508,7 +1509,10 @@ class VmwareRestConnector(HttpConnector):
             probed_at=probed_at,
             probe_method=_ESXI_SOAP_PROBE,
             extras={
-                "api_version": version,
+                # The 4-part ``about.apiVersion`` (e.g. ``9.1.0.0``) the
+                # establish cached, not the display ``version`` -- this is the
+                # value every ``/sdk`` op's ``SOAPAction`` announces.
+                "api_version": self._esxi_api_versions.get(cache_key),
                 "api_type": "HostAgent",
                 "session_flavor": HOST_FLAVOR_ESXI,
             },

@@ -452,15 +452,26 @@ def _soap_val_to_json(element: Any) -> Any:
     if not children and element.get("type") is not None:
         return {"type": element.get("type"), "value": (element.text or "").strip()}
 
-    # Rule 8 -- leaf primitive.
-    if not children:
-        return _coerce_leaf(element.text, element.get(_XSI_TYPE_ATTR))
-
-    # Complex element (rules 3-7).
     xsi_type_raw = element.get(_XSI_TYPE_ATTR)
     xsi_local = _strip_qname_prefix(xsi_type_raw) if xsi_type_raw is not None else None
     is_array_container = xsi_local is not None and xsi_local.startswith(_ARRAY_OF_PREFIX)
 
+    # Rule 5 -- an *empty* ArrayOf* container: no children, but its xsi:type
+    # marks it a collection, so it stays list-shaped. Without this guard the
+    # childless element falls through to the rule-8 leaf branch and yields
+    # ``""`` (empty string) rather than ``[]`` -- a shape break vs the
+    # force-list guarantee the non-empty case makes. The member key is the
+    # ``ArrayOf`` prefix stripped (``ArrayOfScsiLun`` -> ``ScsiLun``); its
+    # exact spelling is immaterial because ``unwrap_vim_value`` collapses any
+    # single-list-payload ``ArrayOf*`` box to the bare list.
+    if not children and is_array_container:
+        return {VIM_TYPE_NAME_KEY: xsi_local, xsi_local[len(_ARRAY_OF_PREFIX) :]: []}
+
+    # Rule 8 -- leaf primitive.
+    if not children:
+        return _coerce_leaf(element.text, xsi_type_raw)
+
+    # Complex element (rules 3-7).
     grouped: dict[str, list[Any]] = {}
     order: list[str] = []
     for child in children:

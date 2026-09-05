@@ -237,6 +237,16 @@ def test_codec_rule5_arrayof_multi_element() -> None:
     assert unwrap_vim_value(box) == ["a", "b"]
 
 
+def test_codec_rule5_arrayof_empty_container_stays_list() -> None:
+    """Rule 5: an *empty* ArrayOf* stays list-shaped -- not the rule-8 ``""`` leaf."""
+    box = _val_of(
+        '<val xsi:type="ArrayOfScsiLun" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>'
+    )
+    assert box == {"_typeName": "ArrayOfScsiLun", "ScsiLun": []}
+    # Backstop: unwrap_vim_value collapses the empty box to the bare list.
+    assert unwrap_vim_value(box) == []
+
+
 def test_codec_rule6_cardinality_repeated_siblings_list() -> None:
     """Rule 6: repeated non-forced sibling tags -> list (bare numerics stay str)."""
     val = _val_of("<parent><item>1</item><item>2</item><item>3</item></parent>")

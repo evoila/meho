@@ -464,7 +464,7 @@ def _soap_val_to_json(element: Any) -> Any:
     # ``ArrayOf`` prefix stripped (``ArrayOfScsiLun`` -> ``ScsiLun``); its
     # exact spelling is immaterial because ``unwrap_vim_value`` collapses any
     # single-list-payload ``ArrayOf*`` box to the bare list.
-    if not children and is_array_container:
+    if not children and is_array_container and xsi_local is not None:
         return {VIM_TYPE_NAME_KEY: xsi_local, xsi_local[len(_ARRAY_OF_PREFIX) :]: []}
 
     # Rule 8 -- leaf primitive.

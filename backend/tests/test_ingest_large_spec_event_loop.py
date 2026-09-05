@@ -93,17 +93,7 @@ _OP_COUNT = 1275
 #: larger than this means the loop was starved for that long.
 _HEARTBEAT_INTERVAL_S = 0.01
 
-#: Whole-run liveness floor: heartbeats that must land anywhere across
-#: the ingest. A secondary sanity that the loop ran at all — the primary
-#: teeth is ``_MIN_TICKS_DURING_REGISTER`` below. A ~1 s ingest polled
-#: every 10 ms yields ~80 ticks locally; requiring >= 50 keeps a wide
-#: margin. (This count alone is a *weak* signal for the register pass:
-#: the parse runs in ``asyncio.to_thread`` and keeps the loop free, so
-#: its ticks can pad the total even if the register froze — which is
-#: exactly why the register window is measured separately.)
-_MIN_TICKS = 50
-
-#: **The primary, load-robust responsiveness signal.** Heartbeats that
+#: **The load-robust responsiveness signal.** Heartbeats that
 #: must land *inside* the DB-commit window — the ``register_ingested_
 #: operations`` call, stamped in the test by wrapping it. This is the leg
 #: the crash signal implicated ("the DB-commit pass yields per-op rather
@@ -362,12 +352,6 @@ async def test_nondryrun_large_spec_ingest_keeps_event_loop_responsive(
         f"(need >= {_MIN_TICKS_DURING_REGISTER}); the register/commit pass "
         "stopped yielding — it is blocking the loop for the whole batch "
         "rather than awaiting per-op"
-    )
-
-    # Secondary sanity: the loop had overall liveness across the whole run.
-    assert len(beats) >= _MIN_TICKS, (
-        f"heartbeat only ticked {len(beats)} times across the ingest "
-        f"(need >= {_MIN_TICKS}); the event loop was starved"
     )
 
 

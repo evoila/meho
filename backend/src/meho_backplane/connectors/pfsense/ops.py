@@ -127,7 +127,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     destructive deletes ``pfsense.nat.delete`` / ``pfsense.alias.delete``
     (#3232), plus the teardown-inverse deletes
     ``pfsense.route.static.delete`` / ``pfsense.gateway.delete`` /
-    ``pfsense.alias.member.remove`` (#3313)). Sixteen ops total.
+    ``pfsense.alias.member.remove`` (#3313)) + ``MGMT_FLOW_OPS`` (the
+    management-plane flow classifier ``pfsense.mgmt_flow.summary``,
+    meho-internal#252). Seventeen ops total.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -142,10 +144,11 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
     :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
     """
     from meho_backplane.connectors.pfsense.ops_delete import DELETE_OPS
+    from meho_backplane.connectors.pfsense.ops_mgmt_flow import MGMT_FLOW_OPS
     from meho_backplane.connectors.pfsense.ops_read import READ_OPS
     from meho_backplane.connectors.pfsense.ops_write import WRITE_OPS
 
-    return (_PFSENSE_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DELETE_OPS)
+    return (_PFSENSE_ABOUT_OP, *READ_OPS, *WRITE_OPS, *DELETE_OPS, *MGMT_FLOW_OPS)
 
 
 #: The ops :class:`PfSenseConnector` registers at lifespan startup.
@@ -159,7 +162,9 @@ def _pfsense_ops() -> tuple[PfSenseOp, ...]:
 #: destructive deletes (``pfsense.nat.delete``, ``pfsense.alias.delete``);
 #: #3313 adds the teardown-inverse deletes (``pfsense.route.static.delete``,
 #: ``pfsense.gateway.delete``, ``pfsense.alias.member.remove``)
-#: -- 16 ops total. The shape of each follow-on PR is "import a new
+#: #252 (meho-internal) adds the management-plane flow classifier
+#: (``pfsense.mgmt_flow.summary``) via the ``ops_mgmt_flow`` module
+#: -- 17 ops total. The shape of each follow-on PR is "import a new
 #: module-level tuple and splat it into :data:`PFSENSE_OPS` via
 #: :func:`_pfsense_ops`" -- the registration walk in
 #: :meth:`PfSenseConnector.register_operations` does not need to

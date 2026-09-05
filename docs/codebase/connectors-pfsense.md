@@ -51,11 +51,13 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (16 ops total). T1 shipped
+  composition function, and the `PFSENSE_OPS` tuple (17 ops total). T1 shipped
   `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
   appends `pfsense.dhcp.leases`; #3090 appends the two write ops via the
   `ops_write` module; #3232 appends the first two destructive deletes and #3313
-  the three teardown-inverse deletes, both via the `ops_delete` module.
+  the three teardown-inverse deletes, both via the `ops_delete` module;
+  meho-internal#252 appends the parameterized management-plane flow classifier
+  `pfsense.mgmt_flow.summary` via the `ops_mgmt_flow` module.
 
 - **Destructive-delete handlers** (`ops_delete.py`, #3232 + #3313) — the
   connector's `safety_level="destructive"` ops. Config parsers
@@ -89,7 +91,13 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
 - **Read op parsers** (`ops_read.py`) — pure parsers for pfctl, config.xml, and
   the ISC dhcpd lease DB, plus the handler functions and the `READ_OPS` tuple:
   - `parse_pfctl_rules` / `parse_pfctl_states` / `parse_pfctl_nat` — pfctl
-    output parsers.
+    output parsers. `parse_pfctl_states` reads the real `pfctl -ss` field
+    order — **interface first, protocol second** (`<if> <proto> <ep1>
+    <-|-> <ep2>  <state>`, pfSense 2.7 / pf state format, redmine #2121);
+    the `proto`/`iface` capture groups were transposed before #252, which
+    mislabelled every row (and, latently, `pfsense.firewall.state`'s
+    output). A NAT-translated first endpoint (`addr:port (xlate:port)`) does
+    not match and is returned unparsed (`proto=None`) rather than misparsed.
   - `parse_ifconfig` / `_netmask_to_cidr` — ifconfig output parser.
   - `parse_gateways_xml` — XML parser for the `<gateways>` block.
   - `parse_dhcp_leases` (#2849) — parses `/var/dhcpd/var/db/dhcpd.leases`
@@ -201,11 +209,12 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (16 ops)
+## Op surface (17 ops)
 
 | Op ID | Command | Group | Safety |
 |---|---|---|---|
 | `pfsense.about` | `cat /etc/version` | `identity` | `safe` |
+| `pfsense.mgmt_flow.summary` | `pfctl -ss` (classified in-op by source vs `sanctioned_src` / `baseline_src` and dst vs `mgmt_nets` / `mgmt_ports`) | `firewall` | `safe` |
 | `pfsense.version` | `cat /etc/version` | `config` | `safe` |
 | `pfsense.firewall.rules` | `pfctl -sr` | `firewall` | `safe` |
 | `pfsense.firewall.state` | `pfctl -ss` | `firewall` | `safe` |
@@ -222,7 +231,8 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.gateway.delete` | `cat /cf/conf/config.xml` guard (match one `<gateways><gateway_item>` by name + fail-closed reference scan) + `pfSsh.php playback` fragment (delete-by-name + `write_config()` + `system_routing_configure()`) + read-back verify | `routing` | `destructive` |
 | `pfsense.alias.member.remove` | `cat /cf/conf/config.xml` guard (match one `<aliases><alias>` by name + locate the member token) + `pfSsh.php playback` fragment (read-modify-write `<address>`/`<detail>` + `write_config()` + `filter_configure()`) + read-back verify | `alias` | `destructive` |
 
-The 9 read / identity ops are `safety_level="safe"`; the 2 write ops (#3090)
+The 9 read / identity ops plus the `pfsense.mgmt_flow.summary` classifier are
+`safety_level="safe"`; the 2 write ops (#3090)
 are `safety_level="caution"` / `requires_approval=False` — the same posture
 `bind9.record.add` / `windns.record.add` carry for an additive, recoverable,
 idempotent config write. The 5 destructive ops (#3232 nat/alias; #3313 the
@@ -269,6 +279,57 @@ present in `config.xml` but absent from the live view (e.g. on a down
 interface `dpinger` is not monitoring) keeps its row with all five health
 fields `null`; a failure of the status command degrades the whole set to
 `null` health rather than failing the op.
+
+### `pfsense.mgmt_flow.summary` — management-plane flow classifier (meho-internal#252)
+
+The enabling read op for the management-plane lockdown ratchet's **alert**
+stage (Goal meho-internal#234, Initiative #249, Task #252). It runs `pfctl -ss`
+and classifies every live TCP connection state whose *server* side (the
+endpoint on a management port) sits in a caller-supplied management network
+into **sanctioned** vs **non-sanctioned** by source, and flags **unexpected**
+sources — non-sanctioned AND not in a caller-supplied baseline. It returns a
+compact per-leg summary (open-state counts + coverage %) plus the distinct
+`non_sanctioned_sources` (capped) and `unexpected_sources` (complete) as
+`{src, leg, ports, states}` rows and the exact `*_source_count` scalars. The
+pure classifier `classify_mgmt_flows` (`ops_mgmt_flow.py`) is tested against
+fixture text; the handler is the thin `pfctl -ss` + `parse_pfctl_states` +
+classify layer.
+
+Why it exists as a governed op rather than a raw-state Sensor: a Sensor's
+bounded assertion (one dotted path + at most one aggregate + one comparator,
+`docs/codebase/sensor.md`) cannot itself filter a state table by source-set
+membership, and `pfsense.firewall.state` reduces to a JSONFlux handle on a busy
+box — neither is assertable. This op collapses the state table to a small,
+inline, pre-classified summary a Sensor can pin: assert
+`$.unexpected_source_count <= 0`, or aggregate `count` over
+`$.unexpected_sources` so the breach evidence (offender sample, #2976) names
+each new source, leg, and port class.
+
+Design notes:
+
+- **Lab-agnostic.** No CIDRs or hostnames are baked in. `sanctioned_src` and
+  `mgmt_nets` (a list of `{cidr, leg}`) are **required** params; `mgmt_ports`
+  defaults to the vendor-generic 443/22/902/5480 class; `baseline_src` is
+  optional. The domain-specific values live in the pinning Sensor's `params`.
+- **Zero firewall change.** It classifies the live state table (the same
+  zero-change source as the stage-1 report's `states` mode), so no counting /
+  logging rule is required. The trade-off is snapshot semantics — a flow that
+  opens and closes between reads is not captured; a cumulative logged-counter
+  source is a separate, firewall-changing decision, out of scope here.
+- **Failed read raises.** A non-zero `pfctl -ss` exit with no output raises so
+  the dispatch fails and a pinned Sensor evaluates `unknown` rather than a
+  false all-clear (the sensor contract: a refusal must fail the dispatch, not
+  return a reading). An empty (exit 0) state table classifies to zeros.
+- **Unparsed lines are counted, not dropped.** A *successful* read whose lines
+  the parser cannot structure (a truncated/unknown form, or a NAT-translated
+  first endpoint `addr:port (xlate:port) <dir> ...` — out of scope for this
+  port-based classifier) is counted in the result's `unparsed_lines` scalar and
+  never classified. A Sensor pins `$.unparsed_lines <= 0` alongside the source
+  assertion so an unrecognised state cannot be silently absorbed into a clean
+  summary (the second false-all-clear the field-order fix closed for #252).
+- **Same-subnet caveat.** A pfSense only sees flows it routes between two of
+  its segments; same-subnet flows are invisible. The op echoes this on every
+  result's `caveat` field.
 
 ## Write ops (#3090)
 

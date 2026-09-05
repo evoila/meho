@@ -3163,16 +3163,22 @@ meho operation preview <connector_id> <op_id> [flags]
 
 ### `meho operation result-query`
 
-Page rows back from a JSONFlux result handle
+Page or query rows back from a JSONFlux result handle
 
 ```
 meho operation result-query <handle_id> [flags]
 ```
 
+- `--aggregate` — query: aggregate "<FUNC> [field]" (repeatable; FUNC = COUNT SUM MIN MAX AVG)
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--group-by` — query: GROUP BY key column (repeatable, max 4)
 - `--json` — emit the full result-query envelope as JSON instead of the human render
-- `--limit` — page size; default 50, max 500 (matches the result_query MCP tool)
-- `--offset` — zero-based index of the first row to return (page by advancing this by --limit)
+- `--limit` — paging: page size; default 50, max 500 (matches the result_query MCP tool)
+- `--offset` — paging: zero-based index of the first row to return (advance by --limit)
+- `--order-by` — query: sort term "<field> [asc|desc]" (repeatable, max 4)
+- `--query-limit` — query: max output rows (clamps to 500); the result flags truncation when more matched
+- `--select` — query: projection column to return (repeatable; omit for all columns)
+- `--where` — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != < <= > >= IN 'IS NULL')
 
 ### `meho operation search`
 

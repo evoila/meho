@@ -224,7 +224,7 @@ $ meho pfsense firewall state --target pfsense-hetzner-dc --json \
 
 When the JSONFlux reducer is configured with a row-count threshold, the
 dispatcher will produce a `ResultHandle` for large state tables (the
-agent can then page via `result_describe` / `result_query`).
+agent can then page it with `result_query(handle_id, offset, limit)`).
 
 ### config.xml contains sensitive data
 

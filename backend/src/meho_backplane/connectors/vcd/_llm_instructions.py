@@ -89,8 +89,8 @@ _VM_LIST_INSTRUCTIONS: dict[str, object] = {
         "Query-service record envelope {record: [AdminVMRecord, ...], total, "
         "page, pageSize}. Each record carries name, containerName (the vApp), "
         "vdc, org, status, numberOfCpus, memoryMB, and guestOs. A large "
-        "inventory is reduced to a JSONFlux handle — narrow it with result_query "
-        "/ result_aggregate (e.g. sum memoryMB by org)."
+        "inventory is reduced to a JSONFlux handle; page it with "
+        "result_query(handle_id, offset, limit) and read memoryMB / org per row."
     ),
     "next_step": (
         "Aggregate over the handle for capacity planning (count / vCPU / memory "

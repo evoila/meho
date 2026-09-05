@@ -43,8 +43,8 @@ func newRequestListCmd() *cobra.Command {
 		Long: "list dispatches GET:/lcm/request/api/v2/requests against\n" +
 			"connector_id=\"fleet-rest-9.0\". Returns the most recent requests\n" +
 			"by createdOn; operators on busy appliances may see a JSONFlux\n" +
-			"handle through the shared HandleStore — use result_describe /\n" +
-			"result_query to filter by state or requestType.\n\n" +
+			"result handle — page it with result_query(handle_id, offset,\n" +
+			"limit) and scan the rows for a given state or requestType.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho vcf-fleet request list --target rdc-fleet\n" +
 			"  meho vcf-fleet request list --target rdc-fleet --json | jq '.result[] | select(.state==\"INPROGRESS\")'",

@@ -531,7 +531,7 @@ VROPS_RESOURCE_STATS_OP = VropsTypedOp(
             "[number], timestamps: [epoch_ms], ...}, ...]}}, ...]}. Each stat "
             "entry carries the metric's latest data point(s) and timestamp(s) "
             "for one statKey on one resource. Large sets return a JSONFlux "
-            "handle — drill in with result_query / result_aggregate. Field "
+            "handle — page it with result_query(handle_id, offset, limit). Field "
             "names follow the VCF Operations 9.0 Suite API stats-of-resources "
             "shape; confirm against a live target if exact-shape parsing is "
             "ever needed (the handler passes the payload through unparsed)."

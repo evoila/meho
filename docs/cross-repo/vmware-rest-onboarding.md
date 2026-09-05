@@ -196,8 +196,8 @@ later call surfaces to the caller as a clean retry signal (deferred per
 the connector's *Session lifecycle* note).
 
 Set-shaped responses (the VM/datastore lists) come back as a JSONFlux
-result handle when they exceed the inline threshold; drill in with
-`result_query` / `result_aggregate` / `result_export` (CLAUDE.md §4).
+result handle when they exceed the inline threshold; page it with
+`result_query(handle_id, offset, limit)` (CLAUDE.md §4).
 
 ## The agent meta-tool path
 

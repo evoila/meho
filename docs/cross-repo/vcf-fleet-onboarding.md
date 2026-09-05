@@ -247,9 +247,9 @@ Dispatches `fleet.environment.list` (the typed read; repointed off the
 ingested `GET:/lcm/lcops/api/v2/environments` op_id by #2355 — the
 legacy op_id no longer resolves on a zero-catalog boot). The primary Fleet inventory
 entry point — every vRA / vROps / vRLI / vIDM deploy lives under an
-environment. Large appliances return a JSONFlux handle through the shared
-`HandleStore`; use `result_describe` / `result_query` to filter when the
-handle is present.
+environment. Large appliances return a JSONFlux result handle; page it with
+`result_query(handle_id, offset, limit)` and scan the rows client-side when
+the handle is present.
 
 ### `meho vcf-fleet environment info <environment-id>`
 

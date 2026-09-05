@@ -345,8 +345,8 @@ $ meho holodeck pod info HoloPod-001 --target holorouter-hetzner-dc --json | jq 
 
 `list` runs `Get-HoloDeckPod | ConvertTo-Json -Depth 4` and surfaces
 the JSONFlux-shaped `{rows, total}` envelope (rows inline today; a
-future JSONFlux reducer will spill large pod lists via the standard
-`result_describe` / `result_query` flow).
+future JSONFlux reducer will spill large pod lists into a result handle you
+page with `result_query(handle_id, offset, limit)`).
 
 `info` runs `Get-HoloDeckPod -Id '<id>' | ConvertTo-Json -Depth 4` and
 returns the single-pod detail dict (state, networking, VMs).

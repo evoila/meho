@@ -58,8 +58,9 @@ _DEPLOYMENT_LIST_INSTRUCTIONS: dict[str, object] = {
         "totalPages, number, size}. Each Deployment carries id, name, projectId, "
         "blueprintId/blueprintVersion, catalogItemId, status, createdAt/By, "
         "ownedBy, leaseExpireAt, and (with expand) resources / lastRequest / "
-        "inprogressRequests. A large list is reduced to a JSONFlux handle — narrow "
-        "with result_query / result_aggregate (e.g. count by projectId or status)."
+        "inprogressRequests. A large list is reduced to a JSONFlux handle; page "
+        "it with result_query(handle_id, offset, limit) and read projectId / "
+        "status per row."
     ),
     "next_step": (
         "Drill into one deployment via vcfa.vra8.deployment.get for its resources "

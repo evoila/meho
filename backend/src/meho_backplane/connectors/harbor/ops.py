@@ -513,11 +513,11 @@ _HARBOR_ARTIFACT_VULN_LLM_INSTRUCTIONS: dict[str, Any] = {
         "fetch_more envelope; the full set is reachable via result_query."
     ),
     "next_step": (
-        "For a named-CVE lookup against a reduced handle, drill in with "
-        "result_query, e.g. SELECT id, severity, package, fix_version FROM "
-        "result WHERE id = 'CVE-2024-3094'. For a promotion gate, filter on "
-        "severity or on fix_version (non-empty = fixable). Pair with "
-        "harbor.artifact.info for the at-a-glance severity counts."
+        "A large vulnerability list is reduced to a JSONFlux handle; page it "
+        "with result_query(handle_id, offset, limit) and scan the rows "
+        "client-side for a named CVE id, or read the severity and fix_version "
+        "fields for a promotion gate (a non-empty fix_version = fixable). Pair "
+        "with harbor.artifact.info for the at-a-glance severity counts."
     ),
 }
 
@@ -773,9 +773,10 @@ _HARBOR_QUOTA_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     ),
     "next_step": (
         "The head rows (default sort) are the projects nearest their quota -- "
-        "surface those with used vs. hard storage. Against a reduced handle, "
-        "drill in with result_query (e.g. filter on used.storage). For one "
-        "project's detail, call harbor.project.summary."
+        "surface those with used vs. hard storage. A large fleet is reduced to "
+        "a JSONFlux handle; page it with result_query(handle_id, offset, limit) "
+        "and compare used vs. hard storage row by row. For one project's "
+        "detail, call harbor.project.summary."
     ),
 }
 

@@ -350,8 +350,8 @@ Expected:
   login); the per-target tenant-plane token cache reuses the token
   for follow-up tenant-plane calls. **Large tenants** (hundreds of
   deployments) trip the JSONFlux seam: the `OperationResult.handle`
-  field carries a `ResultHandle` and `result_describe` /
-  `result_query` resolve against it.
+  field carries a `ResultHandle` that `result_query(handle_id, offset,
+  limit)` pages against.
 
 The JSONFlux *seam* (would-be handle threading) is exercised
 non-interactively at the same locations the NSX precedent

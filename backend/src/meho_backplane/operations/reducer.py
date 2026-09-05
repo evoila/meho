@@ -15,8 +15,10 @@ payload verbatim with a ``None`` :class:`ResultHandle`. It is the import-time
 (G0.6.1-T3 #753), installed at app startup via :func:`set_default_reducer`,
 which reduces set-shaped payloads over the v0.1-spec §4 threshold
 (>50 rows / >4 KB) into a markdown summary + :class:`ResultHandle`. The
-result-handle spill backend (MinIO/S3) and the ``result_query`` /
-``result_aggregate`` read-back meta-tools remain a follow-on Initiative.
+result-handle spill backend (Valkey) and the ``result_query`` read-back
+meta-tool have since shipped (#1507 / #3179); ``result_query`` pages a
+handle by ``offset`` / ``limit`` — server-side filtering / aggregation
+over a handle is not yet available.
 
 The contract design is **swappable hook with a no-op default**: every
 connector shipped JSONFlux-aware from day 1, so swapping the real reducer in

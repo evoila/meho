@@ -12,8 +12,8 @@ import (
 
 // Tenant-plane verb: `meho vcf-automation deployment ...` -- the
 // largest payload on the tenant surface; the dispatcher's JSONFlux
-// seam wraps oversized responses in a ResultHandle (use `result_describe`
-// / `result_query` to navigate).
+// seam wraps oversized responses in a ResultHandle (page it with
+// `result_query(handle_id, offset, limit)`).
 func newDeploymentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "deployment",
@@ -85,7 +85,7 @@ func printDeploymentList(w io.Writer, r *CallResult) {
 	}
 	// JSONFlux handle path: when the dispatcher wraps the payload in
 	// a ResultHandle, the result envelope's `handle` field is set and
-	// the operator should use `result_describe` / `result_query`.
+	// the operator pages it with `result_query(handle_id, offset, limit)`.
 	// Renders a one-liner hint so the handle isn't silently dropped.
 	entries, err := decodeTenantListResult(r.Result)
 	if err != nil {

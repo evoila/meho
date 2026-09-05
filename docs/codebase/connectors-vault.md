@@ -594,15 +594,15 @@ reducer is the threshold-aware
 [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) —
 `vault.kv.list` with ≤50 keys (≤4 KB) passes through inline with
 `OperationResult.handle is None`; a larger list returns a sample +
-`ResultHandle`. The `result_query` / `result_aggregate` /
-`result_describe` / `result_export` meta-tools that read a handle back
-ship in a follow-on Initiative.
+`ResultHandle`. The `result_query` meta-tool reads a handle back — it
+pages the spilled rows by `offset` / `limit` (#1507 / #3179); server-side
+filtering / aggregation over a handle is not available.
 
 `tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
 the contract: ≤50 keys stays inline with no handle, and >50 keys
 produces `{sample, ...}` on `result` plus a `ResultHandle` whose
-`total_rows` / `sample_rows` carry exactly what a future
-`result_describe` / `result_query` will read. The agent never sees the
+`total_rows` / `sample_rows` carry exactly what `result_query` reads when
+it pages the handle. The agent never sees the
 raw >50-key list once a handle is produced.
 
 ## Control flow

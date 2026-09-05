@@ -1,40 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the ESXi-native VI-JSON session branch (#3363).
+"""Unit tests for the standalone-ESXi SOAP session branch (#3363).
 
-#3332 shipped standalone-ESXi host resolution (``ha-host``), the VI-JSON
+#3332 shipped standalone-ESXi host resolution (``ha-host``), the vmomi
 seam, and ``product=esxi`` fingerprint stamping, but left session
 establishment on the two vSphere-Automation vAPI endpoints
 (``POST /api/session`` + the ``/rest/com/vmware/cis/session`` 404-fallback)
-that exist on vCenter only. On a standalone ESXi host ``/api/*`` is a
-JSON-RPC 2.0 handler: a bodyless ``POST /api/session`` answers HTTP 400
-(not 404), so the modern→legacy fallback dead-ends and no
-``vmware-api-session-id`` token is ever obtained. #3363 adds an ESXi-native
-branch that mints the session over VI-JSON ``SessionManager.Login`` on the
-``ha-sessionmgr`` singleton.
+that exist on vCenter only. #3363's first cut assumed a standalone host
+would serve the VI-JSON surface (``/sdk/vim25/{release}/…``); that premise
+is **disproven live** — that surface is vCenter-only and every VI-JSON POST
+there 500s with a SOAP expat fault, while ESXi's ``/api/*`` is a JSON-RPC
+2.0 handler (``POST /api/session`` → HTTP 400 "Unsupported content type").
+The correct transport is **hand-rolled SOAP 1.1 over ``POST /sdk``**:
+``RetrieveServiceContent`` (unauthenticated) → ``SessionManager.Login`` (sets
+a ``vmware_soap_session`` cookie) → the host reads/writes as SOAP methods.
 
 Coverage matrix (per #3363 acceptance criteria):
 
-* First probe, before any fingerprint exists — the JSON-RPC-400 signature
-  on ``POST /api/session`` selects the ESXi branch; ``SessionManager.Login``
-  is POSTed at ``/sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login``
-  with the ``{"userName","password","locale"}`` body (no HTTP Basic), and
-  the ``vmware-api-session-id`` **response header** propagates into
-  ``auth_headers()``.
-* A target already fingerprinted ``product=esxi`` goes straight to the
-  VI-JSON branch — no ``POST /api/session`` at all.
-* Session reuse — one Login for two ``auth_headers`` calls.
-* ``fingerprint`` against a standalone ESXi target → ``reachable=True``,
-  ``product="esxi"``, a version from the vim25 service-versions document.
-* ``_post_vmomi_json`` (the seam every host read/write rides) resolves the
-  VI-JSON ``/sdk/vim25/{release}`` mount + attaches the session header
-  against an ESXi target.
-* ``Logout`` on ``ha-sessionmgr`` on ``invalidate_session`` and ``aclose``.
-* 401 recovery — ``invalidate_session`` → cold VI-JSON re-login.
-* vCenter regression — a genuine (non-JSON-RPC) 400 never takes the ESXi
+* **Branch select — first probe.** The JSON-RPC-400 (or "Unsupported
+  content type") signature on ``POST /api/session`` selects the SOAP branch
+  before any fingerprint exists.
+* **Branch select — fingerprinted.** A ``product=esxi`` target goes straight
+  to the SOAP branch — no ``POST /api/session`` at all.
+* **Ordered establish.** ``RetrieveServiceContent`` before
+  ``SessionManager.Login``; Login's ``_this`` is the ServiceContent-provided
+  SessionManager moid.
+* **Cookie, not header.** ``auth_headers()`` adds no header for ESXi; the
+  ``vmware_soap_session`` cookie carries auth on the pooled client.
+* **Credential hidden.** An ``InvalidLogin`` fault → ``ConnectorAuthError``
+  whose message never contains the username / password.
+* **moid remap.** ``RetrievePropertiesEx`` on the ``propertyCollector``
+  literal is remapped to the HostAgent's ServiceContent PC moid.
+* **fingerprint.** A standalone ESXi target → ``reachable=True``,
+  ``product=esxi``, ``version=about.version`` via SOAP RetrieveServiceContent.
+* **Teardown / Logout.** SOAP ``SessionManager.Logout`` on ``invalidate_session``
+  and ``aclose`` (never ``DELETE /api/session``).
+* **Cold re-login.** ``invalidate_session`` → the next ``auth_headers`` re-runs
+  the SOAP establish.
+* **vCenter regression.** A genuine (non-JSON-RPC) 400 never enters the SOAP
   branch; a real vCenter still mints via ``POST /api/session``.
-* Credentials never appear in the Login error message.
+* **Flight-recorder span.** The vendor-call span never serialises the ``/sdk``
+  SOAP envelope (the Login ``<password>`` cannot leak into a captured span).
+
+Envelopes are realistic hand-written vim25 shapes (modelled on the WSDL),
+not live captures — the committed live-envelope fixtures land with the
+State-2 run.
 """
 
 from __future__ import annotations
@@ -53,35 +64,161 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
+from meho_backplane.connectors.vmware_rest import connector as connector_module
+from meho_backplane.connectors.vmware_rest.typed_ops_host_storage_devices import (
+    _extract_host_props,
+    _map_scsi_lun,
+    build_host_storage_devices_retrieve_params,
+)
 from meho_backplane.settings import get_settings
 
 _ESXI_HOST = "esxi-standalone.test.invalid"
 _ESXI_BASE = f"https://{_ESXI_HOST}"
-_RELEASE = "9.1.0.0"
-_LOGIN_PATH = f"/sdk/vim25/{_RELEASE}/SessionManager/ha-sessionmgr/Login"
-_LOGOUT_PATH = f"/sdk/vim25/{_RELEASE}/SessionManager/ha-sessionmgr/Logout"
+_SDK = "/sdk"
 
-#: The version-discovery document both vCenter and ESXi serve
-#: unauthenticated at /sdk/vimServiceVersions.xml (urn:vim25 9.1.0.0 — the
-#: standalone-ESXi 9.1 shape from the field diagnosis).
-_SERVICE_VERSIONS_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<namespaces version="1.0">
- <namespace>
-  <name>urn:vim25</name>
-  <version>9.1.0.0</version>
-  <priorVersions>
-   <version>8.0.3.0</version>
-  </priorVersions>
- </namespace>
-</namespaces>
-"""
+#: ServiceContent-provided moids (NOT the vCenter ``propertyCollector`` /
+#: ``ha-sessionmgr`` literals a naive branch would hard-code).
+_PC_MOID = "ha-property-collector"
+_SM_MOID = "ha-sessionmgr"
+_ABOUT_VERSION = "9.1.0"
+_SOAP_COOKIE = "vmware_soap_session"
+_COOKIE_VALUE = "52a1b2c3-cookie-value"
+
+_SOAP_ENV = "http://schemas.xmlsoap.org/soap/envelope/"
+_XSI = "http://www.w3.org/2001/XMLSchema-instance"
+
+
+def _envelope(inner: str) -> str:
+    return (
+        f'<soapenv:Envelope xmlns:soapenv="{_SOAP_ENV}" xmlns:xsi="{_XSI}">'
+        f"<soapenv:Body>{inner}</soapenv:Body></soapenv:Envelope>"
+    )
+
+
+_SERVICE_CONTENT_XML = _envelope(
+    '<RetrieveServiceContentResponse xmlns="urn:vim25"><returnval>'
+    f'<propertyCollector type="PropertyCollector">{_PC_MOID}</propertyCollector>'
+    f'<sessionManager type="SessionManager">{_SM_MOID}</sessionManager>'
+    f"<about><version>{_ABOUT_VERSION}</version><apiType>HostAgent</apiType>"
+    "<fullName>VMware ESXi 9.1.0 build-00000000</fullName></about>"
+    "</returnval></RetrieveServiceContentResponse>"
+)
+
+_LOGIN_OK_XML = _envelope(
+    '<LoginResponse xmlns="urn:vim25"><returnval>'
+    "<key>52abcd</key><userName>root</userName></returnval></LoginResponse>"
+)
+
+_LOGOUT_OK_XML = _envelope('<LogoutResponse xmlns="urn:vim25"/>')
+
+#: A minimal ``RetrievePropertiesEx`` result carrying one scsiLun with the
+#: bare ``<ssd>true</ssd>`` primitive-typing trap (#3332). Fed through the
+#: unchanged consumer extractors to prove parity.
+_SCSI_LUN_RETRIEVE_XML = _envelope(
+    '<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval><objects>'
+    '<obj type="HostSystem">ha-host</obj>'
+    "<propSet><name>config.storageDevice.scsiLun</name>"
+    '<val xsi:type="ArrayOfScsiLun">'
+    '<ScsiLun xsi:type="HostScsiDisk">'
+    "<uuid>0200000000naa.6000c290</uuid><canonicalName>naa.6000c290</canonicalName>"
+    "<deviceType>disk</deviceType><ssd>true</ssd><localDisk>true</localDisk>"
+    "<model>Virtual disk    </model><vendor>VMware  </vendor>"
+    "<capacity><blockSize>512</blockSize><block>209715200</block></capacity>"
+    "</ScsiLun></val></propSet>"
+    "</objects></returnval></RetrievePropertiesExResponse>"
+)
+
+#: Synchronous MoRef returnvals for the two host write methods.
+_CREATE_NAS_OK_XML = _envelope(
+    '<CreateNasDatastoreResponse xmlns="urn:vim25">'
+    '<returnval type="Datastore">datastore-42</returnval>'
+    "</CreateNasDatastoreResponse>"
+)
+_MARK_SSD_TASK_OK_XML = _envelope(
+    '<MarkAsSsd_TaskResponse xmlns="urn:vim25">'
+    '<returnval type="Task">haTask-ha-host-vim.host.StorageSystem.markAsSsd-1</returnval>'
+    "</MarkAsSsd_TaskResponse>"
+)
+
+_INVALID_LOGIN_FAULT_XML = _envelope(
+    "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
+    "<faultstring>Cannot complete login due to an incorrect user name or password."
+    "</faultstring>"
+    '<detail><InvalidLoginFault xsi:type="InvalidLogin"></InvalidLoginFault></detail>'
+    "</soapenv:Fault>"
+)
+
+#: A write-fault (HostConfigFault) HTTP 500 for the non-auth fault path.
+_HOST_CONFIG_FAULT_XML = _envelope(
+    "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
+    "<faultstring>The NFS export is unreachable.</faultstring>"
+    '<detail><HostConfigFaultFault xsi:type="HostConfigFault"></HostConfigFaultFault></detail>'
+    "</soapenv:Fault>"
+)
 
 #: ESXi's JSON-RPC 2.0 answer to a bodyless POST /api/session (Basic auth),
-#: verbatim from the field diagnosis — HTTP 400, not 404.
+#: modelled on the live diagnosis — HTTP 400, not 404.
 _JSONRPC_400_BODY: dict[str, Any] = {
     "jsonrpc": "2.0",
     "error": {"code": 400, "message": "Unsupported content type: "},
 }
+
+
+def _soap_method(body: str) -> str:
+    """Return the vim method name in a SOAP request envelope body."""
+    for method in (
+        "RetrieveServiceContent",
+        "RetrievePropertiesEx",
+        "Login",
+        "Logout",
+        "QueryBootDevices",
+        "CreateNasDatastore",
+        "MarkAsSsd_Task",
+        "MarkAsNonSsd_Task",
+    ):
+        if f"<{method} " in body or f"<{method}>" in body:
+            return method
+    return "?"
+
+
+class _SdkRouter:
+    """A respx ``/sdk`` side-effect that dispatches SOAP posts by method.
+
+    All SOAP posts hit the one ``POST /sdk`` endpoint, so the route branches
+    on the method element in the request envelope. Records the ordered method
+    names and the raw request bodies for assertions.
+    """
+
+    def __init__(self, *, login_fault: bool = False, retrieve_xml: str | None = None) -> None:
+        self.methods: list[str] = []
+        self.bodies: list[str] = []
+        self._login_fault = login_fault
+        self._retrieve_xml = retrieve_xml
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8")
+        method = _soap_method(body)
+        self.methods.append(method)
+        self.bodies.append(body)
+        if method == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        if method == "Login":
+            if self._login_fault:
+                return httpx.Response(500, text=_INVALID_LOGIN_FAULT_XML)
+            return httpx.Response(
+                200,
+                text=_LOGIN_OK_XML,
+                headers={"set-cookie": f"{_SOAP_COOKIE}={_COOKIE_VALUE}; Path=/; HttpOnly"},
+            )
+        if method == "Logout":
+            return httpx.Response(200, text=_LOGOUT_OK_XML)
+        if method == "RetrievePropertiesEx":
+            return httpx.Response(200, text=self._retrieve_xml or _SCSI_LUN_RETRIEVE_XML)
+        if method == "CreateNasDatastore":
+            return httpx.Response(200, text=_CREATE_NAS_OK_XML)
+        if method == "MarkAsSsd_Task":
+            return httpx.Response(200, text=_MARK_SSD_TASK_OK_XML)
+        return httpx.Response(500, text="<unexpected/>")
 
 
 def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -97,12 +234,7 @@ def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
 
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin the chassis env vars ``Settings`` reads at construction time.
-
-    The injected stub loader never reaches Vault, but keep the env pinned
-    the same way the sibling auth-test module does so nothing incidental
-    trips on an unset ``KEYCLOAK_*`` / ``VAULT_*``.
-    """
+    """Pin the chassis env vars ``Settings`` reads at construction time."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
@@ -151,8 +283,8 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
     """Replace ``aclose`` with a revoke-free pool tear-down.
 
     Tests that don't exercise the revoke leg would otherwise trip respx's
-    assert-all-mocked on the shutdown Logout/DELETE. Clears the #3363
-    ``_session_flavors`` map alongside the pre-existing caches.
+    assert-all-mocked on the shutdown Logout/DELETE. Clears the #3363 SOAP
+    caches alongside the pre-existing ones.
     """
 
     async def _aclose() -> None:
@@ -161,6 +293,8 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
         connector._session_flavors.clear()
         connector._session_extensions.clear()
         connector._about_versions.clear()
+        connector._esxi_pc_moids.clear()
+        connector._esxi_session_manager_moids.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
@@ -169,172 +303,348 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
 
 
 # ---------------------------------------------------------------------------
-# First probe — JSON-RPC-400 signature selects the ESXi branch
+# Branch select
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_first_probe_jsonrpc_400_selects_esxi_login_branch() -> None:
-    """A bodyless POST /api/session 400 (JSON-RPC) → VI-JSON Login; header propagates."""
+async def test_first_probe_jsonrpc_400_selects_soap_branch() -> None:
+    """A bodyless POST /api/session 400 (JSON-RPC) selects the SOAP establish."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
-    token = "esxi-session-token-abc"
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
         session_route = mock.post("/api/session").respond(400, json=_JSONRPC_400_BODY)
-        sv_route = mock.get("/sdk/vimServiceVersions.xml").respond(
-            200, text=_SERVICE_VERSIONS_XML, headers={"content-type": "text/xml"}
-        )
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={"key": "session-key"}, headers={"vmware-api-session-id": token}
-        )
+        mock.post(_SDK).mock(side_effect=router)
         headers = await connector.auth_headers(_StubTarget(), _make_operator())
 
-    assert headers == {"vmware-api-session-id": token}
-    # The vAPI probe fired once (its 400 is what selected the branch),
-    # the version doc was read for {release}, and Login minted the token.
+    # ESXi auth is the cookie, not a header — auth_headers adds nothing.
+    assert headers == {}
+    # The vAPI probe fired once (its 400 selected the branch); establish then
+    # ran ServiceContent + Login over SOAP.
     assert session_route.call_count == 1
-    assert sv_route.called
-    assert login_route.call_count == 1
+    assert router.methods == ["RetrieveServiceContent", "Login"]
 
 
 @pytest.mark.asyncio
-async def test_esxi_login_request_shape_body_and_no_basic_auth() -> None:
-    """Login POSTs {"userName","password","locale"} on ha-sessionmgr, no HTTP Basic."""
-    import json as _json
-
+async def test_first_probe_unsupported_content_type_text_selects_soap_branch() -> None:
+    """A 400 whose body only carries the "Unsupported content type" text still selects SOAP."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.post("/api/session").respond(400, json=_JSONRPC_400_BODY)
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={}, headers={"vmware-api-session-id": "t"}
-        )
-        await connector.auth_headers(_StubTarget(), _make_operator())
+        mock.post("/api/session").respond(400, text="Unsupported content type: ")
+        mock.post(_SDK).mock(side_effect=router)
+        headers = await connector.auth_headers(_StubTarget(), _make_operator())
 
-    req = login_route.calls[0].request
-    body = _json.loads(req.content)
-    assert body == {"userName": "svc-meho", "password": "stub-password", "locale": "en_US"}
-    # Login carries credentials in the JSON body — never as HTTP Basic.
-    assert req.headers.get("authorization") is None
+    assert headers == {}
+    assert router.methods == ["RetrieveServiceContent", "Login"]
 
 
 @pytest.mark.asyncio
 async def test_fingerprinted_esxi_skips_api_session_entirely() -> None:
-    """A target already fingerprinted product=esxi goes straight to VI-JSON Login."""
+    """A target already fingerprinted product=esxi goes straight to the SOAP establish."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE, assert_all_called=False) as mock:
         session_route = mock.post("/api/session").respond(400, json=_JSONRPC_400_BODY)
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={}, headers={"vmware-api-session-id": "t"}
-        )
+        mock.post(_SDK).mock(side_effect=router)
         headers = await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
 
-    assert headers == {"vmware-api-session-id": "t"}
-    assert login_route.call_count == 1
+    assert headers == {}
+    assert router.methods == ["RetrieveServiceContent", "Login"]
     # The fingerprint already said ESXi, so the vAPI session path is never hit.
     assert session_route.call_count == 0
 
 
+# ---------------------------------------------------------------------------
+# Ordered establish + cookie auth
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_esxi_session_reused_across_auth_calls() -> None:
-    """Two auth_headers calls against one ESXi target → exactly one Login."""
+async def test_establish_orders_service_content_then_login_on_provided_moid() -> None:
+    """ServiceContent precedes Login; Login's _this is the ServiceContent SessionManager moid."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
+
+    assert router.methods == ["RetrieveServiceContent", "Login"]
+    login_body = router.bodies[1]
+    # Login is invoked on the SessionManager moid RetrieveServiceContent returned.
+    assert f'<_this type="SessionManager">{_SM_MOID}</_this>' in login_body
+    # The credential rides the Login body (never HTTP Basic).
+    assert "<userName>svc-meho</userName>" in login_body
+    assert "<password>stub-password</password>" in login_body
+
+
+@pytest.mark.asyncio
+async def test_auth_is_cookie_not_header_on_host_reads() -> None:
+    """A host read carries the vmware_soap_session cookie and no vmware-api-session-id header."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        route = mock.post(_SDK).mock(side_effect=router)
+        await connector._post_vmomi_json(
+            target,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=_make_operator(),
+            json=build_host_storage_devices_retrieve_params("ha-host"),
+        )
+
+    # The last /sdk request is the RetrievePropertiesEx read (after establish).
+    read_request = route.calls[-1].request
+    assert f"{_SOAP_COOKIE}={_COOKIE_VALUE}" in read_request.headers.get("cookie", "")
+    assert read_request.headers.get("vmware-api-session-id") is None
+
+
+@pytest.mark.asyncio
+async def test_session_reused_across_auth_calls() -> None:
+    """Two auth_headers calls against one ESXi target → exactly one establish."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        h1 = await connector.auth_headers(target, _make_operator())
+        h2 = await connector.auth_headers(target, _make_operator())
+
+    assert h1 == h2 == {}
+    assert router.methods == ["RetrieveServiceContent", "Login"]
+
+
+# ---------------------------------------------------------------------------
+# moid remap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_retrieve_properties_ex_remaps_property_collector_moid() -> None:
+    """The vCenter propertyCollector literal is remapped to the HostAgent's PC moid."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector._post_vmomi_json(
+            target,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=_make_operator(),
+            json=build_host_storage_devices_retrieve_params("ha-host"),
+        )
+
+    read_body = router.bodies[-1]
+    # The ServiceContent PC moid is substituted for the vCenter literal.
+    assert f'<_this type="PropertyCollector">{_PC_MOID}</_this>' in read_body
+    assert '<_this type="PropertyCollector">propertyCollector</_this>' not in read_body
+
+
+@pytest.mark.asyncio
+async def test_host_read_deserialises_to_vijson_shape_through_consumers() -> None:
+    """A RetrievePropertiesEx read parses back into the exact shape the consumers read."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        result = await connector._post_vmomi_json(
+            target,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=_make_operator(),
+            json=build_host_storage_devices_retrieve_params("ha-host"),
+        )
+
+    # Same {"objects": [...]} shape the VI-JSON path returns — fed through the
+    # unchanged consumer extractors proves parity (the #3332 corruption class
+    # does not recur: bare <ssd>true</ssd> survives to ssd is True).
+    props = _extract_host_props(result)
+    luns = props["config.storageDevice.scsiLun"]
+    assert isinstance(luns, list)
+    disk = _map_scsi_lun(luns[0], None)
+    assert disk["ssd"] is True
+    assert disk["local"] is True
+    assert disk["capacity_bytes"] == 512 * 209715200
+
+
+# ---------------------------------------------------------------------------
+# Write-method routing (datastore_mount_nfs / disk_mark_flash callers)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_nas_datastore_routes_through_soap_and_returns_moref() -> None:
+    """The datastore_mount_nfs caller's CreateNasDatastore rides SOAP → a Datastore MoRef."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        payload = await connector._post_vmomi_json(
+            target,
+            "/HostDatastoreSystem/ha-datastoresystem/CreateNasDatastore",
+            operator=_make_operator(),
+            json={
+                "spec": {
+                    "_typeName": "HostNasVolumeSpec",
+                    "remoteHost": "10.0.0.9",
+                    "remotePath": "/export/nfs",
+                    "localPath": "nfs-ds",
+                    "accessMode": "readWrite",
+                    "type": "NFS",
+                }
+            },
+        )
+
+    assert payload == {"type": "Datastore", "value": "datastore-42"}
+    # The spec fields serialise into the envelope; _typeName is dropped (SOAP
+    # announces types by position).
+    body = router.bodies[-1]
+    assert "<remoteHost>10.0.0.9</remoteHost>" in body
+    assert "<localPath>nfs-ds</localPath>" in body
+    assert "_typeName" not in body
+
+
+@pytest.mark.asyncio
+async def test_mark_as_ssd_task_routes_through_soap_and_returns_task_moref() -> None:
+    """The disk_mark_flash caller's MarkAsSsd_Task rides SOAP → a Task MoRef to poll."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        payload = await connector._post_vmomi_json(
+            target,
+            "/HostStorageSystem/ha-storagesystem/MarkAsSsd_Task",
+            operator=_make_operator(),
+            json={"scsiDiskUuid": "0200000000naa.6000c290"},
+        )
+
+    assert payload["type"] == "Task"
+    assert payload["value"].startswith("haTask-")
+    body = router.bodies[-1]
+    assert "<scsiDiskUuid>0200000000naa.6000c290</scsiDiskUuid>" in body
+
+
+@pytest.mark.asyncio
+async def test_write_fault_raises_runtime_error_with_fault_type() -> None:
+    """A non-auth vim write fault → RuntimeError carrying the fault type + faultstring."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
     target = _esxi_fingerprinted()
 
-    async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={}, headers={"vmware-api-session-id": "reused"}
-        )
-        h1 = await connector.auth_headers(target, _make_operator())
-        h2 = await connector.auth_headers(target, _make_operator())
+    def _fault_router(request: httpx.Request) -> httpx.Response:
+        method = _soap_method(request.content.decode("utf-8"))
+        if method == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        if method == "Login":
+            return httpx.Response(
+                200,
+                text=_LOGIN_OK_XML,
+                headers={"set-cookie": f"{_SOAP_COOKIE}={_COOKIE_VALUE}; Path=/"},
+            )
+        return httpx.Response(500, text=_HOST_CONFIG_FAULT_XML)  # CreateNasDatastore
 
-    assert h1 == h2 == {"vmware-api-session-id": "reused"}
-    assert login_route.call_count == 1
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=_fault_router)
+        with pytest.raises(RuntimeError, match="HostConfigFault") as excinfo:
+            await connector._post_vmomi_json(
+                target,
+                "/HostDatastoreSystem/ha-datastoresystem/CreateNasDatastore",
+                operator=_make_operator(),
+                json={"spec": {"remoteHost": "10.0.0.9"}},
+            )
+
+    # A write fault is not auth-class, so it does not become ConnectorAuthError.
+    assert not isinstance(excinfo.value, ConnectorAuthError)
+    assert "The NFS export is unreachable." in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
-# Failure shapes
+# Failure shapes + credential posture
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_esxi_login_missing_session_header_raises() -> None:
-    """A 200 Login with no vmware-api-session-id header is an establish failure."""
+async def test_invalid_login_fault_raises_connector_auth_error_hiding_credentials() -> None:
+    """An InvalidLogin SOAP fault → ConnectorAuthError; the message hides the credential."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter(login_fault=True)
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={"key": "no-header"})
-        with pytest.raises(RuntimeError, match="without a vmware-api-session-id"):
-            await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
-
-
-@pytest.mark.asyncio
-async def test_esxi_login_401_error_message_hides_credentials() -> None:
-    """A 401 at Login names only the target + status — never the password."""
-    connector = _make_connector()
-    _patch_no_revoke_aclose(connector)
-
-    async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(401, json={})
-        # 401 at Login → the structured ConnectorAuthError (auth-class),
-        # the same shape the vAPI path raises; assert the message, not type.
-        with pytest.raises((RuntimeError, ConnectorAuthError)) as excinfo:
+        mock.post(_SDK).mock(side_effect=router)
+        with pytest.raises(ConnectorAuthError) as excinfo:
             await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
 
     message = str(excinfo.value)
     assert "stub-password" not in message
     assert "svc-meho" not in message
+    assert excinfo.value.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_esxi_login_unresolvable_release_raises() -> None:
-    """No usable vim25 release from the discovery doc → clean establish failure."""
+async def test_login_without_cookie_is_establish_failure() -> None:
+    """A 200 Login that sets no vmware_soap_session cookie is a clean establish failure."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
 
+    def _no_cookie(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8")
+        if _soap_method(body) == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        return httpx.Response(200, text=_LOGIN_OK_XML)  # no Set-Cookie
+
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        # 200 but no parsable urn:vim25 version → service_versions returns None.
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text="<namespaces/>")
-        with pytest.raises(RuntimeError, match="could not read the vim25 release"):
+        mock.post(_SDK).mock(side_effect=_no_cookie)
+        with pytest.raises(RuntimeError, match="without a vmware_soap_session cookie"):
             await connector.auth_headers(_esxi_fingerprinted(), _make_operator())
 
 
 # ---------------------------------------------------------------------------
-# vCenter regression — a genuine 400 must NOT take the ESXi branch
+# vCenter regression — a genuine 400 must NOT take the SOAP branch
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_non_jsonrpc_400_does_not_select_esxi_branch() -> None:
+async def test_non_jsonrpc_400_does_not_select_soap_branch() -> None:
     """A vCenter 400 without the JSON-RPC signature stays on the vAPI path (RuntimeError)."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE, assert_all_called=False) as mock:
         mock.post("/api/session").respond(400, text="<html>Bad Request</html>")
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={}, headers={"vmware-api-session-id": "t"}
-        )
+        mock.post(_SDK).mock(side_effect=router)
         with pytest.raises(RuntimeError, match="POST /api/session returned HTTP 400"):
             await connector.auth_headers(_StubTarget(), _make_operator())
 
-    # The ESXi login branch was never taken for a non-JSON-RPC 400.
-    assert login_route.call_count == 0
+    # The SOAP establish was never taken for a non-JSON-RPC 400.
+    assert router.methods == []
 
 
 # ---------------------------------------------------------------------------
-# fingerprint() over the ESXi session
+# fingerprint() over the SOAP session
 # ---------------------------------------------------------------------------
 
 
@@ -343,11 +653,11 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     """probe/fingerprint against a standalone ESXi 9.1 host → reachable=True, product=esxi."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
         mock.post("/api/session").respond(400, json=_JSONRPC_400_BODY)
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "t"})
+        mock.post(_SDK).mock(side_effect=router)
         # ESXi's JSON-RPC handler answers GET /api/about with HTTP 400 (empty).
         mock.get("/api/about").respond(400)
         result = await connector.fingerprint(_StubTarget(), _make_operator())
@@ -355,8 +665,10 @@ async def test_fingerprint_standalone_esxi_reachable_product_esxi() -> None:
     assert result.reachable is True
     assert result.vendor == "vmware"
     assert result.product == "esxi"
-    assert result.version == _RELEASE
+    assert result.version == _ABOUT_VERSION
     assert result.extras["session_flavor"] == "esxi"
+    assert result.extras["api_type"] == "HostAgent"
+    assert "soap-retrieveservicecontent" in result.probe_method
 
 
 @pytest.mark.asyncio
@@ -364,41 +676,14 @@ async def test_probe_standalone_esxi_ok_true() -> None:
     """probe() folds the reachable ESXi fingerprint into ok=True."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "t"})
+        mock.post(_SDK).mock(side_effect=router)
         mock.get("/api/about").respond(400)
         probe = await connector.probe(_esxi_fingerprinted())
 
     assert probe.ok is True
-
-
-# ---------------------------------------------------------------------------
-# _post_vmomi_json rides the VI-JSON /sdk/vim25/{release} mount on ESXi
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_post_vmomi_json_uses_vijson_mount_and_session_header_on_esxi() -> None:
-    """A host read on an ESXi target POSTs /sdk/vim25/{release}/... with the session header."""
-    connector = _make_connector()
-    _patch_no_revoke_aclose(connector)
-    target = _esxi_fingerprinted()
-    vmomi_path = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
-    vijson_url = f"/sdk/vim25/{_RELEASE}{vmomi_path}"
-
-    async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "vtok"})
-        read_route = mock.post(vijson_url).respond(200, json={"returnval": {"objects": []}})
-        result = await connector._post_vmomi_json(
-            target, vmomi_path, operator=_make_operator(), json={"specSet": []}
-        )
-
-    assert result == {"returnval": {"objects": []}}
-    assert read_route.call_count == 1
-    assert read_route.calls[0].request.headers.get("vmware-api-session-id") == "vtok"
 
 
 # ---------------------------------------------------------------------------
@@ -407,44 +692,50 @@ async def test_post_vmomi_json_uses_vijson_mount_and_session_header_on_esxi() ->
 
 
 @pytest.mark.asyncio
-async def test_invalidate_session_logs_out_esxi_and_drops_cache() -> None:
-    """invalidate_session issues Logout on ha-sessionmgr for an ESXi session."""
+async def test_invalidate_session_logs_out_over_soap_and_drops_cache() -> None:
+    """invalidate_session posts SOAP Logout on the SessionManager moid and clears the cache."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
     target = _esxi_fingerprinted()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "tok"})
-        logout_route = mock.post(_LOGOUT_PATH).respond(204)
+        mock.post(_SDK).mock(side_effect=router)
         await connector.auth_headers(target, _make_operator())
         await connector.invalidate_session(target)
 
-    assert logout_route.call_count == 1
-    assert logout_route.calls[0].request.headers.get("vmware-api-session-id") == "tok"
+    assert router.methods == ["RetrieveServiceContent", "Login", "Logout"]
+    logout_body = router.bodies[-1]
+    assert f'<_this type="SessionManager">{_SM_MOID}</_this>' in logout_body
     # The cache slot is cleared so the next auth re-establishes.
-    assert target_cache_key(target) not in connector._session_tokens
-    assert target_cache_key(target) not in connector._session_flavors
+    key = target_cache_key(target)
+    assert key not in connector._session_tokens
+    assert key not in connector._session_flavors
+    assert key not in connector._esxi_session_manager_moids
 
 
 @pytest.mark.asyncio
-async def test_401_recovery_cold_re_logs_in() -> None:
-    """invalidate_session → the next auth_headers cold-re-runs VI-JSON Login."""
+async def test_cold_re_login_after_invalidate() -> None:
+    """invalidate_session → the next auth_headers cold-re-runs the SOAP establish."""
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
     target = _esxi_fingerprinted()
 
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        login_route = mock.post(_LOGIN_PATH).respond(
-            200, json={}, headers={"vmware-api-session-id": "tok"}
-        )
-        mock.post(_LOGOUT_PATH).respond(204)
-        await connector.auth_headers(target, _make_operator())  # login #1
-        await connector.invalidate_session(target)  # 401-recovery hook
-        await connector.auth_headers(target, _make_operator())  # login #2 (cold)
+        mock.post(_SDK).mock(side_effect=router)
+        await connector.auth_headers(target, _make_operator())  # establish #1
+        await connector.invalidate_session(target)  # 401-recovery hook (+ Logout)
+        await connector.auth_headers(target, _make_operator())  # establish #2 (cold)
 
-    assert login_route.call_count == 2
+    # ServiceContent+Login, then Logout, then ServiceContent+Login again.
+    assert router.methods == [
+        "RetrieveServiceContent",
+        "Login",
+        "Logout",
+        "RetrieveServiceContent",
+        "Login",
+    ]
 
 
 @pytest.mark.asyncio
@@ -454,10 +745,21 @@ async def test_invalidate_logout_failure_is_swallowed() -> None:
     _patch_no_revoke_aclose(connector)
     target = _esxi_fingerprinted()
 
+    def _logout_down(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode("utf-8")
+        method = _soap_method(body)
+        if method == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        if method == "Login":
+            return httpx.Response(
+                200,
+                text=_LOGIN_OK_XML,
+                headers={"set-cookie": f"{_SOAP_COOKIE}={_COOKIE_VALUE}; Path=/"},
+            )
+        raise httpx.ConnectError("down")  # Logout
+
     async with respx.mock(base_url=_ESXI_BASE) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "tok"})
-        mock.post(_LOGOUT_PATH).mock(side_effect=httpx.ConnectError("down"))
+        mock.post(_SDK).mock(side_effect=_logout_down)
         await connector.auth_headers(target, _make_operator())
         # Must not raise even though Logout errors.
         await connector.invalidate_session(target)
@@ -466,20 +768,62 @@ async def test_invalidate_logout_failure_is_swallowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_logs_out_esxi_session() -> None:
-    """aclose tears an ESXi session down with Logout, not DELETE /api/session."""
+async def test_aclose_logs_out_over_soap_not_delete() -> None:
+    """aclose tears an ESXi session down with SOAP Logout, not DELETE /api/session."""
     connector = _make_connector()
+    router = _SdkRouter()
     target = _esxi_fingerprinted()
 
     async with respx.mock(base_url=_ESXI_BASE, assert_all_called=False) as mock:
-        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
-        mock.post(_LOGIN_PATH).respond(200, json={}, headers={"vmware-api-session-id": "tok"})
+        mock.post(_SDK).mock(side_effect=router)
         api_delete = mock.delete("/api/session").respond(204)
-        logout_route = mock.post(_LOGOUT_PATH).respond(204)
         await connector.auth_headers(target, _make_operator())
         await connector.aclose()
 
-    assert logout_route.call_count == 1
-    assert logout_route.calls[0].request.headers.get("vmware-api-session-id") == "tok"
+    assert router.methods == ["RetrieveServiceContent", "Login", "Logout"]
     # The vAPI DELETE is never used for an ESXi-flavored session.
     assert api_delete.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Flight-recorder span — the /sdk envelope never leaks into a captured span
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_soap_post_never_hands_envelope_to_flight_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor-call span never serialises the /sdk SOAP envelope (Login <password>)."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    router = _SdkRouter()
+    target = _esxi_fingerprinted()
+
+    recorded: list[dict[str, Any]] = []
+
+    def _spy_record(start: Any, **kwargs: Any) -> None:
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(connector_module.flight_recorder_capture, "record_vendor_call", _spy_record)
+
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        mock.post(_SDK).mock(side_effect=router)
+        await connector._post_vmomi_json(
+            target,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            operator=_make_operator(),
+            json=build_host_storage_devices_retrieve_params("ha-host"),
+        )
+
+    # The span was recorded (observability parity with the vCenter path) ...
+    assert recorded, "expected the vendor-call span to be recorded for /sdk posts"
+    # ... but never with the SOAP envelope body, so the Login <password> (and
+    # every other envelope) cannot leak into a captured span.
+    for kwargs in recorded:
+        assert kwargs.get("request_body") is None
+        assert kwargs.get("request_content_type") is None
+    # Defense-in-depth: the credential never appears anywhere in the spy args.
+    blob = repr(recorded)
+    assert "stub-password" not in blob
+    assert "svc-meho" not in blob

@@ -793,3 +793,77 @@ def test_vault_check_runner_role_blank_normalises_to_none(
         assert get_settings().vault_check_runner_role is None
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #3366 — result_query bounded query-surface knobs
+# ---------------------------------------------------------------------------
+
+
+def test_result_query_bounds_default_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset → the documented defaults (500 rows / 256 KB / 5 s).
+
+    ``Settings`` is a plain ``BaseModel``, so a field only reads its env var
+    if ``get_settings`` hand-maps it. This pins that each knob's default flows
+    through the constructor when the env var is absent.
+    """
+    _base_env(monkeypatch)
+    for var in (
+        "RESULT_QUERY_MAX_OUTPUT_ROWS",
+        "RESULT_QUERY_MAX_OUTPUT_BYTES",
+        "RESULT_QUERY_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.result_query_max_output_rows == 500
+        assert settings.result_query_max_output_bytes == 262144
+        assert settings.result_query_timeout_seconds == 5
+    finally:
+        get_settings.cache_clear()
+
+
+def test_result_query_bounds_read_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each knob's env var is hand-mapped in ``get_settings`` (not inert).
+
+    A field without a constructor mapping stays at its default forever — the
+    silent-inert trap #3366 called out. This proves all three env vars reach
+    the constructed ``Settings``.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_ROWS", "250")
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "131072")
+    monkeypatch.setenv("RESULT_QUERY_TIMEOUT_SECONDS", "9")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.result_query_max_output_rows == 250
+        assert settings.result_query_max_output_bytes == 131072
+        assert settings.result_query_timeout_seconds == 9
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "result_query_max_output_rows",
+        "result_query_max_output_bytes",
+        "result_query_timeout_seconds",
+    ],
+)
+def test_result_query_bounds_reject_non_positive(field: str) -> None:
+    """Each knob is ``gt=0`` — a zero/negative value fails construction."""
+    with pytest.raises(ValidationError):
+        Settings(
+            keycloak_issuer_url="https://keycloak.test/realms/meho",
+            keycloak_audience="meho-backplane",
+            vault_addr="https://vault.test",
+            database_url="sqlite+aiosqlite:///:memory:",
+            **{field: 0},
+        )

@@ -77,6 +77,7 @@ import structlog
 
 __all__ = [
     "ResultHandleStore",
+    "SpilledRowSet",
     "SpilledWindow",
     "get_result_handle_store",
     "reset_result_handle_store_for_testing",
@@ -121,6 +122,22 @@ class SpilledWindow(msgspec.Struct, frozen=True):
     total_rows: int
     stored_rows: int
     truncated: bool
+
+
+class SpilledRowSet(msgspec.Struct, frozen=True):
+    """The full authorized row set served by :meth:`ResultHandleStore.fetch_rows`.
+
+    ``rows`` is every row actually retrievable from the store — the reduce's
+    normalized set, capped at spill time to ``stored_rows``. ``total_rows``
+    is the full collection size the reducer saw; when ``stored_rows <
+    total_rows`` the spill was capped and a query over ``rows`` covers only
+    the stored subset (the ``result_query`` core labels that coverage so a
+    capped aggregate is never presented as a whole-inventory total).
+    """
+
+    rows: list[dict[str, Any]]
+    total_rows: int
+    stored_rows: int
 
 
 class _StoredPayload(msgspec.Struct):
@@ -261,6 +278,61 @@ class ResultHandleStore:
             total_rows=payload.total_rows,
             stored_rows=payload.stored_rows,
             truncated=payload.stored_rows < payload.total_rows,
+        )
+
+    async def fetch_rows(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledRowSet | None:
+        """Return the **full** authorized row set of a spilled handle.
+
+        The sibling of :meth:`fetch_window` for the ``result_query`` query
+        surface (#3366): where ``fetch_window`` serves an
+        ``[offset:offset+limit]`` slice for paging, this returns every stored
+        row so the core can register them in a hardened DuckDB engine and run
+        one bounded, compiled ``SELECT`` over the set.
+
+        Reuses ``fetch_window``'s isolation and non-disclosure model exactly:
+        the tenant scopes the key, the stored ``operator_sub`` is checked so
+        another operator in the same tenant gets the same miss (``None``) as a
+        stranger, and an unknown / expired / cross-operator handle or an
+        unreachable store all return ``None`` — the four cases the read tools
+        surface as one typed "handle not found or expired", leaking no
+        existence signal across the operator boundary.
+        """
+        try:
+            raw = await self._client.get(_key(tenant_id, handle_id))
+        except (redis.RedisError, OSError) as exc:
+            _log.warning(
+                "result_handle_fetch_failed",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                error=str(exc),
+            )
+            return None
+        if raw is None:
+            return None
+        try:
+            payload = msgspec.json.decode(_to_bytes(raw), type=_StoredPayload)
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            _log.warning(
+                "result_handle_decode_failed",
+                handle_id=str(handle_id),
+                tenant_id=str(tenant_id),
+                error=str(exc),
+            )
+            return None
+        if payload.operator_sub != operator_sub:
+            # Cross-operator access within the same tenant: a miss, not
+            # another operator's rows. Mirrors #304's isolation contract.
+            return None
+        return SpilledRowSet(
+            rows=payload.rows,
+            total_rows=payload.total_rows,
+            stored_rows=payload.stored_rows,
         )
 
 

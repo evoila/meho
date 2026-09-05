@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vmware-rest: standalone ESXi targets could not establish a session (#3363)
+
+- A standalone ESXi target (a host no vCenter manages yet — the pre-vCenter case `#3332` set out to support) failed its probe with `POST /api/session returned HTTP 400`, and every host op against it was unreachable. ESXi serves `/api/*` through a JSON-RPC 2.0 handler, so the two vSphere-Automation vAPI session endpoints the connector knew (`/api/session` + the `/rest/com/vmware/cis/session` 404-fallback) exist on vCenter only, and `auth_headers()` could never obtain the `vmware-api-session-id` token. The connector now mints the session over VI-JSON `SessionManager.Login` on the well-known `ha-sessionmgr` singleton (`/sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login`), selected by the target's `product=esxi` fingerprint and — on the very first probe, before any fingerprint exists — by ESXi's JSON-RPC-400 signature on `/api/session`. Probe/fingerprint now succeeds and stamps `product=esxi`, and `vmware.host.storage_devices` + the `vmware.composite.host.*` write composites work against a standalone ESXi host. Teardown logs out on `ha-sessionmgr` (there is no `DELETE /api/session` on ESXi); vCenter session establishment, teardown, and fingerprint are unchanged.
+
 ### Fixed — vmware-rest: DVS portgroup VLAN spec omitted `inherited: false`, creating untagged (VLAN 0) portgroups (#3356)
 
 - `network.portgroup.create` built its `defaultPortConfig.vlan` spec (access `VmwareDistributedVirtualSwitchVlanIdSpec` / trunk `VmwareDistributedVirtualSwitchTrunkVlanSpec`) without the required `InheritablePolicy.inherited` field. vCenter then defaulted `inherited: true` and dropped the `vlanId` / trunk ranges, so the create reported success while silently producing an untagged (VLAN 0) portgroup (verified live on vCenter 8.0.3). Both branches now send `inherited: false`. `network.portgroup.security.set` was audited and already correct.

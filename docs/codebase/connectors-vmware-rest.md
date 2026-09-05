@@ -219,7 +219,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `host_target.classify_host_target` — there is no `GET:/vcenter/host`
   surface, so the handler resolves the well-known singleton `ha-host`
   MoRef directly through the VI-JSON seam and the `host` param is
-  optional / ignored (the host is the target); a reachable target that is
+  optional / ignored (the host is the target). Obtaining the session on
+  such a target is the ESXi-native VI-JSON `SessionManager.Login` branch
+  (`#3363`; see the standalone-ESXi session branch under **Per-target
+  session**) — `#3332` shipped the host resolution + VI-JSON seam but not
+  the session, so before `#3363` these ops could not authenticate. A
+  reachable target that is
   neither vCenter nor ESXi fails closed (`status='unsupported_host_target'`)
   and a vCenter target given no host refuses `host_required`. Because
   these vim methods live on the per-host config sub-managers, not
@@ -466,6 +471,38 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `auth_headers()`, gets `{"vmware-api-session-id": "<token>"}`, sends
    it on every dispatched op against this target.
 
+**Standalone-ESXi session branch (`#3363`).** A standalone ESXi host —
+the pre-vCenter case `#3332` exists to support — serves `/api/*` through
+a **JSON-RPC 2.0** handler, not the vSphere-Automation vAPI: a bodyless
+`POST /api/session` there answers **HTTP 400** (not 404) with a
+`{"jsonrpc":"2.0","error":{"code":400,...}}` body and never mints a
+token, so the modern→legacy 404 fallback dead-ends. ESXi mints its
+session over VI-JSON instead, on the well-known `ha-sessionmgr`
+`SessionManager` singleton (the sibling of the `ha-host` MoRef `#3332`
+resolves): `POST /sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login`
+with the method-arg body `{"userName", "password", "locale": "en_US"}`
+(the invoked MoRef rides the URL path, so the body carries no HTTP
+Basic — verified against govmomi `vim25` `LoginRequestType`). The
+`{release}` is discovered from the unauthenticated
+`/sdk/vimServiceVersions.xml` document (`urn:vim25` version, e.g.
+`9.1.0.0`), and the minted session id is read from the
+`vmware-api-session-id` **response header** (govmomi's VI-JSON transport
+`json_client`), then cached exactly as the vAPI token is. **Branch
+selection:** by the target's probe fingerprint (`product=esxi`, via
+`classify_host_target` — the same `#3332`/`#3312` distinguisher every
+host op uses) once probed; and for the **very first probe, before any
+fingerprint exists**, by the `POST /api/session` JSON-RPC-400 signature.
+A vCenter target — fingerprint absent / vcenter / unreachable, or a
+genuine non-JSON-RPC 400 — never takes this branch, so the vAPI path
+above stays byte-for-byte unchanged. The discovered release is also
+cached in `_about_versions`, and `_session_paths` is left unset, so the
+subsequent VI-JSON host reads/writes (`_post_vmomi_json`) resolve the
+`/sdk/vim25/{release}` mount transparently; the ESXi flavor is recorded
+in `_session_flavors` so teardown picks `Logout` over `DELETE`.
+Credentials never appear in logs, errors, or results — the Login body is
+never logged, and a failed Login names only the target, the path
+template, and the status.
+
 ### fingerprint() / probe()
 
 `fingerprint(target)` runs the #2765 probe chain. `GET /api/about`
@@ -500,6 +537,17 @@ pre-#2765 left every vCenter target permanently `reachable=False`.
    `build`; `probe_method` then names both fallback endpoints. Any
    failure here is swallowed (`_appliance_version` → `None`) — absence
    must not turn a reachable fingerprint red.
+4. **Standalone ESXi (`#3363`):** on a JSON-RPC ESXi host `GET /api/about`
+   answers **HTTP 400** (empty), not 404, so the step-2 fallback (gated on
+   exactly 404) never fires. But establishing the session for that GET
+   already recognised the host as ESXi and minted a VI-JSON session (see
+   the standalone-ESXi session branch above); when it did — detected via
+   `_session_flavors[...] == "esxi"` — `fingerprint` returns
+   `reachable=True`, `product="esxi"`, `version` = the `urn:vim25` release
+   the login discovered (cached in `_about_versions`), and `probe_method`
+   names the VI-JSON login + the service-versions document. So a
+   standalone ESXi target now fingerprints reachable instead of
+   dead-ending on the vAPI-only `/api/about`.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,
@@ -513,15 +561,30 @@ probe observed nothing (#2765).
 
 ### aclose()
 
-1. Snapshot the cached session tokens, clear the dict.
-2. For each `(target_name, token)` pair: issue `DELETE /api/session`
-   with the `vmware-api-session-id` header. A failure (5xx, transport
+1. Snapshot the cached session tokens (+ paths, flavors, versions,
+   extensions), clear the dicts.
+2. For each `(cache_key, token)` pair: a **vCenter** session revokes with
+   `DELETE /api/session` (or the legacy `/rest/...` path it was minted at)
+   carrying the `vmware-api-session-id` header; an **ESXi**-flavored
+   session (`#3363`) has no `DELETE /api/session` on its JSON-RPC vAPI, so
+   it revokes with `POST /sdk/vim25/{release}/SessionManager/ha-sessionmgr/Logout`
+   instead (`_esxi_logout_quiet`). Either way a failure (5xx, transport
    error, 401 from an expired session) is logged via structlog
    `vsphere_session_revoke_failed` / `vsphere_session_revoke_non_2xx`
    but doesn't block shutdown — Kubernetes' 30 s
    `terminationGracePeriod` would otherwise be at risk.
 3. Delegate to `super().aclose()` to close the per-target httpx
    clients.
+
+`invalidate_session(target)` — the duck-typed 401-recovery hook — drops
+the cached token + flavor + release so the next dispatch cold-re-establishes
+(vCenter re-runs the `/api/session` fallback; ESXi cold-re-runs the VI-JSON
+Login). For an ESXi-flavored session it additionally issues a best-effort
+`SessionManager.Logout` after dropping the cache entry, so the server-side
+session is released too; it is best-effort by design (a stale token — the
+common 401 case — fails harmlessly), and the vCenter path stays
+network-free here (its `DELETE` lives in `aclose`), so vCenter behaviour is
+unchanged.
 
 ### execute()
 

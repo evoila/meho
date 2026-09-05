@@ -120,6 +120,10 @@ from meho_backplane.connectors.vmware_rest._mount import (
     vmomi_mounted_path,
     vmomi_release_from_version,
 )
+from meho_backplane.connectors.vmware_rest.host_target import (
+    HOST_FLAVOR_ESXI,
+    classify_host_target,
+)
 from meho_backplane.connectors.vmware_rest.session import (
     VsphereSessionLoader,
     VsphereTargetLike,
@@ -184,6 +188,38 @@ _APPLIANCE_VERSION_PROBE = "GET /api/appliance/system/version"
 #: carries the current vim25 API version (four-part, e.g. ``8.0.3.0``
 #: — the same value the VI-JSON ``/sdk/vim25/{release}`` base uses).
 _VIM25_NAMESPACE = "urn:vim25"
+
+# ESXi-native VI-JSON session (#3363). A standalone ESXi host — a host no
+# vCenter manages yet, the pre-vCenter case #3332 exists to support —
+# serves ``/api/*`` through a JSON-RPC 2.0 handler, not the vSphere-
+# Automation vAPI: a bodyless ``POST /api/session`` there answers HTTP 400
+# with a ``{"jsonrpc":"2.0","error":{"code":400,...}}`` body instead of
+# minting a token, so the modern→legacy 404 fallback dead-ends. ESXi mints
+# its session over the VI-JSON ``SessionManager`` on the well-known
+# ``ha-sessionmgr`` singleton — the sibling of the ``ha-host`` HostSystem
+# MoRef #3332 already resolves (``host_target.STANDALONE_ESXI_HOST_MOID``)
+# — invoked on exactly the release-versioned ``/sdk/vim25/{release}``
+# surface the host reads use (``_post_vmomi_json``). The invoked-object
+# MoRef rides the URL path, so the Login/Logout bodies carry only method
+# args (``vim_body.retrieve_properties_body`` posts the same way). Verified
+# against govmomi ``vim25`` (``LoginRequestType`` json tags ``userName`` /
+# ``password`` / ``locale``; ``SessionManager.Logout`` takes no args) and
+# its VI-JSON transport ``json_client`` (``sessionHeader =
+# "vmware-api-session-id"`` — the session id is returned in that response
+# header, matching :data:`_SESSION_HEADER`).
+_ESXI_SESSION_MANAGER_MOID = "ha-sessionmgr"
+_ESXI_LOGIN_VMOMI_PATH = f"/SessionManager/{_ESXI_SESSION_MANAGER_MOID}/Login"
+_ESXI_LOGOUT_VMOMI_PATH = f"/SessionManager/{_ESXI_SESSION_MANAGER_MOID}/Logout"
+# SessionManager.Login's locale arg; govmomi defaults it to ``en_US``.
+_ESXI_LOGIN_LOCALE = "en_US"
+_ESXI_LOGIN_PROBE = "POST /sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login"
+
+# JSON-RPC 2.0 discriminator ESXi's ``/api`` handler stamps on its error
+# bodies. Recognising it on the modern session path's HTTP-400 response is
+# how the connector picks the ESXi branch on the *very first probe*, before
+# any fingerprint exists to classify the target.
+_JSONRPC_KEY = "jsonrpc"
+_JSONRPC_VERSION = "2.0"
 
 
 def _xml_local_name(tag: str) -> str:
@@ -356,6 +392,15 @@ class VmwareRestConnector(HttpConnector):
         # for the rationale and source citations. Keyed on the same
         # tenant-unique tuple as ``_session_tokens``.
         self._session_paths: dict[tuple[str, str], str] = {}
+        # Records which session *flavor* minted each cached token so
+        # teardown picks the right revoke surface (#3363). Absent (the
+        # vCenter default) means the vSphere-Automation vAPI —
+        # ``aclose`` issues ``DELETE /api/session`` / the recorded legacy
+        # path; :data:`HOST_FLAVOR_ESXI` means the VI-JSON
+        # ``SessionManager`` — ``aclose`` / ``invalidate_session`` issue
+        # ``Logout`` on ``ha-sessionmgr`` instead. Keyed on the same
+        # tenant-unique tuple as ``_session_tokens``.
+        self._session_flavors: dict[tuple[str, str], str] = {}
         # Per-target httpx ``extensions`` (the ``tls_server_name`` SNI /
         # cert-verify override, evoila/meho#2398) captured at establish
         # time, keyed on the same tenant-unique tuple. :meth:`aclose`
@@ -699,6 +744,15 @@ class VmwareRestConnector(HttpConnector):
             ) from exc
         auth = (username, password)
         extensions = self._request_extensions(target)
+        # ESXi-native branch (#3363): a target whose probe fingerprint
+        # already names ``product=esxi`` (#3332) mints over VI-JSON —
+        # ``/api/session`` is a JSON-RPC handler on a standalone ESXi host
+        # and never yields a token. vCenter targets (fingerprint absent /
+        # vcenter / unreachable) keep the vAPI path below byte-for-byte.
+        if self._target_is_esxi(target):
+            return await self._establish_esxi_session(
+                target, cache_key, auth=auth, extensions=extensions
+            )
         resp = await client.post(SESSION_PATH_MODERN, auth=auth, extensions=extensions)
         established_path = SESSION_PATH_MODERN
         if resp.status_code == 404:
@@ -707,6 +761,15 @@ class VmwareRestConnector(HttpConnector):
             # legacy path before declaring failure.
             resp = await client.post(SESSION_PATH_LEGACY, auth=auth, extensions=extensions)
             established_path = SESSION_PATH_LEGACY
+        elif resp.status_code == 400 and self._is_esxi_jsonrpc_response(resp):
+            # First probe, before any fingerprint exists: this is ESXi's
+            # JSON-RPC 2.0 answer on the vAPI session path (#3363), the
+            # signature that today dead-ends the modern→legacy fallback
+            # (400, not 404). Switch to the VI-JSON login branch. vCenter
+            # never returns this shape, so its path is unaffected.
+            return await self._establish_esxi_session(
+                target, cache_key, auth=auth, extensions=extensions
+            )
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -743,6 +806,209 @@ class VmwareRestConnector(HttpConnector):
         )
         return token
 
+    def _target_is_esxi(self, target: VsphereTargetLike) -> bool:
+        """Return ``True`` iff *target*'s probe fingerprint names ``product=esxi``.
+
+        Reuses the shared #3332 distinguisher
+        (:func:`~meho_backplane.connectors.vmware_rest.host_target.classify_host_target`)
+        so session establishment, the host-composite park-time preview,
+        and the typed host reads all classify a target identically — the
+        #3312 preview/call parity invariant. An absent / unreachable /
+        vCenter fingerprint is *not* esxi (the classifier's vCenter
+        default), so a managing-vCenter target — probed or not — never
+        takes the ESXi login branch.
+        """
+        return classify_host_target(target)[0] == HOST_FLAVOR_ESXI
+
+    @staticmethod
+    def _is_esxi_jsonrpc_response(resp: httpx.Response) -> bool:
+        """Return ``True`` when *resp* is ESXi's JSON-RPC 2.0 answer on ``/api/session``.
+
+        A standalone ESXi host serves ``POST /api/session`` through a
+        JSON-RPC 2.0 handler that answers a bodyless Basic-auth POST with
+        HTTP 400 and a ``{"jsonrpc":"2.0","error":{...}}`` body — never the
+        vSphere-Automation token vCenter mints. Recognising that signature
+        is how the connector selects the ESXi branch on the very first
+        probe, before any fingerprint exists. Parsing is defensive: a
+        non-JSON / non-object body (a genuine vCenter 4xx, an HTML error
+        page) reads as *not* ESXi, so vCenter's establish path is
+        unaffected. The body is already buffered (``client.post`` read it
+        in full), so ``resp.json()`` costs no extra I/O.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            return False
+        return isinstance(body, dict) and str(body.get(_JSONRPC_KEY, "")) == _JSONRPC_VERSION
+
+    async def _establish_esxi_session(
+        self,
+        target: VsphereTargetLike,
+        cache_key: tuple[str, str],
+        *,
+        auth: tuple[str, str],
+        extensions: dict[str, Any],
+    ) -> str:
+        """Mint a session on a standalone ESXi host over VI-JSON ``SessionManager.Login`` (#3363).
+
+        POSTs ``SessionManager.Login`` on the well-known ``ha-sessionmgr``
+        singleton at the release-versioned VI-JSON base
+        ``/sdk/vim25/{release}/SessionManager/ha-sessionmgr/Login`` with the
+        ``{"userName", "password", "locale"}`` method args (the invoked
+        MoRef rides the URL path, exactly as every VI-JSON invocation does —
+        see :func:`.vim_body.retrieve_properties_body`). The ``{release}``
+        is discovered from the unauthenticated ``/sdk/vimServiceVersions.xml``
+        version document (``urn:vim25`` version, e.g. ``9.1.0.0`` — exactly
+        the four-part ``{release}`` segment) both vCenter and ESXi serve.
+        The minted session id is returned in the ``vmware-api-session-id``
+        response header (govmomi ``vim25`` VI-JSON transport), captured and
+        cached like the vAPI path caches its token; the release is cached in
+        ``_about_versions`` so the subsequent VI-JSON host reads
+        (:meth:`_post_vmomi_json`, via :meth:`_about_version`) resolve
+        ``{release}`` without re-probing, and ``_session_paths`` is left
+        unset so those reads take the modern VI-JSON mount rather than the
+        legacy ``/rest`` form. The ESXi flavor is recorded in
+        ``_session_flavors`` so teardown (:meth:`aclose` /
+        :meth:`invalidate_session`) issues ``Logout`` on ``ha-sessionmgr``
+        rather than ``DELETE /api/session``.
+
+        Called by :meth:`_establish_and_cache_session` under
+        ``self._session_lock`` on a cold cache. Credentials never appear in
+        logs, errors, or results: the Login body is built inline and never
+        logged, and a failed Login raises a ``RuntimeError`` /
+        ``ConnectorAuthError`` naming only the target, the path template,
+        and the status. Login carries its credentials in the JSON body (no
+        HTTP Basic on this POST).
+        """
+        client = await self._http_client(target)
+        release = await self._service_versions_or_none(target)
+        if release is None:
+            # No usable vim25 release means no VI-JSON base to POST Login to.
+            # A bare RuntimeError (not auth-class), so ``fingerprint`` folds
+            # it into a clean ``reachable=False`` rather than a stack trace.
+            raise RuntimeError(
+                f"vsphere session establish failed for target {target.name!r}: "
+                f"standalone ESXi VI-JSON login could not read the vim25 release "
+                f"from {_SERVICE_VERSIONS_PROBE}"
+            )
+        username, password = auth
+        login_path = vmomi_mounted_path(release, _ESXI_LOGIN_VMOMI_PATH)
+        resp = await client.post(
+            login_path,
+            json={"userName": username, "password": password, "locale": _ESXI_LOGIN_LOCALE},
+            extensions=extensions,
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Same wrap + auth-class discrimination as the vAPI path: a 401
+            # (rotated/stale password) / 403 (locked-out account) surfaces
+            # the structured ``ConnectorAuthError`` (restage remediation),
+            # anything else the bare RuntimeError. The path template carries
+            # no ``{release}`` interpolation, so no host detail leaks.
+            message = (
+                f"vsphere session establish failed for target {target.name!r}: "
+                f"{_ESXI_LOGIN_PROBE} returned HTTP {exc.response.status_code}"
+            )
+            raise (
+                session_establish_auth_error(exc, message=message, target=target)
+                or RuntimeError(message)
+            ) from exc
+        token: str | None = resp.headers.get(_SESSION_HEADER)
+        if not token:
+            raise RuntimeError(
+                f"vsphere session establish failed for target {target.name!r}: "
+                f"{_ESXI_LOGIN_PROBE} returned HTTP {resp.status_code} without a "
+                f"{_SESSION_HEADER} response header"
+            )
+        self._session_tokens[cache_key] = token
+        self._session_flavors[cache_key] = HOST_FLAVOR_ESXI
+        self._session_extensions[cache_key] = extensions
+        # Cache the release so ``_about_version`` (and thus the VI-JSON
+        # ``{release}`` derivation in ``_post_vmomi_json``) hits the cache
+        # instead of ``GET /api/about`` (which 400s on ESXi).
+        self._about_versions[cache_key] = release
+        _log.info(
+            "vsphere_session_established",
+            target=target.name,
+            host=target.host,
+            session_flavor=HOST_FLAVOR_ESXI,
+        )
+        return token
+
+    def _pooled_client_for(self, cache_key: tuple[str, str]) -> httpx.AsyncClient | None:
+        """Return the pooled per-target client whose key carries *cache_key*'s prefix.
+
+        ``_session_tokens`` is keyed on the tenant-unique
+        ``(tenant_id, target.id)`` tuple, while the shared
+        ``HttpConnector._clients`` pool keys that same prefix plus a
+        ``verify_tls`` dimension (#1682/#1774). A cached token was minted
+        against exactly one such client, so match the pool entry whose key
+        starts with this token's prefix — the session-revoke paths need it
+        without a ``Target`` in scope (they iterate cached tokens by key).
+        """
+        return next(
+            (
+                pooled
+                for client_key, pooled in self._clients.items()
+                if client_key[: len(cache_key)] == cache_key
+            ),
+            None,
+        )
+
+    async def _esxi_logout_quiet(
+        self,
+        cache_key: tuple[str, str],
+        token: str,
+        release: str | None,
+        extensions: dict[str, Any],
+    ) -> None:
+        """Best-effort ``SessionManager.Logout`` for an ESXi-flavored session (#3363).
+
+        Mirrors the vAPI ``DELETE`` revoke's best-effort discipline: a
+        failure (transport, non-2xx, or an unresolvable ``{release}``) is
+        logged via structlog and swallowed — teardown must not block on an
+        unreachable host, and a stale token (the 401-recovery case) fails
+        harmlessly. Runs *outside* ``self._session_lock`` (callers drop the
+        cache entry under the lock first), matching :meth:`aclose`. POSTs
+        the arg-less ``Logout`` (the ``ha-sessionmgr`` MoRef rides the URL
+        path) carrying the session id in the ``vmware-api-session-id``
+        header, over the same client + extensions the login used.
+        """
+        if release is None:
+            _log.warning(
+                "vsphere_session_revoke_skipped",
+                target=cache_key,
+                session_flavor=HOST_FLAVOR_ESXI,
+                reason="no vim25 release cached for the Logout path",
+            )
+            return
+        client = self._pooled_client_for(cache_key)
+        if client is None:
+            return
+        logout_path = vmomi_mounted_path(release, _ESXI_LOGOUT_VMOMI_PATH)
+        try:
+            resp = await client.post(
+                logout_path,
+                json={},
+                headers={_SESSION_HEADER: token},
+                extensions=extensions,
+            )
+            if resp.status_code >= 400:
+                _log.warning(
+                    "vsphere_session_revoke_non_2xx",
+                    target=cache_key,
+                    status_code=resp.status_code,
+                    session_flavor=HOST_FLAVOR_ESXI,
+                )
+        except (httpx.HTTPError, OSError) as exc:
+            _log.warning(
+                "vsphere_session_revoke_failed",
+                target=cache_key,
+                error=f"{type(exc).__name__}: {exc}",
+                session_flavor=HOST_FLAVOR_ESXI,
+            )
+
     # #2396: vmware_rest deliberately exposes NO ``invalidate_credentials``
     # hook. It caches only the session token (evicted below); the
     # service-account credentials are re-read from Vault via ``_session_loader``
@@ -758,27 +1024,42 @@ class VmwareRestConnector(HttpConnector):
         :meth:`_establish_and_cache_session`, which re-authenticates and
         re-runs the modern->legacy ``/api/session`` 404 fallback from a clean
         state -- the path that recovers vCenter's cold-401 (the freshly minted
-        token expired server-side) without a backplane restart.
+        token expired server-side) without a backplane restart. An ESXi-
+        flavored session (#3363) re-establishes the same way, through the
+        VI-JSON ``SessionManager.Login`` branch, so a stale ESXi token
+        cold-re-logs-in exactly as vCenter's does.
 
         Evicts under ``self._session_lock`` keyed on the tenant-unique
         ``target_cache_key(target)`` tuple, so the per-``(tenant_id,
         target.id)`` isolation (#1642/#1672/#1684) holds across eviction and
         re-establish: two same-named targets in different tenants never share
-        or clobber each other's cache slot. The recorded login path is dropped
-        alongside the token so the re-establish rediscovers the live endpoint.
-        The credentials are not touched -- a 401/440 means the *session token*
-        expired or was rejected, not that the service-account credential is
-        wrong. The hook is a no-op when no token is cached.
+        or clobber each other's cache slot. The recorded login path + flavor
+        are dropped alongside the token so the re-establish rediscovers the
+        live endpoint. The credentials are not touched -- a 401/440 means the
+        *session token* expired or was rejected, not that the service-account
+        credential is wrong. The hook is a no-op when no token is cached.
+
+        For an ESXi-flavored session a best-effort ``SessionManager.Logout``
+        is issued *after* the cache entry is dropped (and outside the lock),
+        so the server-side session is released too (#3363). It is best-effort
+        by design: a stale token — the common 401-recovery case — fails
+        harmlessly, and the cold re-login proceeds regardless. The vCenter
+        path stays network-free here (its ``DELETE /api/session`` lives in
+        :meth:`aclose`), so vCenter behaviour is unchanged.
         """
         cache_key = target_cache_key(target)
         async with self._session_lock:
-            self._session_tokens.pop(cache_key, None)
+            token = self._session_tokens.pop(cache_key, None)
+            flavor = self._session_flavors.pop(cache_key, None)
             self._session_paths.pop(cache_key, None)
-            self._session_extensions.pop(cache_key, None)
+            extensions = self._session_extensions.pop(cache_key, None)
             # Drop the cached about-version too so an auth-recovery cycle
-            # re-probes ``GET /api/about`` — this also un-poisons a slot
-            # where an earlier probe cached ``None`` transiently.
-            self._about_versions.pop(cache_key, None)
+            # re-probes -- this also un-poisons a slot where an earlier
+            # probe cached ``None`` transiently. Captured first for the
+            # ESXi Logout path below (it needs the cached vim25 release).
+            release = self._about_versions.pop(cache_key, None)
+        if flavor == HOST_FLAVOR_ESXI and token is not None:
+            await self._esxi_logout_quiet(cache_key, token, release, extensions or {})
 
     async def fingerprint(
         self,
@@ -826,9 +1107,19 @@ class VmwareRestConnector(HttpConnector):
         # Vault round-trip, so the system-call carve-out still holds
         # when no real operator is in scope.
         eff_operator = operator if operator is not None else synthesise_system_operator()
+        cache_key = target_cache_key(target)
         try:
             payload = await self._get_json(target, _ABOUT_PATH, operator=eff_operator)
         except httpx.HTTPStatusError as exc:
+            # A standalone ESXi host answers GET /api/about with HTTP 400
+            # (empty) through its JSON-RPC handler — not 404 — so the #2765
+            # 404-gated fallback below never fires. But establishing the
+            # session for this GET already recognised the host as ESXi (the
+            # VI-JSON Login branch, #3363); when it did, fingerprint from the
+            # vim25 service-versions document rather than dead-ending
+            # unreachable on the vAPI-only /api/about.
+            if self._session_flavors.get(cache_key) == HOST_FLAVOR_ESXI:
+                return await self._fingerprint_esxi(target, probed_at)
             if exc.response.status_code == 404:
                 # vCenter serves no GET /api/about (#2765); a session
                 # was already established for the GET that 404'd, so
@@ -838,6 +1129,11 @@ class VmwareRestConnector(HttpConnector):
                 target, probed_at, _ABOUT_PROBE, f"{type(exc).__name__}: {exc}"
             )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            # An ESXi session established but the /api/about GET then failed
+            # for another reason: the host is reachable and authenticated, so
+            # fingerprint it as ESXi rather than dead-ending unreachable.
+            if self._session_flavors.get(cache_key) == HOST_FLAVOR_ESXI:
+                return await self._fingerprint_esxi(target, probed_at)
             # RuntimeError catches the session-establish failures from
             # :meth:`_session_token` so an unauthenticatable target
             # surfaces as a clean ``reachable=False`` fingerprint
@@ -861,6 +1157,37 @@ class VmwareRestConnector(HttpConnector):
                 "api_type": payload.get("api_type"),
                 "os_type": payload.get("os_type"),
             },
+        )
+
+    async def _fingerprint_esxi(
+        self,
+        target: VsphereTargetLike,
+        probed_at: datetime,
+    ) -> FingerprintResult:
+        """Fingerprint a standalone ESXi target reached over the VI-JSON session (#3363).
+
+        Reached from :meth:`fingerprint` when session establishment took the
+        ESXi-native VI-JSON ``SessionManager.Login`` branch: ``GET /api/about``
+        is the vAPI surface a JSON-RPC ESXi host answers HTTP 400 (not 404, so
+        the #2765 404-gated fallback never fires). The vim25 release the login
+        already discovered and cached in ``_about_versions`` is the version;
+        product is stamped ``esxi`` (the same slug ``product_from_line_id``
+        maps ``embeddedEsx`` / ``esx`` to and ``classify_host_target`` keys
+        off). ``probe_method`` names the VI-JSON login plus the
+        service-versions document that sourced the version. A session
+        established, so the target is reachable by construction.
+        """
+        version = self._about_versions.get(target_cache_key(target))
+        if version is None:
+            version = await self._service_versions_or_none(target)
+        return FingerprintResult(
+            vendor="vmware",
+            product=HOST_FLAVOR_ESXI,
+            version=version,
+            reachable=True,
+            probed_at=probed_at,
+            probe_method=f"{_ESXI_LOGIN_PROBE} + {_SERVICE_VERSIONS_PROBE}",
+            extras={"api_version": version, "session_flavor": HOST_FLAVOR_ESXI},
         )
 
     async def _fingerprint_via_service_versions(
@@ -1277,26 +1604,39 @@ class VmwareRestConnector(HttpConnector):
         path recorded by :meth:`_session_token` (modern ``/api/session``
         for production vCenter, legacy ``/rest/com/vmware/cis/session``
         for targets where the modern path 404'd at establish time) before
-        delegating to :meth:`HttpConnector.aclose`. A revoke failure
-        (5xx, transport error, target unreachable at shutdown) is logged
-        and proceeds — the operator-facing concern at shutdown is "tear
-        down the httpx pool", and a hung DELETE on an unreachable target
-        would otherwise block lifespan exit long enough to trip
+        delegating to :meth:`HttpConnector.aclose`. An ESXi-flavored
+        session (#3363) has no ``DELETE /api/session`` on its JSON-RPC vAPI,
+        so it is torn down with a VI-JSON ``SessionManager.Logout`` on
+        ``ha-sessionmgr`` instead (:meth:`_esxi_logout_quiet`). A revoke
+        failure (5xx, transport error, target unreachable at shutdown) is
+        logged and proceeds — the operator-facing concern at shutdown is
+        "tear down the httpx pool", and a hung revoke on an unreachable
+        target would otherwise block lifespan exit long enough to trip
         Kubernetes' 30-second terminationGracePeriod.
 
-        The DELETE is issued before :meth:`super().aclose` so the
+        The revoke is issued before :meth:`super().aclose` so the
         cached client is still pooled when we need it. After the
         revoke loop, the parent close runs unchanged.
         """
         async with self._session_lock:
             tokens = dict(self._session_tokens)
             paths = dict(self._session_paths)
+            flavors = dict(self._session_flavors)
+            versions = dict(self._about_versions)
             extensions_by_key = dict(self._session_extensions)
             self._session_tokens.clear()
             self._session_paths.clear()
+            self._session_flavors.clear()
             self._session_extensions.clear()
             self._about_versions.clear()
         for cache_key, token in tokens.items():
+            extensions = extensions_by_key.get(cache_key, {})
+            if flavors.get(cache_key) == HOST_FLAVOR_ESXI:
+                # ESXi-flavored session: no DELETE /api/session on a
+                # JSON-RPC ESXi host — Logout on the VI-JSON SessionManager
+                # (best-effort, same as the vCenter DELETE below).
+                await self._esxi_logout_quiet(cache_key, token, versions.get(cache_key), extensions)
+                continue
             # ``_session_tokens`` is keyed on the tenant-unique
             # ``(tenant_id, target.id)`` tuple, while the shared
             # ``HttpConnector._clients`` pool keys that same prefix plus a
@@ -1304,14 +1644,7 @@ class VmwareRestConnector(HttpConnector):
             # was minted against exactly one per-target client, so match
             # the pool entry whose key starts with this token's
             # ``(tenant_id, id)`` prefix — no name reverse-map needed.
-            client = next(
-                (
-                    pooled
-                    for client_key, pooled in self._clients.items()
-                    if client_key[: len(cache_key)] == cache_key
-                ),
-                None,
-            )
+            client = self._pooled_client_for(cache_key)
             if client is None:
                 # Theoretically unreachable — every cached token was
                 # established against a per-target client that was
@@ -1329,7 +1662,7 @@ class VmwareRestConnector(HttpConnector):
                     "DELETE",
                     revoke_path,
                     headers={_SESSION_HEADER: token},
-                    extensions=extensions_by_key.get(cache_key, {}),
+                    extensions=extensions,
                 )
                 # Log non-2xx but don't raise — shutdown proceeds.
                 if resp.status_code >= 400:

@@ -420,6 +420,11 @@ async def post_result_query(
                 "handle_id": str(body.handle_id),
             },
         ) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": str(exc), "reason": "output_too_large"},
+        ) from exc
 
 
 async def _run_result_query_body(

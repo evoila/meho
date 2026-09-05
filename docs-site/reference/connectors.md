@@ -25,6 +25,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `installer-rest-9.1` | `installer` | >=9.1,<10.0 | — |
 | `k8s-1.x` | `k8s` | — | typed |
 | `keycloak-admin-26.x` | `keycloak` | >=26.0,<27.0 | — |
+| `linux-ssh-1.x` | `linux` | — | — |
 | `loki-api-3.x` | `loki` | >=2.9,<4.0 | — |
 | `mongodb-wire-7` | `mongodb` | >=5,<9 | — |
 | `msad-ssh-2022.x` | `msad` | — | — |

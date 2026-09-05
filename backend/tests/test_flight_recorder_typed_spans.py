@@ -430,6 +430,7 @@ _EXPECTED_TYPED_IMPLS: frozenset[str] = frozenset(
         "installer-rest",
         "k8s",
         "keycloak-admin",
+        "linux-ssh",
         "loki-api",
         "mail-smtp",
         "mongodb-wire",

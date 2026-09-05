@@ -90,7 +90,7 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Security — cap the `result_query` IN-list and `select` projection lengths (#3389)
+### Security — cap the `result_query` IN-list and `select` projection lengths (#3389 / #3398)
 
 - The `result_query` query grammar now caps the two caller-driven dimensions that were still unbounded: an `IN` predicate's value list at **1000 elements** and the `select` projection at **64 columns**, both rejected at model construction as a Pydantic `ValidationError` (surfaced as `invalid_query` on MCP and a `422` on REST, exactly like the existing `filter` ≤10 / `group_by` ≤4 / `order_by` ≤4 caps). Each `IN` element compiles to one bound placeholder and each `select` entry to one quoted identifier, so an over-long list grew the single compiled `SELECT`'s compile-time size without bound — a resource / DoS class only: the statement always stayed one parameterized, read-only `SELECT`, so the no-raw-SQL and values-bind-as-parameters invariants were never at risk. Omitting `select` still returns the handle's full schema via `SELECT *`, so the projection cap bounds only caller-shaped expansion, not the "give me everything" read-back. A new end-to-end regression also pins the inertness the existing string-level test only implied: a `DROP TABLE` payload passed as a filter value runs as a bound parameter against a hardened `QueryEngine` and leaves the `result` table and its row count untouched.
 

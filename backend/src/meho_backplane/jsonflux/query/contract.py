@@ -32,9 +32,14 @@ with embedded quotes escaped).
 Bounds
 ======
 
-Filter predicates ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4 (rejected at
-model construction). Operator allow-list ``=, !=, <, <=, >, >=, IN, IS
-NULL``; aggregate allow-list ``COUNT, SUM, MIN, MAX, AVG``. The output-row
+Filter predicates ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4, ``select``
+projection ≤ 64 columns, and each ``IN`` value list ≤ 1000 elements (all
+rejected at model construction). The ``select`` and ``IN`` caps bound the
+compile-time expansion — one quoted identifier per projected column, one
+bound placeholder per ``IN`` element — so a caller cannot force an
+arbitrarily large (though still single, still parameterized) ``SELECT``.
+Operator allow-list ``=, !=, <, <=, >, >=, IN, IS NULL``; aggregate
+allow-list ``COUNT, SUM, MIN, MAX, AVG``. The output-row
 ceiling (``MAX_LIMIT``) is single-sourced in
 :mod:`meho_backplane.operations.result_query` and passed to
 :func:`compile_query` as ``max_limit`` — this module never imports it, to
@@ -46,7 +51,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = [
     "RESULT_TABLE",
@@ -85,6 +90,20 @@ _VALUELESS_OPERATORS: frozenset[str] = frozenset({"IS NULL"})
 #: placeholder per element).
 _LIST_OPERATORS: frozenset[str] = frozenset({"IN"})
 
+#: Cap on an ``IN`` value list. Each element compiles to one bound
+#: placeholder (``_build_where``), so an unbounded list would expand the
+#: single ``SELECT`` to as many placeholders as the caller supplies — the
+#: statement stays one parameterized SELECT, but the compile-time expansion
+#: is unbounded. Capped at construction, mirroring the ``filter`` /
+#: ``group_by`` / ``order_by`` list caps.
+_MAX_IN_VALUES = 1000
+
+#: Cap on the ``select`` projection. Each entry compiles to one quoted
+#: identifier; same unbounded-expansion reasoning as :data:`_MAX_IN_VALUES`.
+#: Omitting ``select`` still projects the handle's full (non-caller-shaped)
+#: schema via ``SELECT *``, so this bounds only caller-driven expansion.
+_MAX_SELECT_COLUMNS = 64
+
 
 class QueryContractError(ValueError):
     """A structured query cannot be compiled against this handle's schema.
@@ -121,6 +140,20 @@ class FilterPredicate(BaseModel):
         ),
     )
 
+    @field_validator("value")
+    @classmethod
+    def _cap_in_values(cls, v: Any) -> Any:
+        """Reject an over-long ``IN`` value list at construction.
+
+        ``value`` is typed ``Any``, so ``max_length`` on the field cannot see
+        the list length — the cap lives here. A list value is only meaningful
+        for ``IN`` (any other operator rejects a list in ``_build_where``), so
+        capping any list value is equivalent to capping the ``IN`` expansion.
+        """
+        if isinstance(v, list) and len(v) > _MAX_IN_VALUES:
+            raise ValueError(f"IN list too long: {len(v)} values (max {_MAX_IN_VALUES}).")
+        return v
+
 
 class Aggregate(BaseModel):
     """One aggregate output column: ``func(field)`` (``COUNT`` may omit field).
@@ -154,10 +187,11 @@ class ResultQuerySpec(BaseModel):
 
     Every field is optional: an empty spec compiles to ``SELECT * FROM
     result LIMIT <max>`` — a full read-back capped at the output ceiling.
-    The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4)
-    and the operator/aggregate allow-lists are enforced here, at
-    construction; field-vs-schema validation needs the handle's columns and
-    happens in :func:`compile_query`.
+    The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4,
+    ``select`` ≤ 64, and each ``IN`` value list ≤ 1000) and the
+    operator/aggregate allow-lists are enforced here, at construction;
+    field-vs-schema validation needs the handle's columns and happens in
+    :func:`compile_query`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -169,10 +203,11 @@ class ResultQuerySpec(BaseModel):
     )
     select: list[str] = Field(
         default_factory=list,
+        max_length=_MAX_SELECT_COLUMNS,
         description=(
-            "Projection: columns to return. Omit for all columns. Not allowed "
-            "together with `aggregate` (the output is then the group keys plus "
-            "the aggregates)."
+            "Projection: columns to return (max 64). Omit for all columns. Not "
+            "allowed together with `aggregate` (the output is then the group "
+            "keys plus the aggregates)."
         ),
     )
     group_by: list[str] = Field(

@@ -62,6 +62,7 @@ import pytest
 
 import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
+from meho_backplane.connectors.pfsense.ops_mgmt_flow import classify_mgmt_flows
 from meho_backplane.connectors.pfsense.ops_read import (
     _netmask_to_cidr,
     parse_dhcp_leases,
@@ -1040,10 +1041,10 @@ async def test_pfsense_dhcp_leases_response_schema_matches_handler_rows() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_pfsense_ops_has_sixteen_entries() -> None:
+def test_pfsense_ops_has_seventeen_entries() -> None:
     """canary + 7 reads + dhcp.leases (#2849) + 2 writes (#3090) + 2 deletes (#3232)
-    + 3 teardown-inverse deletes (#3313) = 16."""
-    assert len(PFSENSE_OPS) == 16
+    + 3 teardown-inverse deletes (#3313) + mgmt_flow.summary (meho-internal#252) = 17."""
+    assert len(PFSENSE_OPS) == 17
 
 
 def test_pfsense_ops_about_is_first() -> None:
@@ -1119,6 +1120,7 @@ def test_pfsense_ops_covers_expected_op_ids() -> None:
         "pfsense.route.static.delete",
         "pfsense.gateway.delete",
         "pfsense.alias.member.remove",
+        "pfsense.mgmt_flow.summary",
     }
     assert op_ids == expected
 
@@ -1150,3 +1152,201 @@ def test_pfsense_ops_requires_approval_only_for_destructive_deletes() -> None:
             assert op.requires_approval, f"{op.op_id!r} destructive delete must require approval"
         else:
             assert not op.requires_approval, f"{op.op_id!r} has requires_approval=True"
+
+
+# ---------------------------------------------------------------------------
+# classify_mgmt_flows + pfsense.mgmt_flow.summary (meho-internal#252)
+# ---------------------------------------------------------------------------
+
+# A two-leg pfctl -ss fixture. Field order is <proto> <iface> <src> <dir> <dst>
+# <state> (what parse_pfctl_states expects). opt5 CIDR 10.11.16.0/20, opt2 CIDR
+# 10.5.50.0/24. Sanctioned: 10.11.16.40 + 10.5.50.153. Baseline (expected
+# non-sanctioned): 10.11.255.0/24. Management ports default 443/22/902/5480.
+_MGMT_FLOW_STATES = (
+    # 1) sanctioned -> opt5 mgmt (443)
+    "tcp vmx6 10.11.16.40:50001 -> 10.11.16.9:443: ESTABLISHED:ESTABLISHED\n"
+    # 2) baseline (expected) non-sanctioned -> opt5 mgmt (443): non-sanctioned, NOT unexpected
+    "tcp vmx6 10.11.255.7:50002 -> 10.11.16.9:443: ESTABLISHED:ESTABLISHED\n"
+    # 3) unexpected non-sanctioned -> opt5 mgmt (902)
+    "tcp vmx6 192.168.99.5:50003 -> 10.11.16.9:902: ESTABLISHED:ESTABLISHED\n"
+    # 4) same unexpected source, different mgmt port (443) -> port aggregation
+    "tcp vmx6 192.168.99.5:50004 -> 10.11.16.9:443: ESTABLISHED:ESTABLISHED\n"
+    # 5) sanctioned -> opt2 mgmt (22)
+    "tcp vmx3 10.5.50.153:50005 -> 10.5.50.20:22: ESTABLISHED:ESTABLISHED\n"
+    # 6) unexpected non-sanctioned -> opt2 mgmt (5480)
+    "tcp vmx3 172.16.0.9:50006 -> 10.5.50.20:5480: ESTABLISHED:ESTABLISHED\n"
+    # 7) server side is the SRC endpoint (mgmt port on src): client is the dst
+    "tcp vmx6 10.11.16.9:443 -> 203.0.113.5:40000: ESTABLISHED:ESTABLISHED\n"
+    # 8) non-management port -> ignored
+    "tcp vmx6 10.0.0.1:12345 -> 8.8.8.8:53: ESTABLISHED:ESTABLISHED\n"
+    # 9) mgmt port but dst outside every mgmt_net -> ignored
+    "tcp vmx6 1.2.3.4:5000 -> 9.9.9.9:443: ESTABLISHED:ESTABLISHED\n"
+    # 10) UDP to a mgmt port -> ignored (proto != tcp)
+    "udp vmx6 10.0.0.1:5000 -> 10.11.16.9:443\n"
+)
+
+_MGMT_NETS = [
+    {"cidr": "10.11.16.0/20", "leg": "opt5"},
+    {"cidr": "10.5.50.0/24", "leg": "opt2"},
+]
+_SANCTIONED = ["10.11.16.40", "10.5.50.153"]
+_BASELINE = ["10.11.255.0/24"]
+
+
+def _classify_fixture() -> dict[str, Any]:
+    rows = parse_pfctl_states(_MGMT_FLOW_STATES)
+    return classify_mgmt_flows(
+        rows,
+        sanctioned_src=_SANCTIONED,
+        mgmt_nets=_MGMT_NETS,
+        baseline_src=_BASELINE,
+    )
+
+
+def test_classify_mgmt_flows_counts_by_class() -> None:
+    result = _classify_fixture()
+    assert result["total_states_classified"] == 7
+    assert result["sanctioned_state_count"] == 2
+    assert result["non_sanctioned_state_count"] == 5
+    assert result["sanctioned_source_count"] == 2
+    # distinct non-sanctioned sources: 3 on opt5 + 1 on opt2 (see fixture)
+    assert result["non_sanctioned_source_count"] == 4
+
+
+def test_classify_mgmt_flows_unexpected_excludes_sanctioned_and_baseline() -> None:
+    result = _classify_fixture()
+    # unexpected = non-sanctioned AND not in baseline: drops 10.11.255.7 (baseline)
+    # and never includes the sanctioned sources.
+    assert result["unexpected_source_count"] == 3
+    unexpected_srcs = {r["src"] for r in result["unexpected_sources"]}
+    assert unexpected_srcs == {"192.168.99.5", "203.0.113.5", "172.16.0.9"}
+    assert "10.11.255.7" not in unexpected_srcs  # baseline is exempt
+    assert "10.11.16.40" not in unexpected_srcs  # sanctioned never counted
+
+
+def test_classify_mgmt_flows_aggregates_ports_per_source() -> None:
+    result = _classify_fixture()
+    row = next(r for r in result["unexpected_sources"] if r["src"] == "192.168.99.5")
+    assert row["leg"] == "opt5"
+    assert row["ports"] == [443, 902]  # sorted union across the two states
+    assert row["states"] == 2
+
+
+def test_classify_mgmt_flows_per_leg_coverage() -> None:
+    result = _classify_fixture()
+    assert result["legs"]["opt5"]["sanctioned_states"] == 1
+    assert result["legs"]["opt5"]["non_sanctioned_states"] == 4
+    assert result["legs"]["opt5"]["coverage_pct"] == 20.0
+    assert result["legs"]["opt2"]["sanctioned_states"] == 1
+    assert result["legs"]["opt2"]["non_sanctioned_states"] == 1
+    assert result["legs"]["opt2"]["coverage_pct"] == 50.0
+
+
+def test_classify_mgmt_flows_server_side_detected_on_either_endpoint() -> None:
+    """State 7 has the mgmt port on the SRC endpoint; client is the dst."""
+    result = _classify_fixture()
+    row = next(r for r in result["unexpected_sources"] if r["src"] == "203.0.113.5")
+    assert row["leg"] == "opt5"
+    assert row["ports"] == [443]
+
+
+def test_classify_mgmt_flows_default_ports_applied_when_omitted() -> None:
+    rows = parse_pfctl_states(_MGMT_FLOW_STATES)
+    with_default = classify_mgmt_flows(rows, sanctioned_src=_SANCTIONED, mgmt_nets=_MGMT_NETS)
+    # 443/22/902/5480 are the default class, so classification is unchanged
+    # (only difference from the fixture run is no baseline exemption).
+    assert with_default["total_states_classified"] == 7
+
+
+def test_classify_mgmt_flows_no_baseline_makes_all_non_sanctioned_unexpected() -> None:
+    rows = parse_pfctl_states(_MGMT_FLOW_STATES)
+    result = classify_mgmt_flows(rows, sanctioned_src=_SANCTIONED, mgmt_nets=_MGMT_NETS)
+    # Without a baseline, the previously-exempt 10.11.255.7 becomes unexpected too.
+    assert result["unexpected_source_count"] == 4
+
+
+def test_classify_mgmt_flows_empty_input_is_all_zero() -> None:
+    result = classify_mgmt_flows([], sanctioned_src=_SANCTIONED, mgmt_nets=_MGMT_NETS)
+    assert result["total_states_classified"] == 0
+    assert result["unexpected_source_count"] == 0
+    assert result["non_sanctioned_sources"] == []
+    assert result["unexpected_sources"] == []
+    assert result["coverage_pct"] is None
+    assert result["caveat"]
+
+
+def test_classify_mgmt_flows_unexpected_sources_is_a_countable_list() -> None:
+    """The Sensor asserts an aggregate ``count`` over ``$.unexpected_sources``;
+    the value must be a plain list of dicts the bounded select can walk."""
+    result = _classify_fixture()
+    assert isinstance(result["unexpected_sources"], list)
+    assert all(isinstance(r, dict) and "src" in r for r in result["unexpected_sources"])
+    assert result["unexpected_source_count"] == len(result["unexpected_sources"])
+
+
+def test_classify_mgmt_flows_caps_non_sanctioned_sources() -> None:
+    from meho_backplane.connectors.pfsense.ops_mgmt_flow import _MAX_NON_SANCTIONED_SOURCES
+
+    # One state per unique source, all non-sanctioned, all to an opt5 mgmt port.
+    n = _MAX_NON_SANCTIONED_SOURCES + 25
+    lines = "".join(
+        f"tcp vmx6 172.20.{i // 256}.{i % 256}:5000 -> 10.11.16.9:443: ESTABLISHED\n"
+        for i in range(n)
+    )
+    result = classify_mgmt_flows(
+        parse_pfctl_states(lines), sanctioned_src=_SANCTIONED, mgmt_nets=_MGMT_NETS
+    )
+    # Count stays exact; the enumerated list is capped and flagged.
+    assert result["non_sanctioned_source_count"] == n
+    assert len(result["non_sanctioned_sources"]) == _MAX_NON_SANCTIONED_SOURCES
+    assert result["non_sanctioned_sources_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_mgmt_flow_summary_handler_classifies_state_table() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(_MGMT_FLOW_STATES)
+        result = await connector.mgmt_flow_summary(
+            _TARGET,
+            {"sanctioned_src": _SANCTIONED, "mgmt_nets": _MGMT_NETS, "baseline_src": _BASELINE},
+        )
+    mock_cmd.assert_awaited_once()
+    assert mock_cmd.await_args.args[1] == "pfctl -ss"
+    assert result["unexpected_source_count"] == 3
+    assert result["legs"]["opt2"]["coverage_pct"] == 50.0
+
+
+@pytest.mark.asyncio
+async def test_mgmt_flow_summary_handler_raises_on_failed_read() -> None:
+    """A failed pfctl read raises so a pinned Sensor evaluates unknown, not a
+    false all-clear."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc("", exit_status=1)
+        with pytest.raises(RuntimeError, match="pfctl -ss failed"):
+            await connector.mgmt_flow_summary(
+                _TARGET, {"sanctioned_src": _SANCTIONED, "mgmt_nets": _MGMT_NETS}
+            )
+
+
+@pytest.mark.asyncio
+async def test_mgmt_flow_summary_handler_empty_state_table_is_healthy() -> None:
+    """An empty (exit 0) state table classifies to zeros, not an error/raise."""
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc("")
+        result = await connector.mgmt_flow_summary(
+            _TARGET, {"sanctioned_src": _SANCTIONED, "mgmt_nets": _MGMT_NETS}
+        )
+    assert result["unexpected_source_count"] == 0
+    assert result["total_states_classified"] == 0
+
+
+def test_mgmt_flow_summary_op_registered_safe_and_required_params() -> None:
+    op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.mgmt_flow.summary")
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert op.group_key == "firewall"
+    assert op.parameter_schema["additionalProperties"] is False
+    assert set(op.parameter_schema["required"]) == {"sanctioned_src", "mgmt_nets"}

@@ -318,6 +318,12 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
+#: The parameterized read op (meho-internal#252). ``safe`` like the rest of
+#: the read surface, but it takes real params (``sanctioned_src`` /
+#: ``mgmt_nets`` are required), so it is held separate from the empty-params
+#: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
+_PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary"})
+
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
 # ---------------------------------------------------------------------------
@@ -428,11 +434,12 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 16 pfSense ops registered (9 read/identity + 2 write + 5 delete)."""
+    """All 17 pfSense ops registered (9 read/identity + 2 write + 5 delete +
+    1 parameterized mgmt-flow read, meho-internal#252)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
-    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS) - op_ids
+    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS | _PARAM_READ_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 16, f"Expected 16 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 17, f"Expected 17 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
@@ -455,7 +462,11 @@ def test_pfsense_read_ops_parameter_schemas_are_empty() -> None:
         assert schema.get("additionalProperties") is False, (
             f"{op.op_id}: parameter_schema must have additionalProperties=False"
         )
-        if op.op_id not in _WRITE_OP_IDS and op.op_id not in _DELETE_OP_IDS:
+        if (
+            op.op_id not in _WRITE_OP_IDS
+            and op.op_id not in _DELETE_OP_IDS
+            and op.op_id not in _PARAM_READ_OP_IDS
+        ):
             assert schema.get("properties") == {}, (
                 f"{op.op_id}: read-op parameter_schema must have empty properties"
             )

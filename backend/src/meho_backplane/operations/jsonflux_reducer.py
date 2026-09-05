@@ -833,7 +833,7 @@ def _build_json_schema(engine: QueryEngine) -> dict[str, Any]:
     Reads the DuckDB ``DESCRIBE`` for the main table and maps each
     column's type to a JSON Schema property. The shape is
     ``{"type": "array", "items": {"type": "object", "properties":
-    {...}}}`` — the set-of-objects contract a future ``result_describe``
+    {...}}}`` — the set-of-objects contract the query surface
     reports.
     """
     described = engine.conn.execute(f"DESCRIBE {_TABLE}").fetchall()

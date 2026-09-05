@@ -94,6 +94,20 @@ connector-related release-notes line.
 
 - `result_query` gains a second read-back mode alongside paging: pass a `query` object and the backplane returns just the matching rows or the per-group counts instead of forcing the agent to page the whole set into context and filter client-side. The `query` grammar is filter predicates (≤10; operators `=, !=, <, <=, >, >=, IN, IS NULL`), a `select` projection, `group_by` (≤4), aggregates (`COUNT/SUM/MIN/MAX/AVG`), `order_by` (≤4), and `limit` — compiled into **exactly one parameterized, read-only `SELECT`** over the single handle table; every referenced field is validated against the handle's known columns (unknown field → rejected), operators and aggregate functions are fixed allow-lists, and caller values bind as DuckDB prepared-statement parameters. There is **no raw-SQL argument** on any transport: the unsafe forms (writes, DDL, multi-statement input) are not expressible, a stronger property than sanitizing a caller SQL string. The MCP `inputSchema` and the REST `ResultQueryBody` gain the same optional `query` arg in lockstep and both dispatch through one shared core; paging (`handle_id`/`offset`/`limit`) is unchanged and backward-compatible, and the CLI grows matching `--where/--select/--group-by/--aggregate/--order-by/--query-limit` flags on `meho operation result-query`. Every query is bounded — output rows capped at `RESULT_QUERY_MAX_OUTPUT_ROWS` (500) with an explicit `truncated` flag, serialized output capped at `RESULT_QUERY_MAX_OUTPUT_BYTES` (256 KB) with an actionable over-budget error, and each `SELECT` run under a `RESULT_QUERY_TIMEOUT_SECONDS` (5 s) wall-time budget via a worker-thread `conn.interrupt()` — and every result carries a `coverage` label so a `COUNT` over a capped spill is reported as covering the stored subset only, never a whole-inventory total.
 
+### Documentation — describe the shipped result_query query mode (#3388)
+
+- Three source strings predated the #3366 query surface and still called
+  `result_query` paging-only with aggregation "future work":
+  `docs-site/guides/first-operations.md`, the `docs/codebase/backend.md`
+  dispatcher row, and the `jsonflux_reducer._build_json_schema` docstring.
+  They now describe both read-back modes — paging (`offset`/`limit`) and
+  the #3366 query mode, a structured `query` object compiling to one
+  bounded, parameterized, read-only `SELECT` (filter / select / group_by /
+  aggregate / order_by; no raw SQL). The disavowal that `result_aggregate`
+  / `result_export` / `result_describe` are not callable *tool names* stays
+  (aggregation shipped as a mode of `result_query`, not a separate tool);
+  export read-back remains described as absent.
+
 ## [0.33.3] - 2026-09-05
 
 ### Added — net.tls_inspect returns the presented certificate PEM, closing the probe → `tls_ca_pin` loop (#3375)

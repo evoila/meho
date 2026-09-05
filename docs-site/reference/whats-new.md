@@ -9,6 +9,20 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.33.2](https://github.com/evoila/meho/releases/tag/v0.33.2) — 2026-09-05
+
+- **Standalone ESXi host operations now actually reach the host.** The
+  host-setup reads and composites for a not-yet-managed ESXi host — list its
+  storage devices, mount an NFS datastore, mark a disk as flash — had been
+  failing at sign-in, because the connector spoke only the API surface a full
+  vCenter serves. It now speaks the protocol a standalone ESXi host actually
+  offers, so those operations work directly against a freshly provisioned host
+  early in a management-domain bring-up — the case v0.33.0 set out to support.
+- **Distributed-switch portgroup VLANs are no longer silently dropped.**
+  Creating a portgroup with a VLAN tag or a trunk range now applies that VLAN
+  instead of quietly producing an untagged (VLAN 0) portgroup. The create had
+  been reporting success while the tag was discarded.
+
 ## [v0.33.1](https://github.com/evoila/meho/releases/tag/v0.33.1) — 2026-09-04
 
 - **Standing grants for query-string actions.** A service principal can now

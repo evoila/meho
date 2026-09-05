@@ -563,6 +563,30 @@ class Settings(BaseModel):
         genuinely larger sets raise it via
         ``RESULT_HANDLE_MAX_SPILL_ROWS``. Read once per reduce through
         :func:`get_settings`'s cache.
+    result_query_max_output_rows:
+        Output-row ceiling on the ``result_query`` structured query surface
+        (#3366): a compiled ``SELECT`` over a handle returns at most this many
+        rows (grouped results capped identically), and the result flags
+        ``truncated`` when the underlying result had more. Default 500 — the
+        same page ceiling as the paging read-back and the sibling list tools.
+        Env ``RESULT_QUERY_MAX_OUTPUT_ROWS``. Distinct from
+        ``result_handle_max_spill_rows`` (how many rows are *stored*): this
+        bounds how many a single query *returns*.
+    result_query_max_output_bytes:
+        Serialized-output ceiling, in JSON bytes, applied to a
+        ``result_query`` query result **after** the row cap. A wide or
+        deeply-nested projection can blow the MCP result token budget even
+        under 500 rows, so an over-budget result fails closed with an
+        actionable error (narrow ``select``, add a ``filter``, or lower
+        ``limit``) rather than returning a giant envelope. Default 262144
+        (256 KB). Env ``RESULT_QUERY_MAX_OUTPUT_BYTES``.
+    result_query_timeout_seconds:
+        Wall-time budget for a single ``result_query`` compiled ``SELECT``.
+        DuckDB exposes no native Python query timeout, so the core runs
+        ``conn.execute()`` on a worker thread and calls ``conn.interrupt()``
+        on expiry (raising ``InterruptException``), surfaced to the caller as
+        a recoverable "narrow and retry" error. Default 5 seconds. Env
+        ``RESULT_QUERY_TIMEOUT_SECONDS``.
     jsonflux_sample_byte_budget:
         Upper bound, in serialized JSON bytes, on the inline sample the
         JSONFlux reducer carries on a reduced ``ResultHandle`` (#134).
@@ -1229,6 +1253,12 @@ class Settings(BaseModel):
     checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
+    # #3366 -- bounds on the ``result_query`` structured query surface. These
+    # are the query interface's own resource ceilings; it inherits neither the
+    # spill row cap above nor the reducer's hardcoded TTL.
+    result_query_max_output_rows: int = Field(default=500, gt=0)
+    result_query_max_output_bytes: int = Field(default=262144, gt=0)
+    result_query_timeout_seconds: int = Field(default=5, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     agent_invoke_max_depth: int = Field(default=4, gt=0)
@@ -2053,6 +2083,15 @@ def get_settings() -> Settings:
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
+        ),
+        result_query_max_output_rows=int(
+            os.environ.get("RESULT_QUERY_MAX_OUTPUT_ROWS", "500"),
+        ),
+        result_query_max_output_bytes=int(
+            os.environ.get("RESULT_QUERY_MAX_OUTPUT_BYTES", "262144"),
+        ),
+        result_query_timeout_seconds=int(
+            os.environ.get("RESULT_QUERY_TIMEOUT_SECONDS", "5"),
         ),
         jsonflux_sample_byte_budget=int(
             os.environ.get("JSONFLUX_SAMPLE_BYTE_BUDGET", "4096"),

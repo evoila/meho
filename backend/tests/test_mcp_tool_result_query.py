@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 import meho_backplane.operations.result_query as result_query_core
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.result_handle_store import SpilledWindow
+from meho_backplane.connectors.result_handle_store import SpilledRowSet, SpilledWindow
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
@@ -80,6 +80,18 @@ class _FakeStore:
             stored_rows=len(rows),
             truncated=False,
         )
+
+    async def fetch_rows(
+        self,
+        *,
+        tenant_id: UUID,
+        operator_sub: str,
+        handle_id: UUID,
+    ) -> SpilledRowSet | None:
+        rows = self._rows.get((str(tenant_id), operator_sub, str(handle_id)))
+        if rows is None:
+            return None
+        return SpilledRowSet(rows=rows, total_rows=len(rows), stored_rows=len(rows))
 
 
 @pytest.fixture
@@ -207,7 +219,122 @@ def test_result_query_rejects_extra_argument(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     fake_store: _FakeStore,
 ) -> None:
-    client, _op = client_with_operator
+    """#3366 relaxed this to reject only *genuinely* unknown args.
+
+    A bogus top-level key is still rejected (``additionalProperties: false``),
+    but the newly-legal ``query`` argument is accepted — proving the schema
+    widened for the real query surface, not for arbitrary keys.
+    """
+    client, op = client_with_operator
     response = _call(client, {"handle_id": str(uuid4()), "bogus": 1})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+
+    # ``query`` is a legal arg now: seed a handle and confirm it dispatches.
+    handle = uuid4()
+    fake_store.seed(
+        tenant_id=OPERATOR_TENANT_ID, operator_sub=op.sub, handle_id=handle, rows=[{"id": 1}]
+    )
+    ok = _call(client, {"handle_id": str(handle), "query": {"select": ["id"]}})
+    assert "error" not in ok.json(), ok.json()
+
+
+# ---------------------------------------------------------------------------
+# #3366 — query mode (bounded structured query over the handle)
+# ---------------------------------------------------------------------------
+
+
+def test_input_schema_advertises_the_query_argument(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """`tools/list` now exposes the optional `query` arg alongside paging."""
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    schema = next(t for t in response.json()["result"]["tools"] if t["name"] == "result_query")[
+        "inputSchema"
+    ]
+    assert "query" in schema["properties"]
+    # Paging args stay; the top-level stays closed to unknown args.
+    assert {"handle_id", "offset", "limit", "query"} <= set(schema["properties"])
+    assert schema["additionalProperties"] is False
+
+
+def _seed(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:
+    rows = [
+        {"id": i, "severity": "high" if i % 2 else "low", "project": f"p{i % 3}"} for i in range(30)
+    ]
+    fake_store.seed(tenant_id=OPERATOR_TENANT_ID, operator_sub=op.sub, handle_id=handle, rows=rows)
+
+
+def test_query_mode_filters_server_side(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed(fake_store, op, handle)
+    response = _call(
+        client,
+        {
+            "handle_id": str(handle),
+            "query": {"filter": [{"field": "severity", "op": "=", "value": "high"}]},
+        },
+    )
+    assert response.status_code == 200
+    payload = _structured(response.json()["result"])
+    assert payload["returned_rows"] == 15
+    assert {r["severity"] for r in payload["rows"]} == {"high"}
+    assert payload["coverage"] == "complete"
+
+
+def test_query_mode_aggregates_server_side(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed(fake_store, op, handle)
+    response = _call(
+        client,
+        {
+            "handle_id": str(handle),
+            "query": {
+                "group_by": ["project"],
+                "aggregate": [{"func": "COUNT"}],
+                "order_by": [{"field": "project"}],
+            },
+        },
+    )
+    payload = _structured(response.json()["result"])
+    assert {r["project"]: r["count"] for r in payload["rows"]} == {"p0": 10, "p1": 10, "p2": 10}
+
+
+def test_query_mode_unknown_field_is_recoverable_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed(fake_store, op, handle)
+    response = _call(client, {"handle_id": str(handle), "query": {"select": ["nope"]}})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["reason"] == "invalid_query"
+
+
+def test_query_mode_bad_operator_is_invalid_params(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    fake_store: _FakeStore,
+) -> None:
+    client, op = client_with_operator
+    handle = uuid4()
+    _seed(fake_store, op, handle)
+    response = _call(
+        client,
+        {
+            "handle_id": str(handle),
+            "query": {"filter": [{"field": "id", "op": "LIKE", "value": 1}]},
+        },
+    )
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS

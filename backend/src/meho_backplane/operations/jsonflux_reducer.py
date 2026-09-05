@@ -150,7 +150,10 @@ def _drill_in_available_rationale(handle_id: UUID, stored_rows: int, total_rows:
         f"via the ``{_RESULT_QUERY_TOOL}`` tool or over REST via "
         f"``{_RESULT_QUERY_REST_ROUTE}``. Call either with "
         f"``handle_id={handle_id}`` plus ``offset`` / ``limit`` to page "
-        f"beyond the inline sample.{tail_note}"
+        f"beyond the inline sample, or pass a ``query`` (``filter`` / "
+        f"``select`` / ``group_by`` / ``aggregate`` / ``order_by`` / "
+        f"``limit``) to have the backplane return just the matching rows or "
+        f"the per-group counts instead of the whole set.{tail_note}"
     )
 
 

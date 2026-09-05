@@ -36,6 +36,15 @@ const (
 	AgentRunStatusSucceeded        AgentRunStatus = "succeeded"
 )
 
+// Defines values for AggregateFunc.
+const (
+	AggregateFuncAVG   AggregateFunc = "AVG"
+	AggregateFuncCOUNT AggregateFunc = "COUNT"
+	AggregateFuncMAX   AggregateFunc = "MAX"
+	AggregateFuncMIN   AggregateFunc = "MIN"
+	AggregateFuncSUM   AggregateFunc = "SUM"
+)
+
 // Defines values for ApprovalRequestStatus.
 const (
 	ApprovalRequestStatusApproved ApprovalRequestStatus = "approved"
@@ -285,6 +294,18 @@ const (
 	EventSourceStatusPaused EventSourceStatus = "paused"
 )
 
+// Defines values for FilterPredicateOp.
+const (
+	FilterPredicateOpEmpty            FilterPredicateOp = "!="
+	FilterPredicateOpEqual            FilterPredicateOp = "="
+	FilterPredicateOpGreaterThan      FilterPredicateOp = ">"
+	FilterPredicateOpGreaterThanEqual FilterPredicateOp = ">="
+	FilterPredicateOpIN               FilterPredicateOp = "IN"
+	FilterPredicateOpISNULL           FilterPredicateOp = "IS NULL"
+	FilterPredicateOpLessThan         FilterPredicateOp = "<"
+	FilterPredicateOpLessThanEqual    FilterPredicateOp = "<="
+)
+
 // Defines values for GatewayResultBodyOutcome.
 const (
 	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
@@ -340,6 +361,12 @@ const (
 	OperationRunStatusPending   OperationRunStatus = "pending"
 	OperationRunStatusRunning   OperationRunStatus = "running"
 	OperationRunStatusSucceeded OperationRunStatus = "succeeded"
+)
+
+// Defines values for OrderByDirection.
+const (
+	OrderByDirectionAsc  OrderByDirection = "asc"
+	OrderByDirectionDesc OrderByDirection = "desc"
 )
 
 // Defines values for PermissionVerdict.
@@ -1175,6 +1202,23 @@ type AgentRunSummaryResponse struct {
 	Turns   int            `json:"turns"`
 	WorkRef *string        `json:"work_ref"`
 }
+
+// Aggregate One aggregate output column: “func(field)“ (“COUNT“ may omit field).
+//
+// “COUNT“ with no “field“ compiles to “COUNT(*)“; every other
+// function requires a field. The output alias is derived deterministically
+// (“count“ / “sum_<field>“ / ...) and quoted, so callers never inject
+// an alias identifier.
+type Aggregate struct {
+	// Field Column to aggregate; omit only for COUNT (compiles to COUNT(*)).
+	Field *string `json:"field"`
+
+	// Func Aggregate function (fixed allow-list).
+	Func AggregateFunc `json:"func"`
+}
+
+// AggregateFunc Aggregate function (fixed allow-list).
+type AggregateFunc string
 
 // ApprovalRequestStatus Closed lifecycle status of an :class:`ApprovalRequest`.
 //
@@ -4682,6 +4726,26 @@ type EventSourceUpdate struct {
 	Status *EventSourceStatus `json:"status,omitempty"`
 }
 
+// FilterPredicate One “WHERE“ clause term: “field op value“.
+//
+// “value“ is omitted for “IS NULL“, a list for “IN“ (each element
+// bound as its own placeholder), and a scalar otherwise. The value is
+// always bound as a DuckDB prepared-statement parameter — never
+// interpolated — so it cannot alter the statement's structure.
+type FilterPredicate struct {
+	// Field Column to test; must exist on the handle.
+	Field string `json:"field"`
+
+	// Op Comparison operator (fixed allow-list).
+	Op FilterPredicateOp `json:"op"`
+
+	// Value The comparison value, bound as a parameter. Omit for `IS NULL`; a list for `IN`; a scalar for the ordering/equality operators.
+	Value interface{} `json:"value,omitempty"`
+}
+
+// FilterPredicateOp Comparison operator (fixed allow-list).
+type FilterPredicateOp string
+
 // FingerprintResult Connector fingerprint per consumer-needs L95.
 type FingerprintResult struct {
 	Build       *string                 `json:"build"`
@@ -5814,6 +5878,18 @@ type OperatorIdentity struct {
 	TenantRole TenantRole `json:"tenant_role"`
 }
 
+// OrderBy One “ORDER BY“ term: a known column plus a direction.
+type OrderBy struct {
+	// Direction Sort direction.
+	Direction *OrderByDirection `json:"direction,omitempty"`
+
+	// Field Column to sort by; must exist on the handle.
+	Field string `json:"field"`
+}
+
+// OrderByDirection Sort direction.
+type OrderByDirection string
+
 // PairAddonRequest Intake for :meth:`AddonPairingService.pair` — the handshake body.
 //
 // “addon_contract_version“ is the contract version the add-on speaks;
@@ -6313,17 +6389,60 @@ type ResultIngestResponse struct {
 // validate identically. “extra="forbid"“ rejects unknown body fields with
 // a 422, matching the sibling “CallOperationBody“ posture.
 //
-// Filtering / projection is out of scope (issue #3179 non-goal): parity is
-// the same offset/limit window the MCP tool serves, not more.
+// “query“ (#3366) is the optional structured query: when present, the
+// handle is queried server-side as one bounded read-only “SELECT“
+// (filter / project / group / aggregate) and “offset“ / “limit“ are
+// ignored. It mirrors the MCP tool's “query“ argument exactly (the same
+// :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the
+// two surfaces stay in lockstep; there is deliberately no raw-SQL argument
+// on either.
 type ResultQueryBody struct {
 	// HandleId The result handle's UUID, taken from a reduced `/call` response's `result.handle.handle_id` or `fetch_more.drill_in.example_call.args.handle_id`.
 	HandleId openapi_types.UUID `json:"handle_id"`
 
-	// Limit Page size. Default 50; max 500. Matches the `result_query` MCP tool's upper bound.
+	// Limit Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.
 	Limit *int `json:"limit,omitempty"`
 
-	// Offset Zero-based index of the first row to return. Page by advancing this by the previous `limit`.
+	// Offset Zero-based index of the first row to return (paging mode). Page by advancing this by the previous `limit`.
 	Offset *int `json:"offset,omitempty"`
+
+	// Query The structured, validated query arguments for a single handle.
+	//
+	// Every field is optional: an empty spec compiles to ``SELECT * FROM
+	// result LIMIT <max>`` — a full read-back capped at the output ceiling.
+	// The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4)
+	// and the operator/aggregate allow-lists are enforced here, at
+	// construction; field-vs-schema validation needs the handle's columns and
+	// happens in :func:`compile_query`.
+	Query *ResultQuerySpec `json:"query,omitempty"`
+}
+
+// ResultQuerySpec The structured, validated query arguments for a single handle.
+//
+// Every field is optional: an empty spec compiles to “SELECT * FROM
+// result LIMIT <max>“ — a full read-back capped at the output ceiling.
+// The list caps (“filter“ ≤ 10, “group_by“ ≤ 4, “order_by“ ≤ 4)
+// and the operator/aggregate allow-lists are enforced here, at
+// construction; field-vs-schema validation needs the handle's columns and
+// happens in :func:`compile_query`.
+type ResultQuerySpec struct {
+	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
+	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
+
+	// Filter Predicates AND-ed into the WHERE clause (max 10).
+	Filter *[]FilterPredicate `json:"filter,omitempty"`
+
+	// GroupBy Columns to group by (max 4).
+	GroupBy *[]string `json:"group_by,omitempty"`
+
+	// Limit Max output rows. Omitted or above the server ceiling clamps to the ceiling (500); the result flags `truncated` when more rows existed.
+	Limit *int `json:"limit"`
+
+	// OrderBy Sort terms (max 4).
+	OrderBy *[]OrderBy `json:"order_by,omitempty"`
+
+	// Select Projection: columns to return. Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
+	Select *[]string `json:"select,omitempty"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.

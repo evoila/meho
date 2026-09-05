@@ -198,17 +198,26 @@ connection via `_harden_connection()`:
 ```python
 self.conn.execute("SET enable_external_access=false")
 self.conn.execute("SET allow_community_extensions=false")
+self.conn.execute("SET autoinstall_known_extensions=false")
+self.conn.execute("SET autoload_known_extensions=false")
+self.conn.execute("SET max_memory='256MB'")
+self.conn.execute("SET threads=1")
 self.conn.execute("SET lock_configuration=true")  # must be last
 ```
 
 `enable_external_access=false` denies `ATTACH`, `COPY`, and
 `read_csv`/`read_json`/`read_parquet`; `allow_community_extensions=false`
-blocks third-party extension installs; `lock_configuration=true` freezes
-all further configuration and so must be applied **last** (it would
-otherwise prevent the preceding `SET`s). This is defense-in-depth against
-the latent arbitrary-file-read / SSRF / untrusted-extension surface that
-arbitrary SQL (e.g. a future `result_query` drill-in) would expose. See
-the [DuckDB securing guide](https://duckdb.org/docs/operations_manual/securing_duckdb/overview).
+plus the `autoinstall`/`autoload_known_extensions=false` pair block both
+third-party and built-in extension installs/loads; `max_memory` and
+`threads` bound the engine's resources; `lock_configuration=true` freezes
+all further configuration and so must be applied **last** — every `SET`
+above must precede it, because a post-lock `SET` raises
+`InvalidInputException` on the pinned `duckdb==1.5.5`. This is
+defense-in-depth against the latent arbitrary-file-read / SSRF /
+untrusted-extension surface that arbitrary SQL (e.g. the `result_query`
+query surface, #3366) would expose. See the
+[DuckDB securing guide](https://duckdb.org/docs/current/operations_manual/securing_duckdb/overview.html)
+and the [configuration reference](https://duckdb.org/docs/current/configuration/overview.html).
 
 ## Reducer adapter
 
@@ -447,6 +456,61 @@ MCP-only: a REST consumer that received a handle off `POST /api/v1/
 operations/call` was at a dead end. This is the design first drafted as
 the `HandleStore` in G3.1-T4 (#304, closed-superseded), revived and
 narrowed to the reduce-time spill case.
+
+### Query surface (#3366)
+
+Paging alone forces an agent that needs "the one CVE row" or "counts by
+project" to pull the whole set into context and filter client-side — the
+opposite of what the handle exists for. `result_query` therefore has a
+second mode alongside paging: `run_result_query` reads the **full**
+authorized set back (`ResultHandleStore.fetch_rows`), registers it in a
+fresh hardened `QueryEngine` under the table name `result`, and runs one
+**bounded, compiled `SELECT`** shaped by a structured `query` argument —
+filter predicates (≤10; `=, !=, <, <=, >, >=, IN, IS NULL`), `select`
+projection, `group_by` (≤4), aggregates (`COUNT/SUM/MIN/MAX/AVG`),
+`order_by` (≤4), and `limit`. The MCP `inputSchema` and the REST
+`ResultQueryBody` gain the same optional `query` object in lockstep;
+paging (`handle_id`/`offset`/`limit`) is unchanged and backward-compatible.
+
+**Why a compiled contract, not raw SQL.** The contract compiler
+([`jsonflux/query/contract.py`](../../backend/src/meho_backplane/jsonflux/query/contract.py))
+turns the typed grammar into exactly one parameterized read-only `SELECT`
+over the single registered table. Every referenced field is checked
+against the handle's known columns (unknown field → rejected, Kubernetes
+field-selector style); operators and aggregate functions are fixed
+allow-lists; caller values bind as DuckDB prepared-statement parameters,
+never string-interpolated. The unsafe forms are simply **not
+expressible** — there is no `sql=` argument on any transport. This is a
+stronger property than sanitizing a caller SQL string, verified against
+the locked `duckdb==1.5.5` / `pyarrow==25.0.1`: a `:memory:` database
+cannot be opened `read_only` (raises `CatalogException`); with
+`enable_external_access=false` an in-memory `CREATE TABLE … AS SELECT`
+still succeeds; and `execute("A; B")` silently runs both statements — so
+a raw-SQL contract would force MEHO to build and maintain a SQL parser to
+close holes that compiling from a fixed template avoids by construction
+(the negative anchor is MotherDuck's
+[`mcp-server-motherduck`](https://github.com/motherduckdb/mcp-server-motherduck):
+read-only alone is not sufficient).
+
+**Bounds.** Output rows are capped at `RESULT_QUERY_MAX_OUTPUT_ROWS`
+(default 500) with an explicit `truncated` flag (grouped results capped
+identically); the serialized output is capped at
+`RESULT_QUERY_MAX_OUTPUT_BYTES` (default 256 KB) **after** the row cap
+with an actionable over-budget error; and each compiled `SELECT` runs
+under a `RESULT_QUERY_TIMEOUT_SECONDS` (default 5) wall-time budget —
+DuckDB exposes no native Python query timeout, so the core runs
+`conn.execute()` on a worker thread and calls `conn.interrupt()` on
+expiry (raising `InterruptException`; see the
+[DuckDB Python API](https://duckdb.org/docs/current/clients/python/reference/index.html)).
+The engine's `max_memory` / `threads` ceilings (set in the sandbox above)
+bound it further.
+
+**Coverage.** Because the spill is capped at
+`RESULT_HANDLE_MAX_SPILL_ROWS`, a query may run over a subset. Every
+result carries `coverage`: `complete` when `stored_rows == total_rows`,
+else `partial` plus a `coverage_note` — so a `COUNT` over a capped spill
+is labelled as covering the stored subset only, never presented as a
+whole-inventory total.
 
 ### Sample ordering — head vs tail (G0.19-T1, #1479)
 

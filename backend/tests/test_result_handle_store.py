@@ -29,6 +29,7 @@ import redis.exceptions
 
 from meho_backplane.connectors.result_handle_store import (
     ResultHandleStore,
+    SpilledRowSet,
     SpilledWindow,
 )
 
@@ -297,3 +298,85 @@ def test_key_shape_is_tenant_scoped() -> None:
     assert _key(tenant, handle) == (
         "meho:reshandle:00000000-0000-0000-0000-0000000000aa:00000000-0000-0000-0000-0000000000bb"
     )
+
+
+# ---------------------------------------------------------------------------
+# #3366 — fetch_rows: the full-set read the query surface uses
+# ---------------------------------------------------------------------------
+
+
+async def test_fetch_rows_returns_the_full_authorized_set() -> None:
+    """The full-set read returns every stored row + the true total."""
+    fake = _FakeRedis()
+    store = ResultHandleStore(fake)
+    tenant = uuid4()
+    handle = uuid4()
+    rows = _rows(120)
+    await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="vault.kv.list",
+        rows=rows,
+        total_rows=120,
+        ttl_seconds=3600,
+        max_rows=10000,
+    )
+    row_set = await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+    assert isinstance(row_set, SpilledRowSet)
+    assert row_set.total_rows == 120
+    assert row_set.stored_rows == 120
+    assert [r["i"] for r in row_set.rows] == list(range(120))
+
+
+async def test_fetch_rows_reports_capped_spill() -> None:
+    """When the spill was capped, stored_rows < total_rows is preserved."""
+    fake = _FakeRedis()
+    store = ResultHandleStore(fake)
+    tenant = uuid4()
+    handle = uuid4()
+    await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="k8s.pods.list",
+        rows=_rows(500),
+        total_rows=500,
+        ttl_seconds=3600,
+        max_rows=100,
+    )
+    row_set = await store.fetch_rows(tenant_id=tenant, operator_sub="op-a", handle_id=handle)
+    assert row_set is not None
+    assert row_set.stored_rows == 100
+    assert row_set.total_rows == 500
+    assert len(row_set.rows) == 100
+
+
+async def test_fetch_rows_cross_operator_is_a_miss() -> None:
+    """A different operator gets a miss, not another operator's rows (#304)."""
+    fake = _FakeRedis()
+    store = ResultHandleStore(fake)
+    tenant = uuid4()
+    handle = uuid4()
+    await store.spill(
+        tenant_id=tenant,
+        operator_sub="op-a",
+        handle_id=handle,
+        op_id="op",
+        rows=_rows(10),
+        total_rows=10,
+        ttl_seconds=3600,
+        max_rows=10000,
+    )
+    assert await store.fetch_rows(tenant_id=tenant, operator_sub="op-b", handle_id=handle) is None
+
+
+async def test_fetch_rows_unknown_handle_is_none() -> None:
+    store = ResultHandleStore(_FakeRedis())
+    assert await store.fetch_rows(tenant_id=uuid4(), operator_sub="op-a", handle_id=uuid4()) is None
+
+
+async def test_fetch_rows_fails_open_on_unreachable_store() -> None:
+    """An unreachable client yields None, never an exception (fail-open)."""
+    store = ResultHandleStore(_BrokenRedis())
+    assert await store.fetch_rows(tenant_id=uuid4(), operator_sub="op-a", handle_id=uuid4()) is None

@@ -21905,6 +21905,35 @@
         "title": "AgentRunSummaryResponse",
         "description": "One row of the agent-run list (``GET /agents/runs``).\n\nA scannable index row: identity, lifecycle state, resolved model\ncoordinates, timestamps, and the ``work_ref`` change-ticket\nreference the list filters on (work_ref I3-T2 #1662). The full\n``output`` blob is omitted \u2014 a caller wanting a run's result polls\n``GET /agents/runs/{handle}``."
       },
+      "Aggregate": {
+        "properties": {
+          "func": {
+            "type": "string",
+            "enum": [
+              "COUNT",
+              "SUM",
+              "MIN",
+              "MAX",
+              "AVG"
+            ],
+            "title": "Func",
+            "description": "Aggregate function (fixed allow-list)."
+          },
+          "field": {
+            "type": "string",
+            "nullable": true,
+            "title": "Field",
+            "description": "Column to aggregate; omit only for COUNT (compiles to COUNT(*))."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "func"
+        ],
+        "title": "Aggregate",
+        "description": "One aggregate output column: ``func(field)`` (``COUNT`` may omit field).\n\n``COUNT`` with no ``field`` compiles to ``COUNT(*)``; every other\nfunction requires a field. The output alias is derived deterministically\n(``count`` / ``sum_<field>`` / ...) and quoted, so callers never inject\nan alias identifier."
+      },
       "ApprovalRequestStatus": {
         "type": "string",
         "enum": [
@@ -27409,6 +27438,43 @@
         "title": "EventSourceUpdate",
         "description": "PATCH body. Every field optional; ``name`` / ``slug`` are absent.\n\n``name`` and ``slug`` are immutable (rename or re-slug = delete +\nre-create) because ``slug`` is a live routing key external senders are\nalready pointed at. Sending ``secret`` rotates the Vault secret in\nplace at the source's existing ``secret_ref`` -- a new KV-v2 version at\nthe same path, so the ingest path reads the new value on its next\nlookup with no downtime (#2880 acceptance criterion 2). Omitting\n``secret`` leaves the stored secret untouched."
       },
+      "FilterPredicate": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Field",
+            "description": "Column to test; must exist on the handle."
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "=",
+              "!=",
+              "<",
+              "<=",
+              ">",
+              ">=",
+              "IN",
+              "IS NULL"
+            ],
+            "title": "Op",
+            "description": "Comparison operator (fixed allow-list)."
+          },
+          "value": {
+            "title": "Value",
+            "description": "The comparison value, bound as a parameter. Omit for `IS NULL`; a list for `IN`; a scalar for the ordering/equality operators."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "field",
+          "op"
+        ],
+        "title": "FilterPredicate",
+        "description": "One ``WHERE`` clause term: ``field op value``.\n\n``value`` is omitted for ``IS NULL``, a list for ``IN`` (each element\nbound as its own placeholder), and a scalar otherwise. The value is\nalways bound as a DuckDB prepared-statement parameter \u2014 never\ninterpolated \u2014 so it cannot alter the statement's structure."
+      },
       "FingerprintResult": {
         "properties": {
           "vendor": {
@@ -28962,6 +29028,33 @@
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
       },
+      "OrderBy": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Field",
+            "description": "Column to sort by; must exist on the handle."
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Direction",
+            "description": "Sort direction.",
+            "default": "asc"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "field"
+        ],
+        "title": "OrderBy",
+        "description": "One ``ORDER BY`` term: a known column plus a direction."
+      },
       "PairAddonRequest": {
         "properties": {
           "name": {
@@ -29897,7 +29990,7 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Offset",
-            "description": "Zero-based index of the first row to return. Page by advancing this by the previous `limit`.",
+            "description": "Zero-based index of the first row to return (paging mode). Page by advancing this by the previous `limit`.",
             "default": 0
           },
           "limit": {
@@ -29905,8 +29998,13 @@
             "maximum": 500.0,
             "minimum": 1.0,
             "title": "Limit",
-            "description": "Page size. Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
+            "description": "Page size (paging mode). Default 50; max 500. Matches the `result_query` MCP tool's upper bound.",
             "default": 50
+          },
+          "query": {
+            "$ref": "#/components/schemas/ResultQuerySpec",
+            "nullable": true,
+            "description": "Optional structured query. When present, the handle is queried server-side (filter / select / group_by / aggregate / order_by / limit) as one bounded read-only SELECT and `offset` / `limit` are ignored. Every referenced field must be a column on the handle; there is no raw-SQL argument."
           }
         },
         "additionalProperties": false,
@@ -29915,7 +30013,65 @@
           "handle_id"
         ],
         "title": "ResultQueryBody",
-        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\nFiltering / projection is out of scope (issue #3179 non-goal): parity is\nthe same offset/limit window the MCP tool serves, not more."
+        "description": "POST body for ``/api/v1/operations/result-query`` (#3179).\n\nThe REST twin of the MCP ``result_query`` tool's ``inputSchema``:\n``handle_id`` is the UUID minted onto a reduced ``/call`` response's\n``result.handle.handle_id`` / ``fetch_more.drill_in.example_call``, and\n``offset`` / ``limit`` window the spilled set. The bounds mirror the MCP\nschema (``offset >= 0``; ``1 <= limit <= MAX_LIMIT``) so the two surfaces\nvalidate identically. ``extra=\"forbid\"`` rejects unknown body fields with\na 422, matching the sibling ``CallOperationBody`` posture.\n\n``query`` (#3366) is the optional structured query: when present, the\nhandle is queried server-side as one bounded read-only ``SELECT``\n(filter / project / group / aggregate) and ``offset`` / ``limit`` are\nignored. It mirrors the MCP tool's ``query`` argument exactly (the same\n:class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec`), so the\ntwo surfaces stay in lockstep; there is deliberately no raw-SQL argument\non either."
+      },
+      "ResultQuerySpec": {
+        "properties": {
+          "filter": {
+            "items": {
+              "$ref": "#/components/schemas/FilterPredicate"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Filter",
+            "description": "Predicates AND-ed into the WHERE clause (max 10)."
+          },
+          "select": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Select",
+            "description": "Projection: columns to return. Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates)."
+          },
+          "group_by": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Group By",
+            "description": "Columns to group by (max 4)."
+          },
+          "aggregate": {
+            "items": {
+              "$ref": "#/components/schemas/Aggregate"
+            },
+            "type": "array",
+            "title": "Aggregate",
+            "description": "Aggregate output columns (COUNT/SUM/MIN/MAX/AVG)."
+          },
+          "order_by": {
+            "items": {
+              "$ref": "#/components/schemas/OrderBy"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "title": "Order By",
+            "description": "Sort terms (max 4)."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Limit",
+            "description": "Max output rows. Omitted or above the server ceiling clamps to the ceiling (500); the result flags `truncated` when more rows existed."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ResultQuerySpec",
+        "description": "The structured, validated query arguments for a single handle.\n\nEvery field is optional: an empty spec compiles to ``SELECT * FROM\nresult LIMIT <max>`` \u2014 a full read-back capped at the output ceiling.\nThe list caps (``filter`` \u2264 10, ``group_by`` \u2264 4, ``order_by`` \u2264 4)\nand the operator/aggregate allow-lists are enforced here, at\nconstruction; field-vs-schema validation needs the handle's columns and\nhappens in :func:`compile_query`."
       },
       "RetireChecklistReport": {
         "properties": {

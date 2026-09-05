@@ -38,13 +38,20 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, ToolSurface, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.result_query import (
     MAX_LIMIT,
+    QueryContractError,
     ResultHandleNotFoundError,
+    ResultQueryOutputTooLargeError,
+    ResultQuerySpec,
+    ResultQueryTimeoutError,
     read_result_window,
+    run_result_query,
 )
 
 __all__: list[str] = []
@@ -60,14 +67,22 @@ async def _result_query_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a ``[offset : offset+limit]`` window of a spilled handle.
+    """Read back from a spilled handle: page a window, or run a bounded query.
 
     The MCP dispatcher has already validated ``arguments`` against the
-    tool's ``inputSchema`` (``handle_id`` required, ``offset`` / ``limit``
-    bounded), so the body parses the UUID and delegates the windowed read
-    to the shared :func:`read_result_window` core (the same core the REST
-    ``POST /api/v1/operations/result-query`` route wraps). The tenant comes
-    from ``operator.tenant_id`` — the arguments carry no tenant, by design.
+    tool's ``inputSchema``, so the body parses the UUID and branches on the
+    optional ``query`` argument:
+
+    * absent → paging mode: delegate the ``[offset : offset+limit]`` window
+      to the shared :func:`read_result_window` core (unchanged, #3179).
+    * present → query mode: validate it into a
+      :class:`~meho_backplane.jsonflux.query.contract.ResultQuerySpec` and
+      delegate to :func:`run_result_query`, which compiles it to one bounded
+      read-only ``SELECT`` over the handle (#3366).
+
+    Both branches wrap the same tenant/principal scoping and not-found
+    semantics. The tenant comes from ``operator.tenant_id`` — the arguments
+    carry no tenant, by design.
     """
     raw_handle = arguments["handle_id"]
     try:
@@ -78,6 +93,10 @@ async def _result_query_handler(
             data={"reason": "invalid_handle_id", "handle_id": str(raw_handle)},
         ) from exc
 
+    raw_query = arguments.get("query")
+    if raw_query is not None:
+        return await _run_query(operator, handle_id, raw_query)
+
     offset = int(arguments.get("offset", 0))
     limit = int(arguments.get("limit", 50))
 
@@ -85,6 +104,39 @@ async def _result_query_handler(
         return await read_result_window(operator, handle_id, offset, limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
+
+
+async def _run_query(
+    operator: Operator,
+    handle_id: UUID,
+    raw_query: Any,
+) -> dict[str, Any]:
+    """Validate the ``query`` argument and run the bounded structured query.
+
+    Model-shape violations (caps, operator/aggregate allow-lists, unknown
+    sub-keys) surface as a pydantic ``ValidationError``; field-vs-schema,
+    time-budget, and output-byte violations surface from the core. All map
+    to a recoverable ``-32602`` with a machine-readable ``data.reason`` so
+    the agent can narrow and retry.
+    """
+    try:
+        spec = ResultQuerySpec.model_validate(raw_query)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(
+            f"invalid query spec: {exc.error_count()} validation error(s); "
+            f"first: {exc.errors()[0].get('msg', 'invalid')}",
+            data={"reason": "invalid_query"},
+        ) from exc
+    try:
+        return await run_result_query(operator, handle_id, spec)
+    except ResultHandleNotFoundError as exc:
+        raise _handle_not_found(handle_id) from exc
+    except QueryContractError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "invalid_query"}) from exc
+    except ResultQueryTimeoutError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "query_timeout"}) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
 
 
 def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:
@@ -108,19 +160,28 @@ register_mcp_tool(
             "Read rows back from a JSONFlux result handle. After "
             "`call_operation` reduces a large list response, you get an "
             "inline sample plus a handle (`result.handle.handle_id`); call "
-            "this tool to page through the FULL set beyond that sample. "
-            "Arguments: `handle_id` (required, the UUID from the reduced "
+            "this tool to read the FULL set beyond that sample, either by "
+            "paging or by running a bounded server-side query. "
+            "Paging: pass `handle_id` (required, the UUID from the reduced "
             "response's `handle.handle_id` / the `fetch_more.drill_in."
-            "example_call`), `offset` (default 0), `limit` (default 50, "
-            "max 500). Returns the requested window plus `total_rows` "
-            "(the full collection size), `stored_rows` (how many rows are "
-            "retrievable — may be less than `total_rows` if the spill was "
-            "capped), and `truncated`. Page by re-calling with a higher "
-            "`offset`; an empty `rows` with `offset >= stored_rows` is the "
-            "end. A handle that does not exist, has expired (TTL elapsed), "
-            "or belongs to another operator is a recoverable error "
-            "(`-32602`, `data.reason=handle_not_found`) — re-run the "
-            "original operation to get a fresh handle. Only use this when "
+            "example_call`) plus `offset` (default 0) and `limit` (default "
+            "50, max 500); page by re-calling with a higher `offset`, and an "
+            "empty `rows` with `offset >= stored_rows` is the end. "
+            "Query: pass `handle_id` plus a `query` object to filter, "
+            "project (`select`), `group_by`, and `aggregate` "
+            "(COUNT/SUM/MIN/MAX/AVG) server-side — so you fetch just the one "
+            "row you need or the counts by group, not the whole set. The "
+            "query runs as one bounded read-only SELECT over the handle "
+            "(no raw SQL); every referenced field must be a column on the "
+            "handle. Results carry `total_rows`, `stored_rows` (retrievable "
+            "rows — may be below `total_rows` if the spill was capped), "
+            "`truncated` (more rows existed than returned), and, for a "
+            "query, `coverage` (`complete`/`partial`): a `partial` result "
+            "aggregated only the stored subset, not the whole inventory. "
+            "A handle that does not exist, has expired (TTL elapsed), or "
+            "belongs to another operator is a recoverable error (`-32602`, "
+            "`data.reason=handle_not_found`) — re-run the original operation "
+            "to get a fresh handle. Only use this when "
             "`fetch_more.drill_in.available` is `true` on the handle; when "
             "it is `false` the full set was not spilled and you must "
             "re-call the operation with narrower params instead."
@@ -152,9 +213,106 @@ register_mcp_tool(
                     "maximum": _MAX_LIMIT,
                     "default": 50,
                     "description": (
-                        f"Page size. Default 50; max {_MAX_LIMIT}. Matches "
-                        "the sibling list tools' upper bound."
+                        f"Page size (paging mode). Default 50; max {_MAX_LIMIT}. "
+                        "Matches the sibling list tools' upper bound."
                     ),
+                },
+                "query": {
+                    "type": "object",
+                    "description": (
+                        "Optional structured query (query mode). When present, "
+                        "`offset`/`limit` are ignored and the handle is queried "
+                        "server-side as one bounded read-only SELECT. Every "
+                        "referenced field must be a column on the handle."
+                    ),
+                    "additionalProperties": False,
+                    "properties": {
+                        "filter": {
+                            "type": "array",
+                            "maxItems": 10,
+                            "description": "Predicates AND-ed into the WHERE clause (max 10).",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "field": {"type": "string", "minLength": 1},
+                                    "op": {
+                                        "type": "string",
+                                        "enum": ["=", "!=", "<", "<=", ">", ">=", "IN", "IS NULL"],
+                                    },
+                                    "value": {
+                                        "description": (
+                                            "Bound as a parameter. Omit for `IS NULL`; "
+                                            "a list for `IN`; a scalar otherwise."
+                                        ),
+                                    },
+                                },
+                                "required": ["field", "op"],
+                            },
+                        },
+                        "select": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "description": (
+                                "Columns to return. Omit for all columns. Not allowed "
+                                "with `aggregate`."
+                            ),
+                        },
+                        "group_by": {
+                            "type": "array",
+                            "maxItems": 4,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Columns to group by (max 4).",
+                        },
+                        "aggregate": {
+                            "type": "array",
+                            "description": "Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "func": {
+                                        "type": "string",
+                                        "enum": ["COUNT", "SUM", "MIN", "MAX", "AVG"],
+                                    },
+                                    "field": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "description": (
+                                            "Column to aggregate; omit only for COUNT (COUNT(*))."
+                                        ),
+                                    },
+                                },
+                                "required": ["func"],
+                            },
+                        },
+                        "order_by": {
+                            "type": "array",
+                            "maxItems": 4,
+                            "description": "Sort terms (max 4).",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "field": {"type": "string", "minLength": 1},
+                                    "direction": {
+                                        "type": "string",
+                                        "enum": ["asc", "desc"],
+                                        "default": "asc",
+                                    },
+                                },
+                                "required": ["field"],
+                            },
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": (
+                                f"Max output rows; clamps to {_MAX_LIMIT}. "
+                                "The result flags `truncated` when more rows existed."
+                            ),
+                        },
+                    },
                 },
             },
             "required": ["handle_id"],
@@ -171,6 +329,19 @@ register_mcp_tool(
                 "total_rows": {"type": "integer", "minimum": 0},
                 "stored_rows": {"type": "integer", "minimum": 0},
                 "truncated": {"type": "boolean"},
+                "coverage": {
+                    "type": "string",
+                    "enum": ["complete", "partial"],
+                    "description": (
+                        "Query mode only. `partial` when the spill was capped "
+                        "(`stored_rows < total_rows`) so the query covered only the "
+                        "stored subset — a count/aggregate is not a whole-inventory total."
+                    ),
+                },
+                "coverage_note": {
+                    "type": ["string", "null"],
+                    "description": "Query mode only. Human-readable coverage caveat when partial.",
+                },
             },
             "required": [
                 "handle_id",

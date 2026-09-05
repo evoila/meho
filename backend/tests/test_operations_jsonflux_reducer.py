@@ -1083,6 +1083,11 @@ async def test_reduce_spills_full_rows_and_flips_drill_in_available() -> None:
     # too, so a consumer that got the handle over REST (never touching MCP)
     # learns how to page it without a discovery dance.
     assert "POST /api/v1/operations/result-query" in drill_in.rationale
+    # #3366: the rationale advertises the bounded structured-query surface —
+    # the agent can return just the matching rows / per-group counts instead
+    # of paging the whole set — naming the structured args, not raw SQL.
+    assert "group_by" in drill_in.rationale
+    assert "query" in drill_in.rationale
 
 
 async def test_recovery_unchanged_when_inline_sample_is_byte_bounded() -> None:

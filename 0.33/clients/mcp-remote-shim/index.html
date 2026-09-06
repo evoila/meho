@@ -1997,8 +1997,16 @@ environment as the robust form for a bearer header.</p>
 (<code>command</code> + <code>args</code>, an <code>mcp.json</code>, a settings pane); the command is the
 same:</p>
 <div class="highlight"><pre><span></span><code>npx<span class="w"> </span>-y<span class="w"> </span>mcp-remote@0.1.38<span class="w"> </span>https://meho.example.com/mcp<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--header<span class="w"> </span><span class="s2">"Authorization:</span><span class="si">${</span><span class="nv">MEHO_TOKEN</span><span class="si">}</span><span class="s2">"</span>
+<span class="w">  </span>--header<span class="w"> </span><span class="s1">'Authorization:${MEHO_TOKEN}'</span>
 </code></pre></div>
+<p>The single quotes are load-bearing: they stop the shell from expanding
+<code>${MEHO_TOKEN}</code>, so the literal <code>${MEHO_TOKEN}</code> reaches <code>mcp-remote</code>,
+which substitutes the value from its own environment — the token itself
+never lands on the command line, where it would otherwise sit in the
+process table for the whole life of this long-running shim. Because the
+token still lives in the shim's environment as a bearer credential, treat
+this static-token stopgap as unsuitable for shared or multi-user
+workstations.</p>
 <p>The backplane is HTTPS, so no <code>--allow-http</code> is needed. Set
 <code>NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem</code> in the client's
 environment for an internal-CA deploy — Node does not read the OS trust

@@ -16,7 +16,7 @@
       "command": "node",
       "args": ["${__dirname}/server/index.mjs", "${user_config.backplane_url}"],
       "env": {
-        "MEHO_CA_CERT": "${user_config.ca_cert}",
+        "NODE_EXTRA_CA_CERTS": "${user_config.ca_cert}",
         "MEHO_MCP_CLIENT_ID": "${user_config.client_id}",
         "MEHO_MCP_SCOPES": "${user_config.scopes}"
       }

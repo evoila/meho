@@ -3,10 +3,13 @@
 
 """Approval-gated remediation write ops for :class:`HolodeckConnector` (G3.18-T2 #2154).
 
-G3.8 (#371) shipped the connector plus 8 read ops; every one is
-``requires_approval=False`` and read-only -- ``holodeck.k8s.exec``
-re-validates its verb against a read-only safelist, so ``kubectl delete``
-cannot pass. The VCF-9.x backup-fill outage (Initiative #2145) needed three
+G3.8 (#371) shipped the connector plus 8 read ops. The reads are
+``requires_approval=False`` and read-only, except ``holodeck.k8s.exec``,
+which forwards an operator-supplied command line and is now
+``requires_approval=True`` (approval-gated); it still re-validates its
+verb against a read-only safelist, so ``kubectl delete`` cannot pass.
+
+The VCF-9.x backup-fill outage (Initiative #2145) needed three
 narrow writes the connector could not express, so recovery fell back to
 local root SSH with no MEHO audit row. This module closes that gap with
 three **tightly bounded** remediation writes:

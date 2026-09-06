@@ -1441,6 +1441,12 @@ _READ_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
+#: ``holodeck.k8s.exec`` forwards an operator-supplied ``kubectl``
+#: command line, so it is approval-gated (safety_level='dangerous',
+#: requires_approval=True) and is exempt from the read-op safe /
+#: no-approval invariants below. Containment: evoila-bosnia/meho-internal#267.
+_APPROVAL_GATED_READ_OP_IDS: frozenset[str] = frozenset({"holodeck.k8s.exec"})
+
 
 def test_holodeck_ops_has_seventeen_entries() -> None:
     """about + 7 T2 reads + disk.usage + #2847 backups.list + 3 write ops +
@@ -1473,9 +1479,17 @@ def test_holodeck_ops_all_have_holodeck_namespace() -> None:
 
 
 def test_holodeck_read_ops_all_safe() -> None:
-    """Every T2 read op is read-only -- safety_level='safe' is mandatory."""
+    """Every T2 read op is read-only -- safety_level='safe' is mandatory.
+
+    ``holodeck.k8s.exec`` is exempt: it forwards an operator-supplied
+    kubectl command line and is approval-gated (asserted separately in
+    ``test_holodeck_k8s_exec_is_approval_gated``). See
+    evoila-bosnia/meho-internal#267.
+    """
     for op in HOLODECK_OPS:
         if op.op_id not in _READ_OP_IDS:
+            continue
+        if op.op_id in _APPROVAL_GATED_READ_OP_IDS:
             continue
         assert op.safety_level == "safe", (
             f"{op.op_id!r} has safety_level={op.safety_level!r}; every read op must be safe"
@@ -1483,12 +1497,32 @@ def test_holodeck_read_ops_all_safe() -> None:
 
 
 def test_holodeck_read_ops_all_no_approval_required() -> None:
+    # ``holodeck.k8s.exec`` is approval-gated (evoila-bosnia/meho-internal#267);
+    # exempt it here and assert its gate in test_holodeck_k8s_exec_is_approval_gated.
     for op in HOLODECK_OPS:
         if op.op_id not in _READ_OP_IDS:
+            continue
+        if op.op_id in _APPROVAL_GATED_READ_OP_IDS:
             continue
         assert op.requires_approval is False, (
             f"{op.op_id!r} should not require approval -- reads only"
         )
+
+
+def test_holodeck_k8s_exec_is_approval_gated() -> None:
+    """``holodeck.k8s.exec`` forwards an operator-supplied ``kubectl``
+    command line, so it is approval-gated rather than an unattended read
+    op: safety_level='dangerous' + requires_approval=True. This is the
+    positive counterpart to the read-op safe / no-approval invariants,
+    which exempt this op. Containment: evoila-bosnia/meho-internal#267.
+    """
+    op = next(o for o in HOLODECK_OPS if o.op_id == "holodeck.k8s.exec")
+    assert op.safety_level == "dangerous", (
+        f"holodeck.k8s.exec must be dangerous; got {op.safety_level!r}"
+    )
+    assert op.requires_approval is True, (
+        "holodeck.k8s.exec must require approval (operator-supplied command line)"
+    )
 
 
 def test_holodeck_ops_all_parameter_schemas_have_additional_properties_false() -> None:

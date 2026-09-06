@@ -1446,7 +1446,10 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "state without mutating it. The schema pattern enforces "
             "the ``kubectl <read-verb> ...`` shape at the validator "
             "layer; the handler re-checks the verb as a belt-and-braces "
-            "safety gate."
+            "safety gate. Because the command line is operator-supplied, "
+            "this op is approval-gated: a dispatch parks for human "
+            "approval before the command runs, rather than executing "
+            "unattended."
         ),
         parameter_schema={
             "type": "object",
@@ -1539,9 +1542,9 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "additionalProperties": True,
         },
         group_key="k8s",
-        tags=("read-only", "k8s", "kubectl", "holodeck"),
-        safety_level="safe",
-        requires_approval=False,
+        tags=("k8s", "kubectl", "holodeck", "approval-gated"),
+        safety_level="dangerous",
+        requires_approval=True,
         llm_instructions={
             "when_to_use": (
                 "Call when the operator wants to inspect the K8s "
@@ -1557,7 +1560,10 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "<verb> <resource>`` / ``kubectl auth whoami`` for "
                 "authorization inspection. Mutating verbs and "
                 "mutating sub-verbs (``config set-context``, "
-                "``auth reconcile``, etc.) fail closed. " + _SSH_TRANSPORT_NOTE
+                "``auth reconcile``, etc.) fail closed. This op is "
+                "approval-gated: a dispatch parks for human approval "
+                "before the command runs, rather than executing "
+                "unattended. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "command": (

@@ -518,11 +518,16 @@ def test_holodeck_read_ops_all_safe_and_no_approval_required() -> None:
     """Every read op (EXPECTED_OP_IDS) carries safety_level='safe' and no approval.
 
     The G3.18-T2 (#2154) write ops are dangerous / requires_approval=True and
-    are asserted in ``test_connectors_holodeck_write.py``.
+    are asserted in ``test_connectors_holodeck_write.py``. ``holodeck.k8s.exec``
+    is also exempt: it forwards an operator-supplied kubectl command line and is
+    approval-gated (evoila-bosnia/meho-internal#267), asserted in
+    ``test_holodeck_e2e_k8s_exec_parks_for_approval``.
     """
     read_ids = set(EXPECTED_OP_IDS)
     for op in HOLODECK_OPS:
         if op.op_id not in read_ids:
+            continue
+        if op.op_id == "holodeck.k8s.exec":
             continue
         assert op.safety_level == "safe", f"{op.op_id} should be safe"
         assert not op.requires_approval, f"{op.op_id} should not require approval"
@@ -709,15 +714,17 @@ async def test_holodeck_e2e_service_list_dispatches_ok(
 
 
 @pytest.mark.asyncio
-async def test_holodeck_e2e_k8s_exec_safe_verb_dispatches_ok(
+async def test_holodeck_e2e_k8s_exec_parks_for_approval(
     holodeck_e2e: _HolodeckE2EBundle,
     captured_events: list[Any],
 ) -> None:
-    """holodeck.k8s.exec with a read-only verb (`kubectl get pods`)
-    succeeds and returns the fixture stdout. This exercises the full
-    safety path: the schema-layer pattern accepts the shape, the
-    handler-layer `parse_kubectl_command` accepts the verb, and the
-    fake-shell returns the fixture stdout.
+    """holodeck.k8s.exec forwards an operator-supplied kubectl command
+    line, so it is approval-gated (safety_level='dangerous',
+    requires_approval=True) and no longer dispatches unattended. Even a
+    read-only verb now parks: the policy gate returns ``awaiting_approval``
+    with a pending approval-request id, and the call never reaches the
+    fake-shell (no fixture stdout leaks). Containment:
+    evoila-bosnia/meho-internal#267.
     """
     del captured_events
     result = await call_operation(
@@ -729,10 +736,12 @@ async def test_holodeck_e2e_k8s_exec_safe_verb_dispatches_ok(
             "params": {"command": "kubectl get pods -n holodeck"},
         },
     )
-    assert result["status"] == "ok", f"holodeck.k8s.exec failed: {result.get('error')}"
-    out = result["result"].get("stdout", "")
-    assert "holo-dhcp" in out, f"Expected fixture stdout; got {out!r}"
-    assert result["result"].get("exit_status") == 0
+    assert result["status"] == "awaiting_approval", (
+        f"holodeck.k8s.exec should park for approval; got {result!r}"
+    )
+    assert result.get("extras", {}).get("approval_request_id"), result
+    # The command must never have reached the fake-shell.
+    assert "holo-dhcp" not in repr(result)
 
 
 @pytest.mark.asyncio
@@ -1047,6 +1056,24 @@ async def test_holodeck_e2e_all_ops_write_audit_rows(
                 "params": params,
             },
         )
+        if op_id == "holodeck.k8s.exec":
+            # Approval-gated (evoila-bosnia/meho-internal#267): the dispatch
+            # parks instead of executing, writing an APPROVAL audit row
+            # (path='approval.request') rather than a DISPATCH row.
+            assert result["status"] == "awaiting_approval", (
+                f"holodeck.k8s.exec should park; got {result!r}"
+            )
+            async with sessionmaker() as session:
+                db_result = await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.method == "APPROVAL",
+                        AuditLog.path == "approval.request",
+                    )
+                )
+                rows = [r for r in db_result.scalars().all() if r.payload.get("op_id") == op_id]
+            assert rows, f"No APPROVAL audit row found for parked op {op_id!r}"
+            continue
+
         assert result["status"] == "ok", f"Op {op_id} failed: {result.get('error')}"
 
         async with sessionmaker() as session:

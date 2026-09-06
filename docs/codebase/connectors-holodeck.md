@@ -230,8 +230,12 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   `Get-Service | Where-Object { $_.Name -like 'Holo*' } | Select-Object
   Name,Status,DisplayName | ConvertTo-Json -Depth 4`. Same `{rows, total}`
   envelope and the same single-dict / `null` normalisation as `pod.list`.
-- **`holodeck.k8s.exec`** (group `k8s`, **read-only**). Forwards a
-  ``kubectl`` command to the in-appliance K8s cluster. Two complementary
+- **`holodeck.k8s.exec`** (group `k8s`, `safety_level=dangerous`,
+  `requires_approval=True`). Forwards an operator-supplied ``kubectl``
+  command to the in-appliance K8s cluster. Because the command line is
+  operator-supplied, the op is approval-gated: a dispatch parks for
+  human approval rather than running unattended. Its verb safelist still
+  confines it to read-only ``kubectl`` verbs, and two complementary
   allowlist layers reject both mutating verbs and shell-injection shapes
   (`;`, `&&`, `||`, `|`, `$(...)`, backticks, `>`, `<`, newline):
 

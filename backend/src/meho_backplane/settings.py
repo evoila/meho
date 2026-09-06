@@ -1643,10 +1643,14 @@ class Settings(BaseModel):
     # ``scheduler_agent_vault_path_pattern`` under the scheduler's static
     # service token (:attr:`vault_scheduler_token`), and falls back to an
     # environment variable derived from this pattern only when the Vault
-    # read yields nothing. ``{client_id}`` is substituted at fire time and
-    # the result is uppercased + non-alphanumeric chars replaced with
-    # underscores so an ``identity_ref`` like ``agent:reporter`` resolves
-    # to ``MEHO_AGENT_SECRET_AGENT_REPORTER``.
+    # read yields nothing. ``{tenant_id}`` and ``{client_id}`` are
+    # substituted at fire time from the owning tenant and the agent's
+    # ``identity_ref`` (a reversible hex encoding, S10 #298), then the
+    # whole name is uppercased — so ``agent:reporter`` in tenant
+    # ``t`` resolves to ``MEHO_AGENT_SECRET_<t.hex>_<hex(agent:reporter)>``
+    # (uppercased). Both placeholders are required so two distinct
+    # principals — name-variants within a tenant, or the same name across
+    # tenants — never resolve to the same env var.
     #
     # The env-var path is the documented **fallback / break-glass**: an
     # operator can wire an agent secret into the backplane pod's env (Helm
@@ -1657,20 +1661,28 @@ class Settings(BaseModel):
     # Keycloak secret to Vault at ``scheduler_agent_vault_path_pattern``
     # (see :meth:`AgentPrincipalService.register`) and the scheduler reads
     # it straight back.
-    scheduler_agent_secret_env_pattern: str = Field(default="MEHO_AGENT_SECRET_{client_id}")
+    scheduler_agent_secret_env_pattern: str = Field(
+        default="MEHO_AGENT_SECRET_{tenant_id}_{client_id}"
+    )
     # The Vault KV-v2 *API* path (mount + ``data/`` infix + logical path)
     # where agent ``client_credentials`` secrets live. Registration writes
     # here; the scheduler reads here -- both via ``vault_path_for_client_id``,
-    # so the two cannot diverge. ``{client_id}`` is substituted with the
-    # **sanitised, UPPER-CASED** identity_ref (non-alphanumeric chars to
-    # ``_``, then ``upper()``), e.g. ``agent:ops-writer`` ->
-    # ``secret/data/agents/AGENT_OPS_WRITER/credentials`` -- not the raw
-    # ``agent:ops-writer`` key. The default addresses the ``secret/``
-    # KV-v2 mount; the leading ``secret/data/`` is the raw API path Vault's
-    # HTTP surface uses, which the read/write helpers split into hvac's
-    # ``(mount_point, logical_path)`` form.
+    # so the two cannot diverge. ``{tenant_id}`` is substituted with the
+    # owning tenant's ``.hex`` and ``{client_id}`` with a **reversible,
+    # UPPER-CASED hex** encoding of the identity_ref (S10 #298), e.g.
+    # ``agent:ops-writer`` in tenant ``t`` ->
+    # ``secret/data/agents/<t.hex>_<hex(agent:ops-writer)>/credentials``.
+    # Threading both means two distinct principals — name-variants within a
+    # tenant, or the same name across tenants — never collide on one key.
+    # The default joins them under one ``_`` (a single dynamic path
+    # segment) so the deployed ``secret/data/agents/*/credentials`` ACL
+    # keeps matching without a policy re-scope
+    # (``docs/cross-repo/vault-provisioning.md``). The default addresses the
+    # ``secret/`` KV-v2 mount; the leading ``secret/data/`` is the raw API
+    # path Vault's HTTP surface uses, which the read/write helpers split
+    # into hvac's ``(mount_point, logical_path)`` form.
     scheduler_agent_vault_path_pattern: str = Field(
-        default="secret/data/agents/{client_id}/credentials"
+        default="secret/data/agents/{tenant_id}_{client_id}/credentials"
     )
     # G11.3-T3 #824 — event-outbox drain loop cadence. 10 s default
     # mirrors the consumer doc's accepted-latency target (the
@@ -1749,7 +1761,7 @@ class Settings(BaseModel):
         (``VAULT_KV_TENANT_SCOPE_PREFIX=""`` opts a mid-migration deploy
         out of the guard) and is accepted verbatim. Same fail-closed-at-
         startup discipline as
-        :meth:`_scheduler_secret_pattern_must_substitute_client_id`.
+        :meth:`_scheduler_secret_pattern_must_substitute_placeholders`.
         """
         if not value.strip():
             # Explicit-disable sentinel — guard is a no-op; nothing to render.
@@ -1820,20 +1832,24 @@ class Settings(BaseModel):
 
     @field_validator("scheduler_agent_secret_env_pattern")
     @classmethod
-    def _scheduler_secret_pattern_must_substitute_client_id(cls, value: str) -> str:
-        """Reject env-var patterns that don't substitute ``{client_id}``.
+    def _scheduler_secret_pattern_must_substitute_placeholders(cls, value: str) -> str:
+        """Reject env-var patterns missing ``{tenant_id}`` or ``{client_id}``.
 
-        Pulled up to :class:`Settings` construction so three otherwise-
+        Pulled up to :class:`Settings` construction so these otherwise-
         silent failure shapes surface at pod startup rather than at
         first scheduled fire:
 
         * **Pattern lacks ``{client_id}``** (typo / copy-paste error):
           ``str.format`` returns the literal pattern, every agent
           resolves to the same env-var key, all scheduled runs share
-          one secret. Cross-tenant principal-credential bleed.
-        * **Pattern uses positional ``{0}`` instead of named
-          ``{client_id}``**: ``str.format(client_id=...)`` raises
-          :class:`KeyError` on first fire. The precondition gate logs
+          one secret.
+        * **Pattern lacks ``{tenant_id}``** (S10 #298): two principals
+          with name-variants that hex-encode distinctly still stay
+          per-tenant only if the tenant is in the key; without it the
+          env fallback loses the per-tenant isolation the Vault path has.
+        * **Pattern uses positional ``{0}`` instead of a named
+          placeholder**: ``str.format(...)`` raises :class:`KeyError` on
+          first fire. The precondition gate logs
           ``scheduler_credentials_unresolved`` and skips forever.
         * **Pattern has unbalanced braces**: ``str.format`` raises
           :class:`ValueError` on first fire. Same skip-forever path.
@@ -1844,17 +1860,48 @@ class Settings(BaseModel):
         should fail the import chain immediately with an actionable
         message, not days later under load.
         """
-        if "{client_id}" not in value:
-            raise ValueError(
-                f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
-                f"'{{client_id}}' so each agent resolves to its own env var; "
-                f"got: {value!r}"
-            )
+        for placeholder in ("{tenant_id}", "{client_id}"):
+            if placeholder not in value:
+                raise ValueError(
+                    f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must include "
+                    f"'{placeholder}' so each agent resolves to its own "
+                    f"per-tenant env var; got: {value!r}"
+                )
         try:
-            value.format(client_id="TEST_CLIENT_ID")
+            value.format(tenant_id="TEST_TENANT_ID", client_id="TEST_CLIENT_ID")
         except (IndexError, KeyError, ValueError) as exc:
             raise ValueError(
                 f"SCHEDULER_AGENT_SECRET_ENV_PATTERN must be a valid "
+                f"str.format pattern; got: {value!r}"
+            ) from exc
+        return value
+
+    @field_validator("scheduler_agent_vault_path_pattern")
+    @classmethod
+    def _scheduler_vault_path_pattern_must_substitute_placeholders(cls, value: str) -> str:
+        """Reject Vault path patterns missing ``{tenant_id}`` or ``{client_id}``.
+
+        The write (registration) and the read (scheduler / event matcher /
+        checks investigator) both render this pattern via
+        :func:`~meho_backplane.scheduler.vault_credentials.vault_path_for_client_id`.
+        A pattern that drops either placeholder collapses two distinct
+        principals onto one Vault key — the exact silent-clobber this
+        filing (S10 #298) closes — so, like
+        :meth:`_scheduler_secret_pattern_must_substitute_placeholders`,
+        the fault surfaces at pod startup rather than at first fire.
+        """
+        for placeholder in ("{tenant_id}", "{client_id}"):
+            if placeholder not in value:
+                raise ValueError(
+                    f"SCHEDULER_AGENT_VAULT_PATH_PATTERN must include "
+                    f"'{placeholder}' so each agent resolves to its own "
+                    f"per-tenant Vault key; got: {value!r}"
+                )
+        try:
+            value.format(tenant_id="TEST_TENANT_ID", client_id="TEST_CLIENT_ID")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"SCHEDULER_AGENT_VAULT_PATH_PATTERN must be a valid "
                 f"str.format pattern; got: {value!r}"
             ) from exc
         return value
@@ -1870,7 +1917,7 @@ class Settings(BaseModel):
         deploy that thinks it's kill-switched but isn't is the worst-
         case outcome). Same fail-closed-at-startup discipline as
         :meth:`_broadcast_url_must_use_supported_scheme` and
-        :meth:`_scheduler_secret_pattern_must_substitute_client_id`:
+        :meth:`_scheduler_secret_pattern_must_substitute_placeholders`:
         misconfigured env vars surface at import time with an
         actionable message that names the offending entry.
 
@@ -2300,11 +2347,11 @@ def get_settings() -> Settings:
         mail_recipient_allowlist=os.environ.get("MAIL_RECIPIENT_ALLOWLIST", ""),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
-            "MEHO_AGENT_SECRET_{client_id}",
+            "MEHO_AGENT_SECRET_{tenant_id}_{client_id}",
         ),
         scheduler_agent_vault_path_pattern=os.environ.get(
             "SCHEDULER_AGENT_VAULT_PATH_PATTERN",
-            "secret/data/agents/{client_id}/credentials",
+            "secret/data/agents/{tenant_id}_{client_id}/credentials",
         ),
         event_drain_tick_interval_seconds=int(
             os.environ.get("EVENT_DRAIN_TICK_INTERVAL_SECONDS", "10"),

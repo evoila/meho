@@ -28,6 +28,7 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.events.drain import run_one_drain_tick
 from tests.test_event_matcher import (
+    _ENV_REPORTER,
     _TENANT_A,
     _all_runs,
     _create_event_trigger,
@@ -49,7 +50,7 @@ def _agent_fire_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ``agent:reporter`` definition, exactly as :mod:`tests.test_event_matcher`
     does at the unit level.
     """
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     monkeypatch.setattr(
         "meho_backplane.agent.invocation.get_client_credentials_token",
         AsyncMock(return_value="agent-token"),

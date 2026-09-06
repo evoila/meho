@@ -363,7 +363,7 @@ class AgentPrincipalService:
           same posture as a Phase-2 DB failure.
         """
         try:
-            await write_agent_secret(client_id, client_secret)
+            await write_agent_secret(client_id, client_secret, tenant_id=tenant_id)
         except SchedulerVaultNotConfiguredError:
             self._log.warning(
                 "agent_principal_register_vault_skip",

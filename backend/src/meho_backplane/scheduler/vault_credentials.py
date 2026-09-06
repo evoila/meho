@@ -34,8 +34,15 @@ Path convention
 ===============
 
 :attr:`Settings.scheduler_agent_vault_path_pattern` is the **raw Vault
-HTTP API path** (default ``secret/data/agents/{client_id}/credentials``)
-— it embeds the mount (``secret``) and the KV-v2 ``data/`` infix. hvac's
+HTTP API path** (default
+``secret/data/agents/{tenant_id}_{client_id}/credentials``) — it embeds
+the mount (``secret``) and the KV-v2 ``data/`` infix. The ``{tenant_id}``
+and ``{client_id}`` segments are derived per-tenant, per-principal
+(security S10, #298): see
+:func:`~meho_backplane.scheduler.credentials.agent_client_id_from_identity_ref`.
+The default joins them under one ``_`` (a single dynamic path segment) so
+the deployed ``secret/data/agents/*/credentials`` ACL keeps matching
+without a policy re-scope. hvac's
 ``secrets.kv.v2`` helpers want the **logical** path relative to the
 mount (they insert ``data/`` themselves — verified against hvac 2.4.0).
 :func:`split_kv_v2_api_path` reconciles the two so the shipped default
@@ -98,6 +105,7 @@ so a Vault-Agent sidecar (or an operator) that re-mints the token into
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,25 +242,36 @@ def split_kv_v2_api_path(api_path: str) -> tuple[str, str]:
     return mount, logical
 
 
-def vault_path_for_client_id(client_id: str, *, settings: Settings | None = None) -> str:
-    """Render the configured Vault path pattern for *client_id*.
+def vault_path_for_client_id(
+    client_id: str, *, tenant_id: uuid.UUID, settings: Settings | None = None
+) -> str:
+    """Render the configured Vault path pattern for *client_id* in *tenant_id*.
 
-    Substitutes the sanitised-and-upper-cased ``{client_id}`` token into
-    :attr:`Settings.scheduler_agent_vault_path_pattern`. The sanitisation
-    mirrors the env-var derivation in
+    Substitutes the per-tenant ``{tenant_id}`` segment and the reversible,
+    upper-cased ``{client_id}`` segment into
+    :attr:`Settings.scheduler_agent_vault_path_pattern`. The ``{client_id}``
+    derivation mirrors the env-var derivation in
     :func:`~meho_backplane.scheduler.credentials.agent_client_id_from_identity_ref`
-    so the Vault key and the env-var key are derived from one identity in
-    a consistent shape (``agent:reporter`` → ``AGENT_REPORTER``).
+    so the Vault key and the env-var key are derived from one identity in a
+    consistent shape, and both are threaded with the owning tenant so two
+    distinct principals — name-variants within a tenant, or the same name
+    across tenants — can never resolve to the same Vault key (S10, #298).
     """
     # Local import avoids a module-load cycle: credentials imports this
     # module's read path, so importing credentials at top level here would
     # be circular.
-    from meho_backplane.scheduler.credentials import agent_client_id_from_identity_ref
+    from meho_backplane.scheduler.credentials import (
+        agent_client_id_from_identity_ref,
+        tenant_key_segment,
+    )
 
     if settings is None:
         settings = get_settings()
-    sanitised = agent_client_id_from_identity_ref(client_id).upper()
-    return settings.scheduler_agent_vault_path_pattern.format(client_id=sanitised)
+    client_seg = agent_client_id_from_identity_ref(client_id).upper()
+    return settings.scheduler_agent_vault_path_pattern.format(
+        tenant_id=tenant_key_segment(tenant_id),
+        client_id=client_seg,
+    )
 
 
 def _current_scheduler_token(settings: Settings) -> str:
@@ -503,13 +522,14 @@ async def _execute_with_self_heal[T](
         ) from exc
 
 
-async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
+async def write_agent_secret(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
     """Persist *client_secret* for *identity_ref* to Vault; return the path.
 
     Called from the agent-principal register path after the Keycloak
     client is created and its secret fetched. Writes
-    ``{SECRET_FIELD: client_secret}`` as a KV-v2 secret at the configured
-    path under the scheduler service token.
+    ``{SECRET_FIELD: client_secret}`` as a KV-v2 secret at the
+    per-tenant, per-principal path (S10, #298) derived from *identity_ref*
+    and the owning *tenant_id* under the scheduler service token.
 
     Returns the rendered Vault API path (for logging / audit), never the
     secret value.
@@ -532,7 +552,7 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
         other status is evidence about the token, so each keeps ``False``.
     """
     settings = get_settings()
-    api_path = vault_path_for_client_id(identity_ref, settings=settings)
+    api_path = vault_path_for_client_id(identity_ref, tenant_id=tenant_id, settings=settings)
     mount, logical = split_kv_v2_api_path(api_path)
 
     def _write(client: hvac.Client) -> None:
@@ -555,13 +575,17 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
     _log.info(
         "scheduler_agent_secret_written",
         identity_ref=identity_ref,
+        tenant_id=str(tenant_id),
         vault_path=api_path,
     )
     return api_path
 
 
-async def read_agent_secret(identity_ref: str) -> str | None:
+async def read_agent_secret(identity_ref: str, *, tenant_id: uuid.UUID) -> str | None:
     """Read the agent ``client_secret`` for *identity_ref* from Vault.
+
+    Reads the per-tenant, per-principal path (S10, #298) derived from
+    *identity_ref* and the resolving *tenant_id*.
 
     Returns the secret string, or ``None`` when the secret does not exist
     (Vault 404 / missing path) so the caller can fall back to the env-var
@@ -582,7 +606,7 @@ async def read_agent_secret(identity_ref: str) -> str | None:
         re-mint fails, *or* the retry against the re-minted token also fails.
     """
     settings = get_settings()
-    api_path = vault_path_for_client_id(identity_ref, settings=settings)
+    api_path = vault_path_for_client_id(identity_ref, tenant_id=tenant_id, settings=settings)
     mount, logical = split_kv_v2_api_path(api_path)
 
     def _read(client: hvac.Client) -> object:

@@ -104,7 +104,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 def _stub_vault_write(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub the scheduler Vault write the register path performs (no live Vault)."""
 
-    async def _noop_write(identity_ref: str, client_secret: str) -> str:
+    async def _noop_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         return f"secret/data/runners/{identity_ref}/credentials"
 
     monkeypatch.setattr("meho_backplane.auth.runner_principals.write_agent_secret", _noop_write)
@@ -698,7 +698,7 @@ async def test_register_vault_write_failure_detail_splits_on_token_validity(
         SchedulerVaultBrokerError,
     )
 
-    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+    async def _failing_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         raise SchedulerVaultBrokerError("vault denied", token_invalid=token_invalid)
 
     monkeypatch.setattr("meho_backplane.auth.runner_principals.write_agent_secret", _failing_write)

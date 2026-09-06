@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -80,6 +81,17 @@ _DEV_ROOT_TOKEN: str = "meho-dev-root-1478"
 
 _IDENTITY_REF: str = "agent:reporter"
 _AGENT_SECRET: str = "dev-only-client-secret-1478"
+#: Owning tenant threaded through the derivation (S10, #298).
+_TENANT: uuid.UUID = uuid.UUID("11111111-2222-3333-4444-555555555555")
+#: Path shape the default pattern renders for ``_IDENTITY_REF`` in
+#: ``_TENANT`` — recomputed independently of the SUT.
+_CLIENT_SEG: str = _IDENTITY_REF.encode("utf-8").hex().upper()
+_API_PATH: str = f"secret/data/agents/{_TENANT.hex}_{_CLIENT_SEG}/credentials"
+_LOGICAL_PATH: str = f"agents/{_TENANT.hex}_{_CLIENT_SEG}/credentials"
+#: The per-tenant env-var name (must stay ABSENT in the Vault-sourced tests).
+_ENV_REPORTER: str = (
+    f"MEHO_AGENT_SECRET_{_TENANT.hex}_{_IDENTITY_REF.encode('utf-8').hex()}"
+).upper()
 
 
 @pytest.fixture(scope="module")
@@ -132,7 +144,7 @@ def _scheduler_vault_env(vault_dev_addr: str, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("VAULT_SCHEDULER_TOKEN", _DEV_ROOT_TOKEN)
     # Belt-and-suspenders: ensure no env-var secret is present so a pass
     # cannot come from the fallback path.
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -140,16 +152,16 @@ def _scheduler_vault_env(vault_dev_addr: str, monkeypatch: pytest.MonkeyPatch) -
 
 async def test_write_then_read_round_trip(_scheduler_vault_env: None) -> None:
     """write_agent_secret -> read_agent_secret round-trips against live Vault."""
-    api_path = await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET)
-    assert api_path == "secret/data/agents/AGENT_REPORTER/credentials"
+    api_path = await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET, tenant_id=_TENANT)
+    assert api_path == _API_PATH
 
-    read_back = await read_agent_secret(_IDENTITY_REF)
+    read_back = await read_agent_secret(_IDENTITY_REF, tenant_id=_TENANT)
     assert read_back == _AGENT_SECRET
 
 
 async def test_read_missing_returns_none(_scheduler_vault_env: None) -> None:
     """A never-written agent path reads back as ``None`` (env fallback signal)."""
-    assert await read_agent_secret("agent:never-written") is None
+    assert await read_agent_secret("agent:never-written", tenant_id=_TENANT) is None
 
 
 async def test_resolve_is_vault_sourced_with_no_env_var(
@@ -161,14 +173,14 @@ async def test_resolve_is_vault_sourced_with_no_env_var(
     persisted to Vault at registration) is schedulable without an operator
     wiring ``MEHO_AGENT_SECRET_*`` into the pod env.
     """
-    await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET)
+    await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET, tenant_id=_TENANT)
 
-    client_id, secret = await resolve_agent_credentials(_IDENTITY_REF)
+    client_id, secret = await resolve_agent_credentials(_IDENTITY_REF, tenant_id=_TENANT)
 
     assert client_id == _IDENTITY_REF
     assert secret == _AGENT_SECRET
     # Prove the env var really was absent (no accidental fallback).
-    assert os.environ.get("MEHO_AGENT_SECRET_AGENT_REPORTER") is None
+    assert os.environ.get(_ENV_REPORTER) is None
 
 
 async def test_resolve_raises_when_neither_vault_nor_env(
@@ -176,7 +188,7 @@ async def test_resolve_raises_when_neither_vault_nor_env(
 ) -> None:
     """Secret in neither Vault nor env -> AgentCredentialsUnresolvedError."""
     with pytest.raises(AgentCredentialsUnresolvedError):
-        await resolve_agent_credentials("agent:no-secret-anywhere")
+        await resolve_agent_credentials("agent:no-secret-anywhere", tenant_id=_TENANT)
 
 
 async def test_seeded_payload_field_shape(vault_dev_addr: str, _scheduler_vault_env: None) -> None:
@@ -185,11 +197,11 @@ async def test_seeded_payload_field_shape(vault_dev_addr: str, _scheduler_vault_
     A direct root-client read confirms the write shape independently of the
     broker's own read path (defends against a write/read key drift).
     """
-    await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET)
+    await write_agent_secret(_IDENTITY_REF, _AGENT_SECRET, tenant_id=_TENANT)
     root = hvac.Client(url=vault_dev_addr, token=_DEV_ROOT_TOKEN)
     payload = await asyncio.to_thread(
         root.secrets.kv.v2.read_secret_version,
-        path="agents/AGENT_REPORTER/credentials",
+        path=_LOGICAL_PATH,
         mount_point="secret",
         raise_on_deleted_version=False,
     )

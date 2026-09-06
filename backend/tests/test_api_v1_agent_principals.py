@@ -161,7 +161,7 @@ def _stub_vault_write(monkeypatch: pytest.MonkeyPatch) -> None:
     integration suite (live Vault + Keycloak).
     """
 
-    async def _noop_write(identity_ref: str, client_secret: str) -> str:
+    async def _noop_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         return f"secret/data/agents/{identity_ref}/credentials"
 
     monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _noop_write)
@@ -769,7 +769,7 @@ async def test_register_persists_captured_secret_to_vault(
 
     captured: dict[str, str] = {}
 
-    async def _capture_write(identity_ref: str, client_secret: str) -> str:
+    async def _capture_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         captured["identity_ref"] = identity_ref
         captured["secret"] = client_secret
         return f"secret/data/agents/{identity_ref}/credentials"
@@ -799,6 +799,67 @@ async def test_register_persists_captured_secret_to_vault(
 
 
 @pytest.mark.asyncio
+async def test_register_variant_names_write_distinct_vault_paths(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S10 #298: two names that collapsed to one key under the old sanitiser
+    (``a-b`` and ``a_b`` -> ``AGENT_A_B``) now write two distinct Vault
+    paths, so the first principal's secret is never overwritten.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-variant-collision")
+
+    # Distinct Keycloak internal ids + secrets per registration so a clobber
+    # would be observable as a lost secret, not merely a lost key.
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(
+        side_effect=[
+            "cc000000-0000-0000-0000-0000000000a1",
+            "cc000000-0000-0000-0000-0000000000a2",
+        ]
+    )
+    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
+    mock_client.get_client_secret = AsyncMock(side_effect=["secret-a-b", "secret-a_b"])
+    mock_client.disable_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    from meho_backplane.scheduler.vault_credentials import vault_path_for_client_id
+
+    written: dict[str, str] = {}
+
+    async def _capture_by_path(
+        identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID
+    ) -> str:
+        path = vault_path_for_client_id(identity_ref, tenant_id=tenant_id)
+        written[path] = client_secret
+        return path
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _capture_by_path)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        for name in ("a-b", "a_b"):
+            resp = client.post(
+                "/api/v1/agent-principals",
+                json={"name": name},
+                headers={"Authorization": f"Bearer {_token(key)}"},
+            )
+            assert resp.status_code == 201, resp.text
+
+    # Two registrations -> two distinct Vault keys, both secrets retained.
+    assert len(written) == 2, written
+    assert set(written.values()) == {"secret-a-b", "secret-a_b"}
+
+
+@pytest.mark.asyncio
 async def test_register_rolls_back_client_on_vault_write_failure(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -821,7 +882,7 @@ async def test_register_rolls_back_client_on_vault_write_failure(
 
     from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
 
-    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+    async def _failing_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         raise SchedulerVaultBrokerError("vault unreachable")
 
     monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _failing_write)
@@ -876,7 +937,7 @@ async def test_register_vault_write_failure_detail_splits_on_token_validity(
         SchedulerVaultBrokerError,
     )
 
-    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+    async def _failing_write(identity_ref: str, client_secret: str, *, tenant_id: uuid.UUID) -> str:
         raise SchedulerVaultBrokerError("vault denied", token_invalid=token_invalid)
 
     monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _failing_write)

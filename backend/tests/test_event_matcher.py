@@ -71,6 +71,9 @@ from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START
 
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
+#: Per-tenant, per-principal env-var name for ``agent:reporter`` in
+#: ``_TENANT_A`` (S10, #298).
+_ENV_REPORTER = (f"MEHO_AGENT_SECRET_{_TENANT_A.hex}_{b'agent:reporter'.hex()}").upper()
 # A sentinel "upstream" agent definition id the seeded events carry. It is
 # distinct from the seeded ``reporter`` agent's id, so a subscription that
 # targets this upstream (the realistic shape) never re-matches the *fired*
@@ -87,7 +90,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     # identity_ref ``agent:reporter`` -> ``AGENT_REPORTER`` env var.
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

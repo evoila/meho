@@ -170,6 +170,7 @@ from meho_backplane.scheduler.credentials import (
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.query import find_dependencies
 from meho_backplane.topology.resolvers import AmbiguousNodeError, NodeNotFoundError
+from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "ChecksFinding",
@@ -1275,13 +1276,23 @@ def _operator_section(prompt: str) -> list[str]:
 def _build_briefing(dashboard: _DashboardSnapshot, group: _CauseGroup) -> str:
     """Assemble the investigator briefing: server facts, then operator context.
 
-    Three server-built labelled sections (the briefing-builder mould from the
-    r1 harness): the transitioning Dashboard, the correlated non-green
-    Sensors with their evidence, and the ``## Output`` contract that instructs
-    a JSON-only :class:`ChecksFinding` answer so the caller-side parse is
-    deterministic.
+    Server-built labelled sections (the briefing-builder mould from the r1
+    harness): the transitioning Dashboard, the correlated non-green Sensors'
+    deterministic facts (name / state / op), and the ``## Output`` contract
+    that instructs a JSON-only :class:`ChecksFinding` answer so the
+    caller-side parse is deterministic.
 
-    When the Dashboard carries an ``investigator_prompt`` (#2721) a fourth,
+    Each Sensor's observed value / evidence / offender sample are
+    **target-returned** (an attacker who controls a field a breaching select
+    returns controls that text, S14), so they are collected into an
+    ``## Observed sensor evidence`` section wrapped in
+    :func:`~meho_backplane.untrusted_text.wrap_untrusted_text` -- the same
+    untrusted-content envelope the event-matcher path uses -- so the
+    auto-fired diagnose-only investigator reads them as data, not
+    instruction. The deterministic transition snapshot and the ``## Output``
+    schema stay outside the fence.
+
+    When the Dashboard carries an ``investigator_prompt`` (#2721) a further,
     clearly delimited section is **inserted between the transition snapshot
     and ``## Output``** -- appended after the server-built facts, never
     replacing them, so the deterministic transition data always leads and
@@ -1306,14 +1317,31 @@ def _build_briefing(dashboard: _DashboardSnapshot, group: _CauseGroup) -> str:
         "These sensors are non-green and share a common topology cause; "
         "investigate the ONE underlying cause, not each symptom."
     )
+    # Deterministic, server-built per-sensor facts (name / state / op) stay
+    # unfenced so the model reads them as trusted context.
     for member in group.members:
         parts.append("")
         parts.append(f"- name: {member.name}")
         parts.append(f"  state: {member.effective_state} (raw {member.raw_state})")
         parts.append(f"  op: {member.connector_id} {member.op_id}")
-        parts.append(f"  last_value: {member.last_value!r}")
+    # The observed value / evidence / offender sample of each Sensor are
+    # returned by the monitored target -- an attacker who controls a field a
+    # breaching select returns controls this text (S14). Fence the whole block
+    # in the same untrusted-content envelope the event-matcher path uses so an
+    # adversarial value reaches the auto-fired diagnose-only investigator as
+    # data, not instruction. The deterministic facts above and the ``## Output``
+    # contract below stay outside the fence.
+    observed: list[str] = []
+    for member in group.members:
+        observed.append(f"- name: {member.name}")
+        observed.append(f"  last_value: {member.last_value!r}")
         if member.last_evidence:
-            parts.append(f"  evidence: {member.last_evidence!r}")
+            observed.append(f"  evidence: {member.last_evidence!r}")
+    if observed:
+        parts.append("")
+        parts.append("## Observed sensor evidence (target-returned)")
+        parts.append("")
+        parts.append(wrap_untrusted_text("\n".join(observed)))
     if dashboard.investigator_prompt and dashboard.investigator_prompt.strip():
         parts.extend(_operator_section(dashboard.investigator_prompt))
     parts.append("")

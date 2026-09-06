@@ -128,13 +128,17 @@ clearly delimited section **between the transition snapshot and the
 `## Output` contract**:
 
 ```
-## Dashboard              <- server-built, deterministic
-## Correlated sensors     <- server-built, deterministic
+## Dashboard                                    <- server-built, deterministic
+## Correlated sensors                           <- server-built: name / state / op
+## Observed sensor evidence (target-returned)
+<<UNTRUSTED_AGENT_TEXT
+…last_value / evidence / offender sample…       <- target-returned, untrusted (S14)
+END_UNTRUSTED_AGENT_TEXT>>
 ## Operator instructions for this dashboard
 <<<OPERATOR-PROMPT
 …operator text…
 OPERATOR-PROMPT>>>
-## Output                 <- server-built, the answer contract
+## Output                                       <- server-built, the answer contract
 ```
 
 Three properties are load-bearing, in this order:
@@ -158,6 +162,35 @@ Three properties are load-bearing, in this order:
 The threat model is *careless*, not adversarial: the column is writable only
 by a `tenant_admin` through the create path, which is why a fixed fence is
 sufficient and a per-briefing nonce is not warranted.
+
+## Target-returned sensor evidence (S14, #302)
+
+Each correlated Sensor's `last_value`, `last_evidence` and offender `sample`
+rows are **target-returned**, not operator-authored: the assertion evaluator
+sets `evidence["observed"]` straight from the monitored op payload and samples
+offender rows verbatim (`checks/evaluate.py`). An attacker who controls a
+string/scalar field a breaching select returns therefore controls text that
+enters the auto-fired, diagnose-only investigator briefing — and here the
+threat model *is* adversarial, with no human in the loop.
+
+`_build_briefing` collects these fields into an `## Observed sensor evidence`
+section wrapped once in `wrap_untrusted_text`
+(`meho_backplane.untrusted_text`) — the same untrusted-content envelope the
+event-matcher path applies to inbound event bodies. The model reads the guard
+sentence and delimiters and attributes the content to its untrusted
+provenance, so an adversarial value that mimics an instruction (e.g. forcing
+`re_escalate=false` to suppress a genuine red) is read as data, not a
+directive. The positional wrapper means a value embedding the literal
+`END_UNTRUSTED_AGENT_TEXT>>` cannot terminate the envelope early (see
+`untrusted-text-envelope.md`).
+
+The deterministic, server-built facts stay **outside** the fence: the
+transition snapshot, the per-Sensor `name` / `state` / `op` lines, and the
+`## Output` answer contract. Only target-returned observed data is enclosed —
+the model must still trust the facts it needs to diagnose and the schema it
+must answer in. Containment beyond the fence is unchanged: the investigator
+has no mail tool and any change op it attempts parks for operator approval and
+is never executed.
 
 ## Agent-name convention (opt-in per tenant)
 
@@ -313,6 +346,10 @@ principal, so no execution path inherits the role.
   for LLM Applications, LLM01 Prompt Injection —
   <https://genai.owasp.org/llmrisk/llm01-prompt-injection/> ("separate and
   clearly denote untrusted content to limit its influence on user prompts").
+- Target-returned sensor evidence fence: Task #302 (security review S14, parent
+  Initiative #262). Reuses the `wrap_untrusted_text` envelope
+  (`untrusted-text-envelope.md`, Task #154) the event-matcher path already
+  applies to inbound event bodies.
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`
   (definition payload), `permissions.json` (`*.write` needs-approval).

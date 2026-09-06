@@ -46,6 +46,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.vault import VaultClientError
@@ -53,6 +54,7 @@ from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadEr
 from meho_backplane.connectors.mssql import MSSQL_OPS, MssqlConnector
 from meho_backplane.connectors.mssql import connector as connector_module
 from meho_backplane.connectors.mssql import queries as queries_module
+from meho_backplane.connectors.mssql.connector import _classify_fingerprint_error
 from meho_backplane.connectors.mssql.ops import MSSQL_WHEN_TO_USE_BY_GROUP
 from meho_backplane.connectors.mssql.session import (
     SQL_CREDENTIAL_FIELDS,
@@ -628,7 +630,53 @@ async def test_fingerprint_unreachable_on_error(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(queries_module, "fetch_server_identity", _boom)
     fp = await MssqlConnector().fingerprint(_MssqlTarget(), _make_operator())
     assert fp.reachable is False
-    assert "OperationalError" in fp.extras["error"]
+    # type name + classified reason only -- never the raw driver message (#3297).
+    assert fp.extras["error"] == "OperationalError: connect_failed"
+    assert "connection reset" not in fp.extras["error"]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_auth_failure_never_leaks_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3297: pytds ``LoginError`` echoes the Vault-sourced username; it must
+
+    never reach ``extras['error']`` or the ``mssql_fingerprint_unreachable``
+    warning log verbatim -- only the type name + classified ``auth_failed``.
+    """
+
+    async def _login_failed(target, operator):
+        raise pytds.LoginError("Login failed for user 'sql_svc_acct'.")
+
+    monkeypatch.setattr(queries_module, "fetch_server_identity", _login_failed)
+    with capture_logs() as captured:
+        fp = await MssqlConnector().fingerprint(_MssqlTarget(), _make_operator())
+
+    assert fp.reachable is False
+    assert fp.extras["error"] == "LoginError: auth_failed"
+    assert "sql_svc_acct" not in fp.extras["error"]
+
+    warnings = [e for e in captured if e.get("event") == "mssql_fingerprint_unreachable"]
+    assert warnings, "expected a mssql_fingerprint_unreachable warning"
+    assert warnings[0]["error"] == "LoginError: auth_failed"
+    assert "sql_svc_acct" not in warnings[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        (pytds.LoginError("Login failed for user 'sa'."), "auth_failed"),
+        (VaultCredentialsReadError("no operator jwt"), "auth_failed"),
+        (VaultClientError("vault down"), "auth_failed"),
+        (ValueError("operator-less"), "auth_failed"),
+        (TimeoutError("connect timed out"), "tcp_unreachable"),
+        (ConnectionRefusedError("refused"), "tcp_unreachable"),
+        (pytds.OperationalError("encryption required by server"), "connect_failed"),
+    ],
+)
+def test_classify_fingerprint_error_mirrors_probe(exc: Exception, reason: str) -> None:
+    """The fingerprint classifier matches the probe taxonomy (#3297)."""
+    assert _classify_fingerprint_error(exc) == reason
 
 
 @pytest.mark.asyncio

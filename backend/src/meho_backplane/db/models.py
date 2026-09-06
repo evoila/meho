@@ -5998,6 +5998,28 @@ class ApprovalRequest(Base):
       ``params`` it is never projected onto the default read view or a
       broadcast frame. Added by migration ``0096``.
 
+    * ``resume_parent`` -- JSON nullable (JSONB on PG). The parent composite
+      to re-enter when this row is a parked composite **sub-op** (#3351):
+      ``{"op_id": <composite op_id>, "params": <composite params>}``, captured
+      at park time from
+      :data:`~meho_backplane.operations.composite.composite_dispatch_var`.
+      A composite's governed sub-op parks under its sub-op governance key +
+      identity-only gate params, which is not a dispatchable descriptor call,
+      so the shared resume path re-dispatches this parent composite
+      ``_approved=True`` with the approved sub-op pre-cleared
+      (:data:`~meho_backplane.operations.composite.composite_resume_var`) —
+      reproducing the whole governed step through the normal dispatch path
+      instead of the un-executable raw key. The resume runs under the
+      approving reviewer, who auto-executes every governed sub-op (all
+      ``dangerous`` + ``requires_approval=False``), so the composite completes
+      in that single pass; a composite that would open a *second* governed gate
+      is unsupported and fails closed
+      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
+      review B1). NULL for every non-composite (direct-op) park — those keep
+      the unchanged generic re-dispatch of ``op_id`` — and on pre-0099 rows.
+      Internal resume input only; like ``params`` it is never projected onto a
+      read view or a broadcast frame. Added by migration ``0099``.
+
     Indexes
     -------
 
@@ -6166,6 +6188,15 @@ class ApprovalRequest(Base):
     # ``params`` it is never projected onto the default read view or a
     # broadcast frame. Added by migration 0096.
     resume_result: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    # Parent composite to re-enter on resume when this row parks a composite
+    # sub-op (#3351). ``{"op_id": ..., "params": ...}`` captured at park time;
+    # NULL for direct-op parks (generic re-dispatch of ``op_id``) and pre-0099
+    # rows. See the class docstring.
+    resume_parent: Mapped[dict[str, object] | None] = mapped_column(
         _PORTABLE_JSON,
         nullable=True,
         default=None,

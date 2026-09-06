@@ -49,6 +49,7 @@ __all__ = [
     "result_ambiguous_connector",
     "result_ambiguous_target",
     "result_awaiting_approval",
+    "result_composite_resume_multi_gate_unsupported",
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
@@ -459,6 +460,64 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
         error=f"denied: {reason}",
         duration_ms=duration_ms,
         extras={"error_code": "denied", "reason": reason},
+    )
+
+
+def result_composite_resume_multi_gate_unsupported(
+    *,
+    composite_op_id: str,
+    approved_op_id: str,
+    blocked_op_id: str,
+    duration_ms: float,
+) -> OperationResult:
+    """Fail-closed abort of a composite resume that would open a second gate (#3351).
+
+    Returned by
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy` when,
+    during the approval-resume re-entry of a parent composite, a governed
+    sub-op **other** than the approved one reaches ``NEEDS_APPROVAL``. The
+    resume mechanism (#3351) clears exactly one approved sub-op and re-runs
+    the whole composite under the approving reviewer, relying on every other
+    governed sub-op being ``dangerous`` + ``requires_approval=False`` so the
+    reviewer auto-executes them in one pass. A sub-op that a reviewer would
+    *not* auto-execute (``destructive`` / ``requires_approval=True``) would
+    have to park a second request, whose own resume re-enters the composite
+    from the top and re-executes every earlier governed leg — there is no
+    completed-leg guard — silently double-executing writes. No shipped
+    composite hits this (all governed sub-ops satisfy the invariant); this
+    fails closed so a future connector author who breaks the invariant gets a
+    loud, distinct refusal instead of duplicate side effects.
+
+    ``op_id`` is set to the parent ``composite_op_id`` (the entity the resume
+    was re-entering); ``extras`` names the ``approved_op_id`` that cleared and
+    the ``blocked_op_id`` that would have parked, plus a ``remediation`` that
+    points the author at the unsupported multi-gate shape.
+    """
+    return OperationResult(
+        status="error",
+        op_id=composite_op_id,
+        error=(
+            f"composite_resume_multi_gate_unsupported: resuming composite "
+            f"{composite_op_id!r} (approved sub-op {approved_op_id!r}) hit a second "
+            f"governed sub-op {blocked_op_id!r} that requires its own approval; this "
+            f"re-entry mechanism supports only one governed gate per composite and "
+            f"aborts rather than re-run the earlier legs on a second resume"
+        ),
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "composite_resume_multi_gate_unsupported",
+            "composite_op_id": composite_op_id,
+            "approved_op_id": approved_op_id,
+            "blocked_op_id": blocked_op_id,
+            "remediation": (
+                "a composite whose resume can re-park (a governed sub-op that a "
+                "reviewer does not auto-execute — safety_level=destructive or "
+                "requires_approval=True) is unsupported by the #3351 composite-child "
+                "resume path; keep every governed sub-op dangerous + "
+                "requires_approval=False, or add a completed-leg guard before "
+                "introducing a second gate"
+            ),
+        },
     )
 
 

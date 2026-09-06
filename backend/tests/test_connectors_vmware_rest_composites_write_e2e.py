@@ -45,7 +45,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
@@ -56,11 +56,19 @@ from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, EndpointDescriptor
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+    EndpointDescriptor,
+    ServicePrincipalGrant,
+)
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
-from meho_backplane.operations.approval_queue import approve_request
+from meho_backplane.operations.approval_queue import (
+    approve_request,
+    resume_dispatch_after_approval,
+)
 from meho_backplane.settings import get_settings
 
 _CONNECTOR_ID = "vmware-rest-9.0"
@@ -2427,3 +2435,371 @@ async def test_vm_customize_preview_and_broadcast_carry_no_secret(
     # #2681 envelope stamped here too.
     assert effect["op_id"] == "vmware.composite.vm.customize"
     assert effect["safety_level"] == "dangerous"
+
+
+# ===========================================================================
+# #3351 — approve-resume of a parked composite *sub-op* executes the step
+# ===========================================================================
+#
+# The above tests park the *top-level* composite (a USER hits
+# ``requires_approval=True``) and resume it by re-dispatching ``_approved=True``,
+# where the sub-op gate auto-executes for the human. #3351 is the other case: a
+# service / agent principal whose composite top-level cleared (grant) parks at a
+# governed *sub-op* whose ``op_id`` is not a dispatchable descriptor call —
+# a REST ``?action=`` power key (``unknown_op`` on the old generic re-dispatch)
+# or a VI-JSON ``CreateVM_Task`` (``invalid_params`` — no path var / body). The
+# fix re-enters the *parent composite* on resume with the approved sub-op
+# pre-cleared, so the whole governed step reproduces.
+
+
+async def _persist_vmware_target() -> UUID:
+    """Persist a real vmware Target row so the resume path re-hydrates it by id."""
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                version="9.0",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+    return target_id
+
+
+async def _seed_composite_service_grant(*, composite_op_id: str, target_id: UUID) -> None:
+    """Grant a service principal a standing grant on the *composite* op only.
+
+    The issue's real actor: a service principal running a blueprint. The
+    grant clears the top-level composite gate (``consult_and_record_grant``),
+    but there is **no** grant on the governed sub-op, so the sub-op parks —
+    the exact shape #3351 tracks (top-level cleared, a sub-op left to park).
+    """
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                id=uuid.uuid4(),
+                tenant_id=_TENANT_ID,
+                principal_sub="svc-blueprint",
+                op_id=composite_op_id,
+                connector_id=_CONNECTOR_ID,
+                target_id=target_id,
+                reason="unattended build",
+                created_by_sub="ops-admin",
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_vm_power_subop_park_approve_resume_executes(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """REST ``?action=`` power sub-op: park → approve → resume fires the power op.
+
+    The #3351 second instance: the parked sub-op's ``op_id`` is
+    ``POST:/vcenter/vm/{vm}/power?action=start`` — a composite governance key
+    with no ingested descriptor, so the old resume returned ``unknown_op`` and
+    executed nothing. The fix re-enters ``vmware.composite.vm.power`` with the
+    approved sub-op pre-cleared, so the power write fires exactly once.
+    """
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    # The service grant clears the top-level composite; the power sub-op has no
+    # grant, so it is the thing that parks.
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.power", target_id=target_id
+    )
+
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = {"vm": "vm-1", "verb": "on"}
+
+    # Step 1: service dispatch -> the governed power sub-op parks; nothing fired.
+    result1 = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.power",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == [], "the power op must not fire before approval"
+    request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    # The parked row is the sub-op governance key, and it records the parent
+    # composite to re-enter on resume.
+    assert pending.op_id == "POST:/vcenter/vm/{vm}/power?action=start"
+    assert pending.resume_parent == {
+        "op_id": "vmware.composite.vm.power",
+        "params": params,
+    }
+
+    # Step 2: a human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+
+    # Step 3: resume re-enters the parent composite; the power op executes once.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "ok"
+    assert resume.result["verb"] == "on"
+    # The REST ``?action=start`` write fired exactly once — no ``unknown_op``.
+    assert recorder.calls == [("POST", "/vcenter/vm/vm-1/power?action=start")]
+
+    # The reduced envelope was captured for the originating consumer (#3209).
+    async with get_sessionmaker()() as s:
+        final = await s.get(ApprovalRequest, request_id)
+    assert final is not None
+    assert final.resumed_at is not None
+    assert final.resume_result is not None
+    assert final.resume_result["status"] == "ok"
+
+
+class _Pre9RecordingVmwareConnector(_RecordingVmwareConnector):
+    """A recorder that reports a pre-9.0 build so ``vm.create`` rides the vim arm."""
+
+    async def _about_version(self, target: Any, operator: Operator) -> str | None:
+        del target, operator
+        return "8.0.3.00500"
+
+
+@pytest.mark.asyncio
+async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """VI-JSON ``CreateVM_Task`` sub-op: park → approve → resume → the VM exists.
+
+    The #3351 headline: on a pre-9.0 target ``vm.create`` rides
+    ``POST:/Folder/{moId}/CreateVM_Task`` with identity-only gate params (no
+    ``{moId}`` path var, no assembled ConfigSpec), so the old generic resume
+    failed ``invalid_params`` / ``connector_error`` and the VM never appeared.
+    The fix re-enters ``vmware.composite.vm.create`` with the approved sub-op
+    pre-cleared, so the vim create fires and the VM is created.
+    """
+    recorder = _Pre9RecordingVmwareConnector()
+    recorder.responses.update({"/vcenter/datastore/datastore-11": {"name": "datastore1"}})
+    recorder.vmomi_responses.update(
+        {
+            "/Folder/group-v55/CreateVM_Task": {
+                "_typeName": "ManagedObjectReference",
+                "type": "Task",
+                "value": "task-3351",
+            },
+            # The task poll (RetrievePropertiesEx type=Task) returns success
+            # carrying the new VirtualMachine moid in TaskInfo.result.
+            "Task": {
+                "_typeName": "RetrieveResult",
+                "objects": [
+                    {
+                        "_typeName": "ObjectContent",
+                        "obj": {
+                            "_typeName": "ManagedObjectReference",
+                            "type": "Task",
+                            "value": "task-3351",
+                        },
+                        "propSet": [
+                            {
+                                "_typeName": "DynamicProperty",
+                                "name": "info",
+                                "val": {
+                                    "_typeName": "TaskInfo",
+                                    "state": "success",
+                                    "result": {
+                                        "_typeName": "ManagedObjectReference",
+                                        "type": "VirtualMachine",
+                                        "value": "vm-3351",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.create", target_id=target_id
+    )
+
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    target = _FakeVmwareTarget(target_id=target_id)
+    # ``folder`` pin skips the folder-name lookup; pool + datastore pins are
+    # required on the vim arm; no NICs keeps the resolution reads minimal.
+    params = {
+        "name": "vm-approved",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-11",
+    }
+
+    # Step 1: service dispatch -> the CreateVM_Task sub-op parks; no create fired.
+    result1 = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.vmomi_calls == [], "CreateVM_Task must not fire before approval"
+    request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+    assert pending is not None
+    assert pending.op_id == "POST:/Folder/{moId}/CreateVM_Task"
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["op_id"] == "vmware.composite.vm.create"
+
+    # Step 2: a human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+
+    # Step 3: resume re-enters the composite; the vim create fires -> VM exists.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    assert resume.status == "ok", resume.error
+    assert resume.result["status"] == "created"
+    assert resume.result["vm_id"] == "vm-3351"
+    # The CreateVM_Task vim write fired on the approved resume — no
+    # invalid_params / connector_error, and the VM was created.
+    vmomi_paths = [call[0] for call in recorder.vmomi_calls]
+    assert "/Folder/group-v55/CreateVM_Task" in vmomi_paths
+
+
+# ===========================================================================
+# #3351 review B1 — fail-closed guard against a multi-gate composite resume
+# ===========================================================================
+#
+# The single-gate resume above completes a composite in one pass because the
+# approving USER reviewer auto-executes every governed sub-op (all dangerous +
+# requires_approval=False). The unsafe case the guard closes: a *second*
+# governed sub-op that a reviewer would NOT auto-execute. Without a guard, that
+# sub-op re-parks on the resume, and approving it re-enters the composite from
+# the top and re-runs the earlier legs — a duplicate write (the reviewer
+# reproduced a second CreateVM/CreateVM_Task). The guard fails closed instead:
+# it never parks the second gate, so no second resume — and no double-execution
+# — can occur.
+
+
+@pytest.mark.asyncio
+async def test_vm_create_multi_gate_resume_fails_closed_no_double_execute(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later governed leg that re-gates on resume aborts, not re-parks (#3351 B1).
+
+    Forces a second gate by making every write sub-op ``requires_approval=True``
+    (a reviewer does not auto-execute those). ``vm.create`` with
+    ``power_on_after_create=True`` then parks at create for the service
+    principal; on the approve-resume the create fires exactly once and the
+    *power* leg — a second governed gate — would re-park. The fail-closed guard
+    aborts the resume with ``composite_resume_multi_gate_unsupported`` instead,
+    so (a) no second approval row is written, (b) the create leg ran exactly
+    once (no duplicate VM), and (c) the distinct error surfaces.
+    """
+    # Force the multi-gate condition: a reviewer parks (does not auto-execute)
+    # a requires_approval=True sub-op, so the power leg re-gates on resume.
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
+        True,
+    )
+
+    recorder = _RecordingVmwareConnector()
+    # The REST create returns the new VM id; the power leg would POST next.
+    recorder.responses.update({"/vcenter/vm": {"value": "vm-multigate-1"}})
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.create", target_id=target_id
+    )
+
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    target = _FakeVmwareTarget(target_id=target_id)
+    # ``folder`` pin skips the folder lookup; power_on_after_create adds the
+    # second governed leg after create.
+    params = {
+        "name": "vm-multigate",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "power_on_after_create": True,
+    }
+
+    # Step 1: service dispatch -> the create sub-op parks; nothing fired.
+    result1 = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == [], "create must not fire before approval"
+    request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+        parked_count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm"
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["op_id"] == "vmware.composite.vm.create"
+    assert parked_count == 1
+
+    # Step 2: a human reviewer approves the parked create sub-op.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+
+    # Step 3: resume re-enters the composite. create fires once; the power leg
+    # is a second governed gate -> the guard aborts the resume, fail-closed.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    # (c) the distinct error surfaces, naming the composite + both sub-ops.
+    assert resume.status == "error"
+    assert resume.extras["error_code"] == "composite_resume_multi_gate_unsupported"
+    assert resume.extras["composite_op_id"] == "vmware.composite.vm.create"
+    assert resume.extras["approved_op_id"] == "POST:/vcenter/vm"
+    assert resume.extras["blocked_op_id"] == "POST:/vcenter/vm/{vm}/power?action=start"
+
+    # (b) the earlier (create) leg executed exactly once — no duplicate VM, and
+    # the power leg never reached the wire.
+    assert recorder.calls == [("POST", "/vcenter/vm")]
+
+    # (a) no second park was created — the guard did not queue a fresh request.
+    async with get_sessionmaker()() as s:
+        final_count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert final_count == 1

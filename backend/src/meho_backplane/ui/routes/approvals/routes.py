@@ -123,6 +123,10 @@ from fastapi.responses import HTMLResponse
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest
+from meho_backplane.operations.approval_context import (
+    ReviewerContext,
+    resolve_reviewer_context,
+)
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -332,6 +336,37 @@ async def _get_request_or_404(session: UISessionContext, request_id: uuid.UUID) 
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="approval_request_not_found",
             ) from exc
+
+
+async def _get_request_with_context_or_404(
+    session: UISessionContext, request_id: uuid.UUID
+) -> tuple[ApprovalRequest, ReviewerContext]:
+    """Fetch one request + its resolved reviewer context in one session (#3353).
+
+    The redacted, human-legible judging context (resolved target name,
+    subject, parent composite, blast radius, "what will happen" sentence)
+    is resolved inside the same session that loads the row, from the shared
+    :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+    the CLI's ``GET /api/v1/approvals/{id}`` uses -- so the modal and
+    ``meho approvals show`` render the same contract and never drift.
+    Fail-open: the resolver never raises, so a resolution miss just yields
+    an empty context and the modal keeps the raw ids.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        try:
+            row = await get_request(
+                db_session,
+                tenant_id=session.tenant_id,
+                request_id=request_id,
+            )
+        except ApprovalNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="approval_request_not_found",
+            ) from exc
+        reviewer_context = await resolve_reviewer_context(db_session, row)
+    return row, reviewer_context
 
 
 def _is_self_approval_blocked(operator: Operator, request: ApprovalRequest) -> bool:
@@ -593,12 +628,17 @@ async def _render_detail_modal(
     bare error to the actionable single-operator guidance (#2669).
     """
     operator = await _resolve_operator(session)
-    approval = await _get_request_or_404(session, request_id)
+    approval, reviewer_context = await _get_request_with_context_or_404(session, request_id)
 
     self_approval_blocked = _is_self_approval_blocked(operator, approval)
     csrf_token = mint_csrf_token(str(session.session_id))
     context: dict[str, object] = {
         "request": project_request_to_view(approval),
+        # Redacted reviewer context (#3353), resolved from the shared
+        # resolver so the modal renders the same substance ``meho approvals
+        # show`` does. Always present in this context (StrictUndefined-safe)
+        # -- the template guards on ``.is_empty`` before drawing the block.
+        "reviewer_context": reviewer_context,
         "self_approval_blocked": self_approval_blocked,
         "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
         "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,

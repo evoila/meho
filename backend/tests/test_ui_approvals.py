@@ -61,6 +61,7 @@ from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
+    Target,
     Tenant,
 )
 from meho_backplane.settings import get_settings
@@ -479,6 +480,146 @@ def test_detail_modal_renders_request_fields() -> None:
     assert "X-CSRF-Token" in body
     # CSRF cookie re-set on the modal render so the pair lines up.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+def _seed_target_sync(
+    *,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    name: str,
+    product: str,
+    version: str | None,
+) -> None:
+    """Insert one target row so the reviewer-context resolver can name it."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=tenant_id,
+                    name=name,
+                    product=product,
+                    version=version,
+                    host=f"{name}.lab.example",
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def _seed_pathvar_request_sync(
+    *,
+    tenant_id: uuid.UUID,
+    request_id: uuid.UUID,
+    op_id: str,
+    target_id: uuid.UUID,
+    params: dict[str, object],
+) -> None:
+    """Insert a pending path-variable request carrying identity params."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                ApprovalRequest(
+                    id=request_id,
+                    tenant_id=tenant_id,
+                    run_id=None,
+                    principal_sub=_REQUESTER_SUB,
+                    op_id=op_id,
+                    connector_id="vmware-rest-9.0",
+                    target_id=target_id,
+                    params_hash="0" * 64,
+                    params=params,
+                    proposed_effect={"op_id": op_id, "connector_id": "vmware-rest-9.0"},
+                    status=ApprovalRequestStatus.PENDING.value,
+                    work_ref="gh:evoila/meho#42",
+                    created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def test_detail_modal_renders_reviewer_context() -> None:
+    """The modal resolves target name, subject, run context (#3353).
+
+    Parity with ``meho approvals show``: both surfaces render from the one
+    :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+    resolver, so the console shows the resolved target name, the concrete
+    subject of the path-variable op (instead of the unresolved ``{vm}``),
+    and the change-ticket ref -- the substance a human needs to judge it.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = uuid.uuid4()
+    _seed_target_sync(
+        tenant_id=_TENANT_A,
+        target_id=target_id,
+        name="lab-vcenter",
+        product="vmware",
+        version="9.0",
+    )
+    rid = uuid.uuid4()
+    _seed_pathvar_request_sync(
+        tenant_id=_TENANT_A,
+        request_id=rid,
+        op_id="POST:/vcenter/vm/{vm}/power?action=start",
+        target_id=target_id,
+        params={"vm": "vm-1042", "name": "web-01"},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Resolved target name + product/version alongside (not the bare GUID).
+    assert "lab-vcenter" in body
+    assert "vmware" in body
+    # Resolved subject of the path-variable op.
+    assert "web-01 (vm-1042)" in body
+    # Run context: the change-ticket ref.
+    assert "gh:evoila/meho#42" in body
+
+
+def test_detail_modal_reviewer_context_omits_secret_param() -> None:
+    """A secret-keyed param never reaches the modal's reviewer context (#3353)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    target_id = uuid.uuid4()
+    _seed_target_sync(
+        tenant_id=_TENANT_A,
+        target_id=target_id,
+        name="lab-vcenter",
+        product="vmware",
+        version="9.0",
+    )
+    rid = uuid.uuid4()
+    _seed_pathvar_request_sync(
+        tenant_id=_TENANT_A,
+        request_id=rid,
+        op_id="POST:/vcenter/vm/{vm}/power?action=start",
+        target_id=target_id,
+        params={"password": "hunter2", "token": "sk-abcdef0123456789"},
+    )
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # No secret param value is echoed anywhere in the rendered modal.
+    assert "hunter2" not in body
+    assert "sk-abcdef0123456789" not in body
 
 
 def test_detail_modal_approve_enabled_for_other_operator() -> None:

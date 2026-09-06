@@ -229,6 +229,27 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # This was the last guest-ops write riding broadcast unredacted
         # (flagged as the unpinned sibling in the #3255 pin above).
         "vmware.composite.vm.guest.file.write",
+        # #3361 — the governed linux-ssh config-file write. Its ``content``
+        # param is the file body to write; ``content`` is neither a
+        # secret-*named* key nor a recognisable secret *shape*, so the
+        # key-name / Tier-1 scrub in ``scrub_broadcast_params`` lets it
+        # through — a plain ``write`` classification (the ``.write`` suffix)
+        # would ship the whole file body on the feed. Pinning it collapses the
+        # params dict to aggregate-only; the park-time bespoke preview echoes
+        # only path + byte size + backup path + validate command, never the
+        # content (the ``vmware.composite.vm.guest.file.write`` mold above).
+        "linux.file.write",
+        # #3361 — the governed linux-ssh script-execution write, the sibling of
+        # the guest ``program.run`` above. Its ``arguments`` string (a command
+        # line) and ``env`` values can hold credential material
+        # (``--token=…``, ``API_KEY=…``) in ``params``, and neither is a
+        # secret-*named* key nor a recognisable secret *shape*, so the scrub
+        # misses them — and ``.run`` is not even a ``.write`` suffix, so an
+        # unpinned classification would fall through to ``other`` and ship the
+        # command line in full. Pinning it collapses the params dict to
+        # aggregate-only; the park-time bespoke preview echoes only program
+        # identity + argument byte size + env-var NAMES, never any value.
+        "linux.script.run",
     }
 )
 

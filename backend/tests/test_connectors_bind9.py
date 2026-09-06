@@ -456,11 +456,13 @@ def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
     a literal are :mod:`~meho_backplane.connectors.bind9.connector`
     (the ``_remote_bash_with_sudo`` helper),
     :mod:`~meho_backplane.connectors.bind9._atomic` (the atomic-apply
-    primitive that funnels its writes through the helper), and
+    primitive that funnels its writes through the helper),
     :mod:`~meho_backplane.connectors.rke2._sudo` (the rke2 connector's
     own sanctioned safe-sudo primitive — same wire shape as bind9's
     ``_remote_bash_with_sudo``: it stdin-streams a bash script body to
-    ``sudo -S -p "" bash`` so the password never lands in argv/logs).
+    ``sudo -S -p "" bash`` so the password never lands in argv/logs), and
+    :mod:`~meho_backplane.connectors.linux._sudo` (the linux-ssh
+    connector's copy of that same byte-identical primitive).
 
     A failure means a new sudo argv slipped in somewhere; the
     operator must fold it back through :meth:`_remote_bash_with_sudo`.
@@ -488,6 +490,10 @@ def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
         connectors_root / "bind9" / "connector.py",
         connectors_root / "bind9" / "_atomic.py",
         connectors_root / "rke2" / "_sudo.py",
+        # The linux-ssh connector's own sanctioned safe-sudo primitive --
+        # byte-identical wire shape to rke2/_sudo.py (stdin-streams the bash
+        # body to ``sudo -S -p "" bash`` so the password never lands in argv).
+        connectors_root / "linux" / "_sudo.py",
     }
     sudo_argv_re = re.compile(r"""(?<=["'])sudo(?=["'\s\\])""")
     offenders: list[str] = []

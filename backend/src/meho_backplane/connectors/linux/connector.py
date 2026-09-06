@@ -448,6 +448,61 @@ class LinuxSshConnector(SshConnector):
 
         return await linux_mount_list(self, target, params, operator)
 
+    async def file_write(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.file.write`` (group ``file``, dangerous)."""
+        from meho_backplane.connectors.linux.ops_write import linux_file_write
+
+        return await linux_file_write(self, target, params, operator)
+
+    async def service_control(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.service.control`` (group ``service``, caution)."""
+        from meho_backplane.connectors.linux.ops_write import linux_service_control
+
+        return await linux_service_control(self, target, params, operator)
+
+    async def script_run(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.script.run`` (group ``exec``, dangerous)."""
+        from meho_backplane.connectors.linux.ops_write import linux_script_run
+
+        return await linux_script_run(self, target, params, operator)
+
+    async def sysctl_write(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.sysctl.write`` (group ``system``, dangerous)."""
+        from meho_backplane.connectors.linux.ops_write import linux_sysctl_write
+
+        return await linux_sysctl_write(self, target, params, operator)
+
+    async def firewall_load(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``linux.firewall.load`` (group ``firewall``, dangerous)."""
+        from meho_backplane.connectors.linux.ops_write import linux_firewall_load
+
+        return await linux_firewall_load(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`LINUX_OPS` into ``endpoint_descriptor``.

@@ -183,6 +183,103 @@ parameter, an `OperationResult`, an audit row, a broadcast event, or a log
 line; the shared SSH seam logs only command length + exit code, and hands
 the command + output to the fail-closed redaction engine.
 
+## The write surface (T2)
+
+The governed day-2 configuration + remediation tier. It turns the
+state-changing moves an operator performs today over unaudited bare SSH
+into governed operations that flow through the same policy / approval /
+audit / broadcast / preview path every other write does. The handlers live
+in `ops_write.py`; the root-elevation primitive lives in `_sudo.py`.
+
+| op_id | group | Tier | Params | Returns |
+|---|---|---|---|---|
+| `linux.file.write` | `file` | `dangerous` + approval | `path`, `content`, `validate_command?`, `backup?` | `{written, path, backup_path, validated, rolled_back}` |
+| `linux.service.control` | `service` | `caution` (no approval) | `action`, `unit`, `daemon_reload?` | `{unit, action, daemon_reload, ok}` |
+| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `timeout_seconds?`, `use_sudo?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
+| `linux.sysctl.write` | `system` | `dangerous` + approval | `key`, `value` | `{key, value, applied, dropin_path}` |
+| `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?` | `{applied, backend, validated}` |
+
+### Tier rationale
+
+`service.control` is `caution`, not `dangerous`: a systemd action
+(start / stop / restart / reload / enable / disable) is recoverable, so it
+follows the estate `service.*` mold and runs immediately rather than
+parking — no approval, but still audited and broadcast. The other four are
+`dangerous` + `requires_approval=True`: they write config, run arbitrary
+code, change a kernel parameter, or replace a firewall ruleset — a botched
+one wedges the host, so a human approves first. **No op is `destructive`**:
+none of these deletes an irreplaceable object, so the destructive-tier
+blast-radius builder gate (which refuses to park a `destructive` op without
+a bound blast-radius preview) does not apply here — `file.write` is
+`dangerous`, not `destructive`, because its backup + rollback make it
+recoverable.
+
+`script.run` is the **intentional arbitrary-code surface** — a typed verb
+governed by approval, not an interactive shell. It exists so the aborted
+first-boot script can be re-run (or a multi-step fix applied) *through* the
+backplane rather than around it. It returns `stdout` as a list of lines so
+a large output spills to a `result_query` handle through the JSONFlux
+reducer rather than flooding agent context; `stderr` is capped inline.
+
+### Root elevation
+
+Every write that needs root funnels through `_sudo.py`'s
+`run_remote_bash_with_sudo`, a **byte-identical copy** of the rke2 safe-sudo
+primitive (only the module docstring and the family-scoped structlog event
+name are adapted; the rendered wire shape must not drift between families).
+The sudo password is streamed as the last stdin line after the exact script
+bytes — `head -c <N>` consumes exactly the script, so `sudo -S` reads only
+the password line and it never lands in the remote `argv`, the shell
+history, `ApprovalRequest.params`, the audit row, a broadcast event, or a
+log line. A `sudo_password` containing a control character (`\n` / `\r` /
+`\x00`) is rejected **before** the connection opens. The password resolves
+from the target's Vault secret (`sudo_password`, then `password`); the
+copied sudo path records no flight-recorder span (it logs lengths + exit
+code only).
+
+### Split preview posture
+
+The two credential-bearing writes and the two non-secret writes preview
+differently, by design:
+
+- `linux.file.write` (`content`) and `linux.script.run` (`arguments` /
+  `env`) can carry secret material in their params, so they are pinned
+  `credential_write` in `broadcast/events.py` (`_CREDENTIAL_WRITE_OPS`) —
+  the broadcast collapses their params to aggregate-only — and
+  `preview_operation` returns `preview_unavailable` for them (the
+  credential-class exclusion in `_is_previewable`), because the request-time
+  preview's `redacted_body` slot cannot scrub a structured secret. Their
+  reviewer preview is instead a **bespoke park-time `proposed_effect`**
+  (`register_preview_builder`, fail-soft) that echoes only shape — path +
+  content byte size + backup path + validate command for `file.write`;
+  interpreter + script byte size + argument byte size + env-var **names** +
+  working directory + sudo intent + timeout for `script.run` — and **never**
+  the `content` / script body / argument values / env values.
+- `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
+  register **no** bespoke builder and stay previewable via
+  `preview_operation` on the generic params-echo default. For
+  `firewall.load` this is the point: the reviewer sees the full ruleset
+  before approving.
+
+### Approval + secret hygiene
+
+No approval logic lives in any handler: the dispatcher parks a `dangerous`
++ `requires_approval` op and the handler body runs only on the
+`_approved=True` resume path. Approval is a human-only decision — there is
+no MCP decision path for it. No op declares a `password` / `secret`
+parameter. Every operator-supplied value is `shlex.quote`d or base64-carried
+into a fixed command, and `file.write` confines its `path` under a
+**narrower** write-root allow-list (`/etc`, `/var/lib`, `/run`, `/opt`,
+`/srv`, `/usr/local`) than the read roots — `/proc` / `/sys` (the sysctl
+op's job) and `/var/log` are deliberately not writable here.
+
+**Operator rule (shared-machinery caveat):** do not put a bare secret in
+`content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
+verbatim so the approved call can be re-dispatched, so a secret placed
+there is durable on the approval row (the same rule as the guest
+`program.run` / `file.write` verbs). Pass a Vault reference the script
+resolves at run time instead.
+
 ## Key types
 
 - `LinuxSshConnector` (`connectors/linux/connector.py`) — the connector

@@ -15,11 +15,22 @@ against ``_write.vm_import_from_library_composite``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import datetime
 import hashlib
+import socket
+import ssl
+import threading
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, ClassVar
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest import ovf_import, ovf_transfer
@@ -579,6 +590,129 @@ async def test_private_device_host_streams_when_thumbprint_matches(
     assert isinstance(result, LeaseImportResult)
     assert result.status == "imported"
     assert conn._client.puts[0]["url"] == "https://10.11.16.9/nfc/lease-1/disk-0.vmdk"
+
+
+# ---------------------------------------------------------------------------
+# The verification-off handshake itself (SonarCloud S5527/S4830 by-design, #3344)
+# ---------------------------------------------------------------------------
+#
+# Every pin test above stubs ``_fetch_peer_cert_der``; these exercise the real
+# ``check_hostname = False`` / ``CERT_NONE`` handshake the module docstring
+# documents, against a loopback self-signed server. That is exactly what S5527
+# (server-hostname-verification-disabled) and S4830 (cert-not-verified) flag: an
+# ESXi device host serves a self-signed cert, so chain/hostname validation cannot
+# be the control and the certificate *thumbprint* is. The suppression is both
+# necessary (a verifying context refuses the endpoint) and safe (the pin fails
+# closed on a mismatch) -- proven here end to end, no monkeypatch.
+
+
+def _self_signed_pem() -> tuple[bytes, bytes, bytes]:
+    """Return ``(cert_pem, key_pem, cert_der)`` for a throwaway self-signed cert."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "esxi-device.local")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .sign(key, hashes.SHA256())
+    )
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    )
+    return (
+        cert.public_bytes(serialization.Encoding.PEM),
+        key_pem,
+        cert.public_bytes(serialization.Encoding.DER),
+    )
+
+
+@contextlib.contextmanager
+def _self_signed_tls_server(tmp_path: Path, cert_pem: bytes, key_pem: bytes) -> Iterator[int]:
+    """Serve *cert_pem* on a loopback port in a daemon thread; yield the port."""
+    cert_file = tmp_path / "cert.pem"
+    key_file = tmp_path / "key.pem"
+    cert_file.write_bytes(cert_pem)
+    key_file.write_bytes(key_pem)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert_file), str(key_file))
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(5)
+    sock.settimeout(0.5)
+    stop = threading.Event()
+
+    def _serve() -> None:
+        while not stop.is_set():
+            try:
+                client, _ = sock.accept()
+            except (TimeoutError, OSError):
+                continue
+            try:
+                tls = ctx.wrap_socket(client, server_side=True)
+                tls.recv(64)
+                tls.close()
+            except (ssl.SSLError, OSError):
+                with contextlib.suppress(OSError):
+                    client.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        yield sock.getsockname()[1]
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        sock.close()
+
+
+def test_fetch_peer_cert_der_returns_the_self_signed_cert_verification_rejects(
+    tmp_path: Path,
+) -> None:
+    """The suppressed handshake fetches a self-signed cert a verifying context refuses.
+
+    Exercises the S5527/S4830 by-design line over a real loopback handshake:
+    ``_fetch_peer_cert_der`` returns the exact DER the self-signed server
+    presents, while a default (verifying) context raises on the same endpoint --
+    proving verification is off by necessity, with the thumbprint as the control.
+    """
+    cert_pem, key_pem, cert_der = _self_signed_pem()
+    with _self_signed_tls_server(tmp_path, cert_pem, key_pem) as port:
+        assert ovf_transfer._fetch_peer_cert_der("127.0.0.1", port, 5.0) == cert_der
+        verifying = ssl.create_default_context()
+        with (
+            socket.create_connection(("127.0.0.1", port), timeout=5.0) as raw,
+            pytest.raises(ssl.SSLError),
+        ):
+            verifying.wrap_socket(raw, server_hostname="esxi-device.local")
+
+
+async def test_pin_verifies_end_to_end_against_a_real_self_signed_handshake(
+    tmp_path: Path,
+) -> None:
+    """``verify_device_thumbprint`` over the real handshake: match passes, mismatch fails closed.
+
+    The pin tests above stub the handshake; this drives the real
+    verification-off ``_fetch_peer_cert_der`` against a loopback self-signed
+    server. The lease-attested SHA-1 of the presented cert verifies; a wrong
+    thumbprint raises ``DeviceThumbprintError`` -- the security model intact
+    without any hostname or chain check.
+    """
+    cert_pem, key_pem, cert_der = _self_signed_pem()
+    good = _colon_hex(hashlib.sha1(cert_der).hexdigest())
+    bad = _colon_hex(hashlib.sha1(b"not-this-cert").hexdigest())
+    with _self_signed_tls_server(tmp_path, cert_pem, key_pem) as port:
+        url = f"https://127.0.0.1:{port}/nfc/disk-0.vmdk"
+        await ovf_transfer.verify_device_thumbprint(url, good)
+        with pytest.raises(ovf_transfer.DeviceThumbprintError):
+            await ovf_transfer.verify_device_thumbprint(url, bad)
 
 
 # ---------------------------------------------------------------------------

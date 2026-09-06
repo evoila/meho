@@ -49,8 +49,8 @@ cp -R "${SCRIPT_DIR}/server" "${STAGE}/server"
 # dependencies in node_modules (MANIFEST spec) — there is no `npx` fetch
 # at runtime. `npm ci` installs the exact, integrity-checked tree pinned
 # in package-lock.json; `--omit=dev` prunes it to the production deps the
-# launcher actually spawns. The launcher resolves the entry from this
-# node_modules at run time via process.execPath.
+# launcher actually runs. The launcher resolves the entry from this
+# node_modules at run time and imports it in-process (no spawn).
 cp "${SCRIPT_DIR}/package.json" "${SCRIPT_DIR}/package-lock.json" "${STAGE}/"
 ( cd "${STAGE}" && npm ci --omit=dev --no-audit --no-fund )
 

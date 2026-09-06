@@ -61,12 +61,14 @@ jobs:
             exit 1
           fi
 
-      - name: Behavioral test — launcher spawn contract
+      - name: Behavioral test — launcher in-process contract
         # Runs the launcher under a minimal PATH (imposed inside the suite)
-        # to prove the vendored-runtime spawn never reaches for npx —
-        # `spawn npx ENOENT` under Claude Desktop's GUI PATH is the field-
-        # test failure this bundle fixes (#3143/#3144). No network / npm
-        # install: the suite stubs mcp-remote.
+        # to prove it never reaches for PATH tools, and that it runs
+        # mcp-remote in-process (imports its entry, spawns no child) — the
+        # F6 failure mode where a spawned `process.execPath` child FATALs
+        # under Claude Desktop's Electron helper is what this bundle fixes
+        # (#3341, building on #3143/#3144). No network / npm install: the
+        # suite stubs mcp-remote.
         run: node --test clients/claude-desktop-mcpb/test/index.test.mjs
 
       - name: Pack bundle (dry-run)

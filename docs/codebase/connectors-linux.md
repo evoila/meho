@@ -356,3 +356,75 @@ resolves at run time instead.
 - Molds: `connectors-bind9.md`, `connectors-rke2.md`,
   `connectors-windows-dns.md`.
 - v0.1-spec §3 / §4 / §6 / §7.
+
+## Day-0 verification recipe
+
+Readiness is an **observation, not an inference from power-on**. A
+provisioning run that deploys a services host, powers it on, and applies a
+couple of perimeter reach ops has proven only that the VM is *running* —
+not that its in-guest day-0 configuration succeeded. For a Tools-less host
+(outside the VMware-Tools guest-ops path — see
+[`connectors-vmware-rest-guest-ops.md`](connectors-vmware-rest-guest-ops.md)),
+this connector is the only governed channel that can look inside. This
+recipe is the ordered sequence of T1 read ops a run (or an operator) issues
+**at the moment it would declare readiness**, so a silently-aborted
+first-boot is caught by a governed, audited read instead of an unaudited
+SSH session.
+
+It ships **no new ops** — every step is an already-shipped `safe` T1 read
+verb (§ *The read surface (T1)*), or, for the functional probe, an op on
+the existing `net` diagnostics connector
+([`connectors-net-diagnostics.md`](connectors-net-diagnostics.md)). The
+recipe is a documented contract over those verbs, not code.
+
+Each step runs through the ordinary dispatch path (`call_operation` on the
+agent surface, `meho operation call linux-ssh-1.x <op_id> --target <host>
+--params '{…}'` on the CLI), so every readiness check is auth-scoped,
+policy-gated, audited, and broadcast — the property an out-of-band SSH
+session cannot offer.
+
+### The ordered sequence
+
+Cheapest-and-most-decisive first. The caller supplies the environment
+specifics (the sentinel path, the first-boot log path, the unit list, the
+kernel-parameter keys, the probe targets); the op ids and their decisions
+are the fixed part.
+
+| # | op (`connector_id`) | Caller params | The decision it drives |
+|---|---|---|---|
+| 1 | `linux.file.read` (`linux-ssh-1.x`) | `path` (completion sentinel), `max_bytes?` | Present ⇒ first-boot ran to its last line; **absent ⇒ it failed or is still running**. The cheapest decisive signal. A never-written sentinel returns `exists=false` (a legible signal, not an error). |
+| 2 | `linux.log.tail` (`linux-ssh-1.x`) | `path` (first-boot log), `lines?` | The terminal "complete" line, or — when step 1 says *absent* — the `set -euo pipefail` **abort reason**: a missing NIC, an unresolvable package mirror, a red config-validate. |
+| 3 | `linux.service.status` (`linux-ssh-1.x`) | `unit` (once per declared unit: DNS, DHCP, NTP, the firewall unit, NFS) | `is-active` / `is-enabled` per unit. **Any inactive ⇒ that subsystem is down even if the sentinel exists.** |
+| 4 | `linux.sysctl.read` (`linux-ssh-1.x`) | `key` (e.g. `net.ipv4.ip_forward`) | The **live** value of each kernel parameter the day-0 config set — did first-boot actually enable IP forwarding, or only write a `.conf` that never took effect? |
+| 5 | `linux.firewall.show` (`linux-ssh-1.x`) | — | The live ruleset (`nft list ruleset` / `iptables-save`). Confirm the **default-deny base + reach block are actually loaded**, not merely that a rules file validated. |
+| 6 | `linux.mount.list` (`linux-ssh-1.x`) | — | The mount table + NFS exports (`findmnt` + `exportfs -s` / `showmount -e`). Confirm the **base NFS export the dependent hosts need is live** and the expected mount is present. |
+| 7 | `net.dns_lookup` / `net.ntp_check` (`net-probe-1.x`) | dns: `name`, `type?`, `resolver?`; ntp: `host`, `port?` | **Cross-connector functional probe.** A unit being `active` (step 3) is not proof the service *answers* — resolve a name against the host's resolver, read the NTP peer — closing the gap between "unit active" and "service correct." Served by the existing `net` connector, referenced not duplicated. |
+
+Steps 1–6 are the six T1 read verbs of this connector; step 7 is a
+functional probe on the `net` diagnostics connector, **not** a Linux verb —
+this connector adds no functional-service probe of its own (Initiative
+#3359 non-goal). The `net` probe destinations must be inside
+`MEHO_NETDIAG_PROBE_ALLOWLIST` or the probe is refused before any packet is
+sent. `net` ships no DHCP-lease probe today; a lease-liveness functional
+check would be a separate `net`-connector follow-up.
+
+### Steps 1–3 catch the motivating failure
+
+The failure this recipe retires: a run declared a Tools-less services host
+"configured" on deploy + power-on + perimeter reach, while the host's
+entire in-guest day-0 config had aborted silently — the first-boot script
+wrote a completion sentinel and a log that **nothing ever read**.
+
+- **Step 1** (`file.read` of the sentinel) reports `exists=false` — the
+  single decisive signal that first-boot did not finish.
+- **Step 2** (`log.tail` of the first-boot log) surfaces *why* it aborted.
+- **Step 3** (`service.status` per declared unit) confirms which
+  subsystems never came up.
+
+Any one of these three, run as a governed op at the moment the run declared
+readiness, would have caught the failure immediately. Steps 4–7 harden the
+check beyond "did it start" into "is the configuration correct and does the
+service answer." Running the recipe **retires the unaudited-SSH diagnosis
+path** for the services-host case: the diagnosis that previously required an
+operator to open a hand SSH session is now an ordered sequence of audited
+reads any caller — human or automation — can issue.

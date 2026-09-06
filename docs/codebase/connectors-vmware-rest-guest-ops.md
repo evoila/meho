@@ -91,13 +91,21 @@ like `guest.file.write`'s `content`, they are **not** scrubbed on every
 surface (see the safety model for the precise split and the operator
 guidance on not passing bare secrets).
 
-**Why (b) is still deferred, not discarded.** After #3255, one capability
-branch (a) genuinely cannot serve remains:
+**Why (b) is a complementary tier — now built (#3359).** After #3255, one
+capability branch (a) genuinely cannot serve remains:
 
 - **Guests without VMware Tools.** No Tools → no guest operations at all;
-  (b) — a `linux-ssh` typed connector — is the only channel there. If and
-  when a Tools-less guest is a concrete need, (b) is the follow-up. This
-  channel does **not** build it.
+  (b) — a `linux-ssh` typed connector — is the only channel there. That
+  need became concrete, so (b) shipped as the `linux-ssh` typed connector
+  (Initiative #3359): a per-target-credentialled, safelisted-verb SSH
+  connector for any IP-reachable Linux host, **complementary to (a), not a
+  replacement**. Choose (a) for a Tools-bearing VM in the fleet (especially
+  one with no network route to MEHO); choose (b) for an IP-reachable Linux
+  host regardless of hypervisor or Tools. See
+  [`connectors-linux.md`](connectors-linux.md) — its day-0 verification
+  recipe is the ordered read-op sequence a provisioning run uses to
+  *observe* that a Tools-less host actually came up, instead of inferring
+  readiness from power-on.
 
 (The other historically-cited gap — "running a command and capturing its
 output" — is now served by `guest.program.run` for exit code + status,
@@ -365,5 +373,7 @@ signal when done).
 - Redaction precedent: `guest.file.write` excludes `content` the same way
   `guest.program.run` excludes `arguments` / `env`
   (`operations/_preview.py`, `broadcast/events.py` `scrub_broadcast_params`).
-- Still-deferred tier (b): a `linux-ssh` typed connector for Tools-less
-  guests — not built here.
+- Complementary tier (b): the `linux-ssh` typed connector for Tools-less
+  guests and any IP-reachable Linux host — built under Initiative #3359,
+  documented in [`connectors-linux.md`](connectors-linux.md); not part of
+  this channel.

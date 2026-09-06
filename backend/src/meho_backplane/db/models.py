@@ -5204,11 +5204,14 @@ class ServicePrincipalGrant(Base):
     * ``service_principal_grant_lookup_idx`` — b-tree on
       ``(tenant_id, principal_sub, op_id)`` — the dispatch-time query.
     * ``uq_service_principal_grant_targeted`` / ``…_targetless`` — two
-      **partial** unique indexes (``target_id IS [NOT] NULL AND revoked_at
-      IS NULL``) enforcing "at most one active grant per fully-scoped
-      key". Split because the nullable ``target_id`` would otherwise defeat
-      a single unique index on the targetless case (``NULL != NULL``), and
-      scoped to ``revoked_at IS NULL`` so a revoked scope can be re-granted.
+      **partial** unique indexes enforcing "at most one active grant per
+      fully-scoped key". Split because the nullable ``target_id`` would
+      otherwise defeat a single unique index on the targetless case
+      (``NULL != NULL``), and scoped to ``revoked_at IS NULL`` so a revoked
+      scope can be re-granted. Since #3349 the ``…_targetless`` index is
+      narrowed to *pure* targetless grants (``target_product`` and
+      ``target_name_pattern`` both NULL); selector grants (#3349) also key
+      ``target_id IS NULL`` but carry their own CRUD-layer uniqueness check.
     """
 
     __tablename__ = "service_principal_grant"
@@ -5235,6 +5238,19 @@ class ServicePrincipalGrant(Base):
     # NULL keys a targetless / tenant-wide op; a UUID keys exactly one
     # target. Matched exactly at dispatch (no any-target wildcard).
     target_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Target *selector* (#3349), an alternative to a concrete ``target_id``:
+    # a grant with a selector matches any dispatch whose target fingerprint
+    # satisfies it, so an operator can authorise an op on targets that do
+    # not yet exist (a blueprint that registers its own appliances mid-run).
+    # ``target_product`` matches the target's ``product`` exactly;
+    # ``target_name_pattern`` is an ``fnmatch`` glob over the target ``name``.
+    # A selector grant keys ``target_id IS NULL`` with at least one of these
+    # non-NULL; a pure targetless grant keys all three NULL. The wildcard is
+    # requested explicitly here (never implied by a NULL ``target_id``), and
+    # matching is still exact on ``(tenant, principal_sub, op_id,
+    # connector_id)`` — deny-by-default is preserved.
+    target_product: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_name_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Operator's upfront justification (the review flow requires it).
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
@@ -5284,8 +5300,20 @@ class ServicePrincipalGrant(Base):
             "op_id",
             "connector_id",
             unique=True,
-            postgresql_where=sa.text("target_id IS NULL AND revoked_at IS NULL"),
-            sqlite_where=sa.text("target_id IS NULL AND revoked_at IS NULL"),
+            # Narrowed (#3349) to *pure* targetless grants (no selector) so a
+            # selector grant — which also keys ``target_id IS NULL`` — is not
+            # forced into the single-targetless-grant slot. Selector-grant
+            # uniqueness is enforced in the CRUD layer (``create``), not by a
+            # partial index, to sidestep NULL-vs-NULL on the nullable selector
+            # columns portably across Postgres / SQLite.
+            postgresql_where=sa.text(
+                "target_id IS NULL AND target_product IS NULL "
+                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+            ),
+            sqlite_where=sa.text(
+                "target_id IS NULL AND target_product IS NULL "
+                "AND target_name_pattern IS NULL AND revoked_at IS NULL"
+            ),
         ),
         Index(
             "service_principal_grant_expires_at_idx",

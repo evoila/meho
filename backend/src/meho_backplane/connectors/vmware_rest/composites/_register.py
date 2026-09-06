@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — per-composite registration-metadata table
+# (one _CompositeSpec row per vmware-rest composite, field-table form); the
+# sibling schemas.py declaration module carries the same marker. Predates
+# this change (~1490 lines); splitting the metadata table is out of scope for
+# the #3349 governed-subop wiring.
 
 """``register_vmware_composite_operations`` -- registrar for the 33 composites.
 
@@ -57,6 +62,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.composites._governed_subops import (
+    register_vmware_governed_subops,
+)
 from meho_backplane.connectors.vmware_rest.composites._guest import (
     guest_env_read_composite,
     guest_file_read_composite,
@@ -1488,3 +1496,9 @@ async def register_vmware_composite_operations(
             llm_instructions=spec.llm_instructions,
             embedding_service=embedding_service,
         )
+
+    # #3349: publish each write composite's governed child-op set into the
+    # discovery registry the GET /api/v1/operations/governed-subops surface
+    # reads, so an operator assembles a composite's grant set without reading
+    # the ``_SUB_OPS_*`` / ``_VIM_SUB_OPS_*`` manifests in source.
+    register_vmware_governed_subops()

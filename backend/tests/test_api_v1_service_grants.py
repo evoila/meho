@@ -166,3 +166,47 @@ def test_create_review_rejects_bad_op(client: TestClient, op_id: str, expect_fra
         response = client.post(_BASE, headers=headers, json=body)
     assert response.status_code == 422, response.text
     assert expect_fragment in response.json()["detail"]
+
+
+def test_operator_creates_selector_grant(client: TestClient) -> None:
+    """A selector grant is created (201) and its selector fields ride the read surface."""
+    key = make_rsa_keypair("kid-sel")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        body = {
+            "principal_sub": "svc:deploy-bot",
+            "op_id": "vmware.composite.vm.create",
+            "connector_id": "vmware-rest-9.0",
+            "target_product": "vmware",
+            "target_name_pattern": "esx-dc*",
+            "reason": "authorise runtime-created ESXi appliances",
+        }
+        created = client.post(_BASE, headers=headers, json=body)
+        assert created.status_code == 201, created.text
+        payload = created.json()
+        assert payload["target_id"] is None
+        assert payload["target_product"] == "vmware"
+        assert payload["target_name_pattern"] == "esx-dc*"
+
+        shown = client.get(f"{_BASE}/{payload['id']}", headers=headers)
+        assert shown.status_code == 200
+        assert shown.json()["target_name_pattern"] == "esx-dc*"
+
+
+def test_create_rejects_target_id_with_selector(client: TestClient) -> None:
+    """target_id + a selector is a 422 at the schema boundary (mutually exclusive)."""
+    key = make_rsa_keypair("kid-sel2")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        body = {
+            "principal_sub": "svc:deploy-bot",
+            "op_id": "vmware.composite.vm.create",
+            "connector_id": "vmware-rest-9.0",
+            "target_id": str(uuid.uuid4()),
+            "target_product": "vmware",
+            "reason": "contradiction",
+        }
+        response = client.post(_BASE, headers=headers, json=body)
+    assert response.status_code == 422, response.text

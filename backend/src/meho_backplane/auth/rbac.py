@@ -45,10 +45,17 @@ from uuid import UUID
 import structlog
 from fastapi import Depends, HTTPException, status
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, TenantRole, is_human_principal
 from meho_backplane.middleware import verify_jwt_and_bind
 
-__all__ = ["authorize_tenant_scope", "require_approvals_access", "require_role"]
+__all__ = [
+    "HUMAN_ONLY_REST_REMEDIATION",
+    "authorize_tenant_scope",
+    "ensure_human_principal",
+    "require_approvals_access",
+    "require_human_principal",
+    "require_role",
+]
 
 #: Linear role ordering. Index = rank; ``read_only`` is rank 0,
 #: ``tenant_admin`` is rank 2. The dependency compares the actual
@@ -254,3 +261,73 @@ def authorize_tenant_scope(operator: Operator, requested: UUID | None) -> UUID:
         status_code=status.HTTP_403_FORBIDDEN,
         detail="cross_tenant_requires_platform_admin",
     )
+
+
+#: Remediation returned when a machine principal reaches a human-only
+#: governance verb over REST. Names the human path (operator console /
+#: ``meho`` CLI) the way the MCP transport's
+#: :data:`~meho_backplane.mcp.human_only.HUMAN_ONLY_MCP_TOOLS` messages do,
+#: so REST and MCP speak one policy (meho-internal#289). Carried on the 403
+#: ``detail`` behind the machine-readable ``human_principal_required:``
+#: prefix, mirroring the ``self_approval_forbidden: <hint>`` shape the
+#: approvals routes already return.
+HUMAN_ONLY_REST_REMEDIATION: Final[str] = (
+    "this is a human-only governance decision (v0.1-spec §7): a machine "
+    "principal (agent / service / runner) has no path to it on any transport. "
+    "Perform it as a human operator via the approvals queue in the operator "
+    "console, or the meho CLI human path (e.g. `meho approvals approve "
+    "<request-id>`, `meho agent grant elevate ...`, `meho agent-principal "
+    "register ...`)."
+)
+
+
+def ensure_human_principal(operator: Operator) -> None:
+    """Refuse a machine principal on a human-only governance verb (#289).
+
+    Transport-independent guard for the verbs that are a **human**
+    decision (v0.1-spec §7): the approval decisions (approve / reject /
+    decide), agent-grant create / elevate, and agent-principal register. A
+    machine principal — ``principal_kind`` in
+    :data:`~meho_backplane.auth.operator.MACHINE_PRINCIPAL_KINDS` (agent /
+    service / runner) — is refused with HTTP 403 and a remediation naming
+    the console / CLI human path, mirroring the MCP transport's human-only
+    block (:mod:`meho_backplane.mcp.human_only`). The two layers are one
+    policy: an agent principal is minted ``tenant_admin`` with the REST
+    audience, so this closes the transport that the MCP block alone could
+    not.
+
+    Independent of — and evaluated **before** — the role / ``approver``
+    floor, so a machine token holding ``tenant_admin`` (or the ``approver``
+    capability) is refused here regardless. The approver capability model
+    (#3243) and the seniority self-approval rules are preserved unchanged
+    for **human** principals: this gate only removes machine kinds; every
+    human decision path downstream is untouched.
+    """
+    if is_human_principal(operator):
+        return
+    structlog.get_logger(__name__).warning(
+        "non_human_principal_denied",
+        operator_sub=operator.sub,
+        principal_kind=operator.principal_kind.value,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"human_principal_required: {HUMAN_ONLY_REST_REMEDIATION}",
+    )
+
+
+def require_human_principal(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> Operator:
+    """FastAPI dependency form of :func:`ensure_human_principal` (#289).
+
+    Attach to a human-only governance route as a route-decorator
+    ``dependencies=[...]`` entry (or a parameter default) to reject a
+    machine ``principal_kind`` before the endpoint runs, independent of the
+    route's existing role / approver gate. Returns the validated
+    :class:`~meho_backplane.auth.operator.Operator` so it also composes as a
+    parameter dependency. ``verify_jwt_and_bind`` is request-cached, so
+    pairing this with the route's role dependency verifies the JWT once.
+    """
+    ensure_human_principal(operator)
+    return operator

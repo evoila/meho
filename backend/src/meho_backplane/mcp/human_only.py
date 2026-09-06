@@ -39,6 +39,19 @@ This module is the single source of truth for two consumers:
 * The guard test ``tests/test_mcp_human_only_surface.py`` asserts none
   of these names is registered and that no tool module wires a handler
   to an approval-decision or grant-elevation endpoint.
+
+This is the **MCP-transport** half of one transport-independent policy:
+approval is a human decision (v0.1-spec §7). The **REST-transport** half
+lives in :func:`meho_backplane.auth.rbac.ensure_human_principal` /
+:func:`~meho_backplane.auth.rbac.require_human_principal`, which reject a
+machine ``principal_kind`` (agent / service / runner) on the approval
+decision routes and on grant create / elevate + agent-principal register —
+closing the seam that an agent principal, minted ``tenant_admin`` with the
+REST audience, would otherwise reach over REST (meho-internal#289). Both
+halves consult the same
+:func:`meho_backplane.auth.operator.is_human_principal` split, so removing
+a verb from the agent surface here and refusing the machine kind there are
+one decision, not two.
 """
 
 from __future__ import annotations

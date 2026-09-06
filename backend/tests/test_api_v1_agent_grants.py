@@ -189,3 +189,88 @@ def test_operator_role_is_rejected_with_insufficient_role(
         response = client.request(method, path, headers=headers, json=body)
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "insufficient_role"}
+
+
+# ---------------------------------------------------------------------------
+# meho-internal#289 — grant create / elevate are human-only on every
+# transport. An agent principal is minted ``tenant_admin``, so it clears the
+# role gate; the human-principal guard must still refuse it so a machine
+# cannot mint or widen its own (or a sibling's) grant over REST.
+# ---------------------------------------------------------------------------
+
+# RUNNER is refused earlier on the wire (401 missing_runner_id, and the
+# runner path-cage in middleware) so it never reaches this guard over REST;
+# the RUNNER kind is covered at the service layer in test_approval_queue.py.
+_MACHINE_KINDS: tuple[str, ...] = ("agent", "service")
+
+# Only the write verbs that mint / widen a grant carry the human-kind gate.
+_HUMAN_ONLY_GRANT_ENDPOINTS: tuple[tuple[str, dict[str, Any]], ...] = (
+    (
+        "/api/v1/agents/grants",
+        {
+            "principal_sub": "agent:deploy-bot",
+            "op_pattern": "vm.list",
+            "verdict": "auto-execute",
+        },
+    ),
+    (
+        "/api/v1/agents/grants/elevate",
+        {
+            "principal_sub": "agent:deploy-bot",
+            "op_pattern": "vm.power_off",
+            "verdict": "needs-approval",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        },
+    ),
+)
+
+
+def _machine_admin_token(key: Any, *, kind: str, sub: str = "machine-admin") -> str:
+    """Mint a machine principal at ``tenant_admin`` — how agents are minted (#289)."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+
+
+@pytest.mark.parametrize("kind", _MACHINE_KINDS)
+@pytest.mark.parametrize("path, body", _HUMAN_ONLY_GRANT_ENDPOINTS)
+def test_machine_principal_denied_on_grant_create_and_elevate(
+    client: TestClient,
+    path: str,
+    body: dict[str, Any],
+    kind: str,
+) -> None:
+    """A machine ``tenant_admin`` token → 403 ``human_principal_required`` (#289)."""
+    key = make_rsa_keypair(f"kid-machine-{kind}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_machine_admin_token(key, kind=kind)}"}
+        response = client.post(path, headers=headers, json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("human_principal_required"), response.text
+
+
+@pytest.mark.parametrize("path, body", _HUMAN_ONLY_GRANT_ENDPOINTS)
+def test_human_admin_passes_kind_gate_on_grant_create_and_elevate(
+    client: TestClient,
+    path: str,
+    body: dict[str, Any],
+) -> None:
+    """A human ``tenant_admin`` clears both the role and the human-kind gate (#289).
+
+    Both auth dependencies fire before request-body validation (the role
+    gate already does, per this module's negative matrix), so a human
+    ``tenant_admin`` sending a deliberately empty body reaches Pydantic
+    validation — HTTP 422, never the human-only gate's 403. That the
+    endpoint validates the body at all proves the auth gates were cleared.
+    """
+    key = make_rsa_keypair("kid-human-admin")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.TENANT_ADMIN)}"}
+        response = client.post(path, headers=headers, json={})
+    assert response.status_code == 422, response.text

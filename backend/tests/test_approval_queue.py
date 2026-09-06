@@ -54,9 +54,11 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    NonHumanApprovalError,
     ParamsMismatchError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
+    _check_reviewer_role,
     approve_request,
     create_pending_request,
     expire_stale_requests,
@@ -155,13 +157,16 @@ def _make_operator(
     sub: str = "reviewer-sub",
     role: TenantRole = TenantRole.OPERATOR,
     tenant_id: uuid.UUID = _TENANT_ID,
-    principal_kind: PrincipalKind = PrincipalKind.AGENT,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
     approver: bool = False,
 ) -> Operator:
-    # Defaults to an AGENT principal: the approval queue only fires for
-    # agent principals (the G11.2-T3 gate hard-denies requires_approval
-    # for human/service principals). Service-level tests that call the
-    # approval API directly are unaffected by the kind. ``approver`` carries
+    # Defaults to a USER (human) principal: deciding a parked op — approve /
+    # reject / decide / expire — is a human-only action on every transport
+    # (v0.1-spec §7, meho-internal#289), so ``_check_reviewer_role`` now
+    # refuses a machine ``principal_kind`` (agent / service / runner). These
+    # service-level tests exercise the reviewer path, so the default reviewer
+    # must be human; a test modelling an agent *parker* passes
+    # ``principal_kind=PrincipalKind.AGENT`` explicitly. ``approver`` carries
     # the orthogonal approve-only capability (#3243) so a ``read_only``
     # reviewer can still decide.
     return Operator(
@@ -998,6 +1003,41 @@ async def test_read_only_operator_cannot_reject(session: AsyncSession) -> None:
     async with get_sessionmaker()() as s2:
         with pytest.raises(UnauthorizedApprovalError):
             await reject_request(s2, pending.id, operator=read_only_op)
+
+
+# ---------------------------------------------------------------------------
+# Human-only decision gate — machine principals cannot decide (#289)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", [PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER])
+def test_check_reviewer_role_rejects_non_human_principal(kind: PrincipalKind) -> None:
+    """A machine principal is refused by the service-layer reviewer gate (#289).
+
+    Deciding a parked op is a human action (v0.1-spec §7). A machine
+    principal — even one minted ``tenant_admin`` — is refused with
+    :class:`NonHumanApprovalError` (a :class:`UnauthorizedApprovalError`
+    subclass, so the routes still map it to 403). This is the transport-
+    independent backstop behind the REST ``require_human_principal``
+    dependency; the check keys on ``principal_kind``, not role or the
+    ``approver`` capability.
+    """
+    machine = _make_operator(sub="machine-admin", role=TenantRole.TENANT_ADMIN, principal_kind=kind)
+    with pytest.raises(NonHumanApprovalError) as excinfo:
+        _check_reviewer_role(machine)
+    assert excinfo.value.principal_kind == kind.value
+    assert isinstance(excinfo.value, UnauthorizedApprovalError)
+
+
+def test_check_reviewer_role_admits_human_operator() -> None:
+    """A human operator (and a human read_only + approver) still passes (#289).
+
+    The kind gate removes only machine principals; every human decision
+    path is untouched — the ``operator`` role and the orthogonal
+    ``approver`` capability (#3243) both clear the gate.
+    """
+    _check_reviewer_role(_make_operator(role=TenantRole.OPERATOR))
+    _check_reviewer_role(_make_operator(role=TenantRole.READ_ONLY, approver=True))
 
 
 # ---------------------------------------------------------------------------

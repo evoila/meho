@@ -947,3 +947,63 @@ async def test_register_skips_vault_when_token_unset(
     assert resp.status_code == 201, resp.text
     rows = await _fetch_principals(_TENANT_A)
     assert [row.name for row in rows] == ["no-token-bot"]
+
+
+# ---------------------------------------------------------------------------
+# meho-internal#289 — agent-principal register is human-only on every
+# transport. An agent principal is minted ``tenant_admin``, so it clears the
+# role gate; the human-principal guard must still refuse it so a machine
+# cannot mint another agent principal over REST. (The human positive path
+# is the ``tenant_admin`` round-trip test above.)
+# ---------------------------------------------------------------------------
+
+# RUNNER is refused earlier on the wire (401 missing_runner_id, and the
+# runner path-cage in middleware) so it never reaches this guard over REST;
+# the RUNNER kind is covered at the service layer in test_approval_queue.py.
+_MACHINE_KINDS: tuple[str, ...] = ("agent", "service")
+
+
+def _machine_admin_token(key: Any, *, kind: str, sub: str = "machine-admin") -> str:
+    """Mint a machine principal at ``tenant_admin`` — how agents are minted (#289)."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+
+
+@pytest.mark.parametrize("kind", _MACHINE_KINDS)
+def test_machine_principal_denied_on_register(client: TestClient, kind: str) -> None:
+    """A machine ``tenant_admin`` token → 403 ``human_principal_required`` (#289).
+
+    The human-principal dependency fires before the Keycloak / DB work, so
+    no Keycloak mock is needed: an agent/service/runner minted
+    ``tenant_admin`` is refused at the gate.
+    """
+    key = make_rsa_keypair(f"kid-machine-{kind}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_machine_admin_token(key, kind=kind)}"}
+        response = client.post(
+            "/api/v1/agent-principals", json={"name": "sneaky-bot"}, headers=headers
+        )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("human_principal_required"), response.text
+
+
+def test_human_admin_passes_kind_gate_on_register(client: TestClient) -> None:
+    """A human ``tenant_admin`` clears both the role and the human-kind gate (#289).
+
+    Both auth dependencies fire before request-body validation, so a human
+    ``tenant_admin`` sending an empty body reaches Pydantic validation —
+    HTTP 422, never the human-only gate's 403. The full happy path (201)
+    is covered by :func:`test_full_lifecycle_round_trip`.
+    """
+    key = make_rsa_keypair("kid-human-admin")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        response = client.post("/api/v1/agent-principals", json={}, headers=headers)
+    assert response.status_code == 422, response.text

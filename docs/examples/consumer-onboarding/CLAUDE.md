@@ -131,6 +131,59 @@ invokes it. Same auth, audit, policy as the alias verbs.
   conventions). Never delete a wrapper until its MEHO equivalent has
   been in daily use for ≥ 2 weeks.
 
+### Post-configure verification gate — observe readiness, don't infer it
+
+When a provisioning run stands up a Linux host — or you finish
+configuring one — **readiness is an observation, not an inference from
+power-on**. A host that is powered on and answers a perimeter reach check
+may still have had its entire in-guest day-0 configuration abort silently
+(a `set -euo pipefail` first-boot script that wrote a completion sentinel
+and a log **nothing ever read**). Verify through governed read ops before
+declaring the host ready — never by opening an unaudited SSH session.
+
+Run this ordered day-0 recipe (cheapest-and-most-decisive first) through
+the `linux-ssh` connector, substituting your own sentinel path, first-boot
+log path, unit names, and kernel-parameter keys:
+
+```bash
+# 1. Completion sentinel — present ⇒ first-boot ran to its last line;
+#    absent ⇒ it failed or is still running (the cheapest decisive signal).
+meho operation call linux-ssh-1.x linux.file.read --target <host>   --params '{"path": "<completion-sentinel-path>"}'
+
+# 2. First-boot log — the terminal "complete" line, or the abort reason
+#    (missing NIC, unresolvable mirror, red config-validate) when 1 is absent.
+meho operation call linux-ssh-1.x linux.log.tail --target <host>   --params '{"path": "<first-boot-log-path>", "lines": 200}'
+
+# 3. Declared units — once per unit (DNS, DHCP, NTP, firewall, NFS …);
+#    any inactive ⇒ that subsystem is down even if the sentinel exists.
+meho operation call linux-ssh-1.x linux.service.status --target <host>   --params '{"unit": "<unit-name>"}'
+
+# 4. Kernel parameters — the LIVE value the day-0 config set
+#    (did first-boot actually enable it, or only write a .conf?).
+meho operation call linux-ssh-1.x linux.sysctl.read --target <host>   --params '{"key": "net.ipv4.ip_forward"}'
+
+# 5. Firewall ruleset — confirm the default-deny base is loaded,
+#    not merely that a rules file validated.
+meho operation call linux-ssh-1.x linux.firewall.show --target <host>
+
+# 6. Mounts + NFS exports — confirm the base export dependents need is live.
+meho operation call linux-ssh-1.x linux.mount.list --target <host>
+
+# 7. Functional probe (cross-connector, `net` diagnostics) — a unit being
+#    active is not proof the service ANSWERS. Destinations must be inside
+#    MEHO_NETDIAG_PROBE_ALLOWLIST.
+meho operation call net-probe-1.x net.dns_lookup --params '{"name": "<name>"}'
+meho operation call net-probe-1.x net.ntp_check  --params '{"host": "<ntp-host>"}'
+```
+
+* **Steps 1–3 alone catch the classic "the run said ready but the host is
+  dark" failure** — the sentinel is absent, the log shows why, and the
+  declared units are inactive. Steps 4–7 harden the check from "did it
+  start" into "is the configuration correct and does the service answer."
+* Every step is a `safe`, read-only, audited op — the whole recipe is a
+  governed alternative to a hand SSH session. Step 7 is served by the
+  existing `net` connector, not a Linux verb.
+
 ### Audit (canonical history)
 
 * Every MEHO op writes an audit row. Don't worry about ad-hoc

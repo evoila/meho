@@ -1282,7 +1282,7 @@ The fix re-enters the **parent composite** on resume:
   `(op_id, params)` for the handler body (co-located with the
   `parent_audit_id_var` bind above). `enforce_subop_policy` reads it and
   stores it on `ApprovalRequest.resume_parent`
-  (`{"op_id": …, "params": …}`, migration `0098`) at park time. NULL for a
+  (`{"op_id": …, "params": …}`, migration `0099`) at park time. NULL for a
   direct-op park.
 - `resume_dispatch_after_approval` sees `resume_parent` and re-dispatches
   the **parent composite** (`_approved=True`, so its top-level gate is

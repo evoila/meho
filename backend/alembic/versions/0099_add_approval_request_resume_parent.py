@@ -3,8 +3,8 @@
 
 """Add ``approval_request.resume_parent`` — parent composite for a sub-op park.
 
-Revision ID: 0098
-Revises: 0097
+Revision ID: 0099
+Revises: 0098
 Create Date: 2026-09-06
 
 Task #3351. A composite handler that parks a governed direct-session sub-op
@@ -30,7 +30,7 @@ This migration adds the durable landing spot that lets the resume re-enter the
   (:data:`~meho_backplane.operations.composite.composite_dispatch_var`). The
   resume path re-dispatches this composite ``_approved=True`` with the approved
   sub-op pre-cleared, so the whole governed step reproduces through the normal
-  dispatch path. NULL for every non-composite (direct-op) park and on pre-0098
+  dispatch path. NULL for every non-composite (direct-op) park and on pre-0099
   rows — those keep the unchanged generic re-dispatch. Internal resume input
   only, like ``params``; never projected onto a read view or a broadcast frame.
 
@@ -41,7 +41,7 @@ no indexes (only ever read/written off a row already loaded by primary key).
 Migration-chain note (single linear head)
 -----------------------------------------
 
-Numbered ``0098`` with ``down_revision = "0097"`` — the head on ``origin/main``.
+Numbered ``0099`` with ``down_revision = "0098"`` — the head on ``origin/main``.
 Additive-only: one nullable column on an existing table, no ALTER of an existing
 column.
 
@@ -59,8 +59,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0098"
-down_revision: str | None = "0097"
+revision: str = "0099"
+down_revision: str | None = "0098"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

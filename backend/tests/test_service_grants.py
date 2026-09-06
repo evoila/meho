@@ -26,6 +26,7 @@ from meho_backplane.operations.service_grants import (
     GrantValidationError,
     ServicePrincipalGrantService,
     find_live_grant,
+    null_target_only_park_hint,
 )
 from meho_backplane.settings import get_settings
 
@@ -335,3 +336,237 @@ async def test_list_excludes_revoked_by_default() -> None:
     full = await svc.list_(_TENANT_ID, principal_sub=_PRINCIPAL, include_revoked=True)
     full_ids = {g.id for g in full}
     assert {live.id, gone.id} <= full_ids
+
+
+# ---------------------------------------------------------------------------
+# Target selectors (#3349)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_selector_grant_round_trips() -> None:
+    """A selector grant is created and echoes its selector fields."""
+    svc = ServicePrincipalGrantService()
+    entry = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_product="vmware",
+            target_name_pattern="esx-dc*",
+            reason="authorise runtime-created ESXi appliances",
+        ),
+    )
+    assert entry.target_id is None
+    assert entry.target_product == "vmware"
+    assert entry.target_name_pattern == "esx-dc*"
+
+
+def test_create_rejects_target_id_with_selector() -> None:
+    """target_id and a selector are mutually exclusive at the schema boundary."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_id=uuid.uuid4(),
+            target_product="vmware",
+            reason="contradiction",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_duplicate_active_selector() -> None:
+    """A second live selector with the identical (product, pattern) is refused."""
+    svc = ServicePrincipalGrantService()
+    payload = ServiceGrantCreate(
+        principal_sub=_PRINCIPAL,
+        op_id="vmware.composite.vm.create",
+        connector_id=_CONNECTOR,
+        target_product="vmware",
+        target_name_pattern="esx-dc*",
+        reason="first",
+    )
+    await svc.create(_TENANT_ID, _CREATOR, payload)
+    with pytest.raises(GrantValidationError, match="selector grant"):
+        await svc.create(_TENANT_ID, _CREATOR, payload)
+
+
+@pytest.mark.asyncio
+async def test_create_selector_and_pure_targetless_coexist() -> None:
+    """A selector grant and a pure targetless grant share the same key without collision."""
+    svc = ServicePrincipalGrantService()
+    await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.create"))
+    # Same (principal, op, connector) but a selector — the narrowed targetless
+    # unique index must not treat these as duplicates.
+    entry = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_product="vmware",
+            reason="selector alongside targetless",
+        ),
+    )
+    assert entry.target_product == "vmware"
+
+
+@pytest.mark.asyncio
+async def test_selector_grant_matches_target_fingerprint(session: AsyncSession) -> None:
+    """A selector grant matches a target-scoped dispatch whose fingerprint fits.
+
+    The core #3349 win: the target need not have existed at grant-create time.
+    """
+    svc = ServicePrincipalGrantService()
+    created = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_product="vmware",
+            target_name_pattern="esx-dc*",
+            reason="runtime-created appliances",
+        ),
+    )
+    fresh_target_id = uuid.uuid4()  # a target that did not exist at create time
+
+    matched = await find_live_grant(
+        session,
+        tenant_id=_TENANT_ID,
+        principal_sub=_PRINCIPAL,
+        op_id="vmware.composite.vm.create",
+        connector_id=_CONNECTOR,
+        target_id=fresh_target_id,
+        target_product="vmware",
+        target_name="esx-dc19",
+    )
+    assert matched is not None
+    assert matched.id == created.id
+
+    # Product mismatch -> no match.
+    assert (
+        await find_live_grant(
+            session,
+            tenant_id=_TENANT_ID,
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_id=fresh_target_id,
+            target_product="k8s",
+            target_name="esx-dc19",
+        )
+    ) is None
+
+    # Name-glob mismatch -> no match.
+    assert (
+        await find_live_grant(
+            session,
+            tenant_id=_TENANT_ID,
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_id=fresh_target_id,
+            target_product="vmware",
+            target_name="mgmt-dc01",
+        )
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_selector_grant_does_not_match_targetless_dispatch(session: AsyncSession) -> None:
+    """A selector needs a target fingerprint; it never covers a targetless dispatch."""
+    svc = ServicePrincipalGrantService()
+    await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_product="vmware",
+            reason="selector only",
+        ),
+    )
+    assert (
+        await find_live_grant(
+            session,
+            tenant_id=_TENANT_ID,
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_id=None,
+        )
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_concrete_target_grant_wins_over_selector(session: AsyncSession) -> None:
+    """A concrete-target grant is preferred over a matching selector."""
+    svc = ServicePrincipalGrantService()
+    concrete_id = uuid.uuid4()
+    concrete = await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        _payload(op_id="vmware.composite.vm.create", target_id=concrete_id),
+    )
+    await svc.create(
+        _TENANT_ID,
+        _CREATOR,
+        ServiceGrantCreate(
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_product="vmware",
+            reason="broad selector",
+        ),
+    )
+    matched = await find_live_grant(
+        session,
+        tenant_id=_TENANT_ID,
+        principal_sub=_PRINCIPAL,
+        op_id="vmware.composite.vm.create",
+        connector_id=_CONNECTOR,
+        target_id=concrete_id,
+        target_product="vmware",
+        target_name="esx-dc19",
+    )
+    assert matched is not None
+    assert matched.id == concrete.id
+
+
+@pytest.mark.asyncio
+async def test_null_target_only_park_hint_fires_for_target_scoped_dispatch(
+    session: AsyncSession,
+) -> None:
+    """A target-scoped dispatch with only a null-target grant surfaces the #3349 hint."""
+    svc = ServicePrincipalGrantService()
+    await svc.create(_TENANT_ID, _CREATOR, _payload(op_id="vmware.composite.vm.create"))
+
+    hint = await null_target_only_park_hint(
+        session,
+        tenant_id=_TENANT_ID,
+        principal_sub=_PRINCIPAL,
+        op_id="vmware.composite.vm.create",
+        connector_id=_CONNECTOR,
+        target_id=uuid.uuid4(),
+    )
+    assert hint is not None
+    assert "null-target" in hint
+
+    # A targetless dispatch has no mismatch to name.
+    assert (
+        await null_target_only_park_hint(
+            session,
+            tenant_id=_TENANT_ID,
+            principal_sub=_PRINCIPAL,
+            op_id="vmware.composite.vm.create",
+            connector_id=_CONNECTOR,
+            target_id=None,
+        )
+    ) is None

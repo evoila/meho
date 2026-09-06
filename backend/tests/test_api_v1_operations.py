@@ -1279,3 +1279,78 @@ def test_post_result_query_query_mode_bad_operator_is_422(
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/operations/governed-subops (#3349)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _governed_subop_registry() -> Iterator[None]:
+    """Register a synthetic composite child-op surface; tear it down after."""
+    from meho_backplane.operations.governed_subops import (
+        register_governed_subops,
+        reset_governed_subop_registry,
+    )
+
+    reset_governed_subop_registry()
+    register_governed_subops(
+        composite_op_id="vmware.composite.vm.create",
+        connector_id="vault-1.x",  # matches _seed_descriptor's connector natural key
+        sub_op_ids=(
+            "vault.kv.write",
+            "DELETE:/vcenter/vm/{vm}",  # rollback leg — delete-shaped
+        ),
+    )
+    yield
+    reset_governed_subop_registry()
+
+
+def test_governed_subops_lists_children_and_flags_rollback(
+    client: TestClient, _governed_subop_registry: None
+) -> None:
+    """The surface returns each child with grantability; the delete leg is flagged."""
+    import functools
+
+    import anyio
+
+    key = make_rsa_keypair("kid-gsub")
+    # Seed a descriptor so one child resolves a best-effort safety_level.
+    anyio.run(functools.partial(_seed_descriptor, op_id="vault.kv.write"))
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_operator_token(key)}"}
+        response = client.get(
+            "/api/v1/operations/governed-subops",
+            headers=headers,
+            params={"op_id": "vmware.composite.vm.create"},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["op_id"] == "vmware.composite.vm.create"
+    by_op = {s["op_id"]: s for s in body["governed_subops"]}
+
+    assert by_op["vault.kv.write"]["grantable"] is True
+    assert by_op["vault.kv.write"]["safety_level"] == "safe"
+
+    delete_leg = by_op["DELETE:/vcenter/vm/{vm}"]
+    assert delete_leg["grantable"] is False
+    assert "delete-shaped" in delete_leg["ungrantable_reason"]
+
+
+def test_governed_subops_404_for_unregistered_op(
+    client: TestClient, _governed_subop_registry: None
+) -> None:
+    """An op with no registered child surface returns a structured 404."""
+    key = make_rsa_keypair("kid-gsub2")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_operator_token(key)}"}
+        response = client.get(
+            "/api/v1/operations/governed-subops",
+            headers=headers,
+            params={"op_id": "vmware.composite.does.not.exist"},
+        )
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["reason"] == "no_governed_subops"

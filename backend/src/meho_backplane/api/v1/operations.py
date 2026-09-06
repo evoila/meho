@@ -52,6 +52,7 @@ from meho_backplane.api.v1._freetext_filter import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.operations.governed_subops import GovernedSubopsResponse
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
     ConnectorNotIngestedError,
@@ -500,6 +501,62 @@ async def post_preview(
     nothing is written to the audit row.
     """
     return await preview_operation(operator, body.model_dump())
+
+
+@router.get("/governed-subops", response_model=GovernedSubopsResponse)
+async def get_governed_subops(
+    op_id: str = Query(
+        min_length=1,
+        description=(
+            "A composite op id whose governed child ops to enumerate — e.g. "
+            "`vmware.composite.vm.create`."
+        ),
+    ),
+    connector_id: str | None = Query(
+        default=None,
+        description=(
+            "Optional connector-id override for resolving each child's "
+            "best-effort safety_level; defaults to the connector the "
+            "composite is registered against."
+        ),
+    ),
+    operator: Operator = _require_operator,
+) -> GovernedSubopsResponse:
+    """List the governed child ops a composite may dispatch (#3349).
+
+    The supported way to assemble a composite's standing-grant set without
+    reading the connector's ``_SUB_OPS_*`` manifests in source: because child
+    gating consults the grant plane on the **child** op id with no
+    parent→child inheritance, each governed child needs its own grant. Each
+    entry carries a best-effort ``safety_level`` and a ``grantable`` flag;
+    delete-shaped rollback / delete legs are flagged un-grantable (with the
+    refusal reason) so the operator knows a partial failure still needs a
+    human. ``404`` when *op_id* declares no governed child surface (a
+    non-composite op, or a composite whose children dispatch inline).
+    Role: ``operator`` — the same role that creates grants.
+    """
+    from meho_backplane.operations.governed_subops import build_governed_subops_response
+
+    response = await build_governed_subops_response(
+        tenant_id=operator.tenant_id,
+        op_id=op_id,
+        connector_id_override=connector_id,
+    )
+    if response is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"no governed child-op surface registered for op {op_id!r}",
+                "reason": "no_governed_subops",
+                "op_id": op_id,
+                "next_step": (
+                    "governed-subop discovery covers composites whose children "
+                    "fan out through declared manifests; a non-composite op or a "
+                    "composite that dispatches children inline has none"
+                ),
+            },
+        )
+    return response
 
 
 @router.get("/{descriptor_id}", response_model=OperationDescriptor)

@@ -242,6 +242,87 @@ async def _warn_if_grant_holding_non_service(operator: Operator) -> None:
         )
 
 
+async def _null_target_park_hint(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+) -> str | None:
+    """Return the #3349 null-target loud-hint for a parking dispatch, or None.
+
+    Fail-open — a diagnostic must never block a dispatch, so any lookup
+    error is swallowed after logging (mirrors
+    :func:`_warn_if_grant_holding_non_service`).
+    """
+    from meho_backplane.operations.service_grants import null_target_only_park_hint
+
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            return await null_target_only_park_hint(
+                session,
+                tenant_id=operator.tenant_id,
+                principal_sub=operator.sub,
+                op_id=descriptor.op_id,
+                connector_id=connector_id,
+                target_id=getattr(target, "id", None),
+            )
+    except Exception:
+        _log.exception("policy_gate_null_target_hint_failed", operator_sub=operator.sub)
+        return None
+
+
+async def _service_grant_verdict(
+    *,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    connector_id: str,
+    gate_reason: str | None,
+    target_id_str: str | None,
+) -> tuple[PermissionVerdict | None, str | None]:
+    """Consult a standing grant for a parking service-principal op (#3151 / #3349).
+
+    Returns ``(AUTO_EXECUTE, reason)`` when a live grant (concrete-target or
+    selector, #3349) clears the gate, else ``(None, gate_reason)`` — with the
+    #3349 null-target hint appended to *gate_reason* when the dispatch is
+    target-scoped and the only live candidate for this
+    ``(principal, op, connector)`` is a null-target grant (the operator
+    likely created it believing null = "any target").
+    """
+    from meho_backplane.operations.service_grants import consult_and_record_grant
+
+    grant_id = await consult_and_record_grant(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+    )
+    if grant_id is not None:
+        _log.info(
+            "policy_gate_standing_grant_auto_approved",
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+            tenant_id=str(operator.tenant_id),
+            op_id=descriptor.op_id,
+            safety_level=descriptor.safety_level,
+            target_id=target_id_str,
+            grant_id=str(grant_id),
+        )
+        return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+
+    hint = await _null_target_park_hint(
+        operator=operator,
+        descriptor=descriptor,
+        target=target,
+        connector_id=connector_id,
+    )
+    if hint is not None:
+        gate_reason = f"{gate_reason}; {hint}" if gate_reason else hint
+    return None, gate_reason
+
+
 async def _non_agent_verdict(
     *,
     operator: Operator,
@@ -302,26 +383,16 @@ async def _non_agent_verdict(
     # The op would park. A service principal can clear the gate with a live
     # standing grant (recorded as an auto-approval on the audit ledger).
     if is_service and connector_id is not None:
-        from meho_backplane.operations.service_grants import consult_and_record_grant
-
-        grant_id = await consult_and_record_grant(
+        cleared, gate_reason = await _service_grant_verdict(
             operator=operator,
             descriptor=descriptor,
             target=target,
             connector_id=connector_id,
+            gate_reason=gate_reason,
+            target_id_str=target_id_str,
         )
-        if grant_id is not None:
-            _log.info(
-                "policy_gate_standing_grant_auto_approved",
-                operator_sub=operator.sub,
-                principal_kind=operator.principal_kind.value,
-                tenant_id=str(operator.tenant_id),
-                op_id=descriptor.op_id,
-                safety_level=descriptor.safety_level,
-                target_id=target_id_str,
-                grant_id=str(grant_id),
-            )
-            return PermissionVerdict.AUTO_EXECUTE, f"auto-granted by standing grant {grant_id}"
+        if cleared is not None:
+            return cleared, gate_reason
 
     if not is_service:
         # The op is parking for a non-service principal. If that principal

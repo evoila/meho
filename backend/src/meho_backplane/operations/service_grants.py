@@ -69,7 +69,9 @@ __all__ = [
     "ServicePrincipalGrantService",
     "consult_and_record_grant",
     "count_live_grants_for_principal",
+    "delete_shaped_refusal_reason",
     "find_live_grant",
+    "null_target_only_park_hint",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -180,6 +182,19 @@ def _validate_expires_at(expires_at: datetime | None) -> None:
         )
 
 
+def delete_shaped_refusal_reason(op_id: str, patterns: tuple[str, ...]) -> str | None:
+    """Public alias for the pattern-based delete-shaped classifier (#3349).
+
+    The governed-subop discovery surface
+    (:func:`meho_backplane.operations.governed_subops.classify_subop_grantability`)
+    flags a child op un-grantable through this single-sourced rule — the same
+    one :meth:`ServicePrincipalGrantService.create` refuses on — so a rollback
+    / delete leg is flagged on discovery exactly as it would be refused at
+    grant-create time.
+    """
+    return _delete_shaped_reason_by_pattern(op_id, patterns)
+
+
 def _delete_shaped_reason_by_pattern(op_id: str, patterns: tuple[str, ...]) -> str | None:
     """Return a refusal reason if *op_id* matches a configured delete-shaped glob.
 
@@ -282,7 +297,8 @@ class ServicePrincipalGrantService:
 
         Refuses wildcards, delete-shaped ops, and past/naive expiries;
         raises :exc:`GrantValidationError` (→ 422) on any of those or on a
-        duplicate active grant for the same fully-scoped key.
+        duplicate active grant for the same fully-scoped key (a duplicate
+        target selector included, #3349).
         """
         from meho_backplane.settings import get_settings
 
@@ -302,18 +318,30 @@ class ServicePrincipalGrantService:
             if descriptor_reason is not None:
                 raise GrantValidationError(descriptor_reason)
 
+        is_selector = payload.target_product is not None or payload.target_name_pattern is not None
+
         row = ServicePrincipalGrant(
             tenant_id=tenant_id,
             principal_sub=payload.principal_sub,
             op_id=payload.op_id,
             connector_id=payload.connector_id,
             target_id=payload.target_id,
+            target_product=payload.target_product,
+            target_name_pattern=payload.target_name_pattern,
             reason=payload.reason,
             created_by_sub=created_by_sub,
             expires_at=payload.expires_at,
         )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            # Selector grants are not covered by a DB partial unique index
+            # (the nullable selector columns make a portable NULL-safe unique
+            # index awkward), so enforce "at most one active selector per
+            # (key, product, pattern)" in the CRUD layer to preserve the
+            # same duplicate-refusal contract the targeted / targetless
+            # indexes give.
+            if is_selector:
+                await self._reject_duplicate_selector(session, tenant_id, payload)
             session.add(row)
             try:
                 await session.flush()
@@ -336,10 +364,54 @@ class ServicePrincipalGrantService:
             op_id=payload.op_id,
             connector_id=payload.connector_id,
             target_id=str(payload.target_id) if payload.target_id else None,
+            target_product=payload.target_product,
+            target_name_pattern=payload.target_name_pattern,
             created_by_sub=created_by_sub,
             expires_at=payload.expires_at.isoformat() if payload.expires_at else None,
         )
         return entry
+
+    @staticmethod
+    async def _reject_duplicate_selector(
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        payload: ServiceGrantCreate,
+    ) -> None:
+        """Raise if a live selector grant with the identical scope exists (#3349).
+
+        The CRUD-layer twin of the ``uq_service_principal_grant_*`` partial
+        indexes for selector grants (which those indexes deliberately do not
+        cover). Matches an active (``revoked_at IS NULL``) selector row on the
+        full key plus the exact ``(target_product, target_name_pattern)`` pair.
+        """
+        existing = await session.execute(
+            select(ServicePrincipalGrant.id)
+            .where(
+                ServicePrincipalGrant.tenant_id == tenant_id,
+                ServicePrincipalGrant.principal_sub == payload.principal_sub,
+                ServicePrincipalGrant.op_id == payload.op_id,
+                ServicePrincipalGrant.connector_id == payload.connector_id,
+                ServicePrincipalGrant.target_id.is_(None),
+                # NULL-safe equality (``IS NOT DISTINCT FROM`` on Postgres,
+                # ``IS`` on SQLite) so a NULL selector column compares equal
+                # to NULL — a selector with only a product set collides with
+                # another product-only selector for the same product.
+                ServicePrincipalGrant.target_product.is_not_distinct_from(payload.target_product),
+                ServicePrincipalGrant.target_name_pattern.is_not_distinct_from(
+                    payload.target_name_pattern
+                ),
+                ServicePrincipalGrant.revoked_at.is_(None),
+            )
+            .limit(1)
+        )
+        if existing.first() is not None:
+            raise GrantValidationError(
+                f"an active selector grant for principal {payload.principal_sub!r} on "
+                f"op {payload.op_id!r} / connector {payload.connector_id!r} / "
+                f"target_product={payload.target_product!r} / "
+                f"target_name_pattern={payload.target_name_pattern!r} already exists; "
+                "revoke it first"
+            )
 
     async def revoke(
         self,
@@ -449,6 +521,55 @@ def _target_uuid(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
+def _live_grant_scope_predicates(
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    op_id: str,
+    connector_id: str,
+    cutoff: datetime,
+) -> tuple[Any, ...]:
+    """The scope + liveness predicates shared by every grant lookup.
+
+    Exact on ``(tenant, principal_sub, op_id, connector_id)`` with
+    revocation and expiry honoured at dispatch time (``revoked_at IS NULL``
+    and (``expires_at IS NULL`` or ``expires_at > now``)). The target
+    dimension (exact id / selector / targetless) is applied by the caller.
+    """
+    return (
+        ServicePrincipalGrant.tenant_id == tenant_id,
+        ServicePrincipalGrant.principal_sub == principal_sub,
+        ServicePrincipalGrant.op_id == op_id,
+        ServicePrincipalGrant.connector_id == connector_id,
+        ServicePrincipalGrant.revoked_at.is_(None),
+        or_(
+            ServicePrincipalGrant.expires_at.is_(None),
+            ServicePrincipalGrant.expires_at > cutoff,
+        ),
+    )
+
+
+def _selector_matches(
+    grant: ServicePrincipalGrant,
+    *,
+    target_product: str | None,
+    target_name: str | None,
+) -> bool:
+    """Whether a selector grant's fingerprint predicate covers this target.
+
+    ``target_product`` (when set) is matched exactly; ``target_name_pattern``
+    (when set) is an ``fnmatchcase`` glob over the target name. A dimension
+    left NULL on the grant is a "don't care" — but at least one is non-NULL
+    (the caller only passes selector grants), so the grant is never a blanket
+    any-target match by accident.
+    """
+    product_ok = grant.target_product is None or grant.target_product == target_product
+    name_ok = grant.target_name_pattern is None or (
+        target_name is not None and fnmatchcase(target_name, grant.target_name_pattern)
+    )
+    return product_ok and name_ok
+
+
 async def find_live_grant(
     session: AsyncSession,
     *,
@@ -457,37 +578,127 @@ async def find_live_grant(
     op_id: str,
     connector_id: str,
     target_id: uuid.UUID | None,
+    target_product: str | None = None,
+    target_name: str | None = None,
     now: datetime | None = None,
 ) -> ServicePrincipalGrant | None:
-    """Return the live grant covering this exact dispatch, or ``None``.
+    """Return the live grant covering this dispatch, or ``None``.
 
-    Exact match on every scope — ``target_id`` too, including the
-    targetless (``NULL``) case — with revocation and expiry both honoured
-    **at dispatch time**: ``revoked_at IS NULL`` and (``expires_at IS
-    NULL`` or ``expires_at > now``). No wildcard widening.
+    Exact match on ``(tenant, principal_sub, op_id, connector_id)`` with
+    revocation and expiry both honoured **at dispatch time**. The target
+    dimension resolves in this order:
+
+    * **targetless dispatch** (``target_id is None``) — matches a *pure*
+      targetless grant only (``target_id`` and both selector columns NULL).
+      A selector needs a target fingerprint to match, so it never covers a
+      targetless dispatch; and a null ``target_id`` is still **not** a
+      wildcard (the #3349 loud-hint case).
+    * **target-scoped dispatch** — a concrete-``target_id`` grant is tried
+      first (the exact, pre-#3349 match). Absent that, a **selector** grant
+      (#3349) matches when the dispatch's ``target_product`` / ``target_name``
+      satisfy its predicate (``product`` exact + ``name`` ``fnmatch`` glob).
+      The concrete match is preferred so a specific grant always wins over a
+      broad selector.
     """
     cutoff = now or datetime.now(UTC)
-    stmt = (
+    scope = _live_grant_scope_predicates(
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        op_id=op_id,
+        connector_id=connector_id,
+        cutoff=cutoff,
+    )
+
+    if target_id is None:
+        stmt = (
+            select(ServicePrincipalGrant)
+            .where(
+                *scope,
+                ServicePrincipalGrant.target_id.is_(None),
+                ServicePrincipalGrant.target_product.is_(None),
+                ServicePrincipalGrant.target_name_pattern.is_(None),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none()
+
+    # Target-scoped dispatch: prefer a concrete-target grant, then selectors.
+    exact_stmt = (
         select(ServicePrincipalGrant)
+        .where(*scope, ServicePrincipalGrant.target_id == target_id)
+        .limit(1)
+    )
+    exact = (await session.execute(exact_stmt)).scalar_one_or_none()
+    if exact is not None:
+        return exact
+
+    selector_stmt = select(ServicePrincipalGrant).where(
+        *scope,
+        ServicePrincipalGrant.target_id.is_(None),
+        or_(
+            ServicePrincipalGrant.target_product.isnot(None),
+            ServicePrincipalGrant.target_name_pattern.isnot(None),
+        ),
+    )
+    candidates = (await session.execute(selector_stmt)).scalars().all()
+    for grant in candidates:
+        if _selector_matches(grant, target_product=target_product, target_name=target_name):
+            return grant
+    return None
+
+
+async def null_target_only_park_hint(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+    op_id: str,
+    connector_id: str,
+    target_id: uuid.UUID | None,
+    now: datetime | None = None,
+) -> str | None:
+    """Return the #3349 loud-hint when a target-scoped dispatch parks with
+    only a *pure* null-target grant as a candidate.
+
+    A grant created with ``target_id=null`` in the belief that null means
+    "any target" never matches a target-scoped dispatch (null is matched
+    literally, not as a wildcard). Absent a runtime signal that is a silent
+    misfire, so when such a dispatch parks and the *only* live candidate for
+    ``(principal_sub, op_id, connector_id)`` is a pure null-target grant, the
+    gate appends this hint to the park reason. Returns ``None`` for a
+    targetless dispatch (there is no mismatch to name) or when no null-target
+    grant exists.
+
+    Scoped to the park path only (already the slow path): the extra query
+    never touches the auto-execute hot path.
+    """
+    if target_id is None:
+        return None
+    cutoff = now or datetime.now(UTC)
+    stmt = (
+        select(ServicePrincipalGrant.id)
         .where(
-            ServicePrincipalGrant.tenant_id == tenant_id,
-            ServicePrincipalGrant.principal_sub == principal_sub,
-            ServicePrincipalGrant.op_id == op_id,
-            ServicePrincipalGrant.connector_id == connector_id,
-            ServicePrincipalGrant.revoked_at.is_(None),
-            or_(
-                ServicePrincipalGrant.expires_at.is_(None),
-                ServicePrincipalGrant.expires_at > cutoff,
+            *_live_grant_scope_predicates(
+                tenant_id=tenant_id,
+                principal_sub=principal_sub,
+                op_id=op_id,
+                connector_id=connector_id,
+                cutoff=cutoff,
             ),
+            ServicePrincipalGrant.target_id.is_(None),
+            ServicePrincipalGrant.target_product.is_(None),
+            ServicePrincipalGrant.target_name_pattern.is_(None),
         )
         .limit(1)
     )
-    if target_id is None:
-        stmt = stmt.where(ServicePrincipalGrant.target_id.is_(None))
-    else:
-        stmt = stmt.where(ServicePrincipalGrant.target_id == target_id)
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    if (await session.execute(stmt)).first() is None:
+        return None
+    return (
+        "a null-target standing grant does not match a target-scoped dispatch "
+        "— null is matched literally, not as an any-target wildcard. Scope the "
+        "grant to this target, or use a target selector (target_product / "
+        "target_name_pattern) to authorise targets that do not exist yet (#3349)"
+    )
 
 
 async def count_live_grants_for_principal(
@@ -564,6 +775,8 @@ async def consult_and_record_grant(
         return None
 
     target_id = _target_uuid(target)
+    target_product = getattr(target, "product", None) if target is not None else None
+    target_name = getattr(target, "name", None) if target is not None else None
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         grant = await find_live_grant(
@@ -573,15 +786,21 @@ async def consult_and_record_grant(
             op_id=descriptor.op_id,
             connector_id=connector_id,
             target_id=target_id,
+            target_product=target_product if isinstance(target_product, str) else None,
+            target_name=target_name if isinstance(target_name, str) else None,
         )
     if grant is None:
         return None
 
+    matched_by_selector = grant.target_id is None and (
+        grant.target_product is not None or grant.target_name_pattern is not None
+    )
     audit_id = await _record_grant_use(
         operator=operator,
         grant=grant,
         connector_id=connector_id,
         target_id=target_id,
+        matched_by_selector=matched_by_selector,
     )
     await _publish_grant_use_event(operator=operator, grant=grant, audit_id=audit_id)
     _log.info(
@@ -591,6 +810,7 @@ async def consult_and_record_grant(
         connector_id=connector_id,
         principal_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
+        matched_by_selector=matched_by_selector,
     )
     return grant.id
 
@@ -601,6 +821,7 @@ async def _record_grant_use(
     grant: ServicePrincipalGrant,
     connector_id: str,
     target_id: uuid.UUID | None,
+    matched_by_selector: bool = False,
 ) -> uuid.UUID:
     """Write one ``approval.decision`` audit row for a standing-grant use.
 
@@ -611,6 +832,12 @@ async def _record_grant_use(
     ``decision='auto-approved'`` + ``grant_id``. Written in its own
     committed transaction so the authorisation is durable before the op
     runs (the synchronous-audit invariant).
+
+    When the grant matched via a target **selector** (#3349) the payload
+    records ``matched_by='selector'`` plus the grant's selector predicate,
+    so the auto-approval is visibly distinct on the ledger from a
+    concrete-target / targetless match (the operator can see the op ran on a
+    runtime-created target the selector authorised, not a pre-existing one).
     """
     from meho_backplane.operations._audit import resolve_agent_session_id, work_ref_var
 
@@ -625,7 +852,13 @@ async def _record_grant_use(
         "principal_sub": operator.sub,
         "reason": reason,
         "result_status": "decision",
+        "matched_by": "selector" if matched_by_selector else "target",
     }
+    if matched_by_selector:
+        payload["target_selector"] = {
+            "target_product": grant.target_product,
+            "target_name_pattern": grant.target_name_pattern,
+        }
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(

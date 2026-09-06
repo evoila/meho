@@ -4862,6 +4862,28 @@ type GatewayResultBody struct {
 // GatewayResultBodyOutcome Terminal outcome to record for the command.
 type GatewayResultBodyOutcome string
 
+// GovernedSubop One governed child op of a composite (#3349).
+//
+// “safety_level“ is best-effort — resolved from the child's descriptor
+// when one is ingested for the connector, “None“ for a code-shipped vim
+// control-plane sub-op that carries no descriptor. “grantable“ is
+// “False“ for a delete-shaped child (a rollback / delete leg): such a
+// child can never carry a standing grant, so a partial failure of the
+// composite still requires a human.
+type GovernedSubop struct {
+	Grantable         bool    `json:"grantable"`
+	OpId              string  `json:"op_id"`
+	SafetyLevel       *string `json:"safety_level"`
+	UngrantableReason *string `json:"ungrantable_reason"`
+}
+
+// GovernedSubopsResponse Response for “GET /api/v1/operations/governed-subops“ (#3349).
+type GovernedSubopsResponse struct {
+	ConnectorId    string          `json:"connector_id"`
+	GovernedSubops []GovernedSubop `json:"governed_subops"`
+	OpId           string          `json:"op_id"`
+}
+
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
@@ -7678,12 +7700,24 @@ type SensorStatus string
 
 // ServiceGrantCreate Body for creating a standing scoped auto-approval grant.
 //
-// “extra="forbid"“ rejects unknown fields with 422. There are
-// deliberately **no wildcards**: “op_id“ and “connector_id“ name one
-// exact operation on one exact connector, and “target_id“ is either a
-// concrete target UUID or “None“ for a targetless op. The service layer
-// refuses delete-shaped ops (a grant is the floor of what runs
-// unattended, not a bypass of a modeled destructive gate).
+// “extra="forbid"“ rejects unknown fields with 422. “op_id“ and
+// “connector_id“ name one exact operation on one exact connector, with
+// deliberately **no wildcards**. The target scope is one of three shapes:
+//
+//   - a concrete “target_id“ (the op on exactly that target),
+//   - a **selector** — “target_product“ and/or “target_name_pattern“
+//     (#3349) — matching any dispatch whose target fingerprint satisfies it
+//     (“product“ exact + “name“ “fnmatch“ glob), so an operator can
+//     authorise an op on targets that **do not yet exist** (a blueprint that
+//     registers its own appliances mid-run), or
+//   - neither — a targetless / tenant-wide op (“target_id IS NULL“ with no
+//     selector).
+//
+// A selector and a concrete “target_id“ are mutually exclusive: the
+// selector stands **in place of** a concrete target. The service layer
+// refuses delete-shaped ops regardless of the target scope (a grant is the
+// floor of what runs unattended, not a bypass of a modeled destructive
+// gate).
 type ServiceGrantCreate struct {
 	// ConnectorId Exact '<impl_id>-<version>' connector id, e.g. 'vmware-rest-9.0'.
 	ConnectorId string `json:"connector_id"`
@@ -7700,8 +7734,14 @@ type ServiceGrantCreate struct {
 	// Reason Operator's upfront justification (creating the grant is the review).
 	Reason string `json:"reason"`
 
-	// TargetId Target UUID the grant is scoped to, or null for a targetless op.
+	// TargetId Target UUID the grant is scoped to, or null for a targetless op or a selector grant. Mutually exclusive with target_product / target_name_pattern.
 	TargetId *openapi_types.UUID `json:"target_id"`
+
+	// TargetNamePattern Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request — it is never implied by a null target_id.
+	TargetNamePattern *string `json:"target_name_pattern"`
+
+	// TargetProduct Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null.
+	TargetProduct *string `json:"target_product"`
 }
 
 // ServiceGrantListResponse Response envelope for “GET /api/v1/service-principals/grants“.
@@ -7715,18 +7755,20 @@ type ServiceGrantListResponse struct {
 // Exposes “revoked_at“ / “revoked_by_sub“ so callers can tell a live
 // grant from a revoked one in the history.
 type ServiceGrantRead struct {
-	ConnectorId  string              `json:"connector_id"`
-	CreatedAt    time.Time           `json:"created_at"`
-	CreatedBySub string              `json:"created_by_sub"`
-	ExpiresAt    *time.Time          `json:"expires_at"`
-	Id           openapi_types.UUID  `json:"id"`
-	OpId         string              `json:"op_id"`
-	PrincipalSub string              `json:"principal_sub"`
-	Reason       string              `json:"reason"`
-	RevokedAt    *time.Time          `json:"revoked_at"`
-	RevokedBySub *string             `json:"revoked_by_sub"`
-	TargetId     *openapi_types.UUID `json:"target_id"`
-	TenantId     openapi_types.UUID  `json:"tenant_id"`
+	ConnectorId       string              `json:"connector_id"`
+	CreatedAt         time.Time           `json:"created_at"`
+	CreatedBySub      string              `json:"created_by_sub"`
+	ExpiresAt         *time.Time          `json:"expires_at"`
+	Id                openapi_types.UUID  `json:"id"`
+	OpId              string              `json:"op_id"`
+	PrincipalSub      string              `json:"principal_sub"`
+	Reason            string              `json:"reason"`
+	RevokedAt         *time.Time          `json:"revoked_at"`
+	RevokedBySub      *string             `json:"revoked_by_sub"`
+	TargetId          *openapi_types.UUID `json:"target_id"`
+	TargetNamePattern *string             `json:"target_name_pattern"`
+	TargetProduct     *string             `json:"target_product"`
+	TenantId          openapi_types.UUID  `json:"tenant_id"`
 }
 
 // ShowTemplateResponse Full template surface returned by “meho_runbook_show_template“.
@@ -9637,6 +9679,16 @@ type PromoteApiV1MemoryScopeSlugPromotePostParams struct {
 
 // PostCallApiV1OperationsCallPostParams defines parameters for PostCallApiV1OperationsCallPost.
 type PostCallApiV1OperationsCallPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams defines parameters for GetGovernedSubopsApiV1OperationsGovernedSubopsGet.
+type GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams struct {
+	// OpId A composite op id whose governed child ops to enumerate — e.g. `vmware.composite.vm.create`.
+	OpId string `form:"op_id" json:"op_id"`
+
+	// ConnectorId Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.
+	ConnectorId   *string `form:"connector_id,omitempty" json:"connector_id,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12604,6 +12656,9 @@ type ClientInterface interface {
 
 	PostCallApiV1OperationsCallPost(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetGovernedSubopsApiV1OperationsGovernedSubopsGet request
+	GetGovernedSubopsApiV1OperationsGovernedSubopsGet(ctx context.Context, params *GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetGroupsApiV1OperationsGroupsGet request
 	GetGroupsApiV1OperationsGroupsGet(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15313,6 +15368,18 @@ func (c *Client) PostCallApiV1OperationsCallPostWithBody(ctx context.Context, pa
 
 func (c *Client) PostCallApiV1OperationsCallPost(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostCallApiV1OperationsCallPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetGovernedSubopsApiV1OperationsGovernedSubopsGet(ctx context.Context, params *GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetGovernedSubopsApiV1OperationsGovernedSubopsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -26603,6 +26670,82 @@ func NewPostCallApiV1OperationsCallPostRequestWithBody(server string, params *Po
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetGovernedSubopsApiV1OperationsGovernedSubopsGetRequest generates requests for GetGovernedSubopsApiV1OperationsGovernedSubopsGet
+func NewGetGovernedSubopsApiV1OperationsGovernedSubopsGetRequest(server string, params *GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/governed-subops")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, params.OpId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.ConnectorId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, *params.ConnectorId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -42213,6 +42356,9 @@ type ClientWithResponsesInterface interface {
 
 	PostCallApiV1OperationsCallPostWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error)
 
+	// GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse request
+	GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(ctx context.Context, params *GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams, reqEditors ...RequestEditorFn) (*GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error)
+
 	// GetGroupsApiV1OperationsGroupsGetWithResponse request
 	GetGroupsApiV1OperationsGroupsGetWithResponse(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*GetGroupsApiV1OperationsGroupsGetResponse, error)
 
@@ -45637,6 +45783,29 @@ func (r PostCallApiV1OperationsCallPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PostCallApiV1OperationsCallPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GovernedSubopsResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -52979,6 +53148,15 @@ func (c *ClientWithResponses) PostCallApiV1OperationsCallPostWithResponse(ctx co
 	return ParsePostCallApiV1OperationsCallPostResponse(rsp)
 }
 
+// GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse request returning *GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse
+func (c *ClientWithResponses) GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse(ctx context.Context, params *GetGovernedSubopsApiV1OperationsGovernedSubopsGetParams, reqEditors ...RequestEditorFn) (*GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error) {
+	rsp, err := c.GetGovernedSubopsApiV1OperationsGovernedSubopsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse(rsp)
+}
+
 // GetGroupsApiV1OperationsGroupsGetWithResponse request returning *GetGroupsApiV1OperationsGroupsGetResponse
 func (c *ClientWithResponses) GetGroupsApiV1OperationsGroupsGetWithResponse(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*GetGroupsApiV1OperationsGroupsGetResponse, error) {
 	rsp, err := c.GetGroupsApiV1OperationsGroupsGet(ctx, params, reqEditors...)
@@ -59837,6 +60015,39 @@ func ParsePostCallApiV1OperationsCallPostResponse(rsp *http.Response) (*PostCall
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse parses an HTTP response from a GetGovernedSubopsApiV1OperationsGovernedSubopsGetWithResponse call
+func ParseGetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse(rsp *http.Response) (*GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetGovernedSubopsApiV1OperationsGovernedSubopsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GovernedSubopsResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

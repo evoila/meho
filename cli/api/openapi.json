@@ -3789,6 +3789,74 @@
         }
       }
     },
+    "/api/v1/operations/governed-subops": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Get Governed Subops",
+        "description": "List the governed child ops a composite may dispatch (#3349).\n\nThe supported way to assemble a composite's standing-grant set without\nreading the connector's ``_SUB_OPS_*`` manifests in source: because child\ngating consults the grant plane on the **child** op id with no\nparent\u2192child inheritance, each governed child needs its own grant. Each\nentry carries a best-effort ``safety_level`` and a ``grantable`` flag;\ndelete-shaped rollback / delete legs are flagged un-grantable (with the\nrefusal reason) so the operator knows a partial failure still needs a\nhuman. ``404`` when *op_id* declares no governed child surface (a\nnon-composite op, or a composite whose children dispatch inline).\nRole: ``operator`` \u2014 the same role that creates grants.",
+        "operationId": "get_governed_subops_api_v1_operations_governed_subops_get",
+        "parameters": [
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "A composite op id whose governed child ops to enumerate \u2014 e.g. `vmware.composite.vm.create`.",
+              "title": "Op Id"
+            },
+            "description": "A composite op id whose governed child ops to enumerate \u2014 e.g. `vmware.composite.vm.create`."
+          },
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against.",
+              "title": "Connector Id"
+            },
+            "description": "Optional connector-id override for resolving each child's best-effort safety_level; defaults to the connector the composite is registered against."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernedSubopsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/operations/{descriptor_id}": {
       "get": {
         "tags": [
@@ -27725,6 +27793,64 @@
         "title": "GatewayResultBody",
         "description": "POST body for ``.../result`` \u2014 the runner's outcome report."
       },
+      "GovernedSubop": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "safety_level": {
+            "type": "string",
+            "nullable": true,
+            "title": "Safety Level"
+          },
+          "grantable": {
+            "type": "boolean",
+            "title": "Grantable"
+          },
+          "ungrantable_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Ungrantable Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "safety_level",
+          "grantable",
+          "ungrantable_reason"
+        ],
+        "title": "GovernedSubop",
+        "description": "One governed child op of a composite (#3349).\n\n``safety_level`` is best-effort \u2014 resolved from the child's descriptor\nwhen one is ingested for the connector, ``None`` for a code-shipped vim\ncontrol-plane sub-op that carries no descriptor. ``grantable`` is\n``False`` for a delete-shaped child (a rollback / delete leg): such a\nchild can never carry a standing grant, so a partial failure of the\ncomposite still requires a human."
+      },
+      "GovernedSubopsResponse": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "governed_subops": {
+            "items": {
+              "$ref": "#/components/schemas/GovernedSubop"
+            },
+            "type": "array",
+            "title": "Governed Subops"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "connector_id",
+          "governed_subops"
+        ],
+        "title": "GovernedSubopsResponse",
+        "description": "Response for ``GET /api/v1/operations/governed-subops`` (#3349)."
+      },
       "GroupingResultModel": {
         "properties": {
           "connector_id": {
@@ -31831,7 +31957,23 @@
             "format": "uuid",
             "nullable": true,
             "title": "Target Id",
-            "description": "Target UUID the grant is scoped to, or null for a targetless op."
+            "description": "Target UUID the grant is scoped to, or null for a targetless op or a selector grant. Mutually exclusive with target_product / target_name_pattern."
+          },
+          "target_product": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Product",
+            "description": "Target selector (#3349): match any dispatch whose target product equals this exact value (e.g. 'vmware'). Requires target_id to be null."
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Target Name Pattern",
+            "description": "Target selector (#3349): match any dispatch whose target name matches this fnmatch glob (e.g. 'esx-dc*'). Requires target_id to be null. This glob is the explicit any-target request \u2014 it is never implied by a null target_id."
           },
           "reason": {
             "type": "string",
@@ -31857,7 +31999,7 @@
           "reason"
         ],
         "title": "ServiceGrantCreate",
-        "description": "Body for creating a standing scoped auto-approval grant.\n\n``extra=\"forbid\"`` rejects unknown fields with 422. There are\ndeliberately **no wildcards**: ``op_id`` and ``connector_id`` name one\nexact operation on one exact connector, and ``target_id`` is either a\nconcrete target UUID or ``None`` for a targetless op. The service layer\nrefuses delete-shaped ops (a grant is the floor of what runs\nunattended, not a bypass of a modeled destructive gate)."
+        "description": "Body for creating a standing scoped auto-approval grant.\n\n``extra=\"forbid\"`` rejects unknown fields with 422. ``op_id`` and\n``connector_id`` name one exact operation on one exact connector, with\ndeliberately **no wildcards**. The target scope is one of three shapes:\n\n* a concrete ``target_id`` (the op on exactly that target),\n* a **selector** \u2014 ``target_product`` and/or ``target_name_pattern``\n  (#3349) \u2014 matching any dispatch whose target fingerprint satisfies it\n  (``product`` exact + ``name`` ``fnmatch`` glob), so an operator can\n  authorise an op on targets that **do not yet exist** (a blueprint that\n  registers its own appliances mid-run), or\n* neither \u2014 a targetless / tenant-wide op (``target_id IS NULL`` with no\n  selector).\n\nA selector and a concrete ``target_id`` are mutually exclusive: the\nselector stands **in place of** a concrete target. The service layer\nrefuses delete-shaped ops regardless of the target scope (a grant is the\nfloor of what runs unattended, not a bypass of a modeled destructive\ngate)."
       },
       "ServiceGrantListResponse": {
         "properties": {
@@ -31906,6 +32048,16 @@
             "nullable": true,
             "title": "Target Id"
           },
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_name_pattern": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name Pattern"
+          },
           "reason": {
             "type": "string",
             "title": "Reason"
@@ -31945,6 +32097,8 @@
           "op_id",
           "connector_id",
           "target_id",
+          "target_product",
+          "target_name_pattern",
           "reason",
           "created_by_sub",
           "created_at",

@@ -16508,14 +16508,20 @@
 <li><code>--target</code> — target slug to resolve against (required for ops that read a target)</li>
 </ul>
 <h3 id="meho-operation-result-query"><code>meho operation result-query</code><a class="headerlink" href="#meho-operation-result-query" title="Permanent link">&para;</a></h3>
-<p>Page rows back from a JSONFlux result handle</p>
+<p>Page or query rows back from a JSONFlux result handle</p>
 <div class="highlight"><pre><span></span><code>meho operation result-query &lt;handle_id&gt; [flags]
 </code></pre></div>
 <ul>
+<li><code>--aggregate</code> — query: aggregate "<FUNC> [field]" (repeatable; FUNC = COUNT SUM MIN MAX AVG)</li>
 <li><code>--backplane</code> — backplane URL to query (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--group-by</code> — query: GROUP BY key column (repeatable, max 4)</li>
 <li><code>--json</code> — emit the full result-query envelope as JSON instead of the human render</li>
-<li><code>--limit</code> — page size; default 50, max 500 (matches the result_query MCP tool)</li>
-<li><code>--offset</code> — zero-based index of the first row to return (page by advancing this by --limit)</li>
+<li><code>--limit</code> — paging: page size; default 50, max 500 (matches the result_query MCP tool)</li>
+<li><code>--offset</code> — paging: zero-based index of the first row to return (advance by --limit)</li>
+<li><code>--order-by</code> — query: sort term "<field> [asc|desc]" (repeatable, max 4)</li>
+<li><code>--query-limit</code> — query: max output rows (clamps to 500); the result flags truncation when more matched</li>
+<li><code>--select</code> — query: projection column to return (repeatable; omit for all columns)</li>
+<li><code>--where</code> — query: WHERE predicate "<field> <op> [value]" (repeatable; op = != &lt; &lt;= &gt; &gt;= IN 'IS NULL')</li>
 </ul>
 <h3 id="meho-operation-search"><code>meho operation search</code><a class="headerlink" href="#meho-operation-search" title="Permanent link">&para;</a></h3>
 <p>Hybrid BM25 + cosine RRF search across enabled operations</p>

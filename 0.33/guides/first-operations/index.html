@@ -2297,12 +2297,18 @@ confused hour:</p>
   bug.</li>
 <li><code>result_query</code> is the one drill-in tool — over MCP, or as <code>meho
   operation result-query &lt;handle_id&gt;</code> on the CLI (both wrap <code>POST
-  /api/v1/operations/result-query</code>). It pages the spilled set with
-  <code>offset</code> and <code>limit</code>; the full normalized rows are held server-side
-  in a per-operator, per-tenant store that expires on a TTL. There is
+  /api/v1/operations/result-query</code>). It reads the spilled set back two
+  ways: <strong>paging</strong> the raw row window with <code>offset</code> and <code>limit</code>, or a
+  <strong>query</strong> mode where a structured <code>query</code> object — filter predicates,
+  a <code>select</code> projection, <code>group_by</code>, aggregates (<code>COUNT</code> / <code>SUM</code> /
+  <code>MIN</code> / <code>MAX</code> / <code>AVG</code>), and <code>order_by</code> — compiles to exactly one
+  bounded, parameterized, read-only <code>SELECT</code> over the handle's rows (no
+  raw SQL is accepted on any transport). The full normalized rows are
+  held server-side in a per-operator, per-tenant store that expires on
+  a TTL. There is
   no <code>result_aggregate</code>, <code>result_export</code>, or <code>result_describe</code> tool —
-  those names are not callable; aggregation and export read-back tools
-  are future work.</li>
+  those names are not callable; aggregation is a mode of <code>result_query</code>,
+  not a separate tool, and export read-back is still not available.</li>
 <li>When <code>drill_in.available</code> is <code>false</code>, the full set was <em>not</em>
   spilled (the <code>reason</code> field says why) — re-run the operation with
   narrower params instead of hunting for a handle.</li>

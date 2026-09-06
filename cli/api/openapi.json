@@ -21561,6 +21561,11 @@
             "type": "string",
             "title": "Principal Sub"
           },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
           "op_pattern": {
             "type": "string",
             "title": "Op Pattern"
@@ -21609,7 +21614,7 @@
           "updated_at"
         ],
         "title": "AgentGrantRead",
-        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM\nrow. Exposes ``expires_at`` so callers can distinguish permanent\ngrants from elevations."
+        "description": "Row shape every accessor returns.\n\n``from_attributes=True`` allows direct construction from an ORM\nrow. Exposes ``expires_at`` so callers can distinguish permanent\ngrants from elevations.\n\n``principal_name`` is the granted principal's operator-facing\nhandle, resolved alongside ``principal_sub`` (#3337) from the agent\nprincipal registry \u2014 ``principal_sub`` names a registered\n:class:`~meho_backplane.db.models.AgentPrincipal` by its\n``keycloak_client_id`` (the grant service enforces this at write\ntime, #2489), so the row's ``name`` is joinable render-time. Not an\nORM column: it is populated by :class:`AgentGrantService` on the read\npaths and is ``None`` on the write paths and whenever the sub names\nno live principal (a revoked/deleted handle) \u2014 the surface then fails\nopen to the raw ``principal_sub``. Additive; a client that ignores it\nis unaffected. Display name (handle) only \u2014 no other profile field."
       },
       "AgentModelTier": {
         "type": "string",

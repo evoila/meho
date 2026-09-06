@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.agents.grant_schemas import AgentGrantCreate, GrantVerdict
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPrincipal, Tenant
+from meho_backplane.db.models import AgentPermission, AgentPrincipal, Tenant
 from meho_backplane.settings import get_settings
 
 
@@ -148,6 +148,93 @@ async def test_grant_create_list_get_revoke() -> None:
 
     after_revoke = await service.list_(tenant_id, principal_sub="agent-abc")
     assert after_revoke == []
+
+
+# ---------------------------------------------------------------------------
+# Display-name resolution alongside the sub (#3337)
+# ---------------------------------------------------------------------------
+
+
+async def _register_named_principal(tenant_id: uuid.UUID, client_id: str, name: str) -> None:
+    """Register one agent principal with an explicit operator handle."""
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPrincipal(
+                tenant_id=tenant_id,
+                name=name,
+                keycloak_client_id=client_id,
+                keycloak_internal_id=str(uuid.uuid4()),
+                owner_sub="seed-owner",
+                created_by_sub="seed-owner",
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_list_and_get_resolve_principal_name() -> None:
+    """list_ / get resolve principal_sub to the agent-principal handle (#3337).
+
+    A grant's ``principal_sub`` names a registered agent principal by its
+    ``keycloak_client_id`` (#2489), so the read paths surface that
+    principal's ``name`` alongside the sub — the display name the console
+    + CLI render.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "name-resolve")
+    await _register_named_principal(tenant_id, "agent:scout", "Recon Scout")
+    service = AgentGrantService()
+    created = await service.grant(
+        tenant_id,
+        "admin-op",
+        _grant_body(principal_sub="agent:scout", op_pattern="*"),
+    )
+
+    listed = await service.list_(tenant_id, principal_sub="agent:scout")
+    assert len(listed) == 1
+    assert listed[0].principal_sub == "agent:scout"
+    assert listed[0].principal_name == "Recon Scout"
+
+    fetched = await service.get(tenant_id, created.id)
+    assert fetched is not None
+    assert fetched.principal_name == "Recon Scout"
+
+
+@pytest.mark.asyncio
+async def test_principal_name_fails_open_when_unresolvable() -> None:
+    """An unresolvable sub degrades to principal_name=None (fail-open, #3337).
+
+    A grant whose ``principal_sub`` names no live principal — a legacy /
+    hard-deleted handle, seeded here directly to bypass the create-time
+    registration gate — resolves to ``None`` so every surface falls back
+    to the raw sub it shows today. Resolution never raises.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "name-fail-open")
+    grant_id = uuid.uuid4()
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPermission(
+                id=grant_id,
+                tenant_id=tenant_id,
+                principal_sub="agent:ghost",
+                op_pattern="*",
+                target_scope="*",
+                verdict="auto-execute",
+                created_by_sub="admin-op",
+            )
+        )
+        await session.commit()
+    service = AgentGrantService()
+
+    listed = await service.list_(tenant_id, principal_sub="agent:ghost")
+    assert len(listed) == 1
+    assert listed[0].principal_sub == "agent:ghost"
+    assert listed[0].principal_name is None
+
+    fetched = await service.get(tenant_id, grant_id)
+    assert fetched is not None
+    assert fetched.principal_name is None
 
 
 @pytest.mark.asyncio

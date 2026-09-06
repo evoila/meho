@@ -94,6 +94,7 @@ Error contract
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 
 import structlog
@@ -183,6 +184,43 @@ async def _validate_principal_registered(
             "never be evaluated. Register it first with "
             "`meho agent-principal register`."
         )
+
+
+async def _resolve_principal_names(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    principal_subs: Collection[str],
+) -> dict[str, str]:
+    """Resolve grant ``principal_sub`` values to agent-principal handles.
+
+    A grant's ``principal_sub`` names a registered agent principal by its
+    :attr:`~meho_backplane.db.models.AgentPrincipal.keycloak_client_id`
+    (the write path enforces this, #2489, and the resolver matches grants
+    on the same ``operator.sub`` == ``agent:<name>`` client id), so the
+    operator-facing handle (:attr:`AgentPrincipal.name`) is a direct,
+    tenant-scoped join -- the display name the grants surfaces render
+    **alongside** the sub (#3337). This is deliberately not the
+    hoisted-name path the audit / approvals surfaces use (there the token
+    ``sub`` has no principal row): a grant sub *is* a client id, so the
+    registry itself is the name source and needs no migration.
+
+    Returns a ``{sub: name}`` map holding only the subs that resolved; a
+    sub naming no principal -- a legacy pre-#2489 row, or a handle
+    hard-deleted since -- is simply absent, so the caller fails open to
+    the raw sub. Revoked principals are **not** filtered: a lingering
+    grant should still show whose handle it was. Never raises: resolution
+    must never fail or slow the surface it feeds.
+    """
+    subs = {sub for sub in principal_subs if sub}
+    if not subs:
+        return {}
+    result = await session.execute(
+        select(AgentPrincipal.keycloak_client_id, AgentPrincipal.name).where(
+            AgentPrincipal.tenant_id == tenant_id,
+            AgentPrincipal.keycloak_client_id.in_(subs),
+        )
+    )
+    return dict(result.tuples().all())
 
 
 def _validate_target_scope(target_scope: str | None) -> None:
@@ -373,9 +411,11 @@ class AgentGrantService:
                 )
             )
             row = result.scalar_one_or_none()
-        if row is None:
-            return None
-        return AgentGrantRead.model_validate(row)
+            if row is None:
+                return None
+            entry = AgentGrantRead.model_validate(row)
+            names = await _resolve_principal_names(session, tenant_id, [entry.principal_sub])
+        return entry.model_copy(update={"principal_name": names.get(entry.principal_sub)})
 
     async def list_(
         self,
@@ -430,4 +470,11 @@ class AgentGrantService:
                 )
             result = await session.execute(stmt)
             rows = result.scalars().all()
-        return [AgentGrantRead.model_validate(row) for row in rows]
+            entries = [AgentGrantRead.model_validate(row) for row in rows]
+            names = await _resolve_principal_names(
+                session, tenant_id, [entry.principal_sub for entry in entries]
+            )
+        return [
+            entry.model_copy(update={"principal_name": names.get(entry.principal_sub)})
+            for entry in entries
+        ]

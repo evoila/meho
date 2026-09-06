@@ -25,6 +25,7 @@
   CSRF posture matches the create / elevate modals -- inherited from the
   page-level ``hx-headers`` directive plus the route re-set cookie.
 -#}
+{% from "_references.html" import subject %}
 <dialog id="grants-revoke-modal" class="modal">
   <div class="modal-box max-w-lg">
     <h3 class="font-semibold text-lg" id="grants-revoke-modal-title">
@@ -36,7 +37,7 @@
       <span class="font-mono break-all">{{ grant.op_pattern }}</span>
       (<span class="font-mono">{{ grant.verdict }}</span>)
       for principal
-      <span class="font-mono break-all">{{ grant.principal_sub }}</span>?
+      {{ subject(grant.subject) }}?
     </p>
     <p class="text-xs opacity-60">
       This removes the explicit grant; the principal reverts to its

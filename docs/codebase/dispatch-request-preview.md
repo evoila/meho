@@ -154,16 +154,25 @@ JSON value at runtime (`_TargetArg` in `operations/meta_tools.py`), so no
 target-failure mode returns a 4xx.
 
 The shared resolver `resolve_ingested_request` deliberately *raises* on a
-path-template fault — `KeyError` for an unsubstituted path var, `RuntimeError`
+path-template fault — `KeyError` for an unsubstituted path var, `ValueError`
+for a path value carrying a `..` traversal dot-segment (#S04), `RuntimeError`
 for a descriptor missing its method/path — because the **execute** path relies
 on the dispatcher's generic `except` to convert them to a structured
 `connector_error`. The preview path has no such wrapper, so
-`_build_ingested_preview` catches exactly those two and maps them to a
-`dispatch_error` envelope (#2066). Before that wrap they escaped uncaught and
-surfaced as MCP `-32603` / HTTP 500 — violating the never-raises contract this
-table documents. `resolve_ingested_request` itself is unchanged (the
+`_build_ingested_preview` catches exactly those three and maps them to a
+`dispatch_error` envelope (#2066 / #S04). Before that wrap they escaped uncaught
+and surfaced as MCP `-32603` / HTTP 500 — violating the never-raises contract
+this table documents. `resolve_ingested_request` itself is unchanged (the
 execute-path contract must keep raising), so the two surfaces stay aligned via
 their respective wrappers, not a shared swallow.
+
+The `ValueError` arm closes an in-path escape: reserved expansion (`{+var}` /
+`{#var}`) keeps `/` literal, so a caller-supplied path value could otherwise
+carry extra segments or a `..` dot-segment and address a different resource
+than the op the governance/audit gate authorised (the gate keys on
+`descriptor.op_id`, never the resolved wire path). `_substitute_path` rejects a
+`..` dot-segment before encoding and the reserved safe set no longer carries
+`?` / `#`, so a value can never open a query string or fragment either.
 
 ## Redaction
 

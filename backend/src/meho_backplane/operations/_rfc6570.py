@@ -38,8 +38,11 @@ never mistaken for part of the variable name.
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 __all__ = [
     "RFC6570_PATH_OPERATORS",
+    "has_dot_segment",
     "split_path_operator",
 ]
 
@@ -80,3 +83,39 @@ def split_path_operator(name: str) -> tuple[str, str]:
     if len(name) >= 2 and name[0] in RFC6570_PATH_OPERATORS:
         return name[0], name[1:]
     return "", name
+
+
+def has_dot_segment(value: str) -> bool:
+    """Return ``True`` if *value* carries a ``..`` parent-directory dot-segment.
+
+    A shared guard for the two RFC6570 reserved-expansion renderers -- the
+    ingested ``_substitute_path`` and the typed vRLI ``build_event_query_path``
+    -- which keep ``/`` literal so structural slashes reach the appliance
+    intact. That literal ``/`` is also the opening for a caller-supplied value
+    to inject extra path segments, so before either renderer percent-encodes
+    the value it rejects a ``..`` traversal segment. Living beside
+    :data:`RFC6570_PATH_OPERATORS` in this stdlib-only leaf keeps both renderers
+    on one definition -- the same anti-drift stance the operator set already
+    takes (#2003 / #2066).
+
+    One layer of percent-decoding is applied before the split so an already
+    percent-encoded ``%2e%2e`` is caught, not only a literal ``..``. The value
+    is then split on ``/`` and each segment tested for an exact ``..`` -- the
+    RFC3986 §3.3 dot-segment. A ``..`` embedded in a larger segment (``a..b``,
+    ``CONTAINS ..``) is data, not a segment, and is left alone; only a
+    standalone ``..`` segment is a traversal, whether it sits at the start
+    (``../x``), interior (``x/../y``), end (``x/..``), or is the whole value
+    (``..``).
+
+    >>> has_dot_segment("text/CONTAINS error/hostname/CONTAINS vcsa")
+    False
+    >>> has_dot_segment("../../etc/passwd")
+    True
+    >>> has_dot_segment("a/../b")
+    True
+    >>> has_dot_segment("%2e%2e/x")
+    True
+    >>> has_dot_segment("a..b")
+    False
+    """
+    return any(segment == ".." for segment in unquote(value).split("/"))

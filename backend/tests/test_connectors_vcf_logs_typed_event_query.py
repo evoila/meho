@@ -52,6 +52,7 @@ from meho_backplane.connectors.vcf_logs import (
     VcfLogsConnector,
 )
 from meho_backplane.connectors.vcf_logs.typed_ops import (
+    _CONSTRAINTS_RESERVED_SAFE,
     VRLI_EVENT_QUERY_OP,
     build_event_query_path,
     event_query_impl,
@@ -59,6 +60,7 @@ from meho_backplane.connectors.vcf_logs.typed_ops import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, Target
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._branches import _RFC6570_RESERVED_SAFE
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.meta_tools import call_operation
 from tests.acceptance._vrli_canary_fixtures import (
@@ -137,12 +139,57 @@ def test_build_event_query_path_empty_constraint_is_the_base_events_path() -> No
 
 
 def test_build_event_query_path_keeps_reserved_constraint_slashes_literal() -> None:
-    """A reserved constraint chain keeps ``/`` literal, encodes spaces (#2003)."""
+    """A reserved constraint chain keeps ``/`` literal, encodes spaces (#2003).
+
+    Also pins the #S04 hardening: neither the typed constraint safe-set nor the
+    ingested dispatcher's mirror carries ``?`` / ``#`` (a path value can never
+    open a query string or fragment), and the two sets stay byte-for-byte
+    identical so the typed and ingested reserved-expansion paths cannot drift.
+    """
     path = build_event_query_path(VRLI_RESERVED_CONSTRAINT_VALUE)
     assert path == VRLI_RESERVED_CONSTRAINT_WIRE_PATH
     # Structural slashes survived; only the space was percent-encoded.
     assert "%2F" not in path
     assert "%20" in path
+    # #S04: query / fragment delimiters are out of both safe sets, which stay
+    # identical (drift-pinned).
+    assert "?" not in _CONSTRAINTS_RESERVED_SAFE
+    assert "#" not in _CONSTRAINTS_RESERVED_SAFE
+    assert "?" not in _RFC6570_RESERVED_SAFE
+    assert "#" not in _RFC6570_RESERVED_SAFE
+    assert _CONSTRAINTS_RESERVED_SAFE == _RFC6570_RESERVED_SAFE
+
+
+def test_build_event_query_path_encodes_query_and_fragment_delimiters() -> None:
+    """``?`` / ``#`` in a constraint chain percent-encode, never open a query/fragment (#S04)."""
+    assert build_event_query_path("a?b") == "/api/v2/events/a%3Fb"
+    assert build_event_query_path("a#b") == "/api/v2/events/a%23b"
+
+
+@pytest.mark.parametrize(
+    "constraints",
+    [
+        "..",  # bare
+        "../etc/passwd",  # leading
+        "text/CONTAINS x/../secrets",  # interior
+        "text/CONTAINS x/..",  # trailing
+        "%2e%2e/x",  # already percent-encoded
+    ],
+)
+def test_build_event_query_path_rejects_dot_segment(constraints: str) -> None:
+    """A ``..`` dot-segment in the constraint chain is rejected before encoding (#S04).
+
+    The literal slashes that carry a genuine constraint chain are the same
+    slashes a ``..`` would use to climb out of ``/api/v2/events/`` and address
+    another appliance resource than the read-only op the audit gate authorised.
+    """
+    with pytest.raises(ValueError, match="traversal"):
+        build_event_query_path(constraints)
+
+
+def test_build_event_query_path_allows_dots_inside_a_segment() -> None:
+    """A ``..`` embedded in a larger segment is data, not a dot-segment (#S04)."""
+    assert build_event_query_path("text/CONTAINS ..") == "/api/v2/events/text/CONTAINS%20.."
 
 
 @pytest.mark.asyncio
@@ -202,6 +249,19 @@ async def test_event_query_impl_rejects_non_string_constraints() -> None:
 
     with pytest.raises(ValueError, match="constraints"):
         await event_query_impl(conn, _make_operator(), _Target(), {"constraints": ["not", "str"]})
+
+
+@pytest.mark.asyncio
+async def test_event_query_impl_rejects_dot_segment_constraints() -> None:
+    """A ``..`` traversal constraint never reaches the connector session (#S04)."""
+    conn = _FakeConnector({"events": []})
+
+    with pytest.raises(ValueError, match="traversal"):
+        await event_query_impl(
+            conn, _make_operator(), _Target(), {"constraints": "../../etc/passwd"}
+        )
+    # No request was issued — the value was rejected before the session call.
+    assert conn.calls == []
 
 
 # ---------------------------------------------------------------------------

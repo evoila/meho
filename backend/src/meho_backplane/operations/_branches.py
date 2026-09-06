@@ -47,7 +47,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.flight_recorder import typed as flight_recorder_typed
-from meho_backplane.operations._rfc6570 import RFC6570_PATH_OPERATORS
+from meho_backplane.operations._rfc6570 import RFC6570_PATH_OPERATORS, has_dot_segment
 
 __all__ = [
     "IngestedRequest",
@@ -91,7 +91,16 @@ _PATH_VAR_RE = re.compile(rf"\{{([{re.escape(RFC6570_PATH_OPERATORS)}]?)([^{{}}]
 # unencoded so they keep their structural meaning in the URL. Genuinely
 # unsafe characters (space, control chars) are still percent-encoded by
 # :func:`urllib.parse.quote` because they are absent from this set.
-_RFC6570_RESERVED_SAFE = ":/?#[]@!$&'()*+,;="
+#
+# ``?`` and ``#`` are deliberately excluded (they are gen-delims RFC6570 would
+# otherwise pass through): a *path*-segment value never needs them, and leaving
+# them literal would let a caller-supplied path param open a query string
+# (``?``) or fragment (``#``) and address a different resource than the op the
+# governance/audit gate authorised. Encoding them (``%3F`` / ``%23``) keeps the
+# value confined to the path. The mirrored typed set
+# ``vcf_logs.typed_ops._CONSTRAINTS_RESERVED_SAFE`` stays byte-for-byte
+# identical (pinned by ``test_event_query_path_keeps_reserved_constraint_slashes_literal``).
+_RFC6570_RESERVED_SAFE = ":/[]@!$&'()*+,;="
 
 
 def _split_ingested_params(
@@ -180,20 +189,34 @@ def _substitute_path(path_template: str, path_params: dict[str, Any]) -> str:
 
     In both forms a genuinely-unsafe character (space, control chars) is
     still percent-encoded -- only the reserved structural chars differ.
+    ``?`` and ``#`` are never in the reserved safe set (see
+    :data:`_RFC6570_RESERVED_SAFE`), so a value can never open a query string
+    or fragment; and before either form encodes the value, a ``..`` traversal
+    dot-segment (:func:`~meho_backplane.operations._rfc6570.has_dot_segment`)
+    is rejected -- so the resolved wire path can never address a resource
+    outside the op's declared template, which is what the governance/audit
+    gate authorised on ``descriptor.op_id`` (#S04).
 
-    Missing path vars raise :class:`KeyError` so the dispatcher's caller
-    surfaces them as ``invalid_params`` rather than producing a request
-    with a literal ``{var}`` in the URL. The lookup is keyed on the bare
-    variable name (operator stripped), so ``{+constraints}`` resolves the
-    param named ``constraints``.
+    Missing path vars raise :class:`KeyError`, and a ``..`` dot-segment value
+    raises :class:`ValueError`, so the dispatcher's caller surfaces both as a
+    caller-side ``invalid_params`` fault rather than producing a request with
+    a literal ``{var}`` -- or a traversed path -- in the URL. The lookup is
+    keyed on the bare variable name (operator stripped), so ``{+constraints}``
+    resolves the param named ``constraints``.
     """
 
     def _replace(match: re.Match[str]) -> str:
         operator, name = match.group(1), match.group(2)
         if name not in path_params:
             raise KeyError(f"path template requires {name!r} but it was not supplied")
+        value = str(path_params[name])
+        if has_dot_segment(value):
+            raise ValueError(
+                f"path parameter {name!r} may not contain a '..' path-traversal "
+                "segment; supply a value without parent-directory references"
+            )
         safe = _RFC6570_RESERVED_SAFE if operator in ("+", "#") else ""
-        return quote(str(path_params[name]), safe=safe)
+        return quote(value, safe=safe)
 
     return _PATH_VAR_RE.sub(_replace, path_template)
 
@@ -256,10 +279,11 @@ async def resolve_ingested_request(
     real request: the path substitution, the ``mount_op_path`` prefix
     application, the requestBody unwrap (#1656) all run identically.
 
-    Raises the same :class:`RuntimeError` (missing method/path) and
-    :class:`KeyError` (unsubstituted path var) the dispatch path raised
-    inline, so both the execute and the preview surface them through the
-    dispatcher's structured-error mapping unchanged.
+    Raises the same :class:`RuntimeError` (missing method/path),
+    :class:`KeyError` (unsubstituted path var) and :class:`ValueError` (a
+    ``..`` path-traversal dot-segment in a path value, #S04) the dispatch
+    path raised inline, so both the execute and the preview surface them
+    through the dispatcher's structured-error mapping unchanged.
     """
     method = (descriptor.method or "").upper()
     path_template = descriptor.path or ""

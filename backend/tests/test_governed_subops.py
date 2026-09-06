@@ -59,7 +59,9 @@ def test_register_dedups_and_lookup() -> None:
 
 def test_register_empty_is_noop() -> None:
     """A composite with no governed children registers nothing (no grant set)."""
-    register_governed_subops(composite_op_id="x.composite.bare", connector_id="x-1.0", sub_op_ids=())
+    register_governed_subops(
+        composite_op_id="x.composite.bare", connector_id="x-1.0", sub_op_ids=()
+    )
     assert governed_subops_for("x.composite.bare") is None
 
 

@@ -70,13 +70,21 @@ from meho_backplane.agents.grant_schemas import (
 )
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.auth.rbac import require_role
+from meho_backplane.auth.rbac import require_human_principal, require_role
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/api/v1/agents/grants", tags=["agent-grants"])
 
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Human-only governance gate (meho-internal#289). Attached to grant
+#: **create** and **elevate** so a non-human ``principal_kind`` (agent /
+#: service / runner) cannot mint or widen a grant over REST, even holding
+#: the ``tenant_admin`` role an agent principal is minted with — the REST
+#: half of :mod:`meho_backplane.mcp.human_only`'s policy. Read / show /
+#: revoke keep the plain ``tenant_admin`` gate.
+_require_human = Depends(require_human_principal)
 
 _GRANT_OP_IDS: Final[dict[str, str]] = {
     "list": "agent.grant.list",
@@ -139,7 +147,12 @@ async def show_grant(
     return entry
 
 
-@router.post("", response_model=AgentGrantRead, status_code=http_status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=AgentGrantRead,
+    status_code=http_status.HTTP_201_CREATED,
+    dependencies=[_require_human],
+)
 async def create_grant(
     payload: AgentGrantCreate,
     operator: Operator = _require_admin,
@@ -171,6 +184,7 @@ async def create_grant(
     "/elevate",
     response_model=AgentGrantRead,
     status_code=http_status.HTTP_201_CREATED,
+    dependencies=[_require_human],
 )
 async def elevate_grant(
     payload: AgentElevationCreate,

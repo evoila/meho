@@ -642,3 +642,128 @@ def test_show_returns_reviewer_context(client: TestClient) -> None:
     assert rc["subject"] == "web-01 (vm-1042)"
     # Secret hygiene: the secret param never rides the view anywhere.
     assert "hunter2" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# meho-internal#289 — the approval DECISION verbs are human-only on every
+# transport. An agent principal is minted ``tenant_admin`` with the REST
+# audience, so it clears ``require_approvals_access``; the human-only guard
+# must still refuse it (approve / reject / decide), while a human operator
+# passes and the read routes stay open to a service principal (the
+# meho-automation approval bridge lists the queue with a service token).
+# ---------------------------------------------------------------------------
+
+# RUNNER is refused earlier on the wire (401 missing_runner_id, and the
+# runner path-cage in middleware) so it never reaches this guard over REST;
+# the RUNNER kind is covered at the service layer in test_approval_queue.py.
+_MACHINE_KINDS: tuple[str, ...] = ("agent", "service")
+
+_DECISION_ENDPOINTS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("POST", f"/api/v1/approvals/{_APPROVAL_ID_APPROVE}/approve", {"params": {}}),
+    ("POST", f"/api/v1/approvals/{_APPROVAL_ID_REJECT}/reject", {"reason": ""}),
+    ("POST", f"/api/v1/approvals/{_APPROVAL_ID_DECIDE}/decide", {"decision": "approved"}),
+)
+
+
+def _machine_admin_token(key: Any, *, kind: str, sub: str = "machine-admin") -> str:
+    """Mint a machine principal at ``tenant_admin`` — how agents are minted (#289)."""
+    return mint_token(
+        key,
+        sub=sub,
+        tenant_role=TenantRole.TENANT_ADMIN.value,
+        tenant_id=str(_TENANT_A),
+        principal_kind=kind,
+    )
+
+
+@pytest.mark.parametrize("kind", _MACHINE_KINDS)
+@pytest.mark.parametrize("method, path, body", _DECISION_ENDPOINTS)
+def test_machine_principal_denied_on_decision_routes(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: dict[str, Any],
+    kind: str,
+) -> None:
+    """A machine ``tenant_admin`` token → 403 ``human_principal_required``.
+
+    The realistic exploit token: an agent/service/runner minted
+    ``tenant_admin`` (so it clears ``require_approvals_access``). The
+    transport-independent human-principal guard refuses it on every
+    decision verb, with a remediation naming the human path.
+    """
+    key = make_rsa_keypair(f"kid-machine-{kind}")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_machine_admin_token(key, kind=kind)}"}
+        response = client.request(method, path, headers=headers, json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"].startswith("human_principal_required"), response.text
+
+
+@pytest.mark.parametrize("method, path, body", _DECISION_ENDPOINTS)
+def test_human_admin_passes_kind_gate_on_decision_routes(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: dict[str, Any],
+) -> None:
+    """A human ``tenant_admin`` clears the kind gate — reaches the 404 path.
+
+    Proves the guard admits humans: a machine token 403s at the gate, a
+    human token gets past it to the deeper not-found handler (the request
+    id does not exist), so the response is 404, not the gate's 403.
+    """
+    key = make_rsa_keypair("kid-human-admin")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.TENANT_ADMIN)}"}
+        response = client.request(method, path, headers=headers, json=body)
+    assert response.status_code == 404, response.text
+    assert response.json() == {"detail": "approval_request_not_found"}
+
+
+@pytest.mark.parametrize("method, path, body", _DECISION_ENDPOINTS)
+def test_human_approver_passes_kind_gate_on_decision_routes(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: dict[str, Any],
+) -> None:
+    """A human ``read_only`` + ``approver`` also clears the kind gate (#3243 preserved).
+
+    The approver capability model is unchanged for **human** principals:
+    a dedicated human approver reaches the deeper not-found handler (404),
+    never the human-only gate's 403.
+    """
+    key = make_rsa_keypair("kid-human-approver")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_approve_only_token(key)}"}
+        response = client.request(method, path, headers=headers, json=body)
+    assert response.status_code == 404, response.text
+    assert response.json() == {"detail": "approval_request_not_found"}
+
+
+@pytest.mark.asyncio
+async def test_service_principal_can_still_list_approvals() -> None:
+    """The read plane stays open to a service token (meho-automation bridge, #289).
+
+    ``list`` is gated by ``require_approvals_access`` alone (no human-kind
+    gate), so a service principal at ``tenant_admin`` still reads the queue —
+    the approval-bridge use case the ticket calls out. 200 + the empty
+    tenant queue.
+    """
+    key = make_rsa_keypair("kid-service-list")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="https://testserver",
+        ) as ac:
+            response = await ac.get(
+                "/api/v1/approvals",
+                headers={"Authorization": f"Bearer {_machine_admin_token(key, kind='service')}"},
+            )
+    assert response.status_code == 200, response.text
+    assert response.json() == []

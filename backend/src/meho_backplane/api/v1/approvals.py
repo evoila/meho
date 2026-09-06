@@ -82,7 +82,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.rbac import require_approvals_access
+from meho_backplane.auth.rbac import require_approvals_access, require_human_principal
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
@@ -123,6 +123,15 @@ router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
 #: not park the op still cannot read its result. See
 #: :func:`~meho_backplane.auth.rbac.require_approvals_access`.
 _require_approvals_access = Depends(require_approvals_access)
+
+#: Human-only governance gate (meho-internal#289). Rejects a non-human
+#: ``principal_kind`` (agent / service / runner) before the endpoint runs —
+#: the REST half of :mod:`meho_backplane.mcp.human_only`'s policy, so the
+#: approval **decision** verbs (approve / reject / decide) are human-only on
+#: every transport. Attached only to the decision routes; the read routes
+#: (list / show / result) keep ``require_approvals_access`` alone so a
+#: service principal's approval bridge can still list the queue.
+_require_human = Depends(require_human_principal)
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +681,7 @@ async def _record_approval_decision(
 @router.post(
     "/{request_id}/approve",
     response_model=ApproveResponseBody,
+    dependencies=[_require_human],
 )
 async def approve_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
@@ -757,6 +767,7 @@ async def approve_approval_request(
 @router.post(
     "/{request_id}/reject",
     response_model=RejectResponseBody,
+    dependencies=[_require_human],
 )
 async def reject_approval_request(
     request_id: Annotated[uuid.UUID, Path()],
@@ -884,6 +895,7 @@ class DecideResponseBody(BaseModel):
 @router.post(
     "/{request_id}/decide",
     response_model=DecideResponseBody,
+    dependencies=[_require_human],
 )
 async def decide_approval_request(
     request_id: Annotated[uuid.UUID, Path()],

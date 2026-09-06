@@ -104,6 +104,7 @@ __all__ = [
     "ApprovalError",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
+    "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
     "ResultAccessForbiddenError",
@@ -249,6 +250,42 @@ class UnauthorizedApprovalError(ApprovalError):
         super().__init__(
             f"operator {operator_sub!r} with role {role!r} may not approve/reject "
             "an approval request (requires at least 'operator')"
+        )
+
+
+class NonHumanApprovalError(UnauthorizedApprovalError):
+    """A machine (non-human) principal tried to decide an approval request.
+
+    Approving / rejecting / deciding a parked op is a **human** decision
+    (v0.1-spec §7, meho-internal#289). Raised by :func:`_check_reviewer_role`
+    when ``operator.principal_kind`` is a machine kind (agent / service /
+    runner), independent of tenant role or the ``approver`` capability — an
+    agent principal is minted ``tenant_admin``, so a role/approver check
+    alone would admit it.
+
+    Subclasses :class:`UnauthorizedApprovalError` so the existing
+    ``except UnauthorizedApprovalError`` handlers in the REST and console
+    routes still map it to HTTP 403. This service-layer refusal is the
+    transport-independent backstop behind the REST human-principal
+    dependency (:func:`~meho_backplane.auth.rbac.require_human_principal`):
+    a caller reaching the service directly (agent runtime, tests) sees the
+    same human-only policy.
+    """
+
+    def __init__(self, *, operator_sub: str, principal_kind: str) -> None:
+        self.operator_sub = operator_sub
+        self.principal_kind = principal_kind
+        # ``role`` is populated for base-class compatibility (nothing reads
+        # it apart from the message); the refusal is kind-based, not role-
+        # based, so mirror the kind into it rather than a tenant role.
+        self.role = principal_kind
+        # Skip ``UnauthorizedApprovalError.__init__`` (its message talks about
+        # roles); build the kind-aware message off the shared base instead.
+        ApprovalError.__init__(
+            self,
+            f"principal {operator_sub!r} of kind {principal_kind!r} may not "
+            "decide an approval request — approval is a human decision "
+            "(v0.1-spec §7)",
         )
 
 
@@ -1402,7 +1439,19 @@ def _check_reviewer_role(operator: Operator) -> None:
     same decoupled-from-dispatch access model, and keeps ``read_only``
     (no flag) failing closed exactly as before.
     """
-    from meho_backplane.auth.operator import TenantRole
+    from meho_backplane.auth.operator import TenantRole, is_human_principal
+
+    # Human-only governance (v0.1-spec §7, meho-internal#289): a machine
+    # principal (agent / service / runner) can never decide an approval,
+    # regardless of tenant role or the ``approver`` capability. Checked
+    # first so a machine token minted ``tenant_admin`` is refused here too.
+    # This mirrors the REST require_human_principal dependency as the
+    # transport-independent backstop for direct service callers.
+    if not is_human_principal(operator):
+        raise NonHumanApprovalError(
+            operator_sub=operator.sub,
+            principal_kind=operator.principal_kind.value,
+        )
 
     if operator.tenant_role == TenantRole.READ_ONLY and not operator.approver:
         raise UnauthorizedApprovalError(

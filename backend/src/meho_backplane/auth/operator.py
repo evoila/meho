@@ -121,7 +121,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-__all__ = ["Operator", "PrincipalKind", "TenantRole"]
+__all__ = [
+    "MACHINE_PRINCIPAL_KINDS",
+    "Operator",
+    "PrincipalKind",
+    "TenantRole",
+    "is_human_principal",
+]
 
 
 class TenantRole(StrEnum):
@@ -226,3 +232,33 @@ class Operator(BaseModel):
     approver: bool = False
     runner_id: UUID | None = None
     check_runner_dispatch: bool = False
+
+
+#: Machine (non-human) principal kinds. A human operator authenticates as
+#: :attr:`PrincipalKind.USER` (the graceful-fallback default for a token
+#: carrying no ``principal_kind`` claim); every other kind is a machine
+#: credential — an agent client, a non-MEHO service account, or a satellite
+#: runner. The human-only governance verbs (approval decisions, agent-grant
+#: create / elevate, agent-principal register) refuse these kinds on **every**
+#: transport (meho-internal#289): approval is a human decision (v0.1-spec §7).
+MACHINE_PRINCIPAL_KINDS: frozenset[PrincipalKind] = frozenset(
+    {PrincipalKind.AGENT, PrincipalKind.SERVICE, PrincipalKind.RUNNER}
+)
+
+
+def is_human_principal(operator: Operator) -> bool:
+    """Return ``True`` when *operator* is a human (interactive) principal.
+
+    A human principal authenticates as :attr:`PrincipalKind.USER`. Every
+    kind in :data:`MACHINE_PRINCIPAL_KINDS` (agent / service / runner) is a
+    machine credential and returns ``False``.
+
+    Single source of truth for the human-vs-machine split. It is consulted
+    by the transport-independent REST guard
+    (:func:`~meho_backplane.auth.rbac.ensure_human_principal`) and the
+    approval service-layer backstop
+    (:func:`~meho_backplane.operations.approval_queue._check_reviewer_role`)
+    so the two layers enforce one policy — the peer of the MCP transport's
+    :mod:`meho_backplane.mcp.human_only` block.
+    """
+    return operator.principal_kind not in MACHINE_PRINCIPAL_KINDS

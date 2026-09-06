@@ -1095,6 +1095,49 @@ chain, tree shape `approval.request` → {`approval.decision`, `<op_id>`}.
 Pre-0053 rows keep NULLs and simply stay out of replay (the pre-fix
 behaviour).
 
+### Composite-child park lineage (#3348)
+
+A **composite** that fans out to a governed write can park a *child*
+sub-op rather than itself. Two seams reach the park:
+
+- the recursive `dispatch_child` seam (`get_dispatch_child`), which
+  re-dispatches the child through `dispatch()` and hits
+  `_handle_needs_approval`; and
+- the direct-session `enforce_subop_policy` seam
+  (`operations/composite.py`, #2254), which a write composite migrated
+  off `dispatch_child` calls **before** each governed sub-call and which
+  parks via its own `create_pending_request`.
+
+On either seam the parked child's `approval.request` audit row must
+carry `parent_audit_id` = the **composite dispatch's own `audit_id`**, so
+the G8.2 replay walk can attribute the fanned-out write to the composite
+that issued it — the same linkage the approval entry surfaces through its
+`request_audit_id` anchor. `create_pending_request`'s audit writer reads
+that value from `parent_audit_id_var` (the row being written *is* the
+`request_audit_id` row, so it takes the contextvar rather than
+self-parenting — see the `stored_parent`/`else` branch in
+`approval_queue._write_audit_row`).
+
+The contextvar is bound for the **whole composite handler body** in
+`operations/_branches.py::dispatch_composite` (bound to the composite's
+`audit_id`, token-reset in `finally` before the dispatcher writes the
+composite's own DISPATCH row, so the composite never self-parents). The
+recursive seam additionally binds it internally per child dispatch;
+binding at the handler-body boundary is what extends the same linkage to
+the **direct** seam. Before #3348 only the recursive seam bound it, so a
+service principal whose composite parked a child on the direct seam wrote
+`parent_audit_id = NULL` — an orphan approval the replay walk could not
+tie back to its composite.
+
+Note that a composite which returns the child's `awaiting_approval`
+result **verbatim** (the usual write-composite shape) writes no composite
+DISPATCH row of its own — the dispatcher passes a handler-returned
+`OperationResult` straight through. The child's row still records the
+composite's `audit_id` as its parent; whether that parent row is later
+persisted (a composite that continues past the park) is orthogonal to the
+lineage stamp. Reproducing the whole composite step on approve is a
+separate concern (#3351).
+
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent

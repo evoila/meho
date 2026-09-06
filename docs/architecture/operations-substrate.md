@@ -350,7 +350,10 @@ It re-runs the **same** `policy_gate` the dispatcher runs, against an in-memory 
 
 ### `parent_audit_id` semantics
 
-The composite branch builds the `dispatch_child` callable via [`get_dispatch_child(...)`](../../backend/src/meho_backplane/operations/composite.py), passing the parent's `audit_id`. The factory closes over `parent_audit_id` and binds it on `parent_audit_id_var` for the duration of each child dispatch. The child's audit row reads the contextvar via `parent_audit_id_var.get()` and writes the UUID to its `audit_log.parent_audit_id` column.
+`dispatch_composite` binds the composite's own `audit_id` on `parent_audit_id_var` for the **whole handler body** (token-reset in `finally` before the dispatcher writes the composite's own DISPATCH row, so the composite never self-parents). Every sub-op the handler fans out therefore runs with the composite as its audit parent, on **both** sub-call seams:
+
+- The recursive `dispatch_child` seam — [`get_dispatch_child(...)`](../../backend/src/meho_backplane/operations/composite.py) closes over the same `audit_id` and re-binds `parent_audit_id_var` per child dispatch; the child's audit row reads it via `parent_audit_id_var.get()` and writes the UUID to its `audit_log.parent_audit_id` column.
+- The direct-session `enforce_subop_policy` seam (below) — a child that parks there has its `approval.request` audit row stamped with the same value (read off `parent_audit_id_var` in `approval_queue._write_audit_row`). The handler-body bind is what extends the linkage here; before #3348 only the recursive seam bound it, so a direct-seam park recorded `parent_audit_id = NULL` (an orphan approval the replay walk could not attribute to its composite).
 
 `parent_audit_id` is a real column on `audit_log` (added by [migration `0006`](../../backend/alembic/versions/0006_add_audit_log_parent_audit_id.py) with a `b-tree` index for tree traversal queries) — not a contextvar-only linkage. The G8.2 audit-replay surface walks the parent_audit_id chain to reconstruct a composite's full sub-op history.
 

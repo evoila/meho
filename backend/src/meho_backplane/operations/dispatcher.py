@@ -571,9 +571,14 @@ async def _run_source_kind_branch(
 
     Composite branches additionally bind the
     :data:`~meho_backplane.operations._audit.parent_audit_id_var`
-    contextvar so the recursive dispatch attaches audit-tree linkage --
-    T7 (#398) will promote the linkage to a real column on
-    ``audit_log``; T5 lets it ride on the payload.
+    contextvar to the composite's own ``audit_id`` for the whole handler
+    body (in :func:`~meho_backplane.operations._branches.dispatch_composite`),
+    so both the recursive ``dispatch_child`` seam and the direct
+    ``enforce_subop_policy`` seam attach audit-tree linkage -- a parked
+    child on either path records the composite as its ``parent_audit_id``
+    (#398 promoted the linkage to a real ``audit_log`` column; #3348
+    extended the bind to the direct seam so its parked children are no
+    longer orphaned).
     """
     if descriptor.source_kind == "ingested":
         assert connector_instance is not None  # resolver miss handled by caller
@@ -618,6 +623,12 @@ async def _run_source_kind_branch(
             target=target,
             params=params,
             dispatch_child=dispatch_child,
+            # The composite's own audit-row id -- bound as the audit
+            # parent for the whole handler body so a child that parks on
+            # the direct ``enforce_subop_policy`` seam links back to this
+            # composite (#3348), not just the recursive ``dispatch_child``
+            # seam (which binds it again internally).
+            audit_id=audit_id,
             # Forward the instance the resolver already built for this
             # composite's target (#2251). ``dispatch_composite`` hands it
             # to the handler only when the handler declares a ``connector``

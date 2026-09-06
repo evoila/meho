@@ -32602,6 +32602,7 @@
               "installer",
               "k8s",
               "keycloak",
+              "linux",
               "loki",
               "mongodb",
               "msad",

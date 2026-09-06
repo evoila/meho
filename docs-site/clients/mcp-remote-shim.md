@@ -53,8 +53,17 @@ same:
 
 ```bash
 npx -y mcp-remote@0.1.38 https://meho.example.com/mcp \
-  --header "Authorization:${MEHO_TOKEN}"
+  --header 'Authorization:${MEHO_TOKEN}'
 ```
+
+The single quotes are load-bearing: they stop the shell from expanding
+`${MEHO_TOKEN}`, so the literal `${MEHO_TOKEN}` reaches `mcp-remote`,
+which substitutes the value from its own environment — the token itself
+never lands on the command line, where it would otherwise sit in the
+process table for the whole life of this long-running shim. Because the
+token still lives in the shim's environment as a bearer credential, treat
+this static-token stopgap as unsuitable for shared or multi-user
+workstations.
 
 The backplane is HTTPS, so no `--allow-http` is needed. Set
 `NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the client's

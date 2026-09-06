@@ -148,6 +148,35 @@ Migrations that INSERT, UPDATE, or DELETE rows. Rules:
    delete: the skipped row stays in its pre-migration state, and destructive
    cleanup remains operator-driven.
 
+### Constraint enforcement via triggers (Postgres-only)
+
+Some invariants belong at the datastore, not in application code — the load-bearing
+example is `audit_log` being **append-only** (CLAUDE.md postulate 7 / v0.1-spec
+section 6). Migration `0100` installs a `BEFORE UPDATE OR DELETE ... FOR EACH ROW`
+trigger that `RAISE`s, so a direct `UPDATE` / `DELETE` fails at the datastore under
+every role — including the app DB role and a superuser — while `INSERT` / `SELECT`
+stay untouched. Rules for this kind of migration:
+
+1. **Postgres-only, dialect-guarded.** plpgsql trigger DDL is not portable to the
+   SQLite dev/test lane. Guard the body with an early return so `upgrade()` and
+   `downgrade()` are a clean no-op off PostgreSQL:
+
+   ```python
+   bind = op.get_bind()
+   if bind.dialect.name != "postgresql":
+       return
+   ```
+
+   The unit lanes assert the app-level convention (no code path mutates the row);
+   the trigger is the production-datastore backstop, exercised by the
+   testcontainers slice in `tests/migrations/test_migration_rollback.py`.
+2. **Additive and forward-compatible.** `CREATE TRIGGER` / `CREATE OR REPLACE
+   FUNCTION` are not on the compat guard's banned list, and they keep the rollback
+   contract: an older image against the newer schema only ever `INSERT`s the row it
+   already knew how to write, so the trigger never fires on the hot path.
+3. **Reversible.** `downgrade()` drops the trigger then the function (reverse of
+   create order), also Postgres-guarded.
+
 ## Additive-only constraint
 
 Migrations in `upgrade()` must be additive: `create_table`, `add_column`,

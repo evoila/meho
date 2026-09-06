@@ -225,7 +225,7 @@ def upgrade() -> None:
             "proposed_effect",
             proposed_effect_type,
             nullable=False,
-            server_default=sa.text("'{}'") if is_postgres else sa.text("'{}'"),
+            server_default=sa.text("'{}'"),
         ),
         # Lifecycle columns.
         sa.Column(

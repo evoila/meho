@@ -52,6 +52,13 @@
                              principal_act / proposed_effect / status /
                              reviewed_by / work_ref / created_at /
                              decided_at / expires_at
+    reviewer_context      -- ReviewerContext (#3353): the redacted, resolved
+                             judging context shared with ``meho approvals
+                             show`` -- target_name / target_product /
+                             target_version / subject / parent_composite_op_id
+                             / work_ref / run_id / blast_radius / summary.
+                             Every field fails open to None; ``.is_empty`` is
+                             true when nothing resolved.
     self_approval_blocked -- bool: disable the Approve button
     self_approval_setting -- str: the break-glass env-var name to name in the label
     self_approval_docs_url -- str: operator-docs deep link the single-operator
@@ -188,22 +195,84 @@
       </div>
     {% endif %}
 
+    {#- Redacted "what will happen" sentence (#3353). Built server-side by
+        the shared reviewer-context resolver from the op's catalog summary +
+        the resolved subject + target -- identity substance only, never a raw
+        param value. Leads the detail so a human reads what the request DOES
+        before scanning the ids below. Absent when nothing resolved beyond the
+        raw op id (``reviewer_context.summary`` is then ``None``). -#}
+    {% if reviewer_context.summary %}
+      <div class="mt-4 rounded-box border border-base-300 bg-base-200/40 p-3" aria-label="What this request does">
+        <p class="text-sm [overflow-wrap:anywhere]">{{ reviewer_context.summary }}</p>
+      </div>
+    {% endif %}
+
     <dl
       class="mt-4 space-y-2 text-sm"
       aria-labelledby="meho-approval-detail-title"
     >
       <div class="flex items-baseline justify-between gap-4">
         <dt class="shrink-0 text-base-content/55">Operation</dt>
-        <dd class="font-mono">{{ request.op_id }}</dd>
+        <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ request.op_id }}</dd>
       </div>
+      {#- Resolved subject of a path-variable op (#3353): the concrete entity
+          (VM name + moid) recovered from the caller's identity params, so the
+          reviewer reads ``web-01 (vm-1042)`` instead of the unresolved
+          ``{vm}`` still shown in the op id above. Absent when no identity
+          field was supplied (the placeholder stands). -#}
+      {% if reviewer_context.subject %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Subject</dt>
+          <dd class="font-mono [overflow-wrap:anywhere] text-right">{{ reviewer_context.subject }}</dd>
+        </div>
+      {% endif %}
       <div class="flex items-baseline justify-between gap-4">
         <dt class="shrink-0 text-base-content/55">Connector</dt>
         <dd class="font-mono">{{ request.connector_id }}</dd>
       </div>
+      {#- Resolved target name + product/version alongside the bare GUID
+          (#3353). Absent (row omitted) when the request touched no target or
+          the id did not resolve in this tenant -- the raw ``target_id`` still
+          rides ``proposed_effect`` below. -#}
+      {% if reviewer_context.target_name %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Target</dt>
+          <dd class="text-right [overflow-wrap:anywhere]">
+            <span class="font-medium">{{ reviewer_context.target_name }}</span>
+            {% if reviewer_context.target_product %}
+              <span class="font-mono text-xs opacity-60">{{ reviewer_context.target_product }}{% if reviewer_context.target_version %} {{ reviewer_context.target_version }}{% endif %}</span>
+            {% endif %}
+          </dd>
+        </div>
+      {% endif %}
+      {#- Parent composite op for a composite-child park (#3353, #3348
+          lineage): names the composite that fanned out this governed write,
+          so the reviewer sees it is one sub-op of a larger operation. -#}
+      {% if reviewer_context.parent_composite_op_id %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Part of</dt>
+          <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.parent_composite_op_id }}</dd>
+        </div>
+      {% endif %}
       <div class="flex items-baseline justify-between gap-4">
         <dt class="shrink-0 text-base-content/55">Requested by</dt>
         <dd class="flex flex-wrap items-baseline justify-end gap-1">{{ subject(request.requester) }}</dd>
       </div>
+      {#- Run context (#3353): the external change-ticket ref the automation
+          stamps and the originating run id, so the reviewer can trace the
+          request to the work that issued it. -#}
+      {% if reviewer_context.work_ref %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Change ticket</dt>
+          <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.work_ref }}</dd>
+        </div>
+      {% endif %}
+      {% if reviewer_context.run_id %}
+        <div class="flex items-baseline justify-between gap-4">
+          <dt class="shrink-0 text-base-content/55">Run</dt>
+          <dd class="font-mono text-xs [overflow-wrap:anywhere] text-right">{{ reviewer_context.run_id }}</dd>
+        </div>
+      {% endif %}
       {% if request.created_at %}
         <div class="flex items-baseline justify-between gap-4">
           <dt class="shrink-0 text-base-content/55">Requested at</dt>

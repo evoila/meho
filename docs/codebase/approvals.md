@@ -166,6 +166,68 @@ marker): the approvals contract keeps PII off these surfaces, and #1212
 already carries email on audit rows where it exists — that is not
 widened here.
 
+### Reviewer-context contract (#3353)
+
+Display names (#3300) resolve *who* asked; the reviewer-context contract
+resolves *what* is being asked. A parked request persists
+machine-truthful coordinates — a placeholder `op_id` (a composite child
+is gated on the un-substituted path, e.g.
+`POST:/vcenter/vm/{vm}/power?action=start`, so the grant is
+subject-agnostic), a `target_id` GUID, a `params_hash` — none of which a
+human can read at the sign-off moment. `resolve_reviewer_context`
+(`operations/approval_context.py`) resolves them into a single redacted,
+human-legible `ReviewerContext` that **both** operator surfaces render:
+the console "Review approval request" modal and the CLI `meho approvals
+show`. One resolver, two consumers, so the surfaces never drift — a
+regression test (`test_console_and_rest_render_same_resolved_context`)
+asserts the REST projection and the console expose the same resolved
+values.
+
+What it resolves, all fail-open to `None`:
+
+- **target** — the registered target's `name` + `product` / `version`
+  alongside the bare `target_id` GUID (tenant-scoped; a cross-tenant id
+  resolves to no name, never leaking it).
+- **subject** — for a path-variable op, the concrete entity the write
+  touches, recovered from the *identity* fields the caller supplied on the
+  gate params (a human `name` and/or the moid bound to a path variable),
+  so the reviewer reads `web-01 (vm-1042)` instead of an unresolved
+  `{vm}`. The gate params already carry the sub-op's full logical params
+  (`connectors/vmware_rest/composites/_write.py`), so no live read is
+  needed at render time.
+- **parent composite** — for a composite *child* park, the op id of the
+  composite that fanned it out, walked off the `request_audit_id` →
+  `parent_audit_id` lineage the #3348 direct-seam fix records (see
+  *Composite-child park lineage* below).
+- **run context** — the `work_ref` change-ticket the automation stamps
+  and the originating `run_id`.
+- **blast radius** — the preview's blast-radius block when a preview
+  produced one (destructive tier / #3312 preview parity), lifted off
+  `proposed_effect` so both surfaces render the same block.
+- **summary** — a redacted plain-language "what will happen" sentence
+  built from the operation's catalog summary (or the raw op id when no
+  descriptor resolved) + the resolved subject + target.
+
+**Secret hygiene is the hard constraint.** Params stay hidden by design
+(the swap-defence + re-dispatch input the read views never project). The
+resolver reads **identity fields only** — the path-variable moids and a
+caller-supplied `name` — never the request body, arguments, or env
+values. A credential-class op (`classify_op` → `credential_*`) gets
+**no** subject echo at all. Every candidate identity value is run through
+the same connector-boundary redaction engine the response path uses; a
+value the engine flags as secret-shaped (a JWT, a bearer token) is
+dropped rather than surfaced. Tests under `test_approval_context.py`
+assert no secret-keyed param and no secret-shaped value reaches the
+summary.
+
+**Fail-open everywhere.** Resolution never blocks or slows a decision:
+every sub-resolution degrades to the raw id / a `None` field, and the
+whole call is wrapped so a failure returns an empty context rather than
+raising. The REST view carries the context on `GET
+/api/v1/approvals/{id}` only (its resolution runs a few tenant-scoped
+reads); the list view omits it. The field is additive — a pre-#3353
+client, or a resolution miss, renders exactly what it did before.
+
 ## MCP audit status for post-gate rejections (#1481)
 
 A `tools/call` that a tool handler rejects *after* the dispatch gates

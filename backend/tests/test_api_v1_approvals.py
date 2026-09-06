@@ -565,3 +565,80 @@ async def test_approve_only_principal_cannot_read_result_it_did_not_park() -> No
             )
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "not_request_owner"}
+
+
+# ---------------------------------------------------------------------------
+# #3353 — reviewer context on the single-request view (meho approvals show)
+# ---------------------------------------------------------------------------
+
+
+def test_show_returns_reviewer_context(client: TestClient) -> None:
+    """GET /{id} carries the resolved reviewer context (#3353).
+
+    Parity with the console modal: the CLI ``meho approvals show`` reads
+    ``reviewer_context`` off this view, resolved by the shared
+    :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+    the modal renders too. The resolved target name + product/version and
+    the concrete subject of the path-variable op replace the bare GUID /
+    unresolved ``{vm}``; no raw param value is exposed.
+    """
+    import asyncio
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import (
+        ApprovalRequest,
+        ApprovalRequestStatus,
+        Target,
+    )
+
+    target_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    op_id = "POST:/vcenter/vm/{vm}/power?action=start"
+
+    async def _seed() -> None:
+        async with get_sessionmaker()() as session, session.begin():
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=_TENANT_A,
+                    name="lab-vcenter",
+                    product="vmware",
+                    version="9.0",
+                    host="vcenter.lab.example",
+                )
+            )
+            session.add(
+                ApprovalRequest(
+                    id=request_id,
+                    tenant_id=_TENANT_A,
+                    run_id=None,
+                    principal_sub="svc-blueprint",
+                    op_id=op_id,
+                    connector_id="vmware-rest-9.0",
+                    target_id=target_id,
+                    params_hash="0" * 64,
+                    params={"vm": "vm-1042", "name": "web-01", "password": "hunter2"},
+                    proposed_effect={"op_id": op_id, "connector_id": "vmware-rest-9.0"},
+                    status=ApprovalRequestStatus.PENDING.value,
+                    work_ref="gh:evoila/meho#42",
+                )
+            )
+
+    asyncio.run(_seed())
+
+    key = make_rsa_keypair("kid-op")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key, role=TenantRole.OPERATOR)}"}
+        response = client.get(f"/api/v1/approvals/{request_id}", headers=headers)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    rc = body["reviewer_context"]
+    assert rc is not None
+    assert rc["target_name"] == "lab-vcenter"
+    assert rc["target_product"] == "vmware"
+    assert rc["target_version"] == "9.0"
+    assert rc["subject"] == "web-01 (vm-1042)"
+    # Secret hygiene: the secret param never rides the view anywhere.
+    assert "hunter2" not in response.text

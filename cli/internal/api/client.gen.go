@@ -1275,7 +1275,20 @@ type ApprovalRequestView struct {
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
 	ReviewedBy     *string                `json:"reviewed_by"`
 	ReviewedByName *string                `json:"reviewed_by_name"`
-	RunId          *openapi_types.UUID    `json:"run_id"`
+
+	// ReviewerContext Redacted, human-legible context for judging a parked request (#3353).
+	//
+	// The additive, redaction-safe summary the shared
+	// :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+	// resolver produces, carried on the single-request view so ``meho
+	// approvals show`` can render a name instead of a GUID and a resolved
+	// subject instead of an unresolved ``{vm}``. Every field fails open to
+	// ``None`` (the CLI keeps the raw id it already had); the object carries
+	// **identity fields only** -- never a raw param, body, or secret value.
+	// The console modal renders from the same resolver, so the two surfaces
+	// never drift. Populated on ``GET /{id}`` only; the list view omits it.
+	ReviewerContext *ReviewerContextView `json:"reviewer_context,omitempty"`
+	RunId           *openapi_types.UUID  `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
 	//
@@ -6591,6 +6604,27 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+}
+
+// ReviewerContextView Redacted, human-legible context for judging a parked request (#3353).
+//
+// The additive, redaction-safe summary the shared
+// :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+// resolver produces, carried on the single-request view so “meho
+// approvals show“ can render a name instead of a GUID and a resolved
+// subject instead of an unresolved “{vm}“. Every field fails open to
+// “None“ (the CLI keeps the raw id it already had); the object carries
+// **identity fields only** -- never a raw param, body, or secret value.
+// The console modal renders from the same resolver, so the two surfaces
+// never drift. Populated on “GET /{id}“ only; the list view omits it.
+type ReviewerContextView struct {
+	BlastRadius         *map[string]interface{} `json:"blast_radius"`
+	ParentCompositeOpId *string                 `json:"parent_composite_op_id"`
+	Subject             *string                 `json:"subject"`
+	Summary             *string                 `json:"summary"`
+	TargetName          *string                 `json:"target_name"`
+	TargetProduct       *string                 `json:"target_product"`
+	TargetVersion       *string                 `json:"target_version"`
 }
 
 // RunCompletedResponse Returned by “meho_runbook_next“ when the previous step was the last.

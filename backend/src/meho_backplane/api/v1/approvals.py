@@ -86,6 +86,10 @@ from meho_backplane.auth.rbac import require_approvals_access
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations.approval_context import (
+    ReviewerContext,
+    resolve_reviewer_context,
+)
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -126,6 +130,38 @@ _require_approvals_access = Depends(require_approvals_access)
 # ---------------------------------------------------------------------------
 
 
+class ReviewerContextView(BaseModel):
+    """Redacted, human-legible context for judging a parked request (#3353).
+
+    The additive, redaction-safe summary the shared
+    :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`
+    resolver produces, carried on the single-request view so ``meho
+    approvals show`` can render a name instead of a GUID and a resolved
+    subject instead of an unresolved ``{vm}``. Every field fails open to
+    ``None`` (the CLI keeps the raw id it already had); the object carries
+    **identity fields only** -- never a raw param, body, or secret value.
+    The console modal renders from the same resolver, so the two surfaces
+    never drift. Populated on ``GET /{id}`` only; the list view omits it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Resolved target display name, or ``None`` (keep the ``target_id`` GUID).
+    target_name: str | None = None
+    #: Target product family (e.g. ``vmware``), when the name resolved.
+    target_product: str | None = None
+    #: Operator-asserted target version (e.g. ``9.0``), when recorded.
+    target_version: str | None = None
+    #: Resolved subject for a path-variable op, e.g. ``web-01 (vm-1042)``.
+    subject: str | None = None
+    #: Op id of the composite that fanned out this child park (#3348 lineage).
+    parent_composite_op_id: str | None = None
+    #: The preview's blast-radius block, when a preview produced one.
+    blast_radius: dict[str, Any] | None = None
+    #: Redacted plain-language "what will happen" sentence.
+    summary: str | None = None
+
+
 class ApprovalRequestView(BaseModel):
     """Read-only view of an :class:`~meho_backplane.db.models.ApprovalRequest`."""
 
@@ -156,6 +192,13 @@ class ApprovalRequestView(BaseModel):
     created_at: str
     expires_at: str | None
     work_ref: str | None
+    #: Redacted reviewer context (#3353): resolved target name + product/
+    #: version, the concrete subject of a path-variable op, the parent
+    #: composite op for a child park, a blast-radius summary, and a
+    #: plain-language "what will happen" sentence. ``None`` on the list view
+    #: (resolution is single-request only) and on any surface that predates
+    #: this field. Additive; a client that ignores it is unaffected.
+    reviewer_context: ReviewerContextView | None = None
 
 
 class ApprovalResultView(BaseModel):
@@ -253,8 +296,36 @@ class RejectResponseBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _view(row: ApprovalRequest) -> ApprovalRequestView:
-    """Convert an ORM row to a response view."""
+def _reviewer_context_view(ctx: ReviewerContext) -> ReviewerContextView:
+    """Project the shared resolver's dataclass onto the REST view (#3353).
+
+    Carries only the fields the CLI does not already read off the top-level
+    view (``work_ref`` / ``run_id`` are already there); the console renders
+    the whole dataclass directly. Both surfaces derive from the same
+    :func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`,
+    so they never drift.
+    """
+    return ReviewerContextView(
+        target_name=ctx.target_name,
+        target_product=ctx.target_product,
+        target_version=ctx.target_version,
+        subject=ctx.subject,
+        parent_composite_op_id=ctx.parent_composite_op_id,
+        blast_radius=ctx.blast_radius,
+        summary=ctx.summary,
+    )
+
+
+def _view(
+    row: ApprovalRequest, reviewer_context: ReviewerContextView | None = None
+) -> ApprovalRequestView:
+    """Convert an ORM row to a response view.
+
+    *reviewer_context* is the redacted, resolved judging context (#3353),
+    supplied only on the single-request path (its resolution runs a few
+    tenant-scoped reads); the list view passes ``None`` and the field is
+    simply absent there.
+    """
     return ApprovalRequestView(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -274,6 +345,7 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
         work_ref=row.work_ref,
+        reviewer_context=reviewer_context,
     )
 
 
@@ -454,7 +526,12 @@ async def get_approval_request(
                 status_code=http_status.HTTP_404_NOT_FOUND,
                 detail="approval_request_not_found",
             ) from exc
-    return _view(row)
+        # Resolve the redacted reviewer context (#3353) inside the same
+        # session so the single-request view carries resolved names /
+        # subject / lineage for ``meho approvals show``. Fail-open: the
+        # resolver never raises, so a resolution miss just omits the block.
+        reviewer_context = _reviewer_context_view(await resolve_reviewer_context(session, row))
+    return _view(row, reviewer_context)
 
 
 @router.get("/{request_id}/result", response_model=ApprovalResultView)

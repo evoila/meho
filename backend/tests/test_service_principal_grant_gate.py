@@ -36,8 +36,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import meho_backplane.broadcast.publisher as _publisher
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, ServicePrincipalGrant
-from meho_backplane.operations._validate import _is_mutating, _service_safety_gate_reason
+from meho_backplane.db.models import (
+    AuditLog,
+    EndpointDescriptor,
+    PermissionVerdict,
+    ServicePrincipalGrant,
+)
+from meho_backplane.operations._validate import (
+    _is_mutating,
+    _service_safety_gate_reason,
+    policy_gate,
+)
 from meho_backplane.operations.composite import enforce_subop_policy
 from meho_backplane.settings import get_settings
 
@@ -492,3 +501,108 @@ async def test_service_principal_destructive_parks_and_grant_never_satisfies() -
     assert result.status == "awaiting_approval"
     # The live grant did NOT clear the gate — no auto-approval was recorded.
     assert not await _grant_use_rows(grant_id)
+
+
+# ---------------------------------------------------------------------------
+# #3349 — null-target loud hint + target selectors at dispatch
+# ---------------------------------------------------------------------------
+
+
+async def _seed_selector_grant(
+    *,
+    target_product: str | None = "vmware",
+    target_name_pattern: str | None = None,
+) -> uuid.UUID:
+    grant_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            ServicePrincipalGrant(
+                id=grant_id,
+                tenant_id=_TENANT_ID,
+                principal_sub=_PRINCIPAL,
+                op_id=_OP,
+                connector_id=_CONNECTOR,
+                target_id=None,
+                target_product=target_product,
+                target_name_pattern=target_name_pattern,
+                reason="authorise runtime-created appliances",
+                created_by_sub="op-admin",
+            )
+        )
+        await s.commit()
+    return grant_id
+
+
+def _caution_descriptor() -> EndpointDescriptor:
+    # A mutating caution composite (no HTTP method → safety_level stands in).
+    return EndpointDescriptor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id=_OP,
+        source_kind="composite",
+        safety_level="caution",
+        requires_approval=False,
+        parameter_schema={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_null_target_grant_parks_target_scoped_dispatch_with_hint() -> None:
+    """A null-target grant does not cover a target-scoped dispatch; the park reason says so."""
+    await _seed_grant(target_id=None)  # operator believed null == "any target"
+
+    verdict, reason = await policy_gate(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        descriptor=_caution_descriptor(),
+        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-dc19"),
+        connector_id=_CONNECTOR,
+    )
+    assert verdict is PermissionVerdict.NEEDS_APPROVAL
+    assert reason is not None
+    assert "null-target" in reason
+    assert not await _grant_use_rows()
+
+
+@pytest.mark.asyncio
+async def test_selector_grant_auto_executes_for_runtime_created_target() -> None:
+    """A selector grant clears the gate for a target that did not exist at create time."""
+    grant_id = await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-dc*")
+
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="esx-dc19"),
+        params=_PARAMS,
+    )
+    assert result is None  # auto-executed
+
+    rows = await _grant_use_rows(grant_id)
+    assert len(rows) == 1
+    assert rows[0].payload.get("matched_by") == "selector"
+    assert rows[0].payload["target_selector"] == {
+        "target_product": "vmware",
+        "target_name_pattern": "esx-dc*",
+    }
+
+
+@pytest.mark.asyncio
+async def test_selector_grant_parks_on_fingerprint_mismatch() -> None:
+    """A selector grant does not clear the gate for a non-matching target fingerprint."""
+    await _seed_selector_grant(target_product="vmware", target_name_pattern="esx-dc*")
+
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.SERVICE),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=SimpleNamespace(id=uuid.uuid4(), product="vmware", name="mgmt-dc01"),
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert not await _grant_use_rows()

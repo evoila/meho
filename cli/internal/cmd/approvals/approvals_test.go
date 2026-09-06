@@ -645,6 +645,76 @@ func TestPrintListTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrincipalLabelResolvesNameAlongsideSub pins the display-name
+// helpers (#3300): the line helper shows "<name> (<sub>)" so the sub
+// stays visible alongside the name, the scan helper shows the bare
+// name; both fail open to the sub when no name resolved.
+func TestPrincipalLabelResolvesNameAlongsideSub(t *testing.T) {
+	name := "Alice Operator"
+	empty := ""
+	if got := principalLabel("user-abc", &name); got != "Alice Operator (user-abc)" {
+		t.Errorf("principalLabel with name = %q; want %q", got, "Alice Operator (user-abc)")
+	}
+	if got := principalLabel("user-abc", nil); got != "user-abc" {
+		t.Errorf("principalLabel nil name = %q; want %q", got, "user-abc")
+	}
+	if got := principalLabel("user-abc", &empty); got != "user-abc" {
+		t.Errorf("principalLabel empty name = %q; want %q", got, "user-abc")
+	}
+	if got := principalScanLabel("user-abc", &name); got != "Alice Operator" {
+		t.Errorf("principalScanLabel with name = %q; want %q", got, "Alice Operator")
+	}
+	if got := principalScanLabel("user-abc", nil); got != "user-abc" {
+		t.Errorf("principalScanLabel nil name = %q; want %q", got, "user-abc")
+	}
+}
+
+// TestPrintDetailRendersDisplayName confirms show renders the resolved
+// requester + reviewer names alongside their subs when the backplane
+// supplies them (#3300).
+func TestPrintDetailRendersDisplayName(t *testing.T) {
+	d := newApprovalView(t, "approved", "T-test")
+	principalName := "Bob Requester"
+	reviewerName := "Alice Approver"
+	decidedAt := "2026-05-28T12:05:00Z"
+	d.PrincipalName = &principalName
+	d.ReviewedByName = &reviewerName
+	d.DecidedAt = &decidedAt
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Principal:    Bob Requester (user-abc)",
+		"Reviewed by:  Alice Approver (alice@example.com)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintListTableRendersDisplayName confirms the PRINCIPAL column
+// prefers the resolved name (the full sub stays reachable via show /
+// --json), and still shows the sub when no name resolved (#3300).
+func TestPrintListTableRendersDisplayName(t *testing.T) {
+	named := newApprovalView(t, "pending", "")
+	principalName := "Bob Requester"
+	named.PrincipalName = &principalName
+	var buf bytes.Buffer
+	printListTable(&buf, []api.ApprovalRequestView{named})
+	if out := buf.String(); !strings.Contains(out, "Bob Requester") {
+		t.Errorf("printListTable missing resolved name in:\n%s", out)
+	}
+
+	anon := newApprovalView(t, "pending", "")
+	var buf2 bytes.Buffer
+	printListTable(&buf2, []api.ApprovalRequestView{anon})
+	if out := buf2.String(); !strings.Contains(out, "user-abc") {
+		t.Errorf("printListTable fail-open to sub missing in:\n%s", out)
+	}
+}
+
 // TestTruncatePassthroughAndCut covers the rune-aware truncate
 // helper. Same shape as the connector sibling's test — duplicated
 // in-package because cmd/approvals can't import cmd/connector

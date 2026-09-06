@@ -186,7 +186,13 @@ machine / server / instance name, `IsClustered` / `IsHadrEnabled`) in one
 round-trip → `vendor="microsoft"`, `product="mssql"`, `version=<product
 version>`, `build=<product level>`. A connection or credential failure maps to
 `reachable=False` with the error under `extras` (the #986 discipline), never a
-raise.
+raise. The `extras["error"]` value and the paired `mssql_fingerprint_unreachable`
+warning log carry only the exception type name plus a classified reason
+(`auth_failed` / `tcp_unreachable` / `connect_failed`, mirroring the probe
+taxonomy below), never `str(exc)` — a pytds `LoginError` echoes the
+Vault-sourced username (`Login failed for user '<u>'`), so the raw driver
+message must not reach either surface (#3297; redaction seam
+`connectors/_shared/fingerprint.py`).
 
 `probe` is a `SELECT @@VERSION` reachability check with distinct reasons:
 `auth_failed` (`pytds.LoginError`, or an unresolvable credential —

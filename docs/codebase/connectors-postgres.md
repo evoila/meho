@@ -116,7 +116,13 @@ filter; the session flag is the authoritative backstop for the whole session
 `fingerprint()` connects to the default maintenance database and reads
 `server_version`, `pg_is_in_recovery()`, `server_encoding`, `data_checksums`,
 and per-database sizes; any connect/credential failure maps to
-`reachable=False` with the error under `extras` (never raises). `probe()` is a
+`reachable=False` with the error under `extras` (never raises). The
+`extras["error"]` value and the paired `postgres_fingerprint_unreachable`
+warning log carry only the exception type name plus a classified reason
+(the same `auth_failed` / `tcp_unreachable` / `connect_failed` taxonomy the
+probe uses), never `str(exc)` — asyncpg's auth rejection echoes the connecting
+username, so the raw driver message must not reach either surface (#3297;
+redaction seam `connectors/_shared/fingerprint.py`). `probe()` is a
 `SELECT 1` handshake carrying no operator, so its failure reasons are
 `auth_failed` (bad/unresolvable credential — a credentialled target on the
 operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and

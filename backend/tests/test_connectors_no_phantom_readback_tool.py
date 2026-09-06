@@ -195,20 +195,28 @@ _SQL_PHRASE_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: Files walked, as ``(root, glob)`` pairs, all relative to the repo root.
 _SCAN_ROOTS: tuple[tuple[Path, str], ...] = (
     (_REPO_ROOT / "backend" / "src" / "meho_backplane" / "connectors", "*.py"),
-    (_REPO_ROOT / "docs" / "codebase", "*.md"),
-    (_REPO_ROOT / "docs" / "cross-repo", "*.md"),
+    (_REPO_ROOT / "docs", "**/*.md"),
+    (_REPO_ROOT / "docs-site", "**/*.md"),
     (_REPO_ROOT / "cli" / "internal" / "cmd", "*.go"),
 )
+
+#: Historical registers that name the phantom tools deliberately -- excluded
+#: from the recursive ``docs`` walk. ``docs/decisions/locked-decisions.md`` and
+#: ``docs/architecture/mcp.md`` list the meta-tool surface (including the three
+#: phantom read-back names) as a design record, not as agent-facing guidance.
+_EXCLUDED_DOCS_PREFIXES: tuple[str, ...] = ("docs/decisions/", "docs/architecture/")
 
 #: Per-site negative-mention allow-list: ``(path suffix, line substring)``.
 #: An offending line is legal when its path ends with the suffix AND the
 #: line contains the substring -- both scoped tightly to the one sentence
 #: that documents a phantom's *absence*. Re-confirmed against the tree on
 #: 2026-09-05: ``docs/codebase/mcp.md`` L410-413 ("a nonexistent
-#: ``search_connectors`` / ``result_aggregate``"). ``docs-site`` is not a
-#: scan root here, so ``first-operations.md`` needs no entry.
+#: ``search_connectors`` / ``result_aggregate``") and, now that ``docs-site``
+#: is a scan root, ``docs-site/guides/first-operations.md`` L218 (the line
+#: disavowing the three phantom read-back tool names).
 _NEGATIVE_MENTION_ALLOWLIST: tuple[tuple[str, str], ...] = (
     ("docs/codebase/mcp.md", "reciprocal, not divergent"),
+    ("docs-site/guides/first-operations.md", "or `result_describe` tool"),
 )
 
 
@@ -299,6 +307,8 @@ def _scan_tree() -> list[str]:
     for root, glob in _SCAN_ROOTS:
         for path in sorted(root.rglob(glob)):
             rel = str(path.relative_to(_REPO_ROOT))
+            if rel.startswith(_EXCLUDED_DOCS_PREFIXES):
+                continue
             for offense in find_offenses(rel, path.read_text(encoding="utf-8")):
                 hits.append(f"{rel}:{offense.lineno} [{offense.rule}] {offense.text}")
     return hits
@@ -312,8 +322,9 @@ def _scan_tree() -> list[str]:
 def test_no_agent_facing_string_points_at_a_phantom_readback_surface() -> None:
     """No scanned file points the agent at a phantom read-back surface.
 
-    Fails when a connector descriptor, a ``docs/codebase`` / ``docs/cross-repo``
-    page, or a CLI ``Long`` help string reintroduces a phantom read-back
+    Fails when a connector descriptor, any ``docs/`` or ``docs-site/`` page
+    (bar the historical registers in ``docs/decisions`` / ``docs/architecture``),
+    or a CLI ``Long`` help string reintroduces a phantom read-back
     name, a phantom HandleStore reference, or SQL/aggregate/jq guidance
     against the paging-only ``result_query``.
     """

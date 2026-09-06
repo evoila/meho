@@ -349,6 +349,15 @@ async def _write_audit_row(
         "principal_sub": request.principal_sub,
         "result_status": path.split(".")[-1],  # "request" | "decision"
     }
+    # Hoist the acting operator's display name so the name-aware audit views
+    # resolve the approval row's ``operator_sub`` to a human name (#3300) --
+    # the same ``payload['principal_name']`` shape dispatch rows carry (#1212).
+    # ``operator`` is the requester on a "request" row / the reviewer on a
+    # "decision" row, so the name always pairs with ``operator_sub``. Omitted
+    # when the token had no name (resolver fails open to the raw sub); display
+    # name only, email is never widened onto this surface.
+    if operator.name:
+        payload["principal_name"] = operator.name
     if extra_payload:
         payload.update(extra_payload)
     # policy-gate verdict (#130). The parked "request" row is written on the
@@ -520,6 +529,11 @@ async def create_pending_request(
         run_id=run_id,
         principal_sub=operator.sub,
         principal_act=principal_act,
+        # Requester display name hoisted from the JWT ``name`` claim at park
+        # time (#3300) so every approvals surface renders a name alongside
+        # ``principal_sub``. ``None`` when the token carried no name --
+        # fail-open to the raw sub. Same pattern as audit_log.principal_name.
+        principal_name=operator.name,
         op_id=op_id,
         connector_id=connector_id,
         target_id=target_id,
@@ -650,6 +664,10 @@ async def approve_request(
     now = _now()
     request.status = ApprovalRequestStatus.APPROVED.value
     request.reviewed_by = operator.sub
+    # Reviewer display name hoisted from the deciding operator's JWT ``name``
+    # claim (#3300), the peer of ``principal_name`` for ``reviewed_by``.
+    # ``None`` when the token carried no name -- fail-open to the raw sub.
+    request.reviewed_by_name = operator.name
     request.decided_at = now
     await session.flush()
 
@@ -720,6 +738,9 @@ async def reject_request(
     now = _now()
     request.status = ApprovalRequestStatus.REJECTED.value
     request.reviewed_by = operator.sub
+    # Reviewer display name hoisted from the deciding operator's JWT ``name``
+    # claim (#3300); ``None`` fail-opens to the raw sub. See approve_request.
+    request.reviewed_by_name = operator.name
     request.decided_at = now
     await session.flush()
 

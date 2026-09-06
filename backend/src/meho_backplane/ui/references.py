@@ -76,12 +76,14 @@ __all__ = [
     "RunRef",
     "SessionRef",
     "StatusRef",
+    "SubjectRef",
     "TargetRef",
     "TimeRef",
     "WorkRef",
     "humanize_relative",
     "resolve_audit_references",
     "resolve_status",
+    "subject_ref",
 ]
 
 #: ``work_ref`` shorthand for a GitHub issue / PR, e.g. ``gh:evoila/meho#9``.
@@ -111,6 +113,54 @@ class PrincipalRef:
     def display(self) -> str:
         """The best human label available (name, else the raw sub)."""
         return self.name or self.sub
+
+
+@dataclass(frozen=True)
+class SubjectRef:
+    """A principal reference resolved to a display name alongside its ``sub``.
+
+    The lightweight, no-PII shape shared by operator surfaces that render a
+    bare identity ``sub`` and want a human name alongside it -- approvals
+    (#3300) and, reusing this same helper, the grants surfaces (#3337).
+    Distinct from :class:`PrincipalRef` (the audit / broadcast drawer's
+    principal, which also carries ``email`` and a service marker): this one
+    is **display name only**, so it can never widen PII onto a surface whose
+    contract forbids it.
+
+    ``name`` is the display name captured at write time from the acting
+    principal's JWT ``name`` claim (there is no ``sub`` -> name join table,
+    so the name is cached on the row rather than resolved live -- see the
+    module docstring). ``None`` when no name was recorded; the surface then
+    renders the raw ``sub`` (fail-open -- alongside, never instead).
+    """
+
+    sub: str
+    name: str | None
+
+    @property
+    def resolved(self) -> bool:
+        """True when a human display name is available."""
+        return bool(self.name)
+
+    @property
+    def display(self) -> str:
+        """The best human label available (the name, else the raw ``sub``)."""
+        return self.name or self.sub
+
+
+def subject_ref(sub: str | None, name: str | None) -> SubjectRef | None:
+    """Build a :class:`SubjectRef` for *sub*, or ``None`` when there is no sub.
+
+    The shared entry point every operator surface uses to render an identity
+    ``sub`` with its display name alongside (#3300, reused by #3337). Returns
+    ``None`` when *sub* is falsy (e.g. an undecided request's ``reviewed_by``)
+    so a caller can omit the field entirely; otherwise a ref whose ``display``
+    fails open to the raw ``sub`` when *name* is empty. Never raises --
+    resolution must never fail or slow the surface it feeds.
+    """
+    if not sub:
+        return None
+    return SubjectRef(sub=sub, name=name or None)
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -519,6 +520,7 @@ async def dispatch_composite(
     target: Any,
     params: dict[str, Any],
     dispatch_child: Callable[..., Awaitable[Any]],
+    audit_id: uuid.UUID,
     connector_instance: Connector | None = None,
 ) -> Any:
     """Invoke a ``source_kind='composite'`` handler with the dispatcher seam.
@@ -554,7 +556,29 @@ async def dispatch_composite(
     can omit ``dispatch_child`` entirely. A handler may declare both
     (e.g. a composite that recurses into another composite via
     ``dispatch_child`` yet reads its own connector via ``connector``).
+
+    ``audit_id`` -- the composite's own dispatch audit-row id, minted by
+    the dispatcher. It is bound on
+    :data:`~meho_backplane.operations._audit.parent_audit_id_var` for the
+    **whole handler body**, so every sub-op the handler fans out --
+    whether through the catalog-routed ``dispatch_child`` seam (which
+    binds it again internally) or the direct-session
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy`
+    seam -- runs with the composite as its audit parent. Without this
+    bind a child that parks on the direct seam records
+    ``parent_audit_id = NULL`` on its ``approval.request`` audit row, so
+    the G8.2 audit-replay walk cannot attribute the fanned-out write to
+    its composite and the approval reads as an orphan (#3348). The token
+    reset in ``finally`` restores the prior value before the dispatcher
+    writes the composite's own DISPATCH row, so the composite never
+    self-parents.
     """
+    # Local import keeps this module's import graph one-directional --
+    # the dispatcher imports ``_branches`` to run the branch, and the
+    # audit-tree contextvar lives in ``_audit``; deferring to call time
+    # mirrors ``get_dispatch_child`` / ``enforce_subop_policy``.
+    from meho_backplane.operations._audit import parent_audit_id_var
+
     param_names = set(inspect.signature(handler).parameters)
     call_kwargs: dict[str, Any] = {
         "operator": operator,
@@ -565,4 +589,8 @@ async def dispatch_composite(
         call_kwargs["dispatch_child"] = dispatch_child
     if "connector" in param_names:
         call_kwargs["connector"] = connector_instance
-    return await handler(**call_kwargs)
+    audit_token = parent_audit_id_var.set(audit_id)
+    try:
+        return await handler(**call_kwargs)
+    finally:
+        parent_audit_id_var.reset(audit_token)

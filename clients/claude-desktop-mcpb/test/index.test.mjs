@@ -3,22 +3,26 @@
 //
 // Behavioral suite for server/index.mjs — the .mcpb launcher.
 //
-// The launcher spawns the vendored mcp-remote through this process's own
-// runtime (process.execPath), so these tests run index.mjs under a
+// The launcher runs the vendored mcp-remote **in-process**: it sets
+// process.argv to the mcp-remote invocation and imports the entry, spawning
+// nothing (#3341, field-test F6). These tests run index.mjs under a
 // deliberately minimal PATH (/usr/bin:/bin — no /opt/homebrew/bin, no nvm
-// shims) to reproduce Claude Desktop's UtilityProcess GUI PATH. If the
-// launcher still reached for `npx`, the spawn would die with
-// `spawn npx ENOENT` (field-test #3143) and the stub below would never run.
+// shims) to reproduce Claude Desktop's UtilityProcess GUI PATH; the
+// launcher must not depend on PATH at all.
 //
-// mcp-remote is stubbed: a fake node_modules/mcp-remote whose bin prints a
-// JSON diagnostic of the argv + env it was invoked with, then exits 0. That
-// lets the suite assert the exact child contract without a live backplane.
+// mcp-remote is stubbed: a fake node_modules/mcp-remote whose entry is an
+// ESM module that, when imported, prints a JSON diagnostic of the argv +
+// env + process identity it was invoked with, then exits 0. Because the
+// launcher imports it, the stub runs in the launcher's own process — its
+// reported ppid is the test runner, which is what proves the F6 failure
+// mode (a spawned process.execPath child) cannot recur.
 
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -36,7 +40,7 @@ const REAL_INDEX = join(HERE, "..", "server", "index.mjs");
 const MINIMAL_PATH = "/usr/bin:/bin";
 
 // Build one isolated bundle copy: a standalone index.mjs plus a stub
-// mcp-remote whose bin echoes how it was launched.
+// mcp-remote whose entry echoes how it was launched.
 const BUNDLE = mkdtempSync(join(tmpdir(), "meho-mcpb-test-"));
 mkdirSync(join(BUNDLE, "server"), { recursive: true });
 cpSync(REAL_INDEX, join(BUNDLE, "server", "index.mjs"));
@@ -52,6 +56,9 @@ writeFileSync(
     bin: { "mcp-remote": "dist/proxy.js", "mcp-remote-client": "dist/client.js" },
   }),
 );
+// The stub entry is imported by the launcher, so it runs in the launcher's
+// process. It reports process.pid/ppid so the suite can prove there was no
+// spawned child (F6 regression), then exits 0 so spawnSync returns.
 writeFileSync(
   join(STUB_DIR, "dist", "proxy.js"),
   [
@@ -59,6 +66,8 @@ writeFileSync(
     "  JSON.stringify({",
     "    argv: process.argv,",
     "    execPath: process.execPath,",
+    "    pid: process.pid,",
+    "    ppid: process.ppid,",
     "    runAsNode: process.env.ELECTRON_RUN_AS_NODE ?? null,",
     "    nodeExtraCaCerts: process.env.NODE_EXTRA_CA_CERTS ?? null,",
     "    mehoCaCert: process.env.MEHO_CA_CERT ?? null,",
@@ -66,6 +75,7 @@ writeFileSync(
     "    mehoScopes: process.env.MEHO_MCP_SCOPES ?? null,",
     "  }) + '\\n',",
     ");",
+    "process.exit(0);",
     "",
   ].join("\n"),
 );
@@ -78,6 +88,9 @@ const STUB_ENTRY = realpathSync(join(STUB_DIR, "dist", "proxy.js"));
 after(() => rmSync(BUNDLE, { recursive: true, force: true }));
 
 // Run the launcher with a controlled env; PATH defaults to the minimal set.
+// The launcher is a direct child of this test process, so a diagnostic whose
+// ppid equals our pid proves mcp-remote ran in the launcher (in-process),
+// not in a grandchild the launcher spawned.
 function runLauncher(args, extraEnv = {}) {
   return spawnSync(process.execPath, [INDEX, ...args], {
     encoding: "utf8",
@@ -85,16 +98,14 @@ function runLauncher(args, extraEnv = {}) {
   });
 }
 
-test("minimal PATH: no ENOENT, child argv is [execPath, bundled mcp-remote, url, --static-oauth…]", () => {
+test("in-process: child argv is [node, bundled mcp-remote, url, --static-oauth…]", () => {
   const url = "https://meho.internal.example/mcp";
   const res = runLauncher([url]);
 
   assert.equal(res.status, 0, `launcher exited non-zero: ${res.stderr}`);
   const diag = JSON.parse(res.stdout);
 
-  // The child ran through process.execPath (argv[0] is that same runtime),
-  // proving a direct binary spawn rather than a PATH-resolved npx.
-  assert.equal(diag.argv[0], diag.execPath);
+  // mcp-remote reads process.argv.slice(2); argv[1] names the resolved entry.
   assert.equal(diag.argv[1], STUB_ENTRY);
   assert.equal(diag.argv[2], url);
   assert.equal(diag.argv[3], "--static-oauth-client-info");
@@ -104,30 +115,71 @@ test("minimal PATH: no ENOENT, child argv is [execPath, bundled mcp-remote, url,
   assert.equal(diag.argv.length, 7);
 });
 
-test("ELECTRON_RUN_AS_NODE=1 is set in the child env", () => {
+test("regression (F6): mcp-remote runs in the launcher process, not a spawned child", () => {
   const res = runLauncher(["https://meho.internal.example/mcp"]);
   assert.equal(res.status, 0, res.stderr);
-  assert.equal(JSON.parse(res.stdout).runAsNode, "1");
+  const diag = JSON.parse(res.stdout);
+
+  // The launcher is a direct child of this test runner. If mcp-remote ran
+  // in-process, its parent is this test runner; if the launcher had spawned
+  // a process.execPath child (the F6 failure), the parent would be the
+  // launcher instead. This is what makes execPath being an Electron helper
+  // irrelevant — nothing is ever spawned through it.
+  assert.equal(
+    diag.ppid,
+    process.pid,
+    "mcp-remote must run in-process (ppid = test runner), never in a spawned child",
+  );
 });
 
-test("guard: NODE_EXTRA_CA_CERTS exported only on a non-empty CA path, MEHO_CA_CERT scrubbed", () => {
+test("regression (F6): launcher imports no process-spawning module", () => {
+  // child_process is the only vector for a process.execPath child; without
+  // importing it the launcher structurally cannot reintroduce the F6 spawn.
+  // (Comments may still discuss the old spawn — strip them before matching
+  // so documentation of the fix never trips the guard.)
+  const code = readFileSync(REAL_INDEX, "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(
+    code,
+    /child_process/,
+    "launcher must not import child_process",
+  );
+  assert.doesNotMatch(
+    code,
+    /\bspawn\s*\(/,
+    "launcher must not spawn a subprocess",
+  );
+});
+
+test("ELECTRON_RUN_AS_NODE is no longer set (no child to coax into Node mode)", () => {
+  const res = runLauncher(["https://meho.internal.example/mcp"]);
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(JSON.parse(res.stdout).runAsNode, null);
+});
+
+test("CA: NODE_EXTRA_CA_CERTS is boot-delivered by the manifest and passed through untouched", () => {
+  // In-process the launcher cannot manage NODE_EXTRA_CA_CERTS: Node reads it
+  // once at startup, before launcher code runs, and the CA is delivered by
+  // the manifest env block. So the launcher must leave whatever value it was
+  // started with intact — a non-empty path reaches mcp-remote, and an empty
+  // value (the untouched-optional fresh install) stays empty, which Node
+  // treats as "no extra certs" (proven in #3341's spike).
   const withCa = runLauncher(["https://meho.internal.example/mcp"], {
-    MEHO_CA_CERT: "/etc/ssl/internal-ca.pem",
+    NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
   });
   assert.equal(withCa.status, 0, withCa.stderr);
-  const a = JSON.parse(withCa.stdout);
-  assert.equal(a.nodeExtraCaCerts, "/etc/ssl/internal-ca.pem");
-  assert.equal(a.mehoCaCert, null); // scrubbed from the child env
+  assert.equal(
+    JSON.parse(withCa.stdout).nodeExtraCaCerts,
+    "/etc/ssl/internal-ca.pem",
+  );
 
-  for (const caValue of ["", "   "]) {
-    const res = runLauncher(["https://meho.internal.example/mcp"], {
-      MEHO_CA_CERT: caValue,
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(JSON.parse(res.stdout).nodeExtraCaCerts, null);
-  }
+  const empty = runLauncher(["https://meho.internal.example/mcp"], {
+    NODE_EXTRA_CA_CERTS: "",
+  });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.equal(JSON.parse(empty.stdout).nodeExtraCaCerts, "");
 
-  // Unset entirely — NODE_EXTRA_CA_CERTS must not leak in.
   const unset = runLauncher(["https://meho.internal.example/mcp"]);
   assert.equal(JSON.parse(unset.stdout).nodeExtraCaCerts, null);
 });
@@ -139,7 +191,7 @@ test("guard: client_id override applied and MEHO_MCP_CLIENT_ID scrubbed", () => 
   assert.equal(res.status, 0, res.stderr);
   const diag = JSON.parse(res.stdout);
   assert.deepEqual(JSON.parse(diag.argv[4]), { client_id: "meho-mcp-lab" });
-  assert.equal(diag.mehoClientId, null); // scrubbed from the child env
+  assert.equal(diag.mehoClientId, null); // scrubbed from mcp-remote's env
 });
 
 test("guard: an empty client_id falls back to meho-mcp", () => {
@@ -159,7 +211,7 @@ test("guard: scopes override applied to metadata and MEHO_MCP_SCOPES scrubbed", 
   assert.equal(res.status, 0, res.stderr);
   const diag = JSON.parse(res.stdout);
   assert.deepEqual(JSON.parse(diag.argv[6]), { scope: elevated });
-  assert.equal(diag.mehoScopes, null); // scrubbed from the child env
+  assert.equal(diag.mehoScopes, null); // scrubbed from mcp-remote's env
 });
 
 test("guard: an empty or whitespace-only scopes falls back to the default surface", () => {
@@ -174,14 +226,14 @@ test("guard: an empty or whitespace-only scopes falls back to the default surfac
   }
 });
 
-test("guard: a non-https endpoint is rejected before spawning", () => {
+test("guard: a non-https endpoint is rejected before importing mcp-remote", () => {
   const res = runLauncher(["http://meho.internal.example/mcp"]);
   assert.equal(res.status, 1);
-  assert.equal(res.stdout, ""); // never reached the child
+  assert.equal(res.stdout, ""); // never reached mcp-remote
   assert.match(res.stderr, /https/);
 });
 
-test("guard: a malformed URL is rejected before spawning", () => {
+test("guard: a malformed URL is rejected before importing mcp-remote", () => {
   const res = runLauncher(["not a url"]);
   assert.equal(res.status, 1);
   assert.match(res.stderr, /valid URL/);

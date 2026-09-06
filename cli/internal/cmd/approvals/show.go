@@ -140,7 +140,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	if d.TargetId != nil {
 		fmt.Fprintf(w, "Target:       %s\n", d.TargetId.String())
 	}
-	fmt.Fprintf(w, "Principal:    %s\n", d.PrincipalSub)
+	fmt.Fprintf(w, "Principal:    %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", *d.PrincipalAct)
 	}
@@ -153,7 +153,7 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		fmt.Fprintf(w, "Expires:      %s\n", *d.ExpiresAt)
 	}
 	if d.ReviewedBy != nil {
-		fmt.Fprintf(w, "Reviewed by:  %s\n", *d.ReviewedBy)
+		fmt.Fprintf(w, "Reviewed by:  %s\n", principalLabel(*d.ReviewedBy, d.ReviewedByName))
 	}
 	if d.DecidedAt != nil {
 		fmt.Fprintf(w, "Decided at:   %s\n", *d.DecidedAt)

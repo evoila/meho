@@ -217,6 +217,10 @@ class TestClassifyOp:
             # in params (not secret-named/shaped), so the pin collapses its
             # broadcast to aggregate-only rather than shipping the command line.
             "vmware.composite.vm.guest.program.run",
+            # #3298 — in-guest file write: ``content`` (the file body) is not a
+            # secret-named/shaped key, so the pin collapses its broadcast to
+            # aggregate-only rather than shipping the file body on the feed.
+            "vmware.composite.vm.guest.file.write",
         ],
     )
     def test_credential_write_allowlist(self, op_id: str) -> None:
@@ -573,6 +577,32 @@ class TestRedactPayload:
         assert "s3kr3t-sentinel" not in str(result)
         assert "data" not in result
         assert "params" not in result
+
+    def test_guest_file_write_content_dropped_from_broadcast(self) -> None:
+        """#3298 — ``guest.file.write``'s file body never reaches the feed.
+
+        ``content`` is a plain string param (not a secret-*named* / -shaped
+        key), so ``scrub_broadcast_params`` would pass it through; the pin
+        in ``_CREDENTIAL_WRITE_OPS`` makes ``classify_op`` return
+        ``credential_write``, and that class then collapses the whole
+        params dict to aggregate-only — the sibling of the ``program.run``
+        pin (#3255).
+        """
+        op_class = classify_op("vmware.composite.vm.guest.file.write")
+        assert op_class == "credential_write"
+        result = redact_payload(
+            op_class,
+            {
+                "vm": "vm-42",
+                "guest_path": "/etc/app/config",
+                "content": "TOKEN=s3kr3t-file-body-sentinel",
+                "overwrite": True,
+            },
+            "ok",
+        )
+        assert result == {"op_class": "credential_write", "result_status": "ok"}
+        assert "s3kr3t-file-body-sentinel" not in str(result)
+        assert "content" not in result
 
     def test_credential_mint_drops_response_secret(self) -> None:
         """G11.7-T1 #1401 — a response-secret mint redacts to aggregate-only."""

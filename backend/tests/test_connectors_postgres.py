@@ -38,11 +38,13 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import asyncpg
 import pytest
 import structlog
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
@@ -54,6 +56,7 @@ from meho_backplane.connectors.postgres import (
 )
 from meho_backplane.connectors.postgres import connector as connector_module
 from meho_backplane.connectors.postgres import session as session_module
+from meho_backplane.connectors.postgres.connector import _classify_fingerprint_error
 from meho_backplane.connectors.postgres.session import (
     ALLOWED_FIRST_KEYWORDS,
     DEFAULT_TRUST_USER,
@@ -689,7 +692,9 @@ async def test_fingerprint_unreachable_maps_to_not_reachable(
     )
     fp = await PostgresConnector().fingerprint(_PgTarget(), _make_operator())
     assert fp.reachable is False
-    assert "error" in fp.extras
+    # type name + classified reason only -- never the raw driver message (#3297).
+    assert fp.extras["error"] == "OSError: tcp_unreachable"
+    assert "connection refused" not in fp.extras["error"]
 
 
 @pytest.mark.asyncio
@@ -704,7 +709,54 @@ async def test_fingerprint_degrades_on_gsm_credential_read_error(
     )
     fp = await PostgresConnector().fingerprint(_PgTarget(), _make_operator())
     assert fp.reachable is False
-    assert "GcpSecretManagerReadError" in fp.extras["error"]
+    assert fp.extras["error"] == "GcpSecretManagerReadError: auth_failed"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_auth_failure_never_leaks_username(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3297: an asyncpg auth rejection echoes the connecting username; it must
+
+    never reach ``extras['error']`` or the ``postgres_fingerprint_unreachable``
+    warning log verbatim -- only the type name + classified ``auth_failed``.
+    """
+    monkeypatch.setattr(
+        connector_module,
+        "connect_read_only",
+        AsyncMock(
+            side_effect=asyncpg.InvalidPasswordError(
+                'password authentication failed for user "pg_svc_acct"'
+            )
+        ),
+    )
+    with capture_logs() as captured:
+        fp = await PostgresConnector().fingerprint(_PgTarget(), _make_operator())
+
+    assert fp.reachable is False
+    assert fp.extras["error"] == "InvalidPasswordError: auth_failed"
+    assert "pg_svc_acct" not in fp.extras["error"]
+
+    warnings = [e for e in captured if e.get("event") == "postgres_fingerprint_unreachable"]
+    assert warnings, "expected a postgres_fingerprint_unreachable warning"
+    assert warnings[0]["error"] == "InvalidPasswordError: auth_failed"
+    assert "pg_svc_acct" not in warnings[0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "reason"),
+    [
+        (asyncpg.InvalidPasswordError("bad password"), "auth_failed"),
+        (asyncpg.InvalidAuthorizationSpecificationError("no pg_hba entry"), "auth_failed"),
+        (GcpSecretManagerReadError("gsm read failed"), "auth_failed"),
+        (ValueError("operator-less"), "auth_failed"),
+        (OSError("no route to host"), "tcp_unreachable"),
+        (asyncpg.PostgresError("startup failed"), "connect_failed"),
+    ],
+)
+def test_classify_fingerprint_error_mirrors_probe(exc: Exception, reason: str) -> None:
+    """The fingerprint classifier matches the probe taxonomy (#3297)."""
+    assert _classify_fingerprint_error(exc) == reason
 
 
 # ---------------------------------------------------------------------------

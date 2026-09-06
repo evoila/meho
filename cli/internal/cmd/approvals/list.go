@@ -203,7 +203,7 @@ func printListTable(w io.Writer, items []api.ApprovalRequestView) {
 			string(e.Status),
 			truncate(e.ConnectorId, 24),
 			truncate(e.OpId, 32),
-			truncate(e.PrincipalSub, 20),
+			truncate(principalScanLabel(e.PrincipalSub, e.PrincipalName), 20),
 			e.CreatedAt,
 		)
 	}

@@ -188,7 +188,7 @@ Other accepted issue-level false positives: `go:S4830`/`S5527` on
 shell script). Mark these *Accepted* / *Won't fix* in SonarCloud with the rationale
 above so the ratings reflect real risk.
 
-The 5 production CRITICAL TLS findings are **by-design and suppressed in code**
+The 8 production CRITICAL TLS findings are **by-design and suppressed in code**
 via rule-scoped `# NOSONAR(Sxxxx)` comments (rule-scoped so only the named rule is
 muted, not every issue on the line), each pointing at the module docstring that
 carries the justification:
@@ -200,6 +200,9 @@ carries the justification:
 | `connectors/net/tls.py:441` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
 | `connectors/adapters/http.py:125` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
 | `connectors/adapters/http.py:127` | S4830 | same justification; see the module docstring's TLS-trust precedence |
+| `connectors/vmware_rest/ovf_transfer.py:271` | S4830 | pre-flight cert-fetch handshake to the device host builds an unverified context; the lease `sslThumbprint` pin (`verify_device_thumbprint`) is the identity control (module docstring #3229/#3284) |
+| `connectors/vmware_rest/ovf_transfer.py:272` | S5527 | same handshake; the device host is self-signed, so hostname match is not the control — the pin fails closed on a cert mismatch |
+| `connectors/vmware_rest/ovf_transfer.py:273` | S4830 | same handshake; `CERT_NONE` fetches the cert to hash for the pin, it is not the trust decision |
 
 These are deliberately **not** muted project-wide (no source-tree multicriteria on
 the TLS rules) so future genuinely-insecure TLS code still gets flagged.

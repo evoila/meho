@@ -269,7 +269,7 @@ def _fetch_peer_cert_der(host: str, port: int, timeout: float) -> bytes | None:
     unverifiable.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # NOSONAR(S4830) — thumbprint pinning is the identity check; ESXi device hosts are self-signed (module docstring)  # noqa: E501  # fmt: skip
-    context.check_hostname = False
+    context.check_hostname = False  # NOSONAR(S5527) — self-signed device host; the lease sslThumbprint pin (verify_device_thumbprint) is the identity check, not hostname match, and fails closed on a mismatch (module docstring)  # noqa: E501  # fmt: skip
     context.verify_mode = ssl.CERT_NONE  # NOSONAR(S4830) — same justification; the pin authenticates the endpoint  # noqa: E501  # fmt: skip
     with (
         socket.create_connection((host, port), timeout=timeout) as raw,

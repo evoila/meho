@@ -620,6 +620,10 @@ async def _run_source_kind_branch(
         return await dispatch_composite(
             handler=handler,
             operator=operator,
+            # The composite's own op_id -- bound on ``composite_dispatch_var``
+            # for the handler body so a sub-op parking on the direct seam
+            # records this composite as its approval-resume parent (#3351).
+            op_id=descriptor.op_id,
             target=target,
             params=params,
             dispatch_child=dispatch_child,

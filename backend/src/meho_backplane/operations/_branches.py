@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing dispatch-branch module already
+# at the 600-line ceiling; #3351 adds only the ``composite_dispatch_var``
+# binding co-located with the existing ``parent_audit_id_var`` bind (the #3348
+# pattern). Splitting the three source-kind branch handlers apart for a
+# few lines is not warranted.
 
 """Source-kind branch handlers for the G0.6 dispatcher.
 
@@ -517,6 +522,7 @@ async def dispatch_composite(
     *,
     handler: Callable[..., Awaitable[Any]],
     operator: Operator,
+    op_id: str,
     target: Any,
     params: dict[str, Any],
     dispatch_child: Callable[..., Awaitable[Any]],
@@ -578,6 +584,7 @@ async def dispatch_composite(
     # audit-tree contextvar lives in ``_audit``; deferring to call time
     # mirrors ``get_dispatch_child`` / ``enforce_subop_policy``.
     from meho_backplane.operations._audit import parent_audit_id_var
+    from meho_backplane.operations.composite import composite_dispatch_var
 
     param_names = set(inspect.signature(handler).parameters)
     call_kwargs: dict[str, Any] = {
@@ -590,7 +597,11 @@ async def dispatch_composite(
     if "connector" in param_names:
         call_kwargs["connector"] = connector_instance
     audit_token = parent_audit_id_var.set(audit_id)
+    # Bind this composite's identity for approval-resume of a parked sub-op
+    # (#3351; see the ``composite_dispatch_var`` docstring).
+    composite_token = composite_dispatch_var.set((op_id, params))
     try:
         return await handler(**call_kwargs)
     finally:
+        composite_dispatch_var.reset(composite_token)
         parent_audit_id_var.reset(audit_token)

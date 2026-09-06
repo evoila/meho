@@ -1251,7 +1251,56 @@ DISPATCH row of its own — the dispatcher passes a handler-returned
 composite's `audit_id` as its parent; whether that parent row is later
 persisted (a composite that continues past the park) is orthogonal to the
 lineage stamp. Reproducing the whole composite step on approve is a
-separate concern (#3351).
+separate concern (#3351, below).
+
+### Composite-child resume: re-enter the parent, not the child key (#3351)
+
+A parked composite **child** cannot be resumed by re-dispatching its own
+stored `op_id`. `enforce_subop_policy` records the sub-op's *governance
+key* + identity-only gate params, and that pair is not a dispatchable
+descriptor call:
+
+- a VI-JSON vim child (`POST:/Folder/{moId}/CreateVM_Task`,
+  `POST:/VirtualMachine/{moId}/ReconfigVM_Task`, …) requires a `{moId}`
+  path var the gate params omit and carries no assembled `ConfigSpec`
+  body (the composite builds the wire body separately, after the gate),
+  so the generic re-dispatch fails `invalid_params` / `connector_error`;
+- a REST `?action=` child (`POST:/vcenter/vm/{vm}/power?action=start`)
+  bakes the action verb into the `op_id`, and that keyed form has **no
+  ingested descriptor**, so the generic re-dispatch returns `unknown_op`.
+
+Before #3351 the resume re-dispatched the stored key regardless, so the
+approve produced a red resume row that executed nothing and still burned
+the exactly-one-resumer claim (`resumed_at`), leaving the op
+un-resumable. The only thing that "worked" was an out-of-band orchestrator
+re-running the whole blueprint step after the decision — and even that
+re-parked, because the approval did not clear the sub-op gate.
+
+The fix re-enters the **parent composite** on resume:
+
+- `dispatch_composite` binds `composite_dispatch_var` = the composite's
+  `(op_id, params)` for the handler body (co-located with the
+  `parent_audit_id_var` bind above). `enforce_subop_policy` reads it and
+  stores it on `ApprovalRequest.resume_parent`
+  (`{"op_id": …, "params": …}`, migration `0098`) at park time. NULL for a
+  direct-op park.
+- `resume_dispatch_after_approval` sees `resume_parent` and re-dispatches
+  the **parent composite** (`_approved=True`, so its top-level gate is
+  skipped) instead of the sub-op key, with `composite_resume_var` set to
+  the approved sub-op's `(op_id, params_hash)`.
+- On that re-run, `enforce_subop_policy` matches `composite_resume_var`
+  and clears the one approved sub-op (auto-executes) instead of
+  re-parking — reproducing the whole governed step through the normal
+  dispatch path. The match is on `(op_id, params_hash)`, so a composite
+  with more than one governed sub-op resumes **one gate at a time**: a
+  later un-approved governed sub-op parks a fresh request, and the
+  operator approves each in turn. Reads before the approved sub-op re-run
+  idempotently; the sub-op itself did not execute on the parking pass
+  (the gate returns before the write), so the resume executes it exactly
+  once.
+
+A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
+the resume keeps the generic re-dispatch of the stored `op_id`.
 
 ## MCP elicitation URL-mode (forward-looking)
 

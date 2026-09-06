@@ -40,7 +40,12 @@ from meho_backplane.db.models import (
     ApprovalRequestStatus,
     EndpointDescriptor,
 )
-from meho_backplane.operations.composite import enforce_subop_policy
+from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.composite import (
+    composite_dispatch_var,
+    composite_resume_var,
+    enforce_subop_policy,
+)
 from meho_backplane.settings import get_settings
 
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000024a4")
@@ -254,3 +259,110 @@ async def test_seam_persists_no_descriptor_row(session: AsyncSession) -> None:
     )
     after = await session.scalar(select(func.count()).select_from(EndpointDescriptor))
     assert after == before
+
+
+# ===========================================================================
+# #3351 — composite sub-op park records its parent + resume clears it
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_subop_park_captures_parent_composite_for_resume(
+    session: AsyncSession,
+) -> None:
+    """A parked sub-op records its parent composite on ``resume_parent`` (#3351).
+
+    The sub-op's own ``op_id`` + identity-only gate params are not a
+    dispatchable descriptor call, so the park stores the composite to
+    re-enter on resume — read from ``composite_dispatch_var``, the seam
+    ``dispatch_composite`` binds for the handler body.
+    """
+    parent_op_id = "vmware.composite.vm.create"
+    parent_params = {"folder_name": "prod", "name": "web-01", "guest_os": "UBUNTU_64"}
+    token = composite_dispatch_var.set((parent_op_id, parent_params))
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        composite_dispatch_var.reset(token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    request_id = uuid.UUID(result.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    # The parent composite is captured verbatim so the resume re-enters it.
+    assert row.resume_parent == {"op_id": parent_op_id, "params": parent_params}
+
+
+@pytest.mark.asyncio
+async def test_subop_resume_var_clears_matching_gate(session: AsyncSession) -> None:
+    """The approved sub-op auto-executes on resume instead of re-parking (#3351).
+
+    ``composite_resume_var`` carries the approved sub-op's ``(op_id,
+    params_hash)``. When the current sub-op matches, the gate clears
+    (returns ``None``) — reproducing the approved step on the direct seam —
+    *before* ``policy_gate`` runs, so even a would-park request executes and
+    no second :class:`ApprovalRequest` is written.
+    """
+    before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    token = composite_resume_var.set((_SUB_OP_ID, compute_params_hash(_SUB_PARAMS)))
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+        # The var is consumed on the match, so a later identical sub-op re-gates.
+        assert composite_resume_var.get() is None
+    finally:
+        composite_resume_var.reset(token)
+
+    # Cleared → the handler proceeds with its direct call; nothing parked.
+    assert result is None
+    after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_subop_resume_var_ignores_non_matching_subop(
+    session: AsyncSession,
+) -> None:
+    """A resume clears only the approved sub-op; a different one still parks (#3351).
+
+    A composite with more than one governed sub-op resumes one gate at a
+    time: the var pins the clear to the exact ``(op_id, params_hash)``
+    approved, so an unrelated governed sub-op re-parks a fresh request.
+    """
+    token = composite_resume_var.set(("POST:/vcenter/vm/{vm}/power?action=start", "deadbeef"))
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+        # The non-matching var is left intact for the sub-op it does match.
+        assert composite_resume_var.get() == (
+            "POST:/vcenter/vm/{vm}/power?action=start",
+            "deadbeef",
+        )
+    finally:
+        composite_resume_var.reset(token)
+
+    assert result is not None
+    assert result.status == "awaiting_approval"

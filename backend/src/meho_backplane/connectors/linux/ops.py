@@ -273,43 +273,60 @@ def _linux_ops() -> tuple[LinuxOp, ...]:
     Composition: ``linux.about`` (identity canary) + the per-domain read
     tiers -- ``FILE_OPS`` (``file.read`` / ``log.tail``), ``HOST_OPS``
     (``service.status`` / ``sysctl.read``), ``FIREWALL_OPS``
-    (``firewall.show``), ``STORAGE_OPS`` (``mount.list``). Implemented as a
+    (``firewall.show``), ``STORAGE_OPS`` (``mount.list``) -- plus the T2
+    governed ``WRITE_OPS`` (``file.write`` / ``service.control`` /
+    ``script.run`` / ``sysctl.write`` / ``firewall.load``). Implemented as a
     function call rather than a module-level literal so the import order
     stays linear (this module defines :class:`LinuxOp` + the shared helpers
-    first, then imports the per-domain op tuples from their siblings), the
-    rke2 mold.
+    first, then imports the per-domain op tuples from their siblings; the
+    read tiers are imported before ``ops_write``, which imports validators
+    from ``ops_host``), the rke2 mold.
     """
     from meho_backplane.connectors.linux.ops_file import FILE_OPS
     from meho_backplane.connectors.linux.ops_firewall import FIREWALL_OPS
     from meho_backplane.connectors.linux.ops_host import HOST_OPS
     from meho_backplane.connectors.linux.ops_storage import STORAGE_OPS
+    from meho_backplane.connectors.linux.ops_write import WRITE_OPS
 
-    return (_LINUX_ABOUT_OP, *FILE_OPS, *HOST_OPS, *FIREWALL_OPS, *STORAGE_OPS)
+    return (
+        _LINUX_ABOUT_OP,
+        *FILE_OPS,
+        *HOST_OPS,
+        *FIREWALL_OPS,
+        *STORAGE_OPS,
+        *WRITE_OPS,
+    )
 
 
 #: Curated ``when_to_use`` strings per group key, indexed by
 #: :meth:`LinuxSshConnector.register_operations`. Each entry covers a
 #: ``group_key`` declared in :data:`LINUX_OPS`; the registration walk fails
 #: closed with a :class:`ValueError` if a declared ``group_key`` lacks a
-#: curated entry (the bind9 / rke2 precedent). The six read verbs span six
-#: groups; ``system`` carries both the identity canary and ``sysctl.read``.
+#: curated entry (the bind9 / rke2 precedent). Seven groups: the six read
+#: verbs plus the ``exec`` group the T2 write verb ``script.run`` adds;
+#: ``system`` carries the identity canary + ``sysctl.read`` + ``sysctl.write``,
+#: and ``file`` / ``service`` / ``firewall`` each carry a read verb beside
+#: their governed write verb.
 LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "system": (
-        "Use for host identity and kernel-parameter reads: ``linux.about`` "
-        "returns vendor / product / distro version / kernel / init system "
-        "(call it first to confirm SSH reachability), and "
-        "``linux.sysctl.read`` returns the live value of a single named "
-        "kernel parameter (e.g. ``net.ipv4.ip_forward`` -- did the "
-        "first-boot script actually enable IP forwarding?). " + SSH_TRANSPORT_NOTE
+        "Use for host identity and kernel-parameter reads plus the "
+        "kernel-parameter write: ``linux.about`` returns vendor / product / "
+        "distro version / kernel / init system (call it first to confirm SSH "
+        "reachability), ``linux.sysctl.read`` returns the live value of a "
+        "single named kernel parameter (e.g. ``net.ipv4.ip_forward`` -- did "
+        "the first-boot script actually enable IP forwarding?), and "
+        "``linux.sysctl.write`` sets one (runtime + a persistent drop-in), "
+        "approval-gated. " + SSH_TRANSPORT_NOTE
     ),
     "file": (
-        "Use to read the CONTENT of an allow-listed config / log / sentinel "
-        "file: ``linux.file.read`` ``head -c``-caps and returns the bytes "
-        "of a path confined under the read-root allow-list (``/etc``, "
-        "``/var/log``, ``/var/lib``, ``/run``, ``/proc``, ``/sys``). The "
-        "decisive day-0 signal: read the first-boot completion sentinel a "
-        "Tools-less appliance writes -- present means the guest came up, "
-        "missing means the run declared ready while first-boot aborted. " + SSH_TRANSPORT_NOTE
+        "Use to read or write the CONTENT of an allow-listed config / log / "
+        "sentinel file: ``linux.file.read`` ``head -c``-caps and returns the "
+        "bytes of a path confined under the read-root allow-list (``/etc``, "
+        "``/var/log``, ``/var/lib``, ``/run``, ``/proc``, ``/sys``) -- the "
+        "decisive day-0 signal is the first-boot completion sentinel a "
+        "Tools-less appliance writes -- and ``linux.file.write`` atomically "
+        "writes an allow-listed config file with a backup and an optional "
+        "validate/rollback gate, approval-gated. " + SSH_TRANSPORT_NOTE
     ),
     "log": (
         "Use to tail the tail end of an allow-listed log file: "
@@ -322,21 +339,34 @@ LINUX_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
     ),
     "service": (
-        "Use to check whether a named systemd unit is up WITHOUT changing "
-        "it: ``linux.service.status`` reports ``systemctl is-active`` / "
-        "``is-enabled`` / the sub-state for one unit. The day-0 signal: "
-        "confirm each unit the first-boot config declared (DNS, DHCP, NTP) "
-        "is actually active and enabled, not merely installed. Read-only -- "
-        "the service *control* verb is the approval-gated write op. " + SSH_TRANSPORT_NOTE
+        "Use to check or control a named systemd unit: "
+        "``linux.service.status`` reports ``systemctl is-active`` / "
+        "``is-enabled`` / the sub-state for one unit WITHOUT changing it (the "
+        "day-0 signal: confirm each unit the first-boot config declared -- "
+        "DNS, DHCP, NTP -- is actually active and enabled, not merely "
+        "installed), and ``linux.service.control`` performs one recoverable "
+        "action (start / stop / restart / reload / enable / disable). The "
+        "control verb is ``caution`` and runs immediately -- it does not park "
+        "for approval, because the action is reversible. " + SSH_TRANSPORT_NOTE
+    ),
+    "exec": (
+        "Use to run an operator-declared remediation script on the host: "
+        "``linux.script.run`` uploads a script to a temp path and executes it "
+        "under a chosen interpreter (optionally under sudo), capturing stdout "
+        "/ stderr / exit. The right op to re-run the aborted first-boot script "
+        "or apply a multi-step fix. It is the intentional arbitrary-code "
+        "surface -- a typed verb governed by approval (it parks for a human), "
+        "NOT an interactive shell. " + SSH_TRANSPORT_NOTE
     ),
     "firewall": (
-        "Use to inspect the host's live firewall ruleset WITHOUT changing "
-        "it: ``linux.firewall.show`` returns the ``nft list ruleset`` "
-        "output (or ``iptables-save`` on legacy hosts) as rows, with a "
-        "``backend`` discriminator. The day-0 signal: confirm the "
-        "default-deny ruleset the first-boot script was meant to load is "
-        "actually present. Large rulesets spill to a result handle paged "
-        "with ``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
+        "Use to inspect or load the host's firewall ruleset: "
+        "``linux.firewall.show`` returns the ``nft list ruleset`` output (or "
+        "``iptables-save`` on legacy hosts) as rows WITHOUT changing it (the "
+        "day-0 signal: confirm the default-deny ruleset the first-boot script "
+        "was meant to load is present), and ``linux.firewall.load`` "
+        "validates then applies / replaces a ruleset (``nft -c -f`` before "
+        "``nft -f``), approval-gated. Large rulesets spill to a result handle "
+        "paged with ``result_query(handle_id, offset, limit)``. " + SSH_TRANSPORT_NOTE
     ),
     "storage": (
         "Use to inspect the host's mount table and NFS exports WITHOUT "

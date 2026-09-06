@@ -759,7 +759,9 @@ def test_normalise_json_rows_envelope() -> None:
 # ---------------------------------------------------------------------------
 
 
-_EXPECTED_OP_IDS: frozenset[str] = frozenset(
+#: The T1 read floor (about + six read verbs). Every one is ``safe`` +
+#: ``requires_approval=False`` + carries the ``read-only`` tag.
+_READ_OP_IDS: frozenset[str] = frozenset(
     {
         "linux.about",
         "linux.file.read",
@@ -771,9 +773,22 @@ _EXPECTED_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
+#: The T2 governed write verbs.
+_WRITE_OP_IDS: frozenset[str] = frozenset(
+    {
+        "linux.file.write",
+        "linux.service.control",
+        "linux.script.run",
+        "linux.sysctl.write",
+        "linux.firewall.load",
+    }
+)
+
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
+
 
 def test_linux_ops_count_matches_expected() -> None:
-    # about + six read verbs = seven.
+    # about + six read verbs + five write verbs = twelve.
     assert len(LINUX_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -790,12 +805,36 @@ def test_linux_ops_all_namespaced() -> None:
         assert op.op_id.startswith("linux."), f"{op.op_id!r} lacks linux. prefix"
 
 
-def test_linux_ops_all_safe_read_only_no_approval() -> None:
-    """AC: every T1 op is safe-tier, read-only, requires no approval."""
-    for op in LINUX_OPS:
+def test_linux_read_ops_all_safe_read_only_no_approval() -> None:
+    """AC: every read-floor op is safe-tier, read-only, requires no approval."""
+    by_id = {op.op_id: op for op in LINUX_OPS}
+    for op_id in _READ_OP_IDS:
+        op = by_id[op_id]
         assert op.safety_level == "safe", f"{op.op_id!r} is not safe-tier"
         assert op.requires_approval is False, f"{op.op_id!r} requires approval"
         assert "read-only" in op.tags, f"{op.op_id!r} missing read-only tag"
+
+
+def test_linux_write_ops_carry_the_correct_tier() -> None:
+    """AC: the four dangerous writes require approval; service.control is caution.
+
+    No write op is registered ``destructive`` (so the destructive-tier
+    blast-radius builder gate does not apply here), and none carries the
+    ``read-only`` tag.
+    """
+    by_id = {op.op_id: op for op in LINUX_OPS}
+    for op_id in _WRITE_OP_IDS:
+        op = by_id[op_id]
+        assert op.safety_level != "destructive", f"{op.op_id!r} must not be destructive"
+        assert "read-only" not in op.tags, f"{op.op_id!r} must not be tagged read-only"
+
+    assert by_id["linux.service.control"].safety_level == "caution"
+    assert by_id["linux.service.control"].requires_approval is False
+
+    for op_id in _WRITE_OP_IDS - {"linux.service.control"}:
+        op = by_id[op_id]
+        assert op.safety_level == "dangerous", f"{op.op_id!r} must be dangerous"
+        assert op.requires_approval is True, f"{op.op_id!r} must require approval"
 
 
 def test_linux_ops_parameter_schemas_closed() -> None:
@@ -861,7 +900,7 @@ def test_no_op_declares_a_secret_value_parameter() -> None:
 
 def test_every_declared_group_has_a_curated_when_to_use() -> None:
     declared = {op.group_key for op in LINUX_OPS if op.group_key is not None}
-    assert declared == {"system", "file", "log", "service", "firewall", "storage"}
+    assert declared == {"system", "file", "log", "service", "firewall", "storage", "exec"}
     for key in declared:
         blurb = LINUX_WHEN_TO_USE_BY_GROUP.get(key)
         assert blurb and blurb.strip(), f"group {key!r} has no curated when_to_use"

@@ -1312,6 +1312,9 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
       body to ``sudo -S -p "" bash`` so the password never lands in
       argv / logs. The single legitimate sudo-argv site in the rke2
       tree.
+    * :mod:`~meho_backplane.connectors.linux._sudo` — the linux-ssh
+      connector's copy of that same byte-identical primitive, the
+      single legitimate sudo-argv site in the linux tree.
 
     Every sibling connector (and every other bind9 module —
     ``ops.py`` / ``ops_record.py`` / ``ops_config.py`` /
@@ -1353,6 +1356,9 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
         connectors_root / "bind9" / "connector.py",
         connectors_root / "bind9" / "_atomic.py",
         connectors_root / "rke2" / "_sudo.py",
+        # The linux-ssh connector's own sanctioned safe-sudo primitive --
+        # byte-identical wire shape to rke2/_sudo.py.
+        connectors_root / "linux" / "_sudo.py",
     }
     # Match `sudo` only as the first token of a string literal — the
     # universal shape of sudo argv construction, whether it's

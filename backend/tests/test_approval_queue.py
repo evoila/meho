@@ -205,9 +205,12 @@ async def test_create_pending_request_inserts_row(session: AsyncSession) -> None
     assert request.connector_id == "vault-1.x"
     assert request.params_hash == params_hash
     assert request.principal_sub == "agent-sub"
+    # Requester display name captured from the JWT name claim (#3300).
+    assert request.principal_name == "Test Reviewer"
     assert request.tenant_id == _TENANT_ID
     assert request.run_id is None
     assert request.reviewed_by is None
+    assert request.reviewed_by_name is None
     assert request.decided_at is None
 
 
@@ -302,6 +305,9 @@ async def test_create_pending_request_writes_request_audit_row(session: AsyncSes
     assert row.status_code == 202
     assert row.payload["approval_request_id"] == str(request.id)
     assert row.payload["op_id"] == "k8s.pod.delete"
+    # Display name hoisted onto the audit payload (#3300) so the name-aware
+    # audit views resolve the row's operator_sub to a human name.
+    assert row.payload["principal_name"] == "Test Reviewer"
 
 
 @pytest.mark.asyncio
@@ -466,6 +472,8 @@ async def test_approve_request_flips_status(session: AsyncSession) -> None:
 
     assert updated.status == ApprovalRequestStatus.APPROVED.value
     assert updated.reviewed_by == reviewer.sub
+    # Reviewer display name captured at decision time (#3300).
+    assert updated.reviewed_by_name == "Test Reviewer"
     assert updated.decided_at is not None
 
 

@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.db.models import ApprovalRequest
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME
+from meho_backplane.ui.references import subject_ref
 
 __all__ = ["STATUS_PILL_CLASS", "project_request_to_view", "set_csrf_cookie"]
 
@@ -48,6 +49,15 @@ def project_request_to_view(row: ApprovalRequest) -> dict[str, Any]:
     strings here so the templates never touch the ORM row (which carries
     lazy-load + secret-bearing fields).
 
+    The ``requester`` / ``reviewer`` keys carry the display-name resolution
+    (#3300): a :class:`~meho_backplane.ui.references.SubjectRef` pairing the
+    ``sub`` with the name captured on the row at write time, so the
+    ``_subject`` macro renders the human name **alongside** the GUID
+    (fail-open to the GUID when no name was recorded). ``reviewer`` is
+    ``None`` for an undecided request. The raw ``principal_sub`` /
+    ``reviewed_by`` keys stay projected so the ``sub`` remains directly
+    reachable and pre-existing consumers are unaffected.
+
     The internal ``params`` / ``params_hash`` columns are **never**
     projected: they are the swap-defence + re-dispatch input the approvals
     contract keeps off every read view and broadcast frame
@@ -61,6 +71,8 @@ def project_request_to_view(row: ApprovalRequest) -> dict[str, Any]:
         "connector_id": row.connector_id,
         "principal_sub": row.principal_sub,
         "principal_act": row.principal_act,
+        "requester": subject_ref(row.principal_sub, row.principal_name),
+        "reviewer": subject_ref(row.reviewed_by, row.reviewed_by_name),
         "proposed_effect": row.proposed_effect,
         "status": row.status,
         "reviewed_by": row.reviewed_by,

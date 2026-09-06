@@ -131,6 +131,30 @@ func TestPrintGrantListTableRows(t *testing.T) {
 	}
 }
 
+// TestPrintGrantListTableResolvesName covers #3337: when the backplane
+// resolved the principal's handle, the list renders "<name> (<sub>)" —
+// the name alongside the sub. A nil PrincipalName (already covered by
+// TestPrintGrantListTableRows) fails open to the bare sub.
+func TestPrintGrantListTableResolvesName(t *testing.T) {
+	var sb strings.Builder
+	name := "Recon Scout"
+	grants := []api.AgentGrantRead{
+		{
+			Id:            uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			PrincipalSub:  "agent:scout",
+			PrincipalName: &name,
+			OpPattern:     "vault.kv.*",
+			Verdict:       "auto-execute",
+			CreatedBySub:  "op-admin",
+			CreatedAt:     time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	printGrantListTable(&sb, grants)
+	if !strings.Contains(sb.String(), "Recon Scout (agent:scout)") {
+		t.Errorf("printGrantListTable missing resolved name alongside sub; got %q", sb.String())
+	}
+}
+
 func TestRenderGrantEntryHumanLine(t *testing.T) {
 	var sb strings.Builder
 	expires := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)

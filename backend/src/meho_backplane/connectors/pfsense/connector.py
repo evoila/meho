@@ -653,6 +653,26 @@ class PfSenseConnector(SshConnector):
 
         return await _pfsense_dhcp_leases(self, target, params, operator)
 
+    async def mgmt_flow_summary(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.mgmt_flow.summary`` (meho-internal#252).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_mgmt_flow.pfsense_mgmt_flow_summary`.
+        Reads the live state table and returns a compact per-leg
+        sanctioned / non-sanctioned / unexpected-source classification —
+        the assertable read a stage-2 alert Sensor pins.
+        """
+        from meho_backplane.connectors.pfsense.ops_mgmt_flow import (
+            pfsense_mgmt_flow_summary as _pfsense_mgmt_flow_summary,
+        )
+
+        return await _pfsense_mgmt_flow_summary(self, target, params, operator)
+
     async def gateway_add(
         self,
         target: Target,

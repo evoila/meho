@@ -43,6 +43,49 @@ Raises `GrantValidationError` when:
 - `expires_at` is in the past or timezone-naive
 - `target_scope` is neither `None`, `"*"`, nor a valid UUID string
 
+## Display-name resolution alongside the sub (#3337)
+
+The grants surfaces — console rows / detail / revoke modal, and
+`meho agent grant list` — historically rendered `principal_sub` as a
+bare identity string, so an operator reviewing a grant saw an identity
+handle, not *who* the grant is for. The read paths (`list_` / `get`) now
+resolve a human display name **alongside** the sub, never instead — the
+sub stays the stable key. This is the grants slice of Initiative #3301
+(console + CLI GUID-to-name resolution), reusing the shared rendering
+helpers the approvals slice (#3300) established.
+
+**The name source is the agent-principal registry — a direct join, not
+a hoisted column.** Unlike the audit / approvals surfaces (where the
+token `sub` names no principal row, so the name is hoisted at write
+time), a grant's `principal_sub` *is* a registered agent principal's
+`keycloak_client_id`: `AgentGrantService.grant` refuses a grant whose
+sub names no live `AgentPrincipal` in the tenant (#2489), and the
+permission resolver matches grants on that same `agent:<name>` client id
+(`auth/permissions.py`). So `_resolve_principal_names` joins
+`AgentPrincipal.keycloak_client_id` → `AgentPrincipal.name` (the
+operator handle), tenant-scoped, at render time — no migration, no new
+identity lookup mechanism. `list_` resolves the whole page in one
+batched query; `get` resolves the single sub. The result populates
+`AgentGrantRead.principal_name` (an additive, non-ORM field; `None` on
+the write paths).
+
+**Fail-open contract.** Resolution can never fail or slow the surface:
+it reads the registry the grant service already consults. A sub that
+names no live principal — a legacy pre-#2489 row, or a handle
+hard-deleted since — resolves to `None` and every surface degrades
+cleanly to the raw `principal_sub` it showed before. Revoked principals
+are **not** filtered, so a lingering grant still shows whose handle it
+was. The shared resolver `meho_backplane.ui.references.subject_ref(sub,
+name)` returns a `SubjectRef` whose `.display` is `name or sub`; the
+console `subject(ref)` macro (`_references.html`) renders the handle
+leading with the sub alongside in a muted mono span; the CLI
+`principalLabel` (`cli/internal/cmd/agent/identity.go`) renders
+`<name> (<sub>)` in the `list` PRINCIPAL column, falling back to the
+bare sub.
+
+**No PII beyond the display name.** These surfaces resolve to the
+operator handle only — never email, groups, or other profile fields.
+
 ## Control flow
 
 ```
@@ -129,5 +172,8 @@ All verbs require `tenant_admin`.
 
 - G11.2-T3 (#820): per-agent permission model + resolver (parallel PR #1052)
 - G11.2-T6 (#819): this task (grant surface)
+- #3337 (Initiative #3301): display-name resolution alongside the sub on the grants console + CLI
+- #3300: approvals slice of #3301 — the shared `subject_ref` / `SubjectRef` + `subject` macro reused here
+- #2489: grant `principal_sub` must name a registered agent principal — the join key this resolution relies on
 - `memory/expiry.py`: sweeper precedent
 - `agents/service.py`: service layer precedent (session-per-method pattern)

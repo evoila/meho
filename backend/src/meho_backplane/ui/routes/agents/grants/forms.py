@@ -83,6 +83,7 @@ from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.auth.operator import Operator
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
+from meho_backplane.ui.references import subject_ref
 from meho_backplane.ui.routes.agents.grants.views import _fetch_grant_or_404
 from meho_backplane.ui.templating import get_templates
 
@@ -222,6 +223,10 @@ async def render_revoke_modal(
         "grant": {
             "id": str(grant.id),
             "principal_sub": grant.principal_sub,
+            # Display name alongside the sub on the destructive-confirm
+            # (#3337), so the operator confirms the right principal by
+            # name; fails open to the raw sub via the ``subject`` macro.
+            "subject": subject_ref(grant.principal_sub, grant.principal_name),
             "op_pattern": grant.op_pattern,
             "verdict": grant.verdict,
         },

@@ -136,6 +136,11 @@ class ApprovalRequestView(BaseModel):
     run_id: uuid.UUID | None
     principal_sub: str
     principal_act: str | None
+    #: Requester display name, resolved alongside ``principal_sub`` (#3300).
+    #: ``None`` when the parking token carried no ``name`` claim -- the
+    #: surface fails open to the ``principal_sub`` GUID. Additive; a client
+    #: that ignores it is unaffected.
+    principal_name: str | None = None
     op_id: str
     connector_id: str
     target_id: uuid.UUID | None
@@ -143,6 +148,10 @@ class ApprovalRequestView(BaseModel):
     proposed_effect: dict[str, Any]
     status: ApprovalRequestStatus
     reviewed_by: str | None
+    #: Reviewer display name, resolved alongside ``reviewed_by`` (#3300).
+    #: ``None`` before a decision or when the deciding token carried no
+    #: ``name`` claim (fail-open to the ``reviewed_by`` GUID). Additive.
+    reviewed_by_name: str | None = None
     decided_at: str | None
     created_at: str
     expires_at: str | None
@@ -252,6 +261,7 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
         run_id=row.run_id,
         principal_sub=row.principal_sub,
         principal_act=row.principal_act,
+        principal_name=row.principal_name,
         op_id=row.op_id,
         connector_id=row.connector_id,
         target_id=row.target_id,
@@ -259,6 +269,7 @@ def _view(row: ApprovalRequest) -> ApprovalRequestView:
         proposed_effect=row.proposed_effect,
         status=ApprovalRequestStatus(row.status),
         reviewed_by=row.reviewed_by,
+        reviewed_by_name=row.reviewed_by_name,
         decided_at=row.decided_at.isoformat() if row.decided_at else None,
         created_at=row.created_at.isoformat(),
         expires_at=row.expires_at.isoformat() if row.expires_at else None,
@@ -772,6 +783,12 @@ class DecideResponseBody(BaseModel):
     stable ``sub``) whose credential made this decision, so a CLI / console
     can show *who* decided without a second lookup (#3290). Additive and
     optional — a client that ignores it is unaffected.
+
+    ``decided_by_name`` carries the reviewer's human display name alongside
+    ``decided_by`` (#3300), from the deciding operator's JWT ``name`` claim,
+    so a client renders *who* without resolving the GUID itself. ``None``
+    when the token carried no name — the client fails open to ``decided_by``.
+    Display name only: no email or other profile field is added here.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -780,6 +797,7 @@ class DecideResponseBody(BaseModel):
     decision: str
     reason: str
     decided_by: str | None = None
+    decided_by_name: str | None = None
     dispatch_status: str | None = None
     dispatch_op_id: str | None = None
     dispatch_result: dict[str, Any] | list[Any] | None = None
@@ -861,6 +879,7 @@ async def decide_approval_request(
             decision=decision,
             reason=body.reason,
             decided_by=operator.sub,
+            decided_by_name=operator.name,
             dispatch_status=dispatch_result.status,
             dispatch_op_id=dispatch_result.op_id,
             dispatch_result=dispatch_result.result,
@@ -872,4 +891,5 @@ async def decide_approval_request(
         decision=decision,
         reason=body.reason,
         decided_by=operator.sub,
+        decided_by_name=operator.name,
     )

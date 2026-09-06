@@ -94,10 +94,12 @@ _FIXTURE_PFCTL_SR = (
     "block drop in log quick on em0 proto tcp from <bruteforce> to any port = 22\n"
 )
 
+# Real captured pfctl -ss format: interface first, protocol second
+# (pfSense 2.7; pf state format, redmine #2121).
 _FIXTURE_PFCTL_SS = (
-    "tcp em0 10.0.0.1:55234 -> 93.184.216.34:443: ESTABLISHED:ESTABLISHED\n"
-    "udp em0 10.0.0.2:1234 <-> 8.8.8.8:53\n"
-    "tcp em0 10.0.0.3:44100 -> 1.1.1.1:443: ESTABLISHED:ESTABLISHED\n"
+    "em0 tcp 93.184.216.34:443 <- 10.0.0.1:55234  ESTABLISHED:ESTABLISHED\n"
+    "em0 udp 10.0.0.2:1234 <-> 8.8.8.8:53\n"
+    "em0 tcp 1.1.1.1:443 <- 10.0.0.3:44100  ESTABLISHED:ESTABLISHED\n"
 )
 
 _FIXTURE_PFCTL_SN = "nat on em0 from 192.168.1.0/24 to any -> (em0)\n"
@@ -318,6 +320,12 @@ _DELETE_OP_IDS: frozenset[str] = frozenset(
     }
 )
 
+#: The parameterized read op (meho-internal#252). ``safe`` like the rest of
+#: the read surface, but it takes real params (``sanctioned_src`` /
+#: ``mgmt_nets`` are required), so it is held separate from the empty-params
+#: dispatch/audit sweep (covered by ``test_connectors_pfsense_ops.py``).
+_PARAM_READ_OP_IDS: frozenset[str] = frozenset({"pfsense.mgmt_flow.summary"})
+
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
 # ---------------------------------------------------------------------------
@@ -428,11 +436,12 @@ async def pfsense_e2e(
 
 
 def test_pfsense_ops_registration_count() -> None:
-    """All 16 pfSense ops registered (9 read/identity + 2 write + 5 delete)."""
+    """All 17 pfSense ops registered (9 read/identity + 2 write + 5 delete +
+    1 parameterized mgmt-flow read, meho-internal#252)."""
     op_ids = {op.op_id for op in PFSENSE_OPS}
-    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS) - op_ids
+    missing = (set(EXPECTED_OP_IDS) | _WRITE_OP_IDS | _DELETE_OP_IDS | _PARAM_READ_OP_IDS) - op_ids
     assert not missing, f"Missing ops: {missing}"
-    assert len(PFSENSE_OPS) == 16, f"Expected 16 ops, got {len(PFSENSE_OPS)}"
+    assert len(PFSENSE_OPS) == 17, f"Expected 17 ops, got {len(PFSENSE_OPS)}"
 
 
 def test_pfsense_ops_safety_levels_and_approval() -> None:
@@ -455,7 +464,11 @@ def test_pfsense_read_ops_parameter_schemas_are_empty() -> None:
         assert schema.get("additionalProperties") is False, (
             f"{op.op_id}: parameter_schema must have additionalProperties=False"
         )
-        if op.op_id not in _WRITE_OP_IDS and op.op_id not in _DELETE_OP_IDS:
+        if (
+            op.op_id not in _WRITE_OP_IDS
+            and op.op_id not in _DELETE_OP_IDS
+            and op.op_id not in _PARAM_READ_OP_IDS
+        ):
             assert schema.get("properties") == {}, (
                 f"{op.op_id}: read-op parameter_schema must have empty properties"
             )

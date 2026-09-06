@@ -49,6 +49,7 @@ from meho_backplane.ui.csrf import (
     mint_csrf_token,
     verify_csrf_token,
 )
+from meho_backplane.ui.references import subject_ref
 from meho_backplane.ui.routes.agents.views import is_htmx_request
 from meho_backplane.ui.templating import get_templates
 
@@ -124,6 +125,11 @@ def _row_context(grant: AgentGrantRead) -> dict[str, object]:
     return {
         "id": str(grant.id),
         "principal_sub": grant.principal_sub,
+        # Display name resolved alongside the sub (#3337). ``subject_ref``
+        # pairs the sub with the agent-principal handle the service
+        # resolved (``None`` -> the ``subject`` macro fails open to the
+        # raw sub). Same shared helper the approvals surfaces use (#3300).
+        "subject": subject_ref(grant.principal_sub, grant.principal_name),
         "op_pattern": grant.op_pattern,
         "target_scope": grant.target_scope,
         "target_scope_display": _target_scope_display(grant.target_scope),

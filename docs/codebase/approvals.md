@@ -113,6 +113,59 @@ bound) and an autonomous agent run both resolve to `principal_act=NULL`.
 (Before #1481 the field read a nonexistent `Operator.identity_act`
 attribute and was always `NULL`.)
 
+### Display-name resolution alongside the sub (#3300)
+
+Every operator-facing approvals surface — CLI `approve` / `show` /
+`list`, the `/decide` response, and the console approvals modal /
+history / panel — historically rendered `principal_sub` (the requester)
+and `reviewed_by` (the approver) as bare OIDC `sub` GUIDs, so an
+operator reviewing or auditing an approval saw an identity GUID at the
+moment they most needed to know *who*. These surfaces now render a human
+display name **alongside** the `sub`, never instead — the `sub` stays
+the stable, machine-truthful key. This is the first slice of Initiative
+#3301 (console + CLI GUID-to-name resolution).
+
+**No live lookup — the name is hoisted at write time.** There is no
+`sub` → name join table (the agent / runner principal tables key on the
+Keycloak client id, not the token `sub`; see
+`meho_backplane.ui.references`), so the name cannot be resolved after the
+fact. Migration `0097` adds two nullable `approval_request` columns:
+
+- `principal_name` — the requester's name, set in
+  `create_pending_request` from the parking `Operator.name`.
+- `reviewed_by_name` — the approver's name, set in `approve_request` /
+  `reject_request` from the deciding `Operator.name`.
+
+Both come from the JWT `name` claim — the same hoist-at-write pattern
+`audit_log.principal_name` uses (#1212). The approval audit rows
+(`_write_audit_row`) carry the same `payload['principal_name']` so the
+name-aware audit views resolve the row's `operator_sub` too, and the
+`/decide` response gains an additive `decided_by_name` beside
+`decided_by`.
+
+**Fail-open contract.** Resolution can never fail or slow a decision: no
+identity provider is called; the surface reads a column already loaded on
+the row. When no name was recorded — a token without a `name` claim, or a
+pre-`0097` row — the column is `NULL` and every surface degrades cleanly
+to the raw `sub` it showed before. The shared resolver
+`meho_backplane.ui.references.subject_ref(sub, name)` returns a
+`SubjectRef` whose `.display` is `name or sub` (and `None` when there is
+no sub at all, e.g. an undecided request's reviewer); the console
+`subject(ref)` macro in `_references.html` renders the name leading with
+the `sub` alongside in a muted mono span. The CLI mirrors this:
+`principalLabel` renders `<name> (<sub>)` for single-line fields
+(`approve`, `show`); `principalScanLabel` renders the name for the
+width-constrained `list` PRINCIPAL column, where the full sub stays
+reachable via `show` / `--json`.
+
+**No PII beyond the display name.** These surfaces resolve to a human
+display name only — never email, groups, or other profile fields.
+`SubjectRef` is deliberately distinct from `PrincipalRef` (the audit /
+broadcast drawer's principal, which also carries email and a service
+marker): the approvals contract keeps PII off these surfaces, and #1212
+already carries email on audit rows where it exists — that is not
+widened here.
+
 ## MCP audit status for post-gate rejections (#1481)
 
 A `tools/call` that a tool handler rejects *after* the dispatch gates
@@ -1094,6 +1147,49 @@ Net result on either path: >= 3 session-anchored rows per approved
 chain, tree shape `approval.request` → {`approval.decision`, `<op_id>`}.
 Pre-0053 rows keep NULLs and simply stay out of replay (the pre-fix
 behaviour).
+
+### Composite-child park lineage (#3348)
+
+A **composite** that fans out to a governed write can park a *child*
+sub-op rather than itself. Two seams reach the park:
+
+- the recursive `dispatch_child` seam (`get_dispatch_child`), which
+  re-dispatches the child through `dispatch()` and hits
+  `_handle_needs_approval`; and
+- the direct-session `enforce_subop_policy` seam
+  (`operations/composite.py`, #2254), which a write composite migrated
+  off `dispatch_child` calls **before** each governed sub-call and which
+  parks via its own `create_pending_request`.
+
+On either seam the parked child's `approval.request` audit row must
+carry `parent_audit_id` = the **composite dispatch's own `audit_id`**, so
+the G8.2 replay walk can attribute the fanned-out write to the composite
+that issued it — the same linkage the approval entry surfaces through its
+`request_audit_id` anchor. `create_pending_request`'s audit writer reads
+that value from `parent_audit_id_var` (the row being written *is* the
+`request_audit_id` row, so it takes the contextvar rather than
+self-parenting — see the `stored_parent`/`else` branch in
+`approval_queue._write_audit_row`).
+
+The contextvar is bound for the **whole composite handler body** in
+`operations/_branches.py::dispatch_composite` (bound to the composite's
+`audit_id`, token-reset in `finally` before the dispatcher writes the
+composite's own DISPATCH row, so the composite never self-parents). The
+recursive seam additionally binds it internally per child dispatch;
+binding at the handler-body boundary is what extends the same linkage to
+the **direct** seam. Before #3348 only the recursive seam bound it, so a
+service principal whose composite parked a child on the direct seam wrote
+`parent_audit_id = NULL` — an orphan approval the replay walk could not
+tie back to its composite.
+
+Note that a composite which returns the child's `awaiting_approval`
+result **verbatim** (the usual write-composite shape) writes no composite
+DISPATCH row of its own — the dispatcher passes a handler-returned
+`OperationResult` straight through. The child's row still records the
+composite's `audit_id` as its parent; whether that parent row is later
+persisted (a composite that continues past the park) is orthogonal to the
+lineage stamp. Reproducing the whole composite step on approve is a
+separate concern (#3351).
 
 ## MCP elicitation URL-mode (forward-looking)
 

@@ -393,6 +393,58 @@ def test_list_distinguishes_elevation_from_permanent() -> None:
     assert "elevation" in body
 
 
+def _register_named_principal(tenant_id: uuid.UUID, client_id: str, name: str) -> None:
+    """Register one agent principal with an explicit operator handle (#3337)."""
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                AgentPrincipal(
+                    tenant_id=tenant_id,
+                    name=name,
+                    keycloak_client_id=client_id,
+                    keycloak_internal_id=str(uuid.uuid4()),
+                    owner_sub=_OP_A,
+                    created_by_sub=_OP_A,
+                )
+            )
+
+    asyncio.run(_do())
+
+
+def test_list_resolves_principal_display_name() -> None:
+    """The grants table renders the principal handle alongside the sub (#3337).
+
+    A grant whose ``principal_sub`` names a registered agent principal
+    surfaces that principal's handle as the primary label with the sub
+    alongside; a grant whose sub names no principal fails open to the raw
+    sub it showed before.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _register_named_principal(_TENANT_A, "agent:recon", "Recon Scout")
+    _seed_grant(tenant_id=_TENANT_A, principal_sub="agent:recon", op_pattern="vault.*")
+    # Unregistered sub -> fail-open (GUID-only, no display name).
+    _seed_grant(
+        tenant_id=_TENANT_A, principal_sub="agent:ghost", op_pattern="deny.*", verdict="deny"
+    )
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents/grants")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Resolved: the handle is the primary label, the sub renders alongside.
+    assert "Recon Scout" in body
+    assert "agent:recon" in body
+    # Fail-open: the unregistered sub still renders (no display name for it).
+    assert "agent:ghost" in body
+
+
 def test_list_filters_by_principal_sub() -> None:
     """The ``principal_sub`` filter narrows the table to one principal."""
     _seed_tenant(_TENANT_A, "tenant-a")

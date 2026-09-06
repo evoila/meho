@@ -20,6 +20,7 @@
     requests          -- list[dict]: projected rows
     status_pill_class -- dict[str, str]: status -> DaisyUI badge modifier
 -#}
+{% from "_references.html" import subject %}
 {% for req in requests %}
   <li class="flex items-center justify-between gap-3 px-4 py-3">
     <div class="min-w-0 space-y-1">
@@ -33,16 +34,16 @@
       <p class="truncate text-xs text-base-content/55">
         <span>{{ req.connector_id }}</span>
         <span aria-hidden="true">&middot;</span>
-        <span>requested by {{ req.principal_sub }}</span>
+        <span>requested by {{ subject(req.requester) }}</span>
         {% if req.status == "pending" %}
           {% if req.created_at %}
             <span aria-hidden="true">&middot;</span>
             <time datetime="{{ req.created_at }}">{{ req.created_at }}</time>
           {% endif %}
         {% else %}
-          {% if req.reviewed_by %}
+          {% if req.reviewer %}
             <span aria-hidden="true">&middot;</span>
-            <span>by {{ req.reviewed_by }}</span>
+            <span>by {{ subject(req.reviewer) }}</span>
           {% endif %}
           {% if req.decided_at %}
             <span aria-hidden="true">&middot;</span>

@@ -2,28 +2,43 @@
 // Launcher for the "MEHO for Claude Desktop" bundle.
 //
 // Claude Desktop runs this file with its bundled Node runtime (the
-// manifest's server.mcp_config.command is "node"). It is a thin stdio
-// pass-through to the proven onramp `mcp-remote@0.1.38 <url> …`
-// (recipe: docs/cross-repo/mcp-client-setup.md, proven by #2666).
+// manifest's server.mcp_config.command is "node"). It hands the proven
+// onramp `mcp-remote@0.1.38 <url> …` (recipe:
+// docs/cross-repo/mcp-client-setup.md, proven by #2666) full ownership of
+// this process's stdio.
 //
-// mcp-remote is vendored into the bundle's node_modules at pack time
-// (build.sh runs `npm ci --omit=dev`) and launched through the same
-// runtime already executing this file — `process.execPath` — so there is
-// no `npx`, no PATH lookup, and no per-platform shell. Under Claude
-// Desktop the entry point runs inside a UtilityProcess whose PATH is the
-// GUI PATH (no /opt/homebrew/bin, no nvm shims), so the old `npx` spawn
-// died with `spawn npx ENOENT` before OAuth (field-test #3143); a direct
-// `process.execPath` spawn cannot hit that failure.
+// It runs mcp-remote **in-process**: the vendored CLI entry is imported
+// into this process after process.argv is set to the mcp-remote
+// invocation. Nothing is spawned — there is no child process, no execPath
+// launch, no `npx`, no PATH lookup, and no per-platform shell.
+//
+// Why in-process rather than a spawn (#3341, field-test F6). #3144 spawned
+// mcp-remote by launching the bundle's own runtime (execPath) with
+// ELECTRON_RUN_AS_NODE=1, on the assumption that flag makes the child run
+// as plain Node whether execPath is a standalone `node` or Claude Desktop's
+// Electron helper. On Claude Desktop 1.40609.0 that assumption is false:
+// execPath is the
+// `Claude Helper (Plugin)` Electron binary, which FATALs when spawned as
+// Node even with ELECTRON_RUN_AS_NODE=1 ("Unable to find helper app"), so
+// the child never started and Desktop cancelled `initialize` after 60 s.
+// Importing the entry sidesteps execPath entirely — mcp-remote runs in the
+// launcher process Claude Desktop already started as Node, so F6 cannot
+// recur. mcp-remote's CLI entry has no `import.meta.url === argv[1]` main
+// guard and reads `process.argv.slice(2)` at module top level, so importing
+// it runs its `main` against the argv set below.
 //
 // It adds two things over invoking mcp-remote directly:
 //
-//  1. A guard on the internal-CA path: the optional `ca_cert` user_config
-//     is delivered as MEHO_CA_CERT, and NODE_EXTRA_CA_CERTS is exported to
-//     the child ONLY when a non-empty path was supplied. Wiring the
-//     optional file straight into NODE_EXTRA_CA_CERTS would leave the
-//     host's substitution of an unset optional value (empty string vs.
-//     omitted vs. literal) to decide the child's TLS trust store —
-//     undocumented and not worth depending on.
+//  1. Internal-CA trust. The optional `ca_cert` user_config is delivered as
+//     NODE_EXTRA_CA_CERTS by the manifest `env` block, which Claude Desktop
+//     applies to this process's environment *before Node boots*. That is
+//     the only workable delivery route: NODE_EXTRA_CA_CERTS is read once at
+//     Node startup and cannot be set from launcher code afterwards (proven
+//     in #3341's spike), and in-process there is no child env to export it
+//     to. When the field is left empty (the default fresh install) Node
+//     receives an empty NODE_EXTRA_CA_CERTS and treats it as "no extra
+//     certs" — the default trust store is untouched and public-CA deploys
+//     keep working.
 //  2. The static OAuth client id: MEHO's Keycloak realm blocks anonymous
 //     RFC 7591 Dynamic Client Registration (default Trusted Hosts policy →
 //     403 "Host not trusted"), so a bare `mcp-remote` cannot complete
@@ -32,10 +47,10 @@
 //     through the optional `client_id` user_config (delivered as
 //     MEHO_MCP_CLIENT_ID) without editing the installed bundle.
 
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const rawUrl = process.argv[2];
 
@@ -56,22 +71,14 @@ if (url.protocol !== "https:") {
   process.exit(1);
 }
 
-const env = { ...process.env };
-const caCert = (process.env.MEHO_CA_CERT ?? "").trim();
-if (caCert !== "") {
-  env.NODE_EXTRA_CA_CERTS = caCert;
-} else {
-  delete env.NODE_EXTRA_CA_CERTS;
-}
-delete env.MEHO_CA_CERT;
-
 // The pre-registered public OAuth client the shim presents to Keycloak.
 // Fall back to the default when the host substitutes an empty value for an
 // untouched optional field, so an operator who never opens the advanced
-// `client_id` field still authenticates. Stripped from the child env (like
-// MEHO_CA_CERT) to keep the config seam out of mcp-remote's environment.
+// `client_id` field still authenticates. Scrubbed from process.env (which
+// mcp-remote inherits in-process) to keep the config seam out of its
+// environment.
 const clientId = (process.env.MEHO_MCP_CLIENT_ID ?? "").trim() || "meho-mcp";
-delete env.MEHO_MCP_CLIENT_ID;
+delete process.env.MEHO_MCP_CLIENT_ID;
 
 // OAuth scope metadata presented during the handshake. The default is the
 // working surface; the optional `scopes` user_config (delivered as
@@ -82,17 +89,11 @@ delete env.MEHO_MCP_CLIENT_ID;
 // degrades to the default surface: per OAuth 2.1 (RFC 6749 §3.3) the
 // authorization server may ignore an ungranted scope, and Keycloak drops a
 // scope that is not an assigned default/optional client scope, so the token
-// never carries it and the elevated tools simply do not list. Stripped from
-// the child env like the other config seams.
+// never carries it and the elevated tools simply do not list. Scrubbed from
+// process.env like the client id.
 const scopes =
   (process.env.MEHO_MCP_SCOPES ?? "").trim() || "mcp:read mcp:execute";
-delete env.MEHO_MCP_SCOPES;
-
-// Run the child as a plain Node process even when process.execPath is
-// Claude Desktop's Electron helper rather than a standalone `node`:
-// ELECTRON_RUN_AS_NODE=1 "starts the process as a normal Node.js process"
-// (Electron docs). Harmless no-op when execPath is already `node`.
-env.ELECTRON_RUN_AS_NODE = "1";
+delete process.env.MEHO_MCP_SCOPES;
 
 // Resolve the vendored mcp-remote CLI entry from the bundle's node_modules
 // (populated by `npm ci --omit=dev` at pack time). Read the package's own
@@ -107,35 +108,33 @@ const mcpRemoteBin =
     : mcpRemotePkg.bin["mcp-remote"];
 const mcpRemoteEntry = join(dirname(mcpRemotePkgPath), mcpRemoteBin);
 
-// Spawn the pinned mcp-remote through this process's own runtime — a
-// direct binary + args-array spawn on every platform (no external
-// launcher, no PATH resolution, no shell). Present the static `meho-mcp`
-// client via --static-oauth-client-info so the shim skips the DCR the
-// realm blocks; the scope metadata matches what the backplane's token
-// audience mappers expect.
-const child = spawn(
-  process.execPath,
-  [
-    mcpRemoteEntry,
-    url.href,
-    "--static-oauth-client-info",
-    JSON.stringify({ client_id: clientId }),
-    "--static-oauth-client-metadata",
-    JSON.stringify({ scope: scopes }),
-  ],
-  { stdio: "inherit", env },
-);
+// Hand mcp-remote its invocation via process.argv, then import it: it reads
+// process.argv.slice(2), so argv[2..] carry the URL and the static-OAuth
+// contract. argv[0]/argv[1] are ignored by its parser (kept only so any
+// usage string it prints names the real entry). Present the static
+// `meho-mcp` client via --static-oauth-client-info so the shim skips the
+// DCR the realm blocks; the scope metadata matches what the backplane's
+// token audience mappers expect.
+process.argv = [
+  process.argv[0],
+  mcpRemoteEntry,
+  url.href,
+  "--static-oauth-client-info",
+  JSON.stringify({ client_id: clientId }),
+  "--static-oauth-client-metadata",
+  JSON.stringify({ scope: scopes }),
+];
 
-child.on("error", (err) => {
+// Import (not spawn) the vendored entry. pathToFileURL keeps the dynamic
+// import valid on Windows, where a bare path is not a valid import
+// specifier. mcp-remote takes over this process's stdio and installs its
+// own SIGINT / stdin-EOF handlers; Desktop closing the stdio pipe drives
+// its graceful shutdown. A failure to import surfaces as a clear error.
+try {
+  await import(pathToFileURL(mcpRemoteEntry).href);
+} catch (err) {
   process.stderr.write(
     `meho-claude-desktop: failed to launch mcp-remote: ${err.message}\n`,
   );
   process.exit(1);
-});
-child.on("exit", (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-  } else {
-    process.exit(code ?? 0);
-  }
-});
+}

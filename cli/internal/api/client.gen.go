@@ -569,6 +569,7 @@ const (
 	TargetCreateProductInstaller  TargetCreateProduct = "installer"
 	TargetCreateProductK8s        TargetCreateProduct = "k8s"
 	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"
+	TargetCreateProductLinux      TargetCreateProduct = "linux"
 	TargetCreateProductLoki       TargetCreateProduct = "loki"
 	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
 	TargetCreateProductMsad       TargetCreateProduct = "msad"
@@ -992,17 +993,30 @@ type AgentGrantListResponse struct {
 // “from_attributes=True“ allows direct construction from an ORM
 // row. Exposes “expires_at“ so callers can distinguish permanent
 // grants from elevations.
+//
+// “principal_name“ is the granted principal's operator-facing
+// handle, resolved alongside “principal_sub“ (#3337) from the agent
+// principal registry — “principal_sub“ names a registered
+// :class:`~meho_backplane.db.models.AgentPrincipal` by its
+// “keycloak_client_id“ (the grant service enforces this at write
+// time, #2489), so the row's “name“ is joinable render-time. Not an
+// ORM column: it is populated by :class:`AgentGrantService` on the read
+// paths and is “None“ on the write paths and whenever the sub names
+// no live principal (a revoked/deleted handle) — the surface then fails
+// open to the raw “principal_sub“. Additive; a client that ignores it
+// is unaffected. Display name (handle) only — no other profile field.
 type AgentGrantRead struct {
-	CreatedAt    time.Time          `json:"created_at"`
-	CreatedBySub string             `json:"created_by_sub"`
-	ExpiresAt    *time.Time         `json:"expires_at"`
-	Id           openapi_types.UUID `json:"id"`
-	OpPattern    string             `json:"op_pattern"`
-	PrincipalSub string             `json:"principal_sub"`
-	TargetScope  *string            `json:"target_scope"`
-	TenantId     openapi_types.UUID `json:"tenant_id"`
-	UpdatedAt    time.Time          `json:"updated_at"`
-	Verdict      string             `json:"verdict"`
+	CreatedAt     time.Time          `json:"created_at"`
+	CreatedBySub  string             `json:"created_by_sub"`
+	ExpiresAt     *time.Time         `json:"expires_at"`
+	Id            openapi_types.UUID `json:"id"`
+	OpPattern     string             `json:"op_pattern"`
+	PrincipalName *string            `json:"principal_name"`
+	PrincipalSub  string             `json:"principal_sub"`
+	TargetScope   *string            `json:"target_scope"`
+	TenantId      openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	Verdict       string             `json:"verdict"`
 }
 
 // AgentModelTier Logical model tier an agent definition runs against.
@@ -1256,9 +1270,11 @@ type ApprovalRequestView struct {
 	OpId           string                 `json:"op_id"`
 	ParamsHash     string                 `json:"params_hash"`
 	PrincipalAct   *string                `json:"principal_act"`
+	PrincipalName  *string                `json:"principal_name"`
 	PrincipalSub   string                 `json:"principal_sub"`
 	ProposedEffect map[string]interface{} `json:"proposed_effect"`
 	ReviewedBy     *string                `json:"reviewed_by"`
+	ReviewedByName *string                `json:"reviewed_by_name"`
 	RunId          *openapi_types.UUID    `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`ApprovalRequest`.
@@ -3997,9 +4013,16 @@ type DecideRequestBody struct {
 // stable “sub“) whose credential made this decision, so a CLI / console
 // can show *who* decided without a second lookup (#3290). Additive and
 // optional — a client that ignores it is unaffected.
+//
+// “decided_by_name“ carries the reviewer's human display name alongside
+// “decided_by“ (#3300), from the deciding operator's JWT “name“ claim,
+// so a client renders *who* without resolving the GUID itself. “None“
+// when the token carried no name — the client fails open to “decided_by“.
+// Display name only: no email or other profile field is added here.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
 	DecidedBy         *string                            `json:"decided_by"`
+	DecidedByName     *string                            `json:"decided_by_name"`
 	Decision          string                             `json:"decision"`
 	DispatchError     *string                            `json:"dispatch_error"`
 	DispatchOpId      *string                            `json:"dispatch_op_id"`
@@ -6410,10 +6433,11 @@ type ResultQueryBody struct {
 	//
 	// Every field is optional: an empty spec compiles to ``SELECT * FROM
 	// result LIMIT <max>`` — a full read-back capped at the output ceiling.
-	// The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4)
-	// and the operator/aggregate allow-lists are enforced here, at
-	// construction; field-vs-schema validation needs the handle's columns and
-	// happens in :func:`compile_query`.
+	// The list caps (``filter`` ≤ 10, ``group_by`` ≤ 4, ``order_by`` ≤ 4,
+	// ``select`` ≤ 64, and each ``IN`` value list ≤ 1000) and the
+	// operator/aggregate allow-lists are enforced here, at construction;
+	// field-vs-schema validation needs the handle's columns and happens in
+	// :func:`compile_query`.
 	Query *ResultQuerySpec `json:"query,omitempty"`
 }
 
@@ -6421,10 +6445,11 @@ type ResultQueryBody struct {
 //
 // Every field is optional: an empty spec compiles to “SELECT * FROM
 // result LIMIT <max>“ — a full read-back capped at the output ceiling.
-// The list caps (“filter“ ≤ 10, “group_by“ ≤ 4, “order_by“ ≤ 4)
-// and the operator/aggregate allow-lists are enforced here, at
-// construction; field-vs-schema validation needs the handle's columns and
-// happens in :func:`compile_query`.
+// The list caps (“filter“ ≤ 10, “group_by“ ≤ 4, “order_by“ ≤ 4,
+// “select“ ≤ 64, and each “IN“ value list ≤ 1000) and the
+// operator/aggregate allow-lists are enforced here, at construction;
+// field-vs-schema validation needs the handle's columns and happens in
+// :func:`compile_query`.
 type ResultQuerySpec struct {
 	// Aggregate Aggregate output columns (COUNT/SUM/MIN/MAX/AVG).
 	Aggregate *[]Aggregate `json:"aggregate,omitempty"`
@@ -6441,7 +6466,7 @@ type ResultQuerySpec struct {
 	// OrderBy Sort terms (max 4).
 	OrderBy *[]OrderBy `json:"order_by,omitempty"`
 
-	// Select Projection: columns to return. Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
+	// Select Projection: columns to return (max 64). Omit for all columns. Not allowed together with `aggregate` (the output is then the group keys plus the aggregates).
 	Select *[]string `json:"select,omitempty"`
 }
 

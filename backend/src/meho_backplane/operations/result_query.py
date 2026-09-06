@@ -114,6 +114,12 @@ async def read_result_window(
     ``tenant_id``) or when the store returns no window (unknown, expired, or
     cross-operator handle). The two causes are deliberately indistinguishable
     so the store leaks no existence signal.
+
+    Raises :class:`ResultQueryOutputTooLargeError` (#3387) when the window
+    serializes past ``result_query_max_output_bytes`` — the same ceiling the
+    query path applies, so no agent receives an over-budget page — with a
+    paging-specific remediation (read a smaller ``limit``, since paging has no
+    ``select`` / ``filter``).
     """
     if operator.tenant_id is None:
         raise ResultHandleNotFoundError(handle_id)
@@ -127,6 +133,21 @@ async def read_result_window(
     )
     if window is None:
         raise ResultHandleNotFoundError(handle_id)
+
+    # Byte ceiling shared with the query path (#3387): even a window within the
+    # row cap can serialize past the output budget when rows are wide or deeply
+    # nested, and no agent may receive an over-budget page (CLAUDE.md postulate
+    # 6). Encoding is for the size check only — the window rows are returned
+    # verbatim, so an in-budget read is byte-for-byte unchanged.
+    max_bytes = get_settings().result_query_max_output_bytes
+    encoded_rows = msgspec.json.encode(window.rows)
+    if len(encoded_rows) > max_bytes:
+        raise ResultQueryOutputTooLargeError(
+            handle_id,
+            len(encoded_rows),
+            max_bytes,
+            remediation=ResultQueryOutputTooLargeError.PAGING_REMEDIATION,
+        )
 
     return {
         "handle_id": str(handle_id),
@@ -162,22 +183,41 @@ class ResultQueryTimeoutError(Exception):
 
 
 class ResultQueryOutputTooLargeError(Exception):
-    """A ``result_query`` result exceeded the serialized-output byte budget.
+    """A handle read exceeded the serialized-output byte budget.
 
     Applied **after** the row cap: even ≤ ``MAX_LIMIT`` rows can overflow the
     ``result_query_max_output_bytes`` budget when they are wide or deeply
-    nested. Recoverable: the caller narrows the projection (a smaller
-    ``select``), filters harder, or lowers ``limit`` and retries.
+    nested. Raised from both read paths that share the ceiling — the query
+    core (:func:`run_result_query`) and the paging core
+    (:func:`read_result_window`, #3387) — so no agent ever receives an
+    over-budget payload. Recoverable, and the remediation is tailored to the
+    caller's surface: the query path can project fewer columns or filter
+    harder; the paging path has neither and can only read a smaller window.
+    Each transport maps it to its own recoverable shape with
+    ``reason="output_too_large"``.
     """
 
-    def __init__(self, handle_id: UUID, output_bytes: int, max_bytes: int) -> None:
+    #: Remediation for the query surface (it has ``select`` / ``filter``).
+    QUERY_REMEDIATION = (
+        "Narrow the result: project fewer columns with `select`, add a `filter`, or lower `limit`."
+    )
+    #: Remediation for the paging surface (no projection/filter — only ``limit``).
+    PAGING_REMEDIATION = "Read a smaller window: lower `limit` and retry."
+
+    def __init__(
+        self,
+        handle_id: UUID,
+        output_bytes: int,
+        max_bytes: int,
+        remediation: str | None = None,
+    ) -> None:
         self.handle_id = handle_id
         self.output_bytes = output_bytes
         self.max_bytes = max_bytes
+        self.remediation = remediation or self.QUERY_REMEDIATION
         super().__init__(
-            f"query result for handle {handle_id} is {output_bytes} serialized "
-            f"bytes, over the {max_bytes}-byte output budget. Narrow the result: "
-            "project fewer columns with `select`, add a `filter`, or lower `limit`."
+            f"result for handle {handle_id} is {output_bytes} serialized bytes, "
+            f"over the {max_bytes}-byte output budget. {self.remediation}"
         )
 
 

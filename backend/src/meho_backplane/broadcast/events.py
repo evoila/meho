@@ -212,10 +212,44 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # collapses the whole params dict to aggregate-only, exactly as
         # ``k8s.job.create``'s inline-env case and the GOSC create above; the
         # park-time preview additionally echoes only program identity +
-        # argument byte size + env-var names. The sibling ``guest.file.write``
-        # is unpinned (its ``content`` has the same characteristic) and is
-        # tracked under the estate-wide broadcast-hygiene follow-up, not here.
+        # argument byte size + env-var names. Its sibling
+        # ``guest.file.write`` (``content`` has the same characteristic) is
+        # pinned just below (#3298).
         "vmware.composite.vm.guest.program.run",
+        # #3298 — the governed in-guest file write, the sibling of
+        # ``program.run`` above. Its ``content`` param is the file body to
+        # write; ``content`` is neither a secret-*named* key nor a
+        # recognisable secret *shape*, so the key-name / Tier-1 scrub in
+        # ``scrub_broadcast_params`` lets it through — a plain ``write``
+        # classification (the ``.write`` suffix) would ship the whole file
+        # body on the feed. Pinning it collapses the params dict to
+        # aggregate-only, exactly as ``program.run`` above and
+        # ``rke2.node.config.update``; the park-time preview additionally
+        # echoes only path + byte size + overwrite intent, never the content.
+        # This was the last guest-ops write riding broadcast unredacted
+        # (flagged as the unpinned sibling in the #3255 pin above).
+        "vmware.composite.vm.guest.file.write",
+        # #3361 — the governed linux-ssh config-file write. Its ``content``
+        # param is the file body to write; ``content`` is neither a
+        # secret-*named* key nor a recognisable secret *shape*, so the
+        # key-name / Tier-1 scrub in ``scrub_broadcast_params`` lets it
+        # through — a plain ``write`` classification (the ``.write`` suffix)
+        # would ship the whole file body on the feed. Pinning it collapses the
+        # params dict to aggregate-only; the park-time bespoke preview echoes
+        # only path + byte size + backup path + validate command, never the
+        # content (the ``vmware.composite.vm.guest.file.write`` mold above).
+        "linux.file.write",
+        # #3361 — the governed linux-ssh script-execution write, the sibling of
+        # the guest ``program.run`` above. Its ``arguments`` string (a command
+        # line) and ``env`` values can hold credential material
+        # (``--token=…``, ``API_KEY=…``) in ``params``, and neither is a
+        # secret-*named* key nor a recognisable secret *shape*, so the scrub
+        # misses them — and ``.run`` is not even a ``.write`` suffix, so an
+        # unpinned classification would fall through to ``other`` and ship the
+        # command line in full. Pinning it collapses the params dict to
+        # aggregate-only; the park-time bespoke preview echoes only program
+        # identity + argument byte size + env-var NAMES, never any value.
+        "linux.script.run",
     }
 )
 

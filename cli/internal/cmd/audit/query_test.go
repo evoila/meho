@@ -454,6 +454,45 @@ func TestPrintQueryTableEmpty(t *testing.T) {
 	}
 }
 
+// TestPrintQueryTablePrefersPrincipalName pins the PRINCIPAL column
+// contract (#3338): the resolved principal_name, already carried
+// in-band on the audit row, renders in preference to the raw sub —
+// mirroring the TARGET column's target_name handling — and a row
+// without a name falls back to the sub.
+func TestPrintQueryTablePrefersPrincipalName(t *testing.T) {
+	name := "Alice Admin"
+	var buf bytes.Buffer
+	printQueryTable(&buf, &api.AuditQueryResult{
+		Rows: []api.AuditEntry{
+			{
+				Ts:            mustTS(t, "2026-05-13T15:42:11Z"),
+				PrincipalName: &name,
+				PrincipalSub:  "alice-sub",
+				OpId:          "vsphere.vm.list",
+				OpClass:       "read",
+				ResultStatus:  "ok",
+			},
+			{
+				Ts:           mustTS(t, "2026-05-13T15:43:02Z"),
+				PrincipalSub: "bob-sub-only",
+				OpId:         "vsphere.vm.get",
+				OpClass:      "read",
+				ResultStatus: "ok",
+			},
+		},
+	})
+	out := buf.String()
+	if !strings.Contains(out, "Alice Admin") {
+		t.Errorf("PRINCIPAL column dropped the resolved name: %s", out)
+	}
+	if strings.Contains(out, "alice-sub") {
+		t.Errorf("PRINCIPAL column printed the sub despite a resolved name: %s", out)
+	}
+	if !strings.Contains(out, "bob-sub-only") {
+		t.Errorf("PRINCIPAL column dropped the sub fallback when the name was absent: %s", out)
+	}
+}
+
 // mustTS parses s as RFC3339, failing the test on error. The
 // generated client's `Ts` field is `time.Time`; fixtures use the
 // helper so callers don't repeat the parse-or-fatal pattern.

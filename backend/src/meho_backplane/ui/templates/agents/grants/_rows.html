@@ -14,11 +14,12 @@
   criterion on #1832). The expiry column distinguishes a permanent grant
   from a time-bounded elevation that auto-expires at T.
 -#}
+{% from "_references.html" import subject %}
 <tbody id="grants-rows">
   {% if grants %}
     {% for grant in grants %}
       <tr data-grant-id="{{ grant.id }}" data-verdict="{{ grant.verdict }}">
-        <td class="font-mono text-xs break-all max-w-[14rem]">{{ grant.principal_sub }}</td>
+        <td class="text-xs break-all max-w-[14rem]">{{ subject(grant.subject) }}</td>
         <td class="font-mono text-xs break-all max-w-[12rem]">{{ grant.op_pattern }}</td>
         <td class="text-xs">
           {% if grant.target_scope in (None, "*") %}

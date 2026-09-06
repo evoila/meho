@@ -5981,11 +5981,16 @@ class ApprovalRequest(Base):
       ``_approved=True`` with the approved sub-op pre-cleared
       (:data:`~meho_backplane.operations.composite.composite_resume_var`) —
       reproducing the whole governed step through the normal dispatch path
-      instead of the un-executable raw key. NULL for every non-composite
-      (direct-op) park — those keep the unchanged generic re-dispatch of
-      ``op_id`` — and on pre-0098 rows. Internal resume input only; like
-      ``params`` it is never projected onto a read view or a broadcast frame.
-      Added by migration ``0098``.
+      instead of the un-executable raw key. The resume runs under the
+      approving reviewer, who auto-executes every governed sub-op (all
+      ``dangerous`` + ``requires_approval=False``), so the composite completes
+      in that single pass; a composite that would open a *second* governed gate
+      is unsupported and fails closed
+      (``composite_resume_multi_gate_unsupported``) rather than re-park (#3351
+      review B1). NULL for every non-composite (direct-op) park — those keep
+      the unchanged generic re-dispatch of ``op_id`` — and on pre-0098 rows.
+      Internal resume input only; like ``params`` it is never projected onto a
+      read view or a broadcast frame. Added by migration ``0098``.
 
     Indexes
     -------

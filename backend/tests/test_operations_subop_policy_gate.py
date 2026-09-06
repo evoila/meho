@@ -43,6 +43,7 @@ from meho_backplane.db.models import (
 from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.composite import (
     composite_dispatch_var,
+    composite_resume_scope_var,
     composite_resume_var,
     enforce_subop_policy,
 )
@@ -339,11 +340,15 @@ async def test_subop_resume_var_clears_matching_gate(session: AsyncSession) -> N
 async def test_subop_resume_var_ignores_non_matching_subop(
     session: AsyncSession,
 ) -> None:
-    """A resume clears only the approved sub-op; a different one still parks (#3351).
+    """``composite_resume_var`` clears only the exact approved sub-op (#3351).
 
-    A composite with more than one governed sub-op resumes one gate at a
-    time: the var pins the clear to the exact ``(op_id, params_hash)``
-    approved, so an unrelated governed sub-op re-parks a fresh request.
+    In isolation (no resume *scope* active, so the multi-gate guard is not
+    engaged) the clear pins to the exact ``(op_id, params_hash)``: a sub-op
+    that does not match falls through to the normal gate and parks, and the
+    var is left intact for the sub-op it does match. Inside a real resume
+    ``composite_resume_scope_var`` is also set, and a second governed sub-op
+    reaching this park would instead fail closed — see
+    ``test_subop_resume_scope_guard_fails_closed_on_second_gate``.
     """
     token = composite_resume_var.set(("POST:/vcenter/vm/{vm}/power?action=start", "deadbeef"))
     try:
@@ -366,3 +371,49 @@ async def test_subop_resume_var_ignores_non_matching_subop(
 
     assert result is not None
     assert result.status == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
+    session: AsyncSession,
+) -> None:
+    """A second governed gate during a resume fails closed, not re-parks (#3351 B1).
+
+    ``composite_resume_scope_var`` stays set for the whole re-entry (it is not
+    consumed on the approved sub-op's match). When a sub-op *other* than the
+    approved one would park (``NEEDS_APPROVAL``) while the scope var is set,
+    ``enforce_subop_policy`` aborts with
+    ``composite_resume_multi_gate_unsupported`` — naming the composite and both
+    sub-ops — and writes **no** second :class:`ApprovalRequest`, rather than
+    parking a request whose resume would re-run the earlier legs.
+    """
+    approved = ("POST:/vcenter/vm/{vm}/power?action=start", "approvedhash")
+    before = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    dispatch_token = composite_dispatch_var.set(("vmware.composite.vm.create", {"name": "vm-x"}))
+    scope_token = composite_resume_scope_var.set(approved)
+    # The approved sub-op already cleared and consumed ``composite_resume_var``.
+    resume_token = composite_resume_var.set(None)
+    try:
+        result = await enforce_subop_policy(
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_SUB_OP_ID,
+            safety_level="dangerous",
+            requires_approval=True,
+            target=None,
+            params=_SUB_PARAMS,
+        )
+    finally:
+        composite_resume_var.reset(resume_token)
+        composite_resume_scope_var.reset(scope_token)
+        composite_dispatch_var.reset(dispatch_token)
+
+    assert result is not None
+    assert result.status == "error"
+    assert result.extras["error_code"] == "composite_resume_multi_gate_unsupported"
+    assert result.extras["composite_op_id"] == "vmware.composite.vm.create"
+    assert result.extras["approved_op_id"] == approved[0]
+    assert result.extras["blocked_op_id"] == _SUB_OP_ID
+    # No second park was written — the guard refused rather than queue.
+    after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert after == before

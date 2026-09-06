@@ -45,7 +45,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
@@ -2692,3 +2692,114 @@ async def test_vm_create_vim_subop_park_approve_resume_creates_vm(
     # invalid_params / connector_error, and the VM was created.
     vmomi_paths = [call[0] for call in recorder.vmomi_calls]
     assert "/Folder/group-v55/CreateVM_Task" in vmomi_paths
+
+
+# ===========================================================================
+# #3351 review B1 — fail-closed guard against a multi-gate composite resume
+# ===========================================================================
+#
+# The single-gate resume above completes a composite in one pass because the
+# approving USER reviewer auto-executes every governed sub-op (all dangerous +
+# requires_approval=False). The unsafe case the guard closes: a *second*
+# governed sub-op that a reviewer would NOT auto-execute. Without a guard, that
+# sub-op re-parks on the resume, and approving it re-enters the composite from
+# the top and re-runs the earlier legs — a duplicate write (the reviewer
+# reproduced a second CreateVM/CreateVM_Task). The guard fails closed instead:
+# it never parks the second gate, so no second resume — and no double-execution
+# — can occur.
+
+
+@pytest.mark.asyncio
+async def test_vm_create_multi_gate_resume_fails_closed_no_double_execute(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later governed leg that re-gates on resume aborts, not re-parks (#3351 B1).
+
+    Forces a second gate by making every write sub-op ``requires_approval=True``
+    (a reviewer does not auto-execute those). ``vm.create`` with
+    ``power_on_after_create=True`` then parks at create for the service
+    principal; on the approve-resume the create fires exactly once and the
+    *power* leg — a second governed gate — would re-park. The fail-closed guard
+    aborts the resume with ``composite_resume_multi_gate_unsupported`` instead,
+    so (a) no second approval row is written, (b) the create leg ran exactly
+    once (no duplicate VM), and (c) the distinct error surfaces.
+    """
+    # Force the multi-gate condition: a reviewer parks (does not auto-execute)
+    # a requires_approval=True sub-op, so the power leg re-gates on resume.
+    monkeypatch.setattr(
+        "meho_backplane.connectors.vmware_rest.composites._write._WRITE_REQUIRES_APPROVAL",
+        True,
+    )
+
+    recorder = _RecordingVmwareConnector()
+    # The REST create returns the new VM id; the power leg would POST next.
+    recorder.responses.update({"/vcenter/vm": {"value": "vm-multigate-1"}})
+    await _bootstrap(recorder, stub_embedding_service)
+    target_id = await _persist_vmware_target()
+    await _seed_composite_service_grant(
+        composite_op_id="vmware.composite.vm.create", target_id=target_id
+    )
+
+    svc = _make_operator(sub="svc-blueprint", principal_kind=PrincipalKind.SERVICE)
+    target = _FakeVmwareTarget(target_id=target_id)
+    # ``folder`` pin skips the folder lookup; power_on_after_create adds the
+    # second governed leg after create.
+    params = {
+        "name": "vm-multigate",
+        "guest_os": "UBUNTU_64",
+        "folder": "group-v55",
+        "power_on_after_create": True,
+    }
+
+    # Step 1: service dispatch -> the create sub-op parks; nothing fired.
+    result1 = await dispatch(
+        operator=svc,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.create",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == [], "create must not fire before approval"
+    request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, request_id)
+        parked_count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert pending is not None
+    assert pending.op_id == "POST:/vcenter/vm"
+    assert pending.resume_parent is not None
+    assert pending.resume_parent["op_id"] == "vmware.composite.vm.create"
+    assert parked_count == 1
+
+    # Step 2: a human reviewer approves the parked create sub-op.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        await approve_request(s, request_id, operator=reviewer, params=None)
+        await s.commit()
+
+    # Step 3: resume re-enters the composite. create fires once; the power leg
+    # is a second governed gate -> the guard aborts the resume, fail-closed.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+    assert row is not None
+    resume = await resume_dispatch_after_approval(operator=reviewer, request=row, params=None)
+
+    # (c) the distinct error surfaces, naming the composite + both sub-ops.
+    assert resume.status == "error"
+    assert resume.extras["error_code"] == "composite_resume_multi_gate_unsupported"
+    assert resume.extras["composite_op_id"] == "vmware.composite.vm.create"
+    assert resume.extras["approved_op_id"] == "POST:/vcenter/vm"
+    assert resume.extras["blocked_op_id"] == "POST:/vcenter/vm/{vm}/power?action=start"
+
+    # (b) the earlier (create) leg executed exactly once — no duplicate VM, and
+    # the power leg never reached the wire.
+    assert recorder.calls == [("POST", "/vcenter/vm")]
+
+    # (a) no second park was created — the guard did not queue a fresh request.
+    async with get_sessionmaker()() as s:
+        final_count = await s.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert final_count == 1

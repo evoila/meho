@@ -1287,17 +1287,46 @@ The fix re-enters the **parent composite** on resume:
 - `resume_dispatch_after_approval` sees `resume_parent` and re-dispatches
   the **parent composite** (`_approved=True`, so its top-level gate is
   skipped) instead of the sub-op key, with `composite_resume_var` set to
-  the approved sub-op's `(op_id, params_hash)`.
+  the approved sub-op's `(op_id, params_hash)` **and**
+  `composite_resume_scope_var` set to the same pair (the scope var is not
+  consumed on the match, so the guard below can still see it is inside a
+  resume after the approved sub-op has cleared).
 - On that re-run, `enforce_subop_policy` matches `composite_resume_var`
   and clears the one approved sub-op (auto-executes) instead of
   re-parking — reproducing the whole governed step through the normal
-  dispatch path. The match is on `(op_id, params_hash)`, so a composite
-  with more than one governed sub-op resumes **one gate at a time**: a
-  later un-approved governed sub-op parks a fresh request, and the
-  operator approves each in turn. Reads before the approved sub-op re-run
-  idempotently; the sub-op itself did not execute on the parking pass
-  (the gate returns before the write), so the resume executes it exactly
-  once.
+  dispatch path. The match is on `(op_id, params_hash)`, so the clear pins
+  to the exact entity approved and consumes the var.
+
+#### The actual contract: one resume completes the composite (#3351 review B1)
+
+The resume does **not** re-park "one gate at a time". It re-enters the
+composite under the **approving reviewer's** identity, and every governed
+sub-op currently shipped is `dangerous` + `requires_approval=False` — a
+verdict a `USER` auto-executes (`policy_gate` default-allow;
+`_non_agent_verdict` re-gates a `USER` only on `safety_level=="destructive"`
+or `requires_approval==True`). So the reviewer runs the approved sub-op
+**and every remaining governed sub-op in the same pass**: a multi-governed-leg
+composite (e.g. `vm.create` with `power_on_after_create=True`, which parks at
+create then powers on) completes in a **single** resume, each leg firing
+exactly once. The invariant the correctness relies on is therefore explicit:
+**every governed sub-op of a composite must be `dangerous` +
+`requires_approval=False`** so the reviewer auto-executes all remaining legs.
+
+A **multi-gate re-park** — a governed sub-op a reviewer would *not*
+auto-execute (`destructive` or `requires_approval=True`) — is **not
+supported** by this re-entry mechanism. The mechanism clears exactly one
+sub-op and keeps no record of already-executed legs, so a second park +
+second resume would re-enter the composite from the top and re-run every
+earlier governed leg — a duplicate write (the reviewer reproduced a duplicate
+`CreateVM_Task` this way). Rather than allow that, the guard **fails closed**:
+while `composite_resume_scope_var` is set, if any sub-op *other* than the
+approved one reaches `NEEDS_APPROVAL`, `enforce_subop_policy` returns
+`composite_resume_multi_gate_unsupported` — a distinct error naming the
+composite, the approved sub-op, and the sub-op that would have parked — and
+does **not** park a second request or continue. It is audited via the
+composite's own dispatch audit row. This is enforced in
+`enforce_subop_policy` (the `NEEDS_APPROVAL` branch, keyed off the unconsumed
+`composite_resume_scope_var`) and is unreachable for shipped composites.
 
 A direct (non-composite) park is unchanged — `resume_parent` is NULL, so
 the resume keeps the generic re-dispatch of the stored `op_id`.

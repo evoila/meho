@@ -1149,19 +1149,37 @@ async def _dispatch_resume_with_bound_context(
     clears its gate and the whole governed step reproduces, instead of the
     old generic re-dispatch of the un-executable sub-op key. A direct-op park
     (``resume_parent IS NULL``) keeps the generic re-dispatch of ``op_id``.
+
+    The resume re-enters the composite under the approving reviewer, who
+    auto-executes every governed sub-op (all ``dangerous`` +
+    ``requires_approval=False``), so a shipped composite completes in this one
+    pass. ``composite_resume_scope_var`` is bound too — unconsumed for the whole
+    re-entry — so :func:`~meho_backplane.operations.composite.enforce_subop_policy`
+    can fail closed (``composite_resume_multi_gate_unsupported``) if a second
+    governed sub-op would ever need its own approval, rather than re-park and
+    re-run the earlier legs on a second resume (#3351 review B1).
     """
-    from meho_backplane.operations.composite import composite_resume_var
+    from meho_backplane.operations.composite import (
+        composite_resume_scope_var,
+        composite_resume_var,
+    )
     from meho_backplane.operations.dispatcher import dispatch
 
     resume_parent = request.resume_parent
     if resume_parent is not None:
         dispatch_op_id = str(resume_parent["op_id"])
         dispatch_params = cast(dict[str, Any], resume_parent["params"])
-        resume_token = composite_resume_var.set((request.op_id, request.params_hash))
+        approved_subop = (request.op_id, request.params_hash)
+        resume_token = composite_resume_var.set(approved_subop)
+        # The scope var is NOT consumed on the sub-op match, so the fail-closed
+        # multi-gate guard in ``enforce_subop_policy`` can still tell it is
+        # inside a resume after the approved sub-op has cleared (#3351 B1).
+        scope_token = composite_resume_scope_var.set(approved_subop)
     else:
         dispatch_op_id = request.op_id
         dispatch_params = effective_params
         resume_token = None
+        scope_token = None
 
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
@@ -1181,6 +1199,8 @@ async def _dispatch_resume_with_bound_context(
         work_ref_var.reset(work_ref_token)
         if resume_token is not None:
             composite_resume_var.reset(resume_token)
+        if scope_token is not None:
+            composite_resume_scope_var.reset(scope_token)
     # Persist the reduced result envelope so the originating consumer can read it
     # back (principal-scoped) and resume a non-idempotent parked op by poll
     # instead of a second submit (#3209). Reached only by the exactly-one-resumer

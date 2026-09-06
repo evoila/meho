@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — core composite-dispatch infrastructure a hair
+# over the 600-line ceiling after #3351 review B1 added the fail-closed
+# multi-gate resume guard + its ``composite_resume_scope_var`` and the corrected
+# resume-contract docstrings. Splitting the contextvars away from the single
+# ``enforce_subop_policy`` seam that reads them would scatter one tightly-coupled
+# mechanism across modules for a few lines — not warranted.
 
 """Composite-operation recursion infrastructure for the G0.6 dispatcher.
 
@@ -110,6 +116,7 @@ __all__ = [
     "DispatchChild",
     "composite_depth_var",
     "composite_dispatch_var",
+    "composite_resume_scope_var",
     "composite_resume_var",
     "enforce_subop_policy",
     "get_dispatch_child",
@@ -211,10 +218,45 @@ composite_dispatch_var: ContextVar[tuple[str, dict[str, Any]] | None] = ContextV
 #: around the ``_approved=True`` re-dispatch of the parent composite, and read
 #: by :func:`enforce_subop_policy` so the one matching sub-op clears its gate
 #: (auto-executes) instead of re-parking — reproducing the approved step
-#: through the governed path. A later un-approved governed sub-op in the same
-#: composite still parks a fresh request. ``None`` for every ordinary dispatch.
+#: through the governed path. Consumed (set to ``None``) on the match so a
+#: later identical sub-op in the same composite does not clear a second time.
+#: ``None`` for every ordinary dispatch.
+#:
+#: Correctness contract (#3351 review B1): the resume re-enters the parent
+#: composite under the **approving reviewer's** identity, and every governed
+#: sub-op shipped today is ``dangerous`` + ``requires_approval=False`` — a
+#: verdict a USER auto-executes (``policy_gate`` default-allow). So the reviewer
+#: runs the approved sub-op **and** every remaining governed sub-op in a single
+#: pass; the composite completes in one resume. This var clears exactly one
+#: sub-op; the correctness of the rest relies on that auto-execute invariant.
+#: A multi-gate re-park — a later governed sub-op that a USER would *not*
+#: auto-execute (``destructive`` or ``requires_approval=True``) — is **not
+#: supported** by this re-entry mechanism (there is no completed-leg guard, so
+#: a second park + second resume would re-run earlier legs). It is detected via
+#: :data:`composite_resume_scope_var` and fails closed in
+#: :func:`enforce_subop_policy` with ``composite_resume_multi_gate_unsupported``
+#: rather than parking.
 composite_resume_var: ContextVar[tuple[str, str] | None] = ContextVar(
     "composite_resume",
+    default=None,
+)
+
+
+#: ContextVar carrying the approved sub-op's ``(op_id, params_hash)`` for the
+#: **whole** approval-resume re-dispatch of a parent composite (#3351 review
+#: B1). Bound alongside :data:`composite_resume_var` by
+#: :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`,
+#: but — unlike that var — **never consumed**: it stays set for the entire
+#: re-entry so :func:`enforce_subop_policy` can tell it is running inside a
+#: resume even after the approved sub-op has already cleared and consumed
+#: ``composite_resume_var``. Read only by the fail-closed multi-gate guard: if
+#: any sub-op *other* than the approved one reaches ``NEEDS_APPROVAL`` during a
+#: resume, the composite has more than one governed gate, which this mechanism
+#: cannot re-enter safely, so the guard aborts with
+#: ``composite_resume_multi_gate_unsupported`` instead of parking a second
+#: request. ``None`` for every ordinary (non-resume) dispatch.
+composite_resume_scope_var: ContextVar[tuple[str, str] | None] = ContextVar(
+    "composite_resume_scope",
     default=None,
 )
 
@@ -408,11 +450,16 @@ def _subop_resume_cleared(*, op_id: str, params_hash: str) -> bool:
     re-dispatch of a parent composite whose governed sub-op a human approved.
     When the current sub-op's ``(op_id, params_hash)`` matches the approved
     one, the gate clears — the composite reproduces the approved step on the
-    direct seam — and the var is consumed (set to ``None``) so a later
-    identical sub-op in the same composite re-gates normally. Matching on the
-    params-hash (not op_id alone) pins the clear to the exact entity approved,
-    so a per-item composite (e.g. mark-many-disks) clears only the approved
-    item and re-parks the rest.
+    direct seam — and the var is consumed (set to ``None``) so the same
+    ``(op_id, params_hash)`` cannot clear twice in one re-entry. Matching on
+    the params-hash (not op_id alone) pins the clear to the exact entity
+    approved. This clears **exactly one** sub-op: the resume then relies on the
+    reviewer auto-executing every other governed sub-op in the same pass (all
+    ``dangerous`` + ``requires_approval=False``). If any other governed sub-op
+    would instead need its own approval, the fail-closed multi-gate guard in
+    :func:`enforce_subop_policy` (keyed off the unconsumed
+    :data:`composite_resume_scope_var`) aborts the resume rather than re-park it
+    (#3351 review B1) — it does **not** re-park the rest.
     """
     approved = composite_resume_var.get()
     if approved is not None and approved == (op_id, params_hash):
@@ -499,6 +546,7 @@ async def enforce_subop_policy(
     from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
     from meho_backplane.operations._errors import (
         result_awaiting_approval,
+        result_composite_resume_multi_gate_unsupported,
         result_denied,
     )
     from meho_backplane.operations._lookup import parse_connector_id
@@ -543,6 +591,34 @@ async def enforce_subop_policy(
 
     duration_ms = (time.monotonic() - started) * 1000.0
     if verdict is PermissionVerdict.NEEDS_APPROVAL:
+        # #3351 review B1 — fail-closed multi-gate resume guard. The approved
+        # sub-op already cleared above (``_subop_resume_cleared`` returned), so
+        # reaching NEEDS_APPROVAL while :data:`composite_resume_scope_var` is set
+        # means a *second* governed sub-op would park during a resume. Parking it
+        # would create a second approval whose own resume re-enters the composite
+        # from the top and re-runs every earlier governed leg (this mechanism
+        # clears one sub-op and has no completed-leg guard), double-executing
+        # writes. No shipped composite reaches here — every governed sub-op is
+        # ``dangerous`` + ``requires_approval=False``, which the USER reviewer
+        # auto-executes in the single resume pass. Refuse instead of parking.
+        resume_scope = composite_resume_scope_var.get()
+        if resume_scope is not None:
+            approved_op_id, _approved_hash = resume_scope
+            composite_ctx = composite_dispatch_var.get()
+            composite_op_id = composite_ctx[0] if composite_ctx is not None else "<unknown>"
+            _log.error(
+                "composite_resume_multi_gate_unsupported",
+                composite_op_id=composite_op_id,
+                approved_op_id=approved_op_id,
+                blocked_op_id=op_id,
+            )
+            return result_composite_resume_multi_gate_unsupported(
+                composite_op_id=composite_op_id,
+                approved_op_id=approved_op_id,
+                blocked_op_id=op_id,
+                duration_ms=duration_ms,
+            )
+
         run_id = current_agent_run_id_var.get()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:

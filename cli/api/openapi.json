@@ -22036,6 +22036,10 @@
             "type": "string",
             "nullable": true,
             "title": "Work Ref"
+          },
+          "reviewer_context": {
+            "$ref": "#/components/schemas/ReviewerContextView",
+            "nullable": true
           }
         },
         "type": "object",
@@ -30361,6 +30365,49 @@
         ],
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
+      "ReviewerContextView": {
+        "properties": {
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "target_product": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Product"
+          },
+          "target_version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Version"
+          },
+          "subject": {
+            "type": "string",
+            "nullable": true,
+            "title": "Subject"
+          },
+          "parent_composite_op_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Parent Composite Op Id"
+          },
+          "blast_radius": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Blast Radius"
+          },
+          "summary": {
+            "type": "string",
+            "nullable": true,
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "title": "ReviewerContextView",
+        "description": "Redacted, human-legible context for judging a parked request (#3353).\n\nThe additive, redaction-safe summary the shared\n:func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`\nresolver produces, carried on the single-request view so ``meho\napprovals show`` can render a name instead of a GUID and a resolved\nsubject instead of an unresolved ``{vm}``. Every field fails open to\n``None`` (the CLI keeps the raw id it already had); the object carries\n**identity fields only** -- never a raw param, body, or secret value.\nThe console modal renders from the same resolver, so the two surfaces\nnever drift. Populated on ``GET /{id}`` only; the list view omits it."
       },
       "RunCompletedResponse": {
         "properties": {

@@ -133,16 +133,37 @@ func fetchDetail(
 
 func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 	w := cmd.OutOrStdout()
+	rc := d.ReviewerContext
+	// The redacted "what will happen" sentence (#3353) leads the detail so
+	// a human reads what the request DOES before scanning the ids below.
+	if rc != nil && rc.Summary != nil && *rc.Summary != "" {
+		fmt.Fprintf(w, "Summary:      %s\n", *rc.Summary)
+	}
 	fmt.Fprintf(w, "ID:           %s\n", d.Id.String())
 	fmt.Fprintf(w, "Status:       %s\n", string(d.Status))
 	fmt.Fprintf(w, "Connector:    %s\n", d.ConnectorId)
 	fmt.Fprintf(w, "Operation:    %s\n", d.OpId)
+	// Resolved subject of a path-variable op (#3353): the concrete entity
+	// (name + moid) recovered from identity params, so the reviewer reads
+	// `web-01 (vm-1042)` instead of the unresolved `{vm}` in the op id.
+	if rc != nil && rc.Subject != nil && *rc.Subject != "" {
+		fmt.Fprintf(w, "Subject:      %s\n", *rc.Subject)
+	}
 	if d.TargetId != nil {
-		fmt.Fprintf(w, "Target:       %s\n", d.TargetId.String())
+		fmt.Fprintf(w, "Target:       %s\n", targetLabel(d.TargetId.String(), rc))
+	}
+	// Parent composite op for a composite-child park (#3353, #3348 lineage).
+	if rc != nil && rc.ParentCompositeOpId != nil && *rc.ParentCompositeOpId != "" {
+		fmt.Fprintf(w, "Part of:      %s\n", *rc.ParentCompositeOpId)
 	}
 	fmt.Fprintf(w, "Principal:    %s\n", principalLabel(d.PrincipalSub, d.PrincipalName))
 	if d.PrincipalAct != nil {
 		fmt.Fprintf(w, "Acting as:    %s\n", *d.PrincipalAct)
+	}
+	// Run context (#3353): the change-ticket ref and originating run id, so
+	// the reviewer can trace the request to the work that issued it.
+	if d.WorkRef != nil && *d.WorkRef != "" {
+		fmt.Fprintf(w, "Change ref:   %s\n", *d.WorkRef)
 	}
 	if d.RunId != nil {
 		fmt.Fprintf(w, "Agent run:    %s\n", d.RunId.String())
@@ -162,4 +183,23 @@ func printDetail(cmd *cobra.Command, d *api.ApprovalRequestView) {
 		b, _ := json.MarshalIndent(d.ProposedEffect, "  ", "  ")
 		fmt.Fprintf(w, "Effect:\n  %s\n", string(b))
 	}
+}
+
+// targetLabel renders a target for the detail view: the resolved name +
+// product/version alongside the bare GUID (#3353), or the bare GUID alone
+// when nothing resolved (fail-open). The GUID always rides along so the
+// stable id stays directly reachable.
+func targetLabel(id string, rc *api.ReviewerContextView) string {
+	if rc == nil || rc.TargetName == nil || *rc.TargetName == "" {
+		return id
+	}
+	label := *rc.TargetName
+	if rc.TargetProduct != nil && *rc.TargetProduct != "" {
+		if rc.TargetVersion != nil && *rc.TargetVersion != "" {
+			label += fmt.Sprintf(" (%s %s)", *rc.TargetProduct, *rc.TargetVersion)
+		} else {
+			label += fmt.Sprintf(" (%s)", *rc.TargetProduct)
+		}
+	}
+	return fmt.Sprintf("%s [%s]", label, id)
 }

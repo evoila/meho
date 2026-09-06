@@ -834,3 +834,97 @@ func assertRenderedErrorCode(t *testing.T, stderr *bytes.Buffer, exitErr error, 
 		t.Errorf("detail %q missing substring %q (envelope=%+v)", detail, wantDetailSubstr, envelope)
 	}
 }
+
+// TestPrintDetailRendersReviewerContext confirms show renders the
+// redacted reviewer context (#3353): the "what will happen" summary, the
+// resolved subject of a path-variable op, the target name + product/
+// version alongside the GUID, the parent composite op, and the change
+// ref — the substance a human needs to judge the request instead of raw
+// GUIDs and an unresolved `{vm}`.
+func TestPrintDetailRendersReviewerContext(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+	d.OpId = "POST:/vcenter/vm/{vm}/power?action=start"
+	target := mustUUID(t, "33333333-3333-3333-3333-333333333333")
+	d.TargetId = &target
+	workRef := "gh:evoila/meho#42"
+	d.WorkRef = &workRef
+
+	summary := "Power on VM on web-01 (vm-1042) @ target lab-vcenter (vmware 9.0)"
+	subject := "web-01 (vm-1042)"
+	targetName := "lab-vcenter"
+	product := "vmware"
+	version := "9.0"
+	parent := "vmware.composite.vm.power"
+	d.ReviewerContext = &api.ReviewerContextView{
+		Summary:             &summary,
+		Subject:             &subject,
+		TargetName:          &targetName,
+		TargetProduct:       &product,
+		TargetVersion:       &version,
+		ParentCompositeOpId: &parent,
+	}
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	for _, want := range []string{
+		"Summary:      Power on VM on web-01 (vm-1042) @ target lab-vcenter (vmware 9.0)",
+		"Subject:      web-01 (vm-1042)",
+		"Target:       lab-vcenter (vmware 9.0) [33333333-3333-3333-3333-333333333333]",
+		"Part of:      vmware.composite.vm.power",
+		"Change ref:   gh:evoila/meho#42",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printDetail render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintDetailReviewerContextFailsOpen confirms that when the
+// reviewer context is absent (a pre-#3353 backplane, or a resolution
+// miss), show renders exactly what it did before — the bare target GUID,
+// no Summary / Subject / Part of lines — so the field is purely additive.
+func TestPrintDetailReviewerContextFailsOpen(t *testing.T) {
+	d := newApprovalView(t, "pending", "")
+	target := mustUUID(t, "33333333-3333-3333-3333-333333333333")
+	d.TargetId = &target
+	// ReviewerContext left nil.
+
+	cmd, stdout, _ := newCapturingCmd(t)
+	printDetail(cmd, &d)
+	out := stdout.String()
+	if !strings.Contains(out, "Target:       33333333-3333-3333-3333-333333333333") {
+		t.Errorf("nil reviewer context should render bare target GUID; got:\n%s", out)
+	}
+	for _, banned := range []string{"Summary:", "Subject:", "Part of:", "Change ref:"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("nil reviewer context should omit %q; got:\n%s", banned, out)
+		}
+	}
+}
+
+// TestTargetLabelResolvesNameAlongsideGUID pins the target-label helper:
+// name + product/version alongside the GUID when resolved, the bare GUID
+// when nothing resolved (fail-open), and product-only when no version.
+func TestTargetLabelResolvesNameAlongsideGUID(t *testing.T) {
+	id := "33333333-3333-3333-3333-333333333333"
+	name := "lab-vcenter"
+	product := "vmware"
+	version := "9.0"
+
+	full := &api.ReviewerContextView{TargetName: &name, TargetProduct: &product, TargetVersion: &version}
+	if got := targetLabel(id, full); got != "lab-vcenter (vmware 9.0) ["+id+"]" {
+		t.Errorf("targetLabel full = %q", got)
+	}
+	noVer := &api.ReviewerContextView{TargetName: &name, TargetProduct: &product}
+	if got := targetLabel(id, noVer); got != "lab-vcenter (vmware) ["+id+"]" {
+		t.Errorf("targetLabel no-version = %q", got)
+	}
+	nameOnly := &api.ReviewerContextView{TargetName: &name}
+	if got := targetLabel(id, nameOnly); got != "lab-vcenter ["+id+"]" {
+		t.Errorf("targetLabel name-only = %q", got)
+	}
+	if got := targetLabel(id, nil); got != id {
+		t.Errorf("targetLabel nil context = %q; want bare GUID", got)
+	}
+}

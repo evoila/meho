@@ -44,7 +44,12 @@ branch to `available=false`.
 shared core:
 
 - **Paging** (`handle_id` + `offset` + `limit`) — `read_result_window`
-  returns a row window, unchanged since #3179.
+  returns a row window. Since #3387 the window is bounded by the same
+  `RESULT_QUERY_MAX_OUTPUT_BYTES` ceiling the query path applies: a page that
+  serializes past the budget raises the recoverable over-budget error (its
+  remediation is a smaller `limit`, since paging has no `select` / `filter`)
+  rather than returning a multi-MB window, so no agent ever sees an
+  over-budget page.
 - **Query** (`handle_id` + a `query` object) — `run_result_query`
   compiles the structured arguments into **exactly one parameterized,
   read-only `SELECT`** over the handle's rows and returns just the

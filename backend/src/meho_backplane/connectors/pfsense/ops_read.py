@@ -159,13 +159,26 @@ def parse_pfctl_rules(output: str) -> list[dict[str, Any]]:
     return rows
 
 
-# ``pfctl -ss`` emits one state per line in the forms:
-#   <proto> <interface> <src> -> <dst>: <state>/<state> Pkts: N Bytes: N
-#   <proto> <interface> <src> <-> <dst>: <state>/<state> ...
-# The exact format varies by pfSense version. We extract the common fields.
+# ``pfctl -ss`` emits one state per line, INTERFACE first, protocol second:
+#   <interface> <proto> <ep1> -> <ep2>  <state>:<state> ...
+#   <interface> <proto> <ep1> <- <ep2>  <state>:<state> ...
+#   <interface> <proto> <ep1> <-> <ep2> ...
+# e.g. ``em0 tcp 10.11.16.9:443 <- 192.168.99.5:59269  ESTABLISHED:ESTABLISHED``
+# on pfSense 2.7; older builds print ``all`` as the interface. Field order
+# confirmed against the pf state format (pfSense redmine #2121) and the lab's
+# own live classifier (rdc-hetzner-dc ``pfsense-meho-measure-report.sh``:
+# ``$2=="tcp"``; ``<if> tcp <ep1>:<p1> <-|-> <ep2>:<p2>``). Group 1 is the
+# interface, group 2 the protocol -- previously transposed, which mislabelled
+# every row (fixed for #252; also corrects ``pfsense.firewall.state``).
+#
+# A NAT-translated first endpoint (``addr:port (xlate:port) <dir> ...``) does
+# not match this pattern and is returned with ``proto=None`` (an unparsed row)
+# rather than misparsed -- structuring the xlate pair is out of scope for the
+# port-based ``mgmt_flow`` classifier, which surfaces such rows via its
+# ``unparsed_lines`` count instead of silently dropping them.
 _STATE_PROTO_RE = re.compile(
-    r"^(?P<proto>\S+)\s+"
-    r"(?P<iface>\S+)\s+"
+    r"^(?P<iface>\S+)\s+"
+    r"(?P<proto>\S+)\s+"
     r"(?P<src>[^\s<>-]+)\s+"
     r"(?P<direction><->|->|<-)\s+"
     r"(?P<dst>\S+?)(?=:\s|\s|$)"  # dst ends at ': STATE' boundary or whitespace
@@ -197,9 +210,11 @@ def parse_pfctl_states(output: str) -> list[dict[str, Any]]:
     The ``total`` of the returned list is the caller's responsibility
     (``len(rows)``).
 
-    >>> rows = parse_pfctl_states("tcp em0 10.0.0.1:1234 -> 1.2.3.4:443: ESTABLISHED\\n")
+    >>> rows = parse_pfctl_states("em0 tcp 10.0.0.1:1234 -> 1.2.3.4:443  ESTABLISHED\\n")
     >>> rows[0]["proto"]
     'tcp'
+    >>> rows[0]["iface"]
+    'em0'
     >>> rows[0]["dst"]
     '1.2.3.4:443'
     """

@@ -56,19 +56,28 @@ specifies what the realm must produce.
   UUID is recorded on the consumer side in `targets.yaml` for
   per-target tenancy.
 - Keycloak version **22+**. The mapper type names this recipe
-  uses (`Group Attribute` for `tenant_id` in Step 3; `Script Mapper`
-  for Shape A and `User Attribute` for Shape B in Step 4; and
-  `User Realm Role` referenced only as the discouraged shape in
-  Step 4's two callouts) match the Admin Console as shipped in
-  Keycloak 22 through current (26.x at time of writing); the 19.x
-  and earlier consoles use slightly different labels.
+  uses (`Hardcoded claim`, `Script Mapper`, and `User Attribute`
+  for `tenant_id` in Step 3; `Script Mapper` for Shape A and
+  `User Attribute` for Shape B in Step 4; and `User Realm Role`
+  referenced only as the discouraged shape in Step 4's two
+  callouts) are all **stock** OIDC protocol mappers and match the
+  Admin Console as shipped in Keycloak 22 through current (26.x at
+  time of writing); the 19.x and earlier consoles use slightly
+  different labels. Stock Keycloak ships **no** "Group Attribute"
+  mapper — see
+  [Step 3](#step-3--configure-the-tenant_id-protocol-mapper).
 
 ## Recommended path: groups + realm roles
 
-The recommended configuration sources `tenant_id` from a **group
-attribute** and `tenant_role` from a **realm role**. This shape scales
-to tenants with many operators (one group membership +  one role
-assignment per operator; the group attribute carries the UUID once).
+The recommended configuration sources `tenant_id` from the tenant
+**group's `tenant_id` attribute** (read by a Script Mapper — stock
+Keycloak has no mapper that copies a group attribute directly; see
+[Step 3](#step-3--configure-the-tenant_id-protocol-mapper)) and
+`tenant_role` from a **realm role**. This shape scales to tenants with
+many operators (one group membership + one role assignment per
+operator; the group attribute carries the UUID once). A single-tenant
+deploy can skip the group plumbing entirely and hardcode the UUID —
+also covered in Step 3.
 
 The alternative — both claims as user attributes — is covered as a
 [side note](#side-note-alternative-claim-sources) at the bottom; it is
@@ -131,10 +140,30 @@ Under Shape B the realm roles are RBAC bookkeeping only; the per-user
 
 ### Step 3 — Configure the `tenant_id` protocol mapper
 
-This mapper copies the group's `tenant_id` attribute into every access
-token issued for a member of that group.
+The access token needs the tenant's UUID as a `tenant_id` claim.
+**Stock Keycloak has no "Group Attribute" mapper** that copies a
+*group* attribute into a scalar claim: the OIDC package ships
+`GroupMembershipMapper` (emits group names / paths),
+`UserAttributeMapper` (emits a per-*user* attribute), and
+`HardcodedClaim` (emits a constant), and none of them reads a group
+attribute — the same gap the
+[`approver` recipe](#the-approver-approve-only-capability--group-based-recipe-3243)
+documents for a group-gated boolean (verified against the
+[26.x mapper javadocs](https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/protocol/oidc/mappers/package-summary.html)).
+Pick the stock shape that fits the deployment:
 
-Where to add it:
+- **One tenant per deploy** (the v0.2 default — see Prerequisites) → a
+  **Hardcoded claim** mapper carrying the tenant UUID. Simplest, stock,
+  no scripts, and the shape the reference deployment and the repo's
+  integration realm fixture actually use.
+- **Multiple tenants in one realm, scripts allowed** → **Shape A**, a
+  Script Mapper that reads the member's tenant-group `tenant_id`
+  attribute (from [Step 1](#step-1--create-the-tenant-group)).
+- **Multiple tenants, no scripts** → a per-user `tenant_id` attribute +
+  a **User Attribute** mapper (the
+  [side note](#side-note-alternative-claim-sources)).
+
+Where to add the mapper (any shape):
 
 - **Preferred:** add to the **Client scope** the backplane's client
   uses (typically `meho-mcp` or whichever scope is bound to the
@@ -145,30 +174,67 @@ Where to add it:
   when the realm has only one MEHO client and you prefer mapper
   ownership tied to the client lifecycle.
 
-In the Admin Console:
+The claim-toggle settings are the same for every shape below:
+**Token Claim Name** `tenant_id` (what the backplane reads via
+`JWT_TENANT_CLAIM_NAME`, which defaults to `tenant_id`), **Claim JSON
+Type** `String`, **Add to ID token** off (the backplane validates the
+access token, not the ID token), **Add to access token** **on**
+(load-bearing — without this the mapper is a no-op for the backplane),
+and **Add to userinfo** on (makes the
+[verification snippet](#verification) below work without decoding the
+access token by hand).
 
-1. Navigate to **Client scopes** → `meho-mcp` (or your chosen scope) →
-   **Mappers** tab → **Add mapper** → **By configuration**.
-2. Select **Group Attribute** from the mapper-type list.
-3. Configure:
-   - **Name:** `tenant_id`
-   - **Group Attribute:** `tenant_id` (the source — matches the
-     attribute key from [Step 1](#step-1--create-the-tenant-group))
-   - **Token Claim Name:** `tenant_id` (the target — what the
-     backplane reads via `JWT_TENANT_CLAIM_NAME`, which defaults to
-     `tenant_id`)
-   - **Claim JSON Type:** `String`
-   - **Add to ID token:** off (the backplane validates the access
-     token, not the ID token)
-   - **Add to access token:** **on** (load-bearing — without this the
-     mapper is a no-op for the backplane)
-   - **Add to userinfo:** on (recommended — makes the
-     [verification snippet](#verification) below work without
-     decoding the access token by hand)
-   - **Aggregate attribute values:** off (each operator is in exactly
-     one tenant group; aggregation would produce a JSON array, which
-     the backplane rejects as `malformed_tenant_claim`)
-4. Save.
+#### One tenant per deploy — a Hardcoded claim mapper
+
+In the Admin Console: **Client scopes** → `meho-mcp` (or your chosen
+scope) → **Mappers** tab → **Add mapper** → **By configuration** →
+**Hardcoded claim**. Set **Name** `tenant_id`, **Claim value** the
+tenant UUID minted in [Step 1](#step-1--create-the-tenant-group), and
+the shared claim toggles above.
+
+This is the shape the repo's integration realm fixture uses
+(`backend/tests/integration/_fixtures/meho-integration-realm.json` — an
+`oidc-hardcoded-claim-mapper` with `claim.name: tenant_id`). A Hardcoded
+claim is the same constant for **every** token minted on that client /
+scope, so it fits a single-tenant realm exactly; move to Shape A (or the
+per-user attribute) once a realm hosts more than one tenant.
+
+#### Shape A — a Script Mapper reading the group's `tenant_id` attribute
+
+If the realm has the **Script Mapper** feature enabled, a single mapper
+reads the member's tenant group's `tenant_id` attribute and emits it as
+the claim. Add it on the same scope / client: **Add mapper** → **By
+configuration** → **Script Mapper**, with **Name** `tenant_id`, the
+shared claim toggles above, and this body:
+
+```javascript
+// Script Mapper body — emits the tenant group's tenant_id attribute.
+// Each operator belongs to exactly one tenant group (Step 5); this reads
+// the first group carrying a tenant_id attribute and exports its value.
+// A member of no tenant group leaves exports undefined, so Keycloak omits
+// the claim and the backplane fails closed (401 missing_tenant_claim).
+var it = user.getGroupsStream().iterator();
+while (it.hasNext()) {
+  var tid = it.next().getFirstAttribute('tenant_id');
+  if (tid != null) { exports = tid; break; }
+}
+```
+
+`user.getGroupsStream()` is the current `UserModel` API (Keycloak 19+,
+the same call the `approver` Shape A script uses) and
+`GroupModel.getFirstAttribute(...)` returns the group attribute's first
+value. Script Mapper requires the script-mappers feature
+(`--features=scripts` on `kc.sh start`, disabled by default since
+Keycloak 18) and a JS engine on the classpath (GraalJS ships with
+current distributions) — the same caveat as `tenant_role` Shape A.
+
+#### Shape B — `tenant_id` as a per-user attribute (no scripts)
+
+Realms that cannot enable scripts stamp `tenant_id` on each user and
+copy it with a built-in **User Attribute** mapper — see the
+[side note](#side-note-alternative-claim-sources), which gives the full
+mapper config (including the one extra **Aggregate attribute values:**
+off toggle that shape needs).
 
 ### Step 4 — Configure the `tenant_role` protocol mapper
 
@@ -314,8 +380,8 @@ For each operator who should authenticate against MEHO:
 1. **Users** → select the user → **Groups** tab → **Join Group** →
    pick the tenant group from [Step 1](#step-1--create-the-tenant-group).
    Users must belong to **exactly one** tenant group; multiple
-   memberships make the group attribute mapper produce ambiguous
-   `tenant_id` values.
+   memberships make the Shape A script read a `tenant_id` from
+   whichever tenant group it encounters first.
 2. **(Shape A only.)** **Users** → select the user → **Role
    mapping** tab → **Assign role** → filter by **Realm roles** →
    pick exactly one of `meho-tenant-admin` / `meho-operator` /
@@ -485,10 +551,10 @@ Practical consequences for an operator standing up a v0.2 deploy:
 | --- | --- | --- |
 | `401 missing_tenant_claim` on every request | Mapper not on the access token | On the mapper screen, toggle **Add to access token** on |
 | `401 missing_tenant_claim` for one user only | User is not in a tenant group; or (Shape A) holds none of the three `meho-*` realm roles; or (Shape B) has no `tenant_role` user attribute | Assign the user (Step 5) |
-| `401 malformed_tenant_claim` | `tenant_id` mapper has **Aggregate attribute values** on (emits a JSON array instead of a single string) | Toggle **Aggregate attribute values** off and re-issue the token |
+| `401 malformed_tenant_claim` | `tenant_id` **User Attribute** mapper (Shape B) has **Aggregate attribute values** on (emits a JSON array instead of a single string) | Toggle **Aggregate attribute values** off and re-issue the token |
 | `401 malformed_tenant_claim` (continued) | `tenant_id` mapper has **Claim JSON Type:** `int` or `JSON` instead of `String` | Set **Claim JSON Type** to `String`; UUIDs are strings, not ints |
 | `401 unknown_tenant_role` | The token's `tenant_role` is a string but not one of the three enum values — usually because the operator left a built-in **User Realm Role** mapper in place (it forwards realm-role names like `meho-operator`, not the constant enum values), or under Shape B set the user attribute to a hyphenated value (`read-only` instead of `read_only`) | Remove the User Realm Role mapper; use Shape A (Script Mapper, which converts `meho-read-only` → `read_only` automatically) or Shape B (User Attribute mapper sourcing the literal snake_case enum value the operator stamped on the user). Either way the on-the-wire value must be exactly `tenant_admin` / `operator` / `read_only` |
-| Two operators in the same tenant get different `tenant_id` values | One of them is in two tenant groups; the mapper picks one non-deterministically | Each user belongs to exactly one tenant group |
+| Two operators in the same tenant get different `tenant_id` values | One of them is in two tenant groups; the Shape A script reads whichever tenant group it encounters first | Each user belongs to exactly one tenant group |
 | `403 Forbidden` on a route that worked before | User now mints a `tenant_role` claim below what the route requires (e.g. demoted to `read_only`) | (Shape A) Re-assign the appropriate `meho-*` realm role on the user's **Role mapping** tab — the Script Mapper picks the highest assigned role on the next token mint. (Shape B) Update the user's `tenant_role` attribute on the **Users → Attributes** tab to one of `tenant_admin` / `operator` / `read_only` — realm-role changes do **not** drive the claim under Shape B. Either way, in-flight tokens keep the old claim until they expire (or the operator runs `meho login` again). |
 | Claims appear on userinfo but not on the access token | Mapper has **Add to userinfo: on** but **Add to access token: off** | Toggle both on |
 | Mapper changes don't take effect for already-logged-in operators | Cached access tokens are still being sent until they expire | Wait for token expiry (or invoke `meho login` again to mint a fresh token) |
@@ -503,19 +569,27 @@ B: User Attribute mapper). One smaller variation on the
 
 ### `tenant_id` as a per-user attribute
 
-Skip the group plumbing when every user is permanently in one
-tenant. Stamp `tenant_id` directly on each user as an attribute and
-replace the Group Attribute mapper with a **User Attribute** mapper
-(User Attribute: `tenant_id`, Token Claim Name: `tenant_id`, Claim
-JSON Type: `String`, Add to access token: on).
+When each user is permanently in one tenant but the realm still hosts
+several tenants (so the single Hardcoded-claim shortcut in
+[Step 3](#step-3--configure-the-tenant_id-protocol-mapper) does not
+fit), stamp `tenant_id` directly on each user as an attribute and copy
+it with a built-in **User Attribute** mapper (the same mapper type as
+`tenant_role` Shape B). Configure it on the `meho-mcp` client scope:
+**User Attribute:** `tenant_id`, **Token Claim Name:** `tenant_id`,
+**Claim JSON Type:** `String`, **Add to access token:** on, **Aggregate
+attribute values:** off, **Multivalued:** off (each user has exactly one
+tenant; aggregation or multivalue would emit a JSON array, which the
+backplane rejects as `malformed_tenant_claim`).
 
-Step 1 and Step 3 of the recipe drop out; Step 2 (realm roles —
-optional under Shape B), Step 4, and Step 5 still apply.
+The tenant group's `tenant_id` attribute (Step 1) and Shape A's Script
+Mapper drop out; Step 2 (realm roles — optional under Shape B), Step 4,
+and Step 5 still apply.
 
-Tradeoff: avoids one Admin Console object class but does not
-remove maintenance — every per-tenant UUID rotation still touches
-every user. The recommended (groups + group attribute) shape is
-strictly better once a tenant has more than one operator.
+Tradeoff: avoids the Script Mapper feature but does not remove
+maintenance — every per-tenant UUID rotation still touches every user.
+The recommended (groups + Shape A script) shape is strictly better once
+a tenant has more than one operator; the single-tenant Hardcoded-claim
+shortcut is strictly simpler when a deploy has exactly one tenant.
 
 ## Side note — the `platform_admin` cross-tenant flag (#1638)
 

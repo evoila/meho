@@ -46,9 +46,22 @@ natively. The per-target TLS trust has three states, in precedence order:
    can reach a self-signed / internal-CA appliance with no pin. Per-target,
    never global, and loud — see :func:`_insecure_ssl_context` and the WARN
    emitted at client construction.
-3. **Default** (``verify_tls=True``, no pin) — the client is built with
-   **no** ``verify=`` argument, so the global ``SSL_CERT_FILE`` /
-   chart-trust-bundle path (evoila/meho#209) is in effect unchanged.
+3. **Default** (``verify_tls=True``, no pin) — the transport is built with
+   ``verify=True``, so the global ``SSL_CERT_FILE`` / chart-trust-bundle
+   path (evoila/meho#209) is in effect unchanged (httpx's
+   ``create_ssl_context(verify=True, trust_env=True)`` reads it, exactly
+   as an unconfigured client would).
+
+Each resolved TLS context is carried by the per-target pinning
+**transport** (:func:`build_pinned_async_transport`), not passed as a
+client ``verify=`` argument, because the client is handed an explicit
+``transport=`` that enforces destination pinning at the socket
+(evoila-bosnia/meho-internal#275): ``connect_tcp`` re-screens the host
+and dials only a guard-validated address from that same resolution, so a
+resolver change between the guard's screen and the socket connect cannot
+reach a blocked destination. Only the TCP target is rewritten — TLS SNI,
+certificate verification, and the ``Host:`` header still use the
+original hostname.
 
 **Client pool key:** the pool is keyed on
 :func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`
@@ -79,11 +92,13 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_async_transport
 from meho_backplane.connectors.base import Connector
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.targets.ssrf_guard import (
     TargetDestinationBlockedError,
     assert_public_destination_async,
+    screen_and_resolve,
 )
 
 logger = structlog.get_logger(__name__)
@@ -213,6 +228,27 @@ def _ca_pin_digest(ca_pem: str | None) -> str:
     if not ca_pem:
         return ""
     return hashlib.sha256(ca_pem.encode("utf-8")).hexdigest()[:16]
+
+
+def _pin_target_addresses(host: str) -> list[str] | None:
+    """Connect-time screen for the pinned transport, in ``SsrfBlockedError`` terms.
+
+    Wraps :func:`screen_and_resolve` (the target SSRF guard's
+    address-returning arm) so a block raised from *inside* the transport's
+    ``connect_tcp`` surfaces as :class:`SsrfBlockedError` — an
+    ``httpx.ConnectError`` subclass — exactly like the ``_http_client``
+    pre-check does. httpx's transport exception mapping re-raises an
+    unmapped exception unchanged, so an ``httpx.ConnectError`` subclass
+    reaches the dispatcher's existing ``ConnectError`` arm (flattened into
+    the structured ``connector_error`` shape) while a bare
+    ``TargetDestinationBlockedError`` (a ``ValueError``) would escape
+    unhandled. It is excluded from :func:`_retryable` for the same reason
+    the pre-check's rejection is: the verdict is deterministic policy.
+    """
+    try:
+        return screen_and_resolve(host)
+    except TargetDestinationBlockedError as exc:
+        raise SsrfBlockedError(str(exc)) from exc
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -536,13 +572,14 @@ class HttpConnector(Connector):
         ca_pin = getattr(target, "tls_ca_pin", None)
         async with self._lock:
             if cache_key not in self._clients:
-                # Pass ``verify=`` only when the target pins a CA (secure)
-                # or opts out of verification (insecure). With neither we
-                # omit the kwarg so the client defaults to httpx's
-                # ``verify=True``, keeping the global ``SSL_CERT_FILE`` path
-                # (evoila/meho#209) byte-identical to a connector with no
-                # TLS config at all.
-                verify_kwargs: dict[str, Any] = {}
+                # Resolve the TLS-trust argument for the pinned transport.
+                # ``True`` keeps httpx's default ``verify=True`` + the
+                # global ``SSL_CERT_FILE`` path (evoila/meho#209)
+                # byte-identical to a connector with no TLS config at all;
+                # a CA-pin or the insecure opt-out supersedes it below.
+                # The transport (not the client) carries this context now,
+                # because the client is handed an explicit ``transport=``.
+                verify_arg: ssl.SSLContext | bool = True
                 if ca_pin:
                     # Secure supersession (evoila/meho#1784): trust the
                     # pinned CA while keeping CERT_REQUIRED + hostname
@@ -559,7 +596,7 @@ class HttpConnector(Connector):
                         host=getattr(target, "host", None),
                         ca_pin_digest=_ca_pin_digest(ca_pin),
                     )
-                    verify_kwargs["verify"] = _build_ca_pinned_ssl_context(ca_pin)
+                    verify_arg = _build_ca_pinned_ssl_context(ca_pin)
                 elif not verify_tls:
                     # Per-target, audited last resort (evoila/meho#1774):
                     # the dispatch forwards a Vault-resolved credential over
@@ -572,7 +609,21 @@ class HttpConnector(Connector):
                         target=getattr(target, "name", None),
                         host=getattr(target, "host", None),
                     )
-                    verify_kwargs["verify"] = _insecure_ssl_context()
+                    verify_arg = _insecure_ssl_context()
+                # Pin the connection to a guard-validated address at the
+                # socket boundary (evoila-bosnia/meho-internal#275). The
+                # ``_http_client`` pre-check above screens the stored name
+                # on every acquisition; this transport re-screens inside
+                # ``connect_tcp`` and dials only an address from that same
+                # resolution, so a resolver that changes its answer between
+                # the screen and the connect cannot steer the socket at a
+                # blocked destination the guard never saw. It preserves the
+                # original hostname for TLS SNI + cert verification and the
+                # ``Host:`` header (only the TCP target is rewritten). A
+                # blocked answer surfaces as ``SsrfBlockedError`` via
+                # ``_pin_target_addresses``, reaching the dispatcher's
+                # ``ConnectError`` arm and staying out of the retry policy.
+                transport = build_pinned_async_transport(_pin_target_addresses, verify=verify_arg)
                 self._clients[cache_key] = _SameOriginRedirectClient(
                     base_url=self._base_url(target),
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
@@ -588,7 +639,7 @@ class HttpConnector(Connector):
                     # origin and forward NSX's ``X-XSRF-TOKEN`` and the
                     # login body to an attacker-controlled ``Location``
                     # (open-redirect SSRF, evoila/meho-internal#101 row L11).
-                    **verify_kwargs,
+                    transport=transport,
                 )
             return self._clients[cache_key]
 

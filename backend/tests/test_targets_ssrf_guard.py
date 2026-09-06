@@ -63,6 +63,7 @@ from meho_backplane.targets.ssrf_guard import (
     TARGET_SSRF_ALLOWLIST_ENV,
     TargetDestinationBlockedError,
     assert_public_destination,
+    screen_and_resolve,
 )
 
 # 93.184.216.34 (example.com's long-stable A record) — a public, globally
@@ -456,3 +457,91 @@ def test_ssrf_blocked_error_is_connect_error_but_not_retryable() -> None:
     err = SsrfBlockedError("blocked")
     assert isinstance(err, httpx.ConnectError)
     assert _retryable(err) is False
+
+
+# ---------------------------------------------------------------------------
+# screen_and_resolve — the address-returning arm the pinning transport uses
+# ---------------------------------------------------------------------------
+
+
+def test_screen_and_resolve_returns_public_ip_literal(_guard_live: pytest.MonkeyPatch) -> None:
+    assert screen_and_resolve(_PUBLIC_IP) == [_PUBLIC_IP]
+
+
+def test_screen_and_resolve_returns_resolved_addresses(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _patch_resolver(_guard_live, _PUBLIC_IP, "93.184.216.35")
+    assert screen_and_resolve("public.example.com") == [_PUBLIC_IP, "93.184.216.35"]
+
+
+def test_screen_and_resolve_empty_host_is_passthrough(_guard_live: pytest.MonkeyPatch) -> None:
+    assert screen_and_resolve("   ") is None
+
+
+def test_screen_and_resolve_unresolvable_is_passthrough(_guard_live: pytest.MonkeyPatch) -> None:
+    _patch_resolver(_guard_live)  # resolves to nothing
+    assert screen_and_resolve("nowhere.invalid") is None
+
+
+def test_screen_and_resolve_allowlisted_hostname_is_passthrough(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    # An allowlisted hostname literal is trusted verbatim — no resolution
+    # round-trip, so the pin dials it by name (passthrough).
+    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "vcenter.lab.internal")
+    _patch_resolver(_guard_live, "10.0.0.5")  # would be blocked if resolved
+    assert screen_and_resolve("vcenter.lab.internal") is None
+
+
+@pytest.mark.parametrize("host", _NON_PUBLIC_HOSTS)
+def test_screen_and_resolve_rejects_non_public_literal(
+    host: str, _guard_live: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(TargetDestinationBlockedError):
+        screen_and_resolve(host)
+
+
+def test_screen_and_resolve_rejects_hostname_resolving_private(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    _patch_resolver(_guard_live, "10.0.0.7")
+    with pytest.raises(TargetDestinationBlockedError):
+        screen_and_resolve("benign.example.com")
+
+
+def test_screen_and_resolve_cidr_allowlist_returns_the_address(
+    _guard_live: pytest.MonkeyPatch,
+) -> None:
+    # An allowlisted CIDR permits an otherwise-blocked resolved address,
+    # and the pin gets that address to dial.
+    _guard_live.setenv(TARGET_SSRF_ALLOWLIST_ENV, "10.0.0.0/8")
+    _patch_resolver(_guard_live, "10.0.0.9")
+    assert screen_and_resolve("appliance.example.com") == ["10.0.0.9"]
+
+
+@pytest.mark.parametrize(
+    "host",
+    _NON_PUBLIC_HOSTS + _STRUCTURED_NON_PUBLIC_HOSTS + _REFUSED_STRUCTURE_HOSTS,
+)
+def test_screen_and_resolve_matches_assert_public_destination_rejections(
+    host: str, _guard_live: pytest.MonkeyPatch
+) -> None:
+    """The address-returning arm rejects exactly where the assert-only arm does.
+
+    Both entry points share ``_screen``; this pins that they can never
+    diverge on which destinations they refuse (blocked literals, blocked
+    dialed hosts behind URL structure, and refused structure alike).
+    """
+    _patch_resolver(_guard_live, "10.0.0.7")
+    assert_raised = False
+    try:
+        assert_public_destination(host)
+    except TargetDestinationBlockedError:
+        assert_raised = True
+    screen_raised = False
+    try:
+        screen_and_resolve(host)
+    except TargetDestinationBlockedError:
+        screen_raised = True
+    assert assert_raised is screen_raised is True

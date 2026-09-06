@@ -1716,11 +1716,25 @@ activity:
    next request. A redirect from a public host to a private IP is rejected
    at the hop — the private-target socket is never opened.
 
-4. **Response size cap.** The response body is streamed and rejected if it
+4. **Socket-boundary address pinning (`_pin_fetch_addresses`,
+   evoila-bosnia/meho-internal#275).** The pre-connect guard (#2) and the
+   per-hop guard (#3) screen the *name*, but httpx would re-resolve it at
+   connect time — a check/use gap a resolver flip (DNS rebinding) could
+   exploit. `_fetch_spec_bytes` runs its fetch over
+   `build_pinned_sync_transport(_pin_fetch_addresses)`, so the socket
+   `connect_tcp` re-screens the host via `_screen_fetch_host` (shared with
+   the pre-fetch guard) and dials **only** a validated address from that
+   same resolution — for the initial fetch and every redirect hop that
+   opens a fresh connection. TLS SNI, certificate verification, and the
+   `Host:` header still use the original hostname. Because the client is
+   handed an explicit `transport=`, ambient `HTTP(S)_PROXY` mounts do not
+   interpose on the pinned dial.
+
+5. **Response size cap.** The response body is streamed and rejected if it
    exceeds 20 MiB (`_MAX_SPEC_BYTES`), preventing a redirect to a large
    internal endpoint from exhausting pod memory.
 
-5. **Oracle-free error messages that name the inline remedy.** Error
+6. **Oracle-free error messages that name the inline remedy.** Error
    messages never echo the operator-supplied URI, the resolved IP /
    hostname, or OS-level error text — the rejection is path-free so it
    is not a network-topology oracle. The scheme + non-public rejections

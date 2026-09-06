@@ -93,6 +93,7 @@ __all__ = [
     "TargetDestinationBlockedError",
     "assert_public_destination",
     "assert_public_destination_async",
+    "screen_and_resolve",
 ]
 
 #: Env var holding the operator-configured destination allowlist:
@@ -245,34 +246,56 @@ def _resolve_addrs(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addr
     return addrs
 
 
-def assert_public_destination(host: str) -> None:
-    """Reject *host* when it is, or resolves to, a non-public address.
+def _reject_blocked(
+    addrs: list[ipaddress.IPv4Address | ipaddress.IPv6Address],
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> None:
+    """Raise when any address in *addrs* is blocked and not allowlisted.
 
-    *host* may be an IPv4/IPv6 literal (bracketed IPv6 URL form
-    accepted) or a hostname. IP literals are checked directly. Anything
-    else is first normalized to the host httpx will actually dial via
-    :func:`_dialed_host` (values embedding credentials, a query, or a
-    fragment are refused outright; a path- or port-bearing value is
-    reduced to its dialed host) — so a stored value cannot be screened
-    as one destination and dialed as another. The dialed host is then
-    re-checked as an IP literal (an embedded-port form like
-    ``<ip>:<port>`` normalizes back to a screenable literal), matched
-    against the allowlist's hostname entries (an allowlisted name is
-    trusted verbatim — no resolution round-trip), and otherwise
-    resolved via :func:`_resolve_addrs`, with **every** resolved
-    address screened (any blocked, non-allowlisted candidate rejects,
-    matching the ingest guard's posture).
+    The single screening loop shared by :func:`assert_public_destination`
+    and :func:`screen_and_resolve`, so the assert-only and
+    return-the-addresses entry points can never diverge on which
+    destinations they reject. Any blocked, non-allowlisted candidate
+    rejects the whole set (the ingest guard's all-or-nothing posture).
+    """
+    for addr in addrs:
+        if not _is_blocked(addr):
+            continue
+        if any(addr in network for network in networks):
+            continue
+        raise TargetDestinationBlockedError(
+            "target destination is not a public address; refusing it as a "
+            f"server-side request forgery risk ({_REMEDIATION})"
+        )
 
-    Raises:
-        TargetDestinationBlockedError: The destination is non-public and
-            not exempted by :data:`TARGET_SSRF_ALLOWLIST_ENV`, embeds
-            URL structure the guard refuses, or cannot be parsed as a
-            dialable destination. The message never includes the
-            resolved address (no internal-topology oracle).
+
+def _screen(host: str) -> list[str] | None:
+    """Screen *host* and return the validated addresses it may dial.
+
+    The shared core of both public entry points. *host* may be an
+    IPv4/IPv6 literal (bracketed IPv6 URL form accepted) or a hostname.
+    IP literals are checked directly. Anything else is first normalized
+    to the host httpx will actually dial via :func:`_dialed_host` (values
+    embedding credentials, a query, or a fragment are refused outright; a
+    path- or port-bearing value is reduced to its dialed host) — so a
+    stored value cannot be screened as one destination and dialed as
+    another. The dialed host is then re-checked as an IP literal (an
+    embedded-port form like ``<ip>:<port>`` normalizes back to a
+    screenable literal), matched against the allowlist's hostname entries
+    (an allowlisted name is trusted verbatim — no resolution round-trip),
+    and otherwise resolved via :func:`_resolve_addrs`, with **every**
+    resolved address screened.
+
+    Returns the concrete IP-literal address set a connection may dial, or
+    ``None`` when the destination is dialed by name unchanged: an empty
+    host, an allowlisted hostname literal, or an unresolvable name
+    (fail-open — see the module docstring). Raises
+    :class:`TargetDestinationBlockedError` on a blocked, non-allowlisted
+    address, on refused URL structure, or on an unparseable value.
     """
     candidate = host.strip()
     if not candidate:
-        return
+        return None
     networks, hostnames = _parse_allowlist()
     literal = (
         candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
@@ -285,17 +308,53 @@ def assert_public_destination(host: str) -> None:
             addrs = [ipaddress.ip_address(dialed)]
         except ValueError:
             if dialed.rstrip(".").lower() in hostnames:
-                return
+                return None
             addrs = _resolve_addrs(dialed)
-    for addr in addrs:
-        if not _is_blocked(addr):
-            continue
-        if any(addr in network for network in networks):
-            continue
-        raise TargetDestinationBlockedError(
-            "target destination is not a public address; refusing it as a "
-            f"server-side request forgery risk ({_REMEDIATION})"
-        )
+    _reject_blocked(addrs, networks)
+    return [str(addr) for addr in addrs] if addrs else None
+
+
+def assert_public_destination(host: str) -> None:
+    """Reject *host* when it is, or resolves to, a non-public address.
+
+    The create/update-time and connect-time *pre-check* entry point:
+    screens *host* via :func:`_screen` and discards the resolved
+    addresses. See :func:`_screen` for the normalization and screening
+    rules; :func:`screen_and_resolve` is the connect-time variant that
+    returns the validated address set for the pinning transport.
+
+    Raises:
+        TargetDestinationBlockedError: The destination is non-public and
+            not exempted by :data:`TARGET_SSRF_ALLOWLIST_ENV`, embeds
+            URL structure the guard refuses, or cannot be parsed as a
+            dialable destination. The message never includes the
+            resolved address (no internal-topology oracle).
+    """
+    _screen(host)
+
+
+def screen_and_resolve(host: str) -> list[str] | None:
+    """Screen *host* and return the addresses a connection may pin to.
+
+    The connect-time arm consumed by the pinning transport
+    (:mod:`meho_backplane.connectors._shared.pinned_transport`). It
+    mirrors :func:`assert_public_destination`'s screening exactly — same
+    allowlist, same block predicate, same message — but instead of only
+    asserting, it hands back the concrete IP-literal address set the
+    socket may dial, so the transport connects to a screened address
+    rather than re-resolving the name. Because the address returned here
+    is the address the connection uses, a resolver that changes its
+    answer between the screen and the connect cannot steer the socket at
+    a destination the guard never saw (the check/use gap,
+    evoila-bosnia/meho-internal#275).
+
+    Returns ``None`` for a passthrough destination — an empty host, an
+    allowlisted hostname literal (trusted verbatim), or an unresolvable
+    name (fail-open; the transport's own resolution then fails or
+    succeeds naturally). Raises :class:`TargetDestinationBlockedError`
+    identically to :func:`assert_public_destination`.
+    """
+    return _screen(host)
 
 
 async def assert_public_destination_async(host: str) -> None:

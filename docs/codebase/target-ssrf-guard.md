@@ -9,8 +9,19 @@ attached. Without a destination screen, anything able to drive
 RFC 1918 space, `169.254.169.254` (cloud metadata), or the IPv6
 analogues and have the backplane deliver a credential there — classic
 server-side request forgery. The guard rejects non-public destinations
-at **two layers** and is overridable only through an explicit,
+at **three layers** — create/update, a connect-time pre-check, and the
+socket boundary itself — and is overridable only through an explicit,
 operator-configured allowlist env var.
+
+The socket-boundary layer (evoila-bosnia/meho-internal#275) is what
+makes the guard robust against a resolver whose answer changes *between*
+the screen and the connect (DNS rebinding, split-horizon flip). Screening
+a hostname and then handing the *name* to httpx leaves httpx free to
+re-resolve at connect time — a check/use gap. The dispatch transport
+closes it by re-screening inside the socket `connect_tcp` and dialing
+**only** a validated address from that same resolution; only the TCP
+target is rewritten, so TLS SNI, certificate verification, and the
+`Host:` header still use the original hostname.
 
 MEHO is an on-prem product: registering appliances on private space is
 the normal case, not an edge case. The intended deployment posture is
@@ -29,15 +40,38 @@ off-switch.
   - `TargetDestinationBlockedError(ValueError)` — raised on rejection.
     `ValueError` so pydantic validators surface it as a structured 422.
   - `assert_public_destination(host)` / `assert_public_destination_async(host)`
-    — sync (schema-validator) and async (dispatch hot path, via
-    `asyncio.to_thread`) entry points.
+    — sync (schema-validator) and async (dispatch pre-check hot path, via
+    `asyncio.to_thread`) entry points; screen and discard.
+  - `screen_and_resolve(host)` — the connect-time arm the pinning
+    transport consumes: it shares `_screen` with
+    `assert_public_destination` (same allowlist, same block predicate,
+    same message) but **returns** the validated IP-literal address set to
+    dial (or `None` for a passthrough — empty host / allowlisted hostname
+    literal / unresolvable name).
+  - `_screen(host)` — the shared screening core both entry points call,
+    so the assert-only and address-returning arms can never diverge.
   - `_dialed_host(candidate)` — normalizes a non-IP-literal value to
     the host component httpx actually dials for `https://{candidate}`
     (refusing credentials/query/fragment and unparseable values).
   - `_resolve_addrs(host)` — the single DNS seam
     (`socket.getaddrinfo`), monkeypatched by tests.
+- `meho_backplane/connectors/_shared/pinned_transport.py` — the
+  address-pinning httpx transports shared by the target-dispatch and
+  spec-ingest paths:
+  - `build_pinned_async_transport(resolver, verify=...)` /
+    `build_pinned_sync_transport(...)` — build an
+    `httpx.AsyncHTTPTransport` / `httpx.HTTPTransport` and swap its
+    connection pool's network backend for a pinning one, preserving the
+    TLS `verify` context.
+  - `_PinnedAsyncBackend` / `_PinnedSyncBackend` — `httpcore` network
+    backends whose `connect_tcp` calls the `resolver`, dials only a
+    returned address (trying each in order for IPv4/IPv6 fallback), and
+    passes a `None` result through to the stock backend.
 - `meho_backplane/connectors/adapters/http.py` —
-  `SsrfBlockedError(httpx.ConnectError)`, the connect-time rejection.
+  `SsrfBlockedError(httpx.ConnectError)`, the connect-time rejection;
+  `_pin_target_addresses(host)`, the dispatch resolver that wraps
+  `screen_and_resolve` so a socket-boundary block surfaces as
+  `SsrfBlockedError` (not a bare `ValueError`).
 
 ## Control flow
 
@@ -62,16 +96,28 @@ off-switch.
    `is_reserved` / `is_multicast` / `is_unspecified` union (kept
    alongside `is_global` because global-scope multicast reports
    `is_global=True` in both address families).
-2. **Connect** — `HttpConnector._http_client` awaits
+2. **Connect pre-check** — `HttpConnector._http_client` awaits
    `assert_public_destination_async(target.host)` on **every**
    acquisition, before the pool lookup, so a pooled client for a
    hostname whose DNS answer has since moved into private space is
-   refused too (DNS-rebind window). Rejection is re-raised as
-   `SsrfBlockedError`, an `httpx.ConnectError` subclass, so the
-   dispatcher's existing `ConnectError` arm flattens it into the
-   structured `connector_error` shape — no dispatcher changes. It is
-   excluded from the transport retry policy (`_retryable`): the verdict
-   is deterministic.
+   refused too. Rejection is re-raised as `SsrfBlockedError`, an
+   `httpx.ConnectError` subclass, so the dispatcher's existing
+   `ConnectError` arm flattens it into the structured `connector_error`
+   shape — no dispatcher changes. It is excluded from the transport
+   retry policy (`_retryable`): the verdict is deterministic.
+3. **Socket boundary** — the pooled client is built on a pinning
+   transport (`build_pinned_async_transport(_pin_target_addresses, …)`).
+   When httpcore opens a new connection its `connect_tcp` runs
+   `_pin_target_addresses` → `screen_and_resolve`, which resolves the
+   host once, screens that exact answer, and returns the validated
+   addresses; the transport dials one of them directly. The pre-check
+   (step 2) and this socket screen use *different* resolutions, so the
+   pre-check alone left a check/use gap; step 3 removes it because the
+   address the socket reaches is the address that was screened. A block
+   here raises `SsrfBlockedError` from inside the dial (httpx's transport
+   exception mapping re-raises the unmapped subclass unchanged), so it
+   reaches the same `ConnectError` arm. A warm pooled connection is
+   reused untouched; the next new connection re-screens.
 
 Design choices:
 
@@ -102,15 +148,34 @@ Design choices:
   deliberately not allowlisted suite-wide. Guard tests
   (`backend/tests/test_targets_ssrf_guard.py`) clear/re-pin both.
 
+## Ingest spec-fetch pinning
+
+The connector spec-ingest fetch (`operations/ingest/openapi.py`) is a
+second sink of the same check/use class and gets the same treatment. Its
+own guard, `_assert_fetchable_remote_url`, screens the URL host before
+the fetch and re-screens every redirect hop; `_fetch_spec_bytes` now
+runs that fetch over `build_pinned_sync_transport(_pin_fetch_addresses)`,
+so `connect_tcp` re-screens the host it is about to dial and connects
+only to a validated address — for the initial fetch and every redirect
+hop that opens a fresh connection. The shared screen is
+`_screen_fetch_host` (used by both the pre-fetch guard and the pin
+resolver). This path is stricter than the target guard: it fails
+**closed** on an unresolvable name and has no allowlist (public-https
+only). It stays a distinct guard with a distinct error type
+(`InvalidSpecError`); only the pinning *transport* is shared.
+
 ## Known issues
 
-- The ingest spec-fetch guard (`_assert_fetchable_remote_url`) still
-  lacks the `not is_global` posture this guard adopted, so CGNAT
-  `100.64.0.0/10` passes it — separate sink, adjacent follow-up.
-- The guard screens the transport's *intended* destination; it does not
-  pin the subsequent httpx socket connect to the screened address
-  (full DNS pinning would require a custom transport). The per-dispatch
-  re-check narrows the TOCTOU window to a single dispatch.
+- The ingest spec-fetch guard (`_assert_fetchable_remote_url` /
+  `_screen_fetch_host`) still lacks the `not is_global` posture this
+  guard adopted, so CGNAT `100.64.0.0/10` passes it — separate sink,
+  adjacent follow-up.
+- When an explicit proxy is configured the dial target decision moves to
+  the far side of the proxy; the pinning transport is handed to the
+  client as an explicit `transport=`, which bypasses httpx's ambient
+  `HTTP(S)_PROXY` mounts, so the direct dial is pinned. MEHO configures
+  no such proxy; deployment egress policy remains an independent
+  boundary the guard does not replace.
 - Non-HTTP transports (`SshConnector`, the kubeconfig-driven Kubernetes
   connector, GitHub App session client) are separate sinks outside this
   guard.
@@ -135,6 +200,9 @@ private-range example.
 ## References
 
 - Task: evoila-bosnia/meho-internal#153 (parent backlog #101, goal #87)
+- Socket-boundary pinning: evoila-bosnia/meho-internal#275 (F13, the
+  2026-09-06 security review) — bind SSRF destination checks to the
+  actual HTTP connection.
 - OWASP SSRF Prevention Cheat Sheet:
   <https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html>
 - Sibling guard: `backend/src/meho_backplane/operations/ingest/openapi.py`

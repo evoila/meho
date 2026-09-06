@@ -215,7 +215,7 @@
                 x-bind:datetime="ev.ts"
                 x-text="formatTs(ev.ts)"
               ></time>
-              <span class="max-w-40 shrink-0 truncate text-base-content/50" x-text="ev.principal_sub"></span>
+              <span class="max-w-40 shrink-0 truncate text-base-content/50" x-text="ev.principal_name || ev.principal_sub"></span>
               <span class="min-w-0 truncate" x-text="ev.op_id"></span>
               <span class="ml-auto shrink-0 text-base-content/50" x-text="ev.result_status"></span>
             </li>

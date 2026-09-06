@@ -979,6 +979,41 @@ def test_post_result_query_defaults_offset_and_limit(
     assert [r["i"] for r in body["rows"]] == list(range(50))
 
 
+def test_post_result_query_paging_over_budget_returns_422(
+    client: TestClient,
+    fake_result_store: _FakeResultStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paging window over the byte budget -> 422 with reason=output_too_large.
+
+    The REST twin of the MCP tool's recoverable over-budget error and the same
+    shape as the query branch's over-budget 422 (#3387).
+    """
+    monkeypatch.setenv("RESULT_QUERY_MAX_OUTPUT_BYTES", "2048")
+    get_settings.cache_clear()
+    handle = uuid.uuid4()
+    rows = [{"i": i, "blob": "x" * 5000} for i in range(50)]
+    fake_result_store.seed(
+        tenant_id=uuid.UUID(DEFAULT_TENANT_ID),
+        operator_sub="op-1",
+        handle_id=handle,
+        rows=rows,
+    )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/operations/result-query",
+            json={"handle_id": str(handle), "offset": 0, "limit": 50},
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["reason"] == "output_too_large"
+    # Paging remediation names a smaller `limit`, not `select` / `filter`.
+    assert "limit" in detail["message"].lower()
+
+
 def test_post_result_query_unknown_handle_returns_typed_404(
     client: TestClient,
     fake_result_store: _FakeResultStore,

@@ -104,6 +104,8 @@ async def _result_query_handler(
         return await read_result_window(operator, handle_id, offset, limit)
     except ResultHandleNotFoundError as exc:
         raise _handle_not_found(handle_id) from exc
+    except ResultQueryOutputTooLargeError as exc:
+        raise McpInvalidParamsError(str(exc), data={"reason": "output_too_large"}) from exc
 
 
 async def _run_query(
@@ -243,7 +245,8 @@ register_mcp_tool(
                                     "value": {
                                         "description": (
                                             "Bound as a parameter. Omit for `IS NULL`; "
-                                            "a list for `IN`; a scalar otherwise."
+                                            "a list for `IN` (max 1000 elements); a "
+                                            "scalar otherwise."
                                         ),
                                     },
                                 },
@@ -252,10 +255,11 @@ register_mcp_tool(
                         },
                         "select": {
                             "type": "array",
+                            "maxItems": 64,
                             "items": {"type": "string", "minLength": 1},
                             "description": (
-                                "Columns to return. Omit for all columns. Not allowed "
-                                "with `aggregate`."
+                                "Columns to return (max 64). Omit for all columns. Not "
+                                "allowed with `aggregate`."
                             ),
                         },
                         "group_by": {

@@ -1,10 +1,9 @@
 # Management-plane break-glass: an offline-anchored, edge-expired, recorded emergency reach path (decision)
 
-**Status:** **proposed — awaiting Damir's determination.** This record states the
-problem, the candidate mechanisms with honest trade-offs, and a recommendation;
-the mechanism pick is the operator's. Nothing here is implemented — the
-implementation seams are filed as post-decision Tasks under the parent Initiative.
+**Status:** decided — Option D adopted (Damir Topic, 2026-09-06). Nothing here is
+implemented; the implementation seams are filed as Tasks under the parent Initiative.
 **Date:** 2026-09-05
+**Decided:** 2026-09-06
 **Goal:** management-plane lockdown (evoila-bosnia/meho-internal#234) — its
 enforcement ratchet **cannot reach stage 3 (deny-with-log) without this**: the Goal
 makes "break-glass live and tested first" an explicit prerequisite for denying
@@ -141,8 +140,8 @@ complete."* Neither is sufficient alone. The composition:
    the appliances** (Option B's recording, demoted from "standing route" to
    "the only thing the emergency cert can reach"): the operator touches management
    planes only through the chokepoint, which records the session as the
-   audit-import source. A recording bastion is the recommended chokepoint; the exact
-   recording surface is implementation, not this decision.
+   audit-import source. The chokepoint is a recording bastion (a session-recording
+   jump host) — decided (2026-09-06).
 3. **The sealed recovery account (Option C) is retained only as the deep
    double-failure fallback** — for when even the anchor or the chokepoint is
    unavailable. Its use is the loudest possible alarm and the highest-friction path.
@@ -187,11 +186,10 @@ discipline** — the exact phrasing the parent Goal and Initiative require:
   certificate) so a session cannot outlive its certificate by holding a tunnel open.
 - An expired certificate stops authenticating and an over-length session is torn
   down **by the edge** — the operator is never trusted to disconnect on time.
-- **The exact TTL value is an operator veto point on review** (as the satellite
-  decision left its Stage-1 op-class and revocation-latency knobs to operator
-  determination). The recommendation is a short window on the order of one hour,
-  extendable only by re-issuance through the same gate — never by silently widening
-  an active grant.
+- **The decided TTL is one hour** (2026-09-06): the certificate's `notAfter` is one
+  hour from issuance, and the edge session hard-cap is one hour with a forced rekey
+  that re-validates the certificate. Extension is only by re-issuance through the same
+  gate — never by silently widening an active grant.
 
 ## Contract 3 — after-the-fact audit-log import with a break-glass provenance marker
 
@@ -279,8 +277,8 @@ for *inconvenient* governance.** Stated against the two sibling decisions:
 
 **Adopt Option D:** the **offline-anchored short-lived certificate** as the
 break-glass *authorization/reach* mechanism — backplane-independent to issue,
-edge-enforced to expire — **terminating on a recording chokepoint** (a recording
-bastion is the recommended surface) so every emergency session imports into
+edge-enforced to expire — **terminating on a recording bastion** (a session-recording
+jump host — decided 2026-09-06) so every emergency session imports into
 `audit_log` under a break-glass provenance marker; with the **sealed recovery
 account retained only as the deep double-failure fallback.**
 
@@ -332,9 +330,10 @@ network/access *reach* when the whole backplane is unavailable.
 - **This decision records the design, not the code.** The implementation seams are
   the post-decision Tasks under evoila-bosnia/meho-internal#248, unimplemented. This
   file is the design/decision home.
-- **The mechanism pick is the operator's.** Status is *proposed — awaiting Damir*;
-  the exact TTL value and the recording-surface choice are operator veto points on
-  review, as the satellite decision left its analogous knobs.
+- **The mechanism pick, the one-hour TTL, and the recording bastion are decided**
+  (2026-09-06): Option D adopted, certificate `notAfter` and edge hard-cap both one
+  hour, and the recording chokepoint is a recording bastion. Changing any of them
+  needs a new decision entry.
 - **Management planes only.** Data-plane / workload-network emergency access is out
   of scope (Goal #234 non-goal).
 - **No standing privileged VPN.** Break-glass is the opposite of standing access —
@@ -346,8 +345,9 @@ network/access *reach* when the whole backplane is unavailable.
 
 ## Implementation shape (for the post-decision Tasks)
 
-Filed concrete once the mechanism is picked; the parent Initiative's execution-tasks
-checklist is updated to these at accept time:
+Filed as Tasks under evoila-bosnia/meho-internal#248 (backplane seams in evoila/meho,
+edge/bastion/cold-test seams in the internal tracker); the numbers are recorded on
+that Initiative:
 
 1. **The offline anchor + edge emergency profile** — a sealed, backplane-independent
    certificate issuer (split-custody signing key, issuance alarm) and the edge

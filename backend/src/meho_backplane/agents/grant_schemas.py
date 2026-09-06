@@ -117,6 +117,18 @@ class AgentGrantRead(BaseModel):
     ``from_attributes=True`` allows direct construction from an ORM
     row. Exposes ``expires_at`` so callers can distinguish permanent
     grants from elevations.
+
+    ``principal_name`` is the granted principal's operator-facing
+    handle, resolved alongside ``principal_sub`` (#3337) from the agent
+    principal registry — ``principal_sub`` names a registered
+    :class:`~meho_backplane.db.models.AgentPrincipal` by its
+    ``keycloak_client_id`` (the grant service enforces this at write
+    time, #2489), so the row's ``name`` is joinable render-time. Not an
+    ORM column: it is populated by :class:`AgentGrantService` on the read
+    paths and is ``None`` on the write paths and whenever the sub names
+    no live principal (a revoked/deleted handle) — the surface then fails
+    open to the raw ``principal_sub``. Additive; a client that ignores it
+    is unaffected. Display name (handle) only — no other profile field.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -124,6 +136,7 @@ class AgentGrantRead(BaseModel):
     id: UUID
     tenant_id: UUID
     principal_sub: str
+    principal_name: str | None = None
     op_pattern: str
     target_scope: str | None
     verdict: str

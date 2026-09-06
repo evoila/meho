@@ -153,7 +153,8 @@ func printGrantListTable(w io.Writer, grants []api.AgentGrantRead) {
 			exp = g.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 		fmt.Fprintf(w, "%-36s %-36s %-30s %-12s %-22s %s\n",
-			g.Id.String(), g.PrincipalSub, g.OpPattern, g.Verdict, exp, g.CreatedBySub)
+			g.Id.String(), principalLabel(g.PrincipalSub, g.PrincipalName),
+			g.OpPattern, g.Verdict, exp, g.CreatedBySub)
 	}
 }
 

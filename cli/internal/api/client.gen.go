@@ -993,17 +993,30 @@ type AgentGrantListResponse struct {
 // “from_attributes=True“ allows direct construction from an ORM
 // row. Exposes “expires_at“ so callers can distinguish permanent
 // grants from elevations.
+//
+// “principal_name“ is the granted principal's operator-facing
+// handle, resolved alongside “principal_sub“ (#3337) from the agent
+// principal registry — “principal_sub“ names a registered
+// :class:`~meho_backplane.db.models.AgentPrincipal` by its
+// “keycloak_client_id“ (the grant service enforces this at write
+// time, #2489), so the row's “name“ is joinable render-time. Not an
+// ORM column: it is populated by :class:`AgentGrantService` on the read
+// paths and is “None“ on the write paths and whenever the sub names
+// no live principal (a revoked/deleted handle) — the surface then fails
+// open to the raw “principal_sub“. Additive; a client that ignores it
+// is unaffected. Display name (handle) only — no other profile field.
 type AgentGrantRead struct {
-	CreatedAt    time.Time          `json:"created_at"`
-	CreatedBySub string             `json:"created_by_sub"`
-	ExpiresAt    *time.Time         `json:"expires_at"`
-	Id           openapi_types.UUID `json:"id"`
-	OpPattern    string             `json:"op_pattern"`
-	PrincipalSub string             `json:"principal_sub"`
-	TargetScope  *string            `json:"target_scope"`
-	TenantId     openapi_types.UUID `json:"tenant_id"`
-	UpdatedAt    time.Time          `json:"updated_at"`
-	Verdict      string             `json:"verdict"`
+	CreatedAt     time.Time          `json:"created_at"`
+	CreatedBySub  string             `json:"created_by_sub"`
+	ExpiresAt     *time.Time         `json:"expires_at"`
+	Id            openapi_types.UUID `json:"id"`
+	OpPattern     string             `json:"op_pattern"`
+	PrincipalName *string            `json:"principal_name"`
+	PrincipalSub  string             `json:"principal_sub"`
+	TargetScope   *string            `json:"target_scope"`
+	TenantId      openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	Verdict       string             `json:"verdict"`
 }
 
 // AgentModelTier Logical model tier an agent definition runs against.

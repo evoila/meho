@@ -170,6 +170,16 @@ load-bearing-ness:
    already applies to `k8s.job.create` (inline pod-template `env`) and the
    GOSC `guest.customization_spec.create` write, so `program.run` **matches
    the GOSC broadcast posture** rather than being weaker than it.
+   `guest.file.write` is pinned in the same frozenset (#3298) for the
+   identical reason — its `content` param (the file body) is not a
+   secret-*named* / -shaped key, so without the pin the plain `.write`
+   classification would ship the whole file body on the feed. **That
+   broadcast pin is distinct from the park-preview redaction in point 3:**
+   the preview already echoes only path + byte size + overwrite intent,
+   but that governs the *reviewer* surface — the frozenset pin is what
+   keeps `content` off the SSE feed / Slack mirror / durable
+   `BroadcastEvent` row. With it, no guest-ops write rides broadcast
+   unredacted.
 
    **What still carries the values — the same characteristic as
    `guest.file.write`'s `content`, from shared machinery, not a

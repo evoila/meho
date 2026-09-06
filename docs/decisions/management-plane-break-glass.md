@@ -1,7 +1,10 @@
 # Management-plane break-glass: an offline-anchored, edge-expired, recorded emergency reach path (decision)
 
-**Status:** decided — Option D adopted (Damir Topic, 2026-09-06). Nothing here is
-implemented; the implementation seams are filed as Tasks under the parent Initiative.
+**Status:** recorded, not scheduled — Option D was adopted on 2026-09-06 and parked
+the same day (Damir Topic): the network-level lockdown it serves is not pursued for
+the current shared estate; enforcement moved to the operator tooling layer
+(evoila-bosnia/meho-internal#286). This record stands as the design to build if a
+governed-only environment is stood up.
 **Date:** 2026-09-05
 **Decided:** 2026-09-06
 **Goal:** management-plane lockdown (evoila-bosnia/meho-internal#234) — its
@@ -19,6 +22,17 @@ backplane-independent issuance and audit-import contract (this file).
 (delete-shaped ops behind a dedicated destructive tier, fail-closed). Both name a
 **central-or-break-glass** arm for the hardest work; this decision defines what
 that break-glass arm *is*.
+
+## Disposition (2026-09-06)
+
+Option D was adopted and parked the same day: the network-level lockdown this path
+serves (Goal #234) is not being pursued for the current shared estate — whose
+operators include teams outside the governed workflow — so enforcement moves to the
+operator tooling layer (Claude Code hooks in the operators' working repo plus a
+deviation ledger), tracked in evoila-bosnia/meho-internal#286. This decision record
+stands as the recorded design. The implementation Tasks (#3411, #3412 and three in
+the internal tracker) were closed as not planned and can be reopened if a
+governed-only environment is stood up.
 
 ## The problem
 
@@ -345,9 +359,9 @@ network/access *reach* when the whole backplane is unavailable.
 
 ## Implementation shape (for the post-decision Tasks)
 
-Filed as Tasks under evoila-bosnia/meho-internal#248 (backplane seams in evoila/meho,
-edge/bastion/cold-test seams in the internal tracker); the numbers are recorded on
-that Initiative:
+Were filed as Tasks under evoila-bosnia/meho-internal#248 and closed not-planned on
+2026-09-06 with the parking of the lockdown; reopen them from that Initiative if the
+design is scheduled.
 
 1. **The offline anchor + edge emergency profile** — a sealed, backplane-independent
    certificate issuer (split-custody signing key, issuance alarm) and the edge

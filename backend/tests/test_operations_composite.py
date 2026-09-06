@@ -46,14 +46,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import meho_backplane.operations._audit as audit_module
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import (
+    ApprovalRequest,
+    ApprovalRequestStatus,
+    AuditLog,
+    EndpointDescriptor,
+)
 from meho_backplane.operations import (
     CompositeRecursionLimitExceeded,
     DispatchChild,
@@ -65,6 +70,7 @@ from meho_backplane.operations._audit import parent_audit_id_var
 from meho_backplane.operations.composite import (
     COMPOSITE_DEPTH_TOP_LEVEL,
     composite_depth_var,
+    enforce_subop_policy,
     get_dispatch_child,
 )
 from meho_backplane.settings import get_settings
@@ -129,6 +135,7 @@ def _make_operator(
     *,
     sub: str = "op-composite",
     tenant_id: UUID | None = None,
+    principal_kind: PrincipalKind = PrincipalKind.USER,
 ) -> Operator:
     """Construct an :class:`Operator` directly -- no JWT round-trip."""
     return Operator(
@@ -138,6 +145,7 @@ def _make_operator(
         raw_jwt="<test-raw-jwt>",
         tenant_id=tenant_id or UUID("00000000-0000-0000-0000-00000000a0a0"),
         tenant_role=TenantRole.OPERATOR,
+        principal_kind=principal_kind,
     )
 
 
@@ -342,6 +350,73 @@ async def _override_target_composite(
         target=alt_target,
     )
     return {"child_result": child.result}
+
+
+#: The child ``op_id`` a governed write composite gates on the direct
+#: ``enforce_subop_policy`` seam -- the exact vim child from #3348.
+_GATED_CHILD_OP_ID = "POST:/Folder/{moId}/CreateVM_Task"
+_GATED_CHILD_CONNECTOR_ID = "vmware-rest-9.0"
+
+#: Records the ``parent_audit_id_var`` value observed inside the direct-seam
+#: composite handler, so the park-verbatim test can assert the composite's
+#: audit id reached the seam (it was ``None`` before #3348).
+_direct_seam_parent_ids: list[UUID | None] = []
+
+
+async def _direct_seam_gate_then_continue(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Gate a ``dangerous`` write child on the direct seam, then continue.
+
+    Mirrors a write composite migrated off ``dispatch_child`` (#2254): it
+    re-applies the policy/approval gate around a governed sub-op via
+    :func:`enforce_subop_policy`. For a service principal with no covering
+    grant the ``dangerous`` child parks (a durable :class:`ApprovalRequest`
+    + an ``approval.request`` audit row). This handler records the park and
+    returns a normal summary, so the composite's own DISPATCH audit row is
+    persisted -- the child then reconstructs under it via ``parent_audit_id``.
+    """
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_GATED_CHILD_CONNECTOR_ID,
+        op_id=_GATED_CHILD_OP_ID,
+        safety_level="dangerous",
+        requires_approval=False,
+        target=target,
+        params={"name": params.get("vm_name", "vm-child")},
+    )
+    return {"child_gate_status": gate.status if gate is not None else "auto-execute"}
+
+
+async def _direct_seam_gate_return_verbatim(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> Any:
+    """Gate a ``dangerous`` write child and return the park verbatim.
+
+    The faithful write-composite shape: the first governed child that parks
+    short-circuits the composite and the handler returns the
+    ``awaiting_approval`` :class:`OperationResult` verbatim (the dispatcher
+    passes a handler-returned result straight through, writing no composite
+    DISPATCH row). Records the ``parent_audit_id_var`` seen inside the body
+    so the test can assert the composite's audit id reached the seam.
+    """
+    _direct_seam_parent_ids.append(parent_audit_id_var.get())
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_GATED_CHILD_CONNECTOR_ID,
+        op_id=_GATED_CHILD_OP_ID,
+        safety_level="dangerous",
+        requires_approval=False,
+        target=target,
+        params={"name": params.get("vm_name", "vm-child")},
+    )
+    if gate is not None:
+        return gate
+    return {"created": True}
 
 
 # ---------------------------------------------------------------------------
@@ -929,3 +1004,134 @@ async def test_dispatch_composite_child_inherits_target_unless_overridden(
     # The child handler echoed its target.id; the override wins over
     # the parent's target.
     assert child_result["target_id"] == str(alt_target_id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_direct_seam_child_park_records_parent_lineage(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A child parked on the direct ``enforce_subop_policy`` seam links to its composite.
+
+    Regression for #3348. The composite branch now binds
+    ``parent_audit_id_var`` to the composite's own ``audit_id`` for the
+    *whole* handler body, so a child that parks via the direct seam (not
+    only the recursive ``dispatch_child`` seam) records the composite as
+    its ``parent_audit_id``. Before the fix the child's ``approval.request``
+    audit row carried ``parent_audit_id = NULL`` and the G8.2 replay walk
+    could not attribute the fanned-out write to its composite (orphan).
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _insert_composite_descriptor(
+        session=session,
+        op_id="vault.composite.gated_direct_write",
+        handler_ref="tests.test_operations_composite._direct_seam_gate_then_continue",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    # A service principal running a blueprint, with no covering grant --
+    # the ``dangerous`` child parks for human approval (#3152).
+    operator = _make_operator(principal_kind=PrincipalKind.SERVICE)
+    target = _FakeTarget(product="vault")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.composite.gated_direct_write",
+        target=target,
+        params={"vm_name": "vm-under-test"},
+    )
+    # The composite continued past the park and completed, so its own
+    # DISPATCH row is persisted (the parent the child reconstructs under).
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["child_gate_status"] == "awaiting_approval"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        # Exactly one pending approval was written -- for the gated child.
+        pending = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+        assert len(pending) == 1
+        request = pending[0]
+        assert request.op_id == _GATED_CHILD_OP_ID
+        assert request.connector_id == _GATED_CHILD_CONNECTOR_ID
+        assert request.status == ApprovalRequestStatus.PENDING.value
+
+        # The composite's own DISPATCH row -- a top-level dispatch, no parent.
+        composite_row = (
+            await fresh.execute(
+                select(AuditLog).where(AuditLog.path == "vault.composite.gated_direct_write")
+            )
+        ).scalar_one()
+        assert composite_row.parent_audit_id is None
+
+        # Criteria 1 + 2: the child's ``approval.request`` audit row (the row
+        # the approval entry anchors on via ``request_audit_id``) carries the
+        # composite as its parent -- no longer NULL.
+        child_row = await fresh.get(AuditLog, request.request_audit_id)
+        assert child_row is not None
+        assert child_row.path == "approval.request"
+        assert child_row.parent_audit_id == composite_row.id
+
+        # Criterion 3: the audit-replay walk reconstructs the chain -- the
+        # child surfaces when walking down from the composite id.
+        children = (
+            await fresh.execute(
+                select(AuditLog.id, AuditLog.parent_audit_id).where(
+                    AuditLog.parent_audit_id == composite_row.id
+                )
+            )
+        ).all()
+        assert request.request_audit_id in {row.id for row in children}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_composite_direct_seam_child_park_verbatim_not_orphaned(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The real write-composite shape (park returned verbatim) is not orphaned.
+
+    A governed write composite returns the child's ``awaiting_approval``
+    verbatim on the first parked sub-op, so the dispatcher passes it straight
+    through and writes no composite DISPATCH row. The bind still fired for the
+    handler body, so the child's ``approval.request`` audit row carries the
+    composite's ``audit_id`` -- ``None`` before #3348.
+    """
+    _direct_seam_parent_ids.clear()
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await _insert_composite_descriptor(
+        session=session,
+        op_id="vault.composite.gated_direct_write_verbatim",
+        handler_ref="tests.test_operations_composite._direct_seam_gate_return_verbatim",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    operator = _make_operator(principal_kind=PrincipalKind.SERVICE)
+    target = _FakeTarget(product="vault")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.composite.gated_direct_write_verbatim",
+        target=target,
+        params={"vm_name": "vm-under-test"},
+    )
+    # The park propagates to the caller verbatim.
+    assert result.status == "awaiting_approval", result.error
+
+    # The bind fired: the seam saw the composite's audit id, not None.
+    assert len(_direct_seam_parent_ids) == 1
+    bound_parent = _direct_seam_parent_ids[0]
+    assert bound_parent is not None
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        request = (await fresh.execute(select(ApprovalRequest))).scalar_one()
+        assert request.op_id == _GATED_CHILD_OP_ID
+        child_row = await fresh.get(AuditLog, request.request_audit_id)
+        assert child_row is not None
+        # Not an orphan: the child's approval row carries the composite parent.
+        assert child_row.parent_audit_id == bound_parent

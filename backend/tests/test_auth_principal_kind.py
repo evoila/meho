@@ -313,7 +313,12 @@ def test_custom_service_account_username_claim(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_empty_prefix_disables_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty configured prefix disables the marker — a service account stays ``user``."""
+    """An empty prefix disables the username marker.
+
+    A token carrying only the service-account username (and none of the
+    client-credentials shape markers the S11 backstop keys on — no ``azp`` /
+    ``client_id``) then stays ``user``.
+    """
     monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
     key = _make_key("kid-empty-prefix")
     token = _mint(
@@ -322,6 +327,89 @@ def test_empty_prefix_disables_marker(monkeypatch: pytest.MonkeyPatch) -> None:
         extra_claims={"preferred_username": "service-account-deploy-bot"},
     )
     assert _classify(token, key, monkeypatch=monkeypatch) == "user"
+
+
+# ---------------------------------------------------------------------------
+# Marker-independent client-credentials shape classification (security review S11)
+# ---------------------------------------------------------------------------
+#
+# The #3178 username-prefix marker is disabled by an empty
+# JWT_SERVICE_ACCOUNT_USERNAME_PREFIX and silent when a realm omits or
+# renames the preferred_username mapper. A client-credentials token must
+# still classify as ``service`` in those configs — otherwise it defaults to
+# ``user`` and auto-executes the mutating caution/dangerous ops the #3152
+# gate would park (the S11 fail-open). The fail-close backstop keys on the
+# token *shape*: a client-identity claim (``azp`` / ``client_id``) with none
+# of the interactive-session claims (``auth_time`` / ``session_state`` /
+# ``sid``) a human authorization-code / direct-grant token carries.
+
+
+def test_client_credentials_shape_classifies_service_empty_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty prefix + client-credentials shape (``azp``, no session claims) → ``service``."""
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    key = _make_key("kid-ccred-empty-prefix")
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={
+            "azp": "deploy-bot",
+            "client_id": "deploy-bot",
+            # Prefix disabled: the #3178 username marker cannot fire, so the
+            # shape test alone must classify this as a service token.
+            "preferred_username": "service-account-deploy-bot",
+        },
+    )
+    assert _classify(token, key, monkeypatch=monkeypatch) == "service"
+
+
+def test_client_credentials_shape_classifies_service_absent_username() -> None:
+    """No username claim at all + ``azp``, no session claims → ``service``.
+
+    Default settings (prefix enabled) but the realm omits the
+    ``preferred_username`` mapper, so the #3178 marker is silent; the
+    shape test still resolves ``service``.
+    """
+    key = _make_key("kid-ccred-no-username")
+    token = _mint(key, principal_kind=None, extra_claims={"azp": "deploy-bot"})
+    assert _classify(token, key) == "service"
+
+
+def test_client_credentials_shape_via_client_id_only() -> None:
+    """RFC 9068 ``client_id`` (no ``azp``), no session claims → ``service``."""
+    key = _make_key("kid-ccred-client-id")
+    token = _mint(key, principal_kind=None, extra_claims={"client_id": "deploy-bot"})
+    assert _classify(token, key) == "service"
+
+
+@pytest.mark.parametrize("session_claim", ["auth_time", "session_state", "sid"])
+def test_interactive_token_with_session_claim_stays_user(session_claim: str) -> None:
+    """A token with a client id but an interactive-session claim stays ``user``.
+
+    An authorization-code / direct-grant human token carries ``azp`` (the
+    client it logged into) *and* a user-session claim. The shape test must
+    not upgrade it — the human-``user`` default-allow is preserved.
+    """
+    key = _make_key(f"kid-interactive-{session_claim}")
+    value: Any = 1700000000 if session_claim == "auth_time" else "sess-xyz"
+    token = _mint(
+        key,
+        principal_kind=None,
+        extra_claims={"azp": "meho-cli", "preferred_username": "alice", session_claim: value},
+    )
+    assert _classify(token, key) == "user"
+
+
+def test_explicit_user_claim_overrides_client_credentials_shape() -> None:
+    """An explicit ``principal_kind=user`` wins over the shape inference."""
+    key = _make_key("kid-explicit-user-ccred")
+    token = _mint(
+        key,
+        principal_kind="user",
+        extra_claims={"azp": "deploy-bot", "client_id": "deploy-bot"},
+    )
+    assert _classify(token, key) == "user"
 
 
 # ---------------------------------------------------------------------------

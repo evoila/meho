@@ -1052,6 +1052,30 @@ line. The `/result` read is deliberately **not** on this gate: it is
 principal-scoped on `principal_sub`, so an approver deciding a request it
 did not park gains no result-read rights.
 
+**Human-only on every transport (meho-internal#289).** `require_approvals_access`
+gates on *role/capability*, not on *what authenticated the request* — and an
+agent principal is minted `tenant_admin` with the REST audience
+(`auth/agent_principals.py`), so its client-credentials token clears that gate.
+The three decision verbs (`approve` / `reject` / `decide`) therefore carry a
+second, transport-independent dependency — `require_human_principal`
+(`auth/rbac.py`) — evaluated **before** the role floor: it refuses any machine
+`principal_kind` (`agent` / `service` / `runner`, the `MACHINE_PRINCIPAL_KINDS`
+frozenset in `auth/operator.py`, via the shared `is_human_principal` split) with
+403 `human_principal_required` and a remediation naming the console / CLI human
+path. This is the REST peer of the MCP transport's human-only block
+(`mcp/human_only.py`): removing the decision verbs from the agent surface there
+and refusing the machine kind here are **one** policy — approval is a human
+decision (v0.1-spec §7) — not two per-transport rules, and both consult the same
+`is_human_principal` split. The service-layer twin `_check_reviewer_role`
+enforces the same refusal for direct queue callers, raising `NonHumanApprovalError`
+(a `UnauthorizedApprovalError` subclass, so the routes still map it to 403), so
+the guard holds even for a caller that reaches the queue below the REST
+dependency. The **read** plane is deliberately unchanged — `GET` list/show stay
+on `require_approvals_access` alone — so a `service` principal (the
+meho-automation approval bridge) still lists the tenant queue. The gate removes
+only machine kinds: the `approver` capability model (#3243) and the seniority
+self-approval rules are preserved unchanged for **human** principals.
+
 The realm-side provisioning path for the `approver` claim — a group-based
 Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
 secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
@@ -1063,9 +1087,9 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
-| `POST` | `/api/v1/approvals/{id}/decide` | operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
-| `POST` | `/api/v1/approvals/{id}/reject` | operator **or** approver | Reject. The op never executes. |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 

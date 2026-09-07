@@ -393,11 +393,12 @@ async def _build_ingested_preview(
     # ``dispatch_ingested`` sends through -- no drift.
     #
     # ``resolve_ingested_request`` deliberately *raises* on a path-template
-    # fault (``KeyError`` for an unsubstituted path var, ``RuntimeError`` for
-    # a descriptor missing its method/path) because the execute path relies on
+    # fault (``KeyError`` for an unsubstituted path var, ``ValueError`` for a
+    # ``..`` path-traversal dot-segment value (#S04), ``RuntimeError`` for a
+    # descriptor missing its method/path) because the execute path relies on
     # the dispatcher's structured-error mapping (``dispatcher`` generic
     # ``except``) to convert them. The preview path has no such wrapper, so we
-    # catch those two -- and only those two -- here and map them to the same
+    # catch those three -- and only those -- here and map them to the same
     # structured ``error`` envelope every other preview fault returns, honouring
     # this module's documented never-raises contract (#2066). ``resolve_*``
     # itself is left untouched so the execute-path contract is unchanged.
@@ -409,7 +410,7 @@ async def _build_ingested_preview(
             target=target,
             params=params,
         )
-    except (KeyError, RuntimeError) as exc:
+    except (KeyError, ValueError, RuntimeError) as exc:
         return {
             "status": "error",
             "op_id": op_id,
@@ -418,7 +419,8 @@ async def _build_ingested_preview(
             "error": (
                 f"dispatch_error: the operation's request could not be resolved "
                 f"({exc}). This usually means a required path parameter was not "
-                "supplied or the descriptor is missing its method/path."
+                "supplied, a path value carried a '..' traversal segment, or the "
+                "descriptor is missing its method/path."
             ),
             "extras": {
                 "error_code": "dispatch_error",

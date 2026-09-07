@@ -64,6 +64,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vcf_logs.session import VcfLogsTargetLike
+from meho_backplane.operations._rfc6570 import has_dot_segment
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.vcf_logs.connector import VcfLogsConnector
@@ -88,11 +89,15 @@ _EVENTS_PATH_PREFIX = "/api/v2/events/"
 
 # RFC6570 §3.2.3 reserved-expansion safe-set — the gen-delims + sub-delims
 # that stay literal so vRLI's slash-delimited constraint chain reaches the
-# appliance intact. Mirrors the ingested dispatcher's ``_RFC6570_RESERVED_SAFE``
-# (``meho_backplane.operations._branches``); the shared behaviour is pinned by
-# ``test_event_query_path_keeps_reserved_constraint_slashes_literal`` so the
-# typed path and the ingested ``{+constraints}`` path cannot drift (#2003).
-_CONSTRAINTS_RESERVED_SAFE = ":/?#[]@!$&'()*+,;="
+# appliance intact. ``?`` and ``#`` are excluded (a constraint sub-path never
+# needs them, and leaving them literal would let an agent-supplied constraint
+# open a query string / fragment and address a resource the op's audit gate
+# never authorised, #S04); they encode to ``%3F`` / ``%23`` instead. Mirrors
+# the ingested dispatcher's ``_RFC6570_RESERVED_SAFE``
+# (``meho_backplane.operations._branches``) byte-for-byte; the shared behaviour
+# is pinned by ``test_event_query_path_keeps_reserved_constraint_slashes_literal``
+# so the typed path and the ingested ``{+constraints}`` path cannot drift (#2003).
+_CONSTRAINTS_RESERVED_SAFE = ":/[]@!$&'()*+,;="
 
 # vRLI caps an unbounded events query at the appliance default; the op exposes
 # ``limit`` so the agent can bound the pull explicitly (the adopter's incident
@@ -142,7 +147,21 @@ def build_event_query_path(constraints: str) -> str:
     literal on the wire while spaces / control chars still encode — identical to
     how the ingested dispatcher renders a ``{+constraints}`` template (#2003 /
     #2066).
+
+    A ``..`` path-traversal dot-segment in the chain is rejected with
+    :class:`ValueError` before encoding (#S04): the literal slashes that let a
+    genuine constraint chain through are the same slashes a ``..`` would use to
+    climb out of ``/api/v2/events/`` and address a different appliance
+    resource than the read-only op the audit gate authorised. ``?`` / ``#`` can
+    no longer open a query string / fragment either — they are outside the
+    safe-set and encode.
     """
+    if has_dot_segment(constraints):
+        raise ValueError(
+            "vrli.event.query: 'constraints' may not contain a '..' path-traversal "
+            "segment; compose the chain from field/OP value pairs without "
+            "parent-directory references"
+        )
     return _EVENTS_PATH_PREFIX + quote(constraints, safe=_CONSTRAINTS_RESERVED_SAFE)
 
 

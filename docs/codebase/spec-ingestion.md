@@ -484,7 +484,13 @@ stripping the operator from the template. `descriptor.path` keeps the operator
 verbatim — the renderer needs it to pick reserved expansion. The operator set
 both stages strip is shared via `operations/_rfc6570.RFC6570_PATH_OPERATORS`,
 so the property key and the lookup key can never drift (the keying-vs-rendering
-mismatch that made these ops undispatchable at v0.19.0). A spec declaring both
+mismatch that made these ops undispatchable at v0.19.0). Reserved expansion
+keeps `/` literal by design, so `_substitute_path` hardens the value before it
+renders (#S04): the reserved safe set excludes `?` / `#` (a path value can
+never open a query string or fragment) and a `..` traversal dot-segment
+(`operations/_rfc6570.has_dot_segment` — the same shared leaf) is rejected with
+`ValueError` before encoding, so the resolved wire path can never leave the op's
+declared template that the audit gate authorised. A spec declaring both
 `path` and `+path` as **path** parameters collapses onto the same bare key and
 raises `InvalidSchemaError` rather than silently dropping one. The collision
 guard is scoped to path-vs-path only: a name shared *across different* `in`

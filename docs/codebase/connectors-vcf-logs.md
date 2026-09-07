@@ -88,7 +88,12 @@ typed and profiled paths is proven in
   lifespan through the typed-op registrar (queued in the package
   `__init__`), so it dispatches with **zero catalog ingest** — no
   `endpoint_descriptor` ingested row. `build_event_query_path` renders the
-  reserved-expansion constraint sub-path with literal slashes (#2003/#2066).
+  reserved-expansion constraint sub-path with literal slashes (#2003/#2066),
+  and rejects a `..` traversal dot-segment (shared
+  `operations/_rfc6570.has_dot_segment`) before encoding — the literal slashes
+  that carry a genuine chain are also what a `..` would use to climb out of
+  `/api/v2/events/`; `?`/`#` are outside the safe set so a constraint can never
+  open a query string or fragment (#S04).
   Mirrors `vmware_rest/typed_ops.py` (`vmware.host.usage`, #2257) and
   `argocd/ops.py`.
 - **Re-exports of the shared module**: `VcfCredentialsLoader`,

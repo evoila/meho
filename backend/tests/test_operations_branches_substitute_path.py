@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from meho_backplane.operations._branches import _substitute_path
+from meho_backplane.operations._branches import _RFC6570_RESERVED_SAFE, _substitute_path
 
 
 def test_simple_expansion_encodes_reserved_slash() -> None:
@@ -78,3 +78,54 @@ def test_missing_param_still_raises_keyerror() -> None:
         _substitute_path("/v1/{+path}", {})
     with pytest.raises(KeyError):
         _substitute_path("/v1/{cluster}", {})
+
+
+# --- S04: reserved-expansion path-escape hardening -------------------------
+
+
+def test_reserved_safe_set_excludes_query_and_fragment_delimiters() -> None:
+    """``?`` / ``#`` are never in the reserved safe set (#S04).
+
+    Leaving them literal would let a caller-supplied ``{+var}`` value open a
+    query string or fragment and address a resource the op's audit gate never
+    authorised (which keys on ``descriptor.op_id``, not the resolved path).
+    """
+    assert "?" not in _RFC6570_RESERVED_SAFE
+    assert "#" not in _RFC6570_RESERVED_SAFE
+
+
+def test_reserved_expansion_encodes_query_and_fragment_delimiters() -> None:
+    """A ``?`` / ``#`` in a ``{+var}`` value is percent-encoded, not passed through."""
+    assert _substitute_path("/v1/{+p}", {"p": "a?b"}) == "/v1/a%3Fb"
+    assert _substitute_path("/v1/{+p}", {"p": "a#b"}) == "/v1/a%23b"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "..",  # bare
+        "../etc/passwd",  # leading
+        "a/../b",  # interior
+        "a/..",  # trailing
+        "../../etc/passwd",  # multi-level
+        "%2e%2e/x",  # already percent-encoded
+    ],
+)
+def test_dot_segment_value_is_rejected_before_substitution(value: str) -> None:
+    """A ``..`` dot-segment value raises ``ValueError`` before it reaches the wire.
+
+    Rejected in **both** expansion forms — a traversal segment is never a
+    legitimate path value, and reserved expansion keeps ``/`` literal so a
+    ``..`` there would climb out of the op's declared path (#S04). The
+    dispatcher surfaces the raise as a caller-side ``invalid_params`` fault.
+    """
+    with pytest.raises(ValueError, match="traversal"):
+        _substitute_path("/v1/{+p}", {"p": value})
+    with pytest.raises(ValueError, match="traversal"):
+        _substitute_path("/v1/{p}", {"p": value})
+
+
+def test_dot_in_a_larger_segment_is_data_not_a_dot_segment() -> None:
+    """``..`` embedded in a larger segment is data and passes through unchanged."""
+    assert _substitute_path("/v1/{+p}", {"p": "a..b"}) == "/v1/a..b"
+    assert _substitute_path("/v1/{+p}", {"p": "text/CONTAINS .."}) == "/v1/text/CONTAINS%20.."

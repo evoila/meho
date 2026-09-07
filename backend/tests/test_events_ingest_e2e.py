@@ -50,13 +50,16 @@ from ._event_source_helpers import (
 )
 
 _TENANT = uuid.UUID("33333333-3333-3333-3333-333333333333")
+#: Per-tenant, per-principal env-var name for ``agent:reactor`` in
+#: ``_TENANT`` (S10, #298).
+_ENV_REACTOR = (f"MEHO_AGENT_SECRET_{_TENANT.hex}_{b'agent:reactor'.hex()}").upper()
 _SECRET_VALUE = "e2e-hmac-key"
 
 
 @pytest.fixture(autouse=True)
 def _agent_secret_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # identity_ref ``agent:reactor`` -> ``AGENT_REACTOR`` client-credentials env.
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REACTOR", "test-secret")
+    monkeypatch.setenv(_ENV_REACTOR, "test-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

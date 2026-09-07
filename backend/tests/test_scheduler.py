@@ -108,6 +108,10 @@ from meho_backplane.scheduler.repository import (
 from meho_backplane.settings import get_settings
 
 _TENANT_A = uuid.UUID("11111111-1111-1111-1111-111111111111")
+#: Per-tenant, per-principal env-var name the scheduler now derives
+#: for ``agent:reporter`` in ``_TENANT_A`` (S10, #298 — hex client seg,
+#: tenant.hex, whole name uppercased).
+_ENV_REPORTER = (f"MEHO_AGENT_SECRET_{_TENANT_A.hex}_{b'agent:reporter'.hex()}").upper()
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +130,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     # Default seed identity_ref is ``agent:reporter`` -- sanitised by
     # ``agent_client_id_from_identity_ref`` to ``AGENT_REPORTER``.
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -861,7 +865,7 @@ async def test_one_off_with_unresolved_credentials_stays_active_and_fires_on_sec
     the row untouched; the next tick re-runs the gate and fires once
     the operator wires the env var.
     """
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     agent_id = await _seed_tenant_and_agent()
     trigger = await _create_one_off(
         agent_definition_id=agent_id,
@@ -879,7 +883,7 @@ async def test_one_off_with_unresolved_credentials_stays_active_and_fires_on_sec
     )
 
     # Wire the secret -- the next tick fires the long-overdue run.
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     fires_after = await run_one_tick(invoker=_make_invoker())
     assert fires_after == 1
     finalised = await _get_trigger(trigger.id)
@@ -1007,7 +1011,7 @@ async def test_cron_with_unresolved_credentials_stays_active_and_does_not_advanc
     overdue value; once the operator wires the secret, the next tick
     fires the missed instant and advances to the next cron match.
     """
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     agent_id = await _seed_tenant_and_agent()
     base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
     trigger = await _create_cron(agent_definition_id=agent_id, base=base)
@@ -1026,7 +1030,7 @@ async def test_cron_with_unresolved_credentials_stays_active_and_does_not_advanc
     # the advance.
     assert _aware(held.next_fire_at) == stuck_instant
 
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     fires_after = await run_one_tick(invoker=_make_invoker())
     assert fires_after == 1
     fired = await _get_trigger(trigger.id)
@@ -1614,7 +1618,7 @@ async def test_unresolved_credentials_skip_records_skip_state_on_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A credentials-unresolved skip projects reason + count onto the row (#2327)."""
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     agent_id = await _seed_tenant_and_agent()
     base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
     trigger = await _create_cron(agent_definition_id=agent_id, base=base)
@@ -1639,7 +1643,7 @@ async def test_missing_definition_skip_records_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deleted-definition skip stamps ``definition_missing`` on the row (#2327)."""
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     agent_id = await _seed_tenant_and_agent()
     trigger = await _create_cron(
         agent_definition_id=agent_id,
@@ -1677,7 +1681,7 @@ async def test_consecutive_skips_park_the_trigger(
     """
     from meho_backplane.scheduler.loop import _PARK_AFTER_CONSECUTIVE_SKIPS
 
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     agent_id = await _seed_tenant_and_agent()
     base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
     trigger = await _create_cron(agent_definition_id=agent_id, base=base)
@@ -1708,7 +1712,7 @@ async def test_successful_fire_clears_skip_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful fire resets the consecutive-skip streak to a clean row (#2327)."""
-    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    monkeypatch.delenv(_ENV_REPORTER, raising=False)
     agent_id = await _seed_tenant_and_agent()
     base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
     trigger = await _create_cron(agent_definition_id=agent_id, base=base)
@@ -1721,7 +1725,7 @@ async def test_successful_fire_clears_skip_state(
     assert skipped.last_skip_reason == "credentials_unresolved"
 
     # Wire the secret; the next tick fires and clears the skip state.
-    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    monkeypatch.setenv(_ENV_REPORTER, "test-secret")
     assert await run_one_tick(invoker=_make_invoker()) == 1
     fired = await _get_trigger(trigger.id)
     assert fired.skip_count == 0

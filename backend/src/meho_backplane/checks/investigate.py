@@ -1025,7 +1025,7 @@ async def _investigate_group(
         name, identity_ref = definition
 
         try:
-            client_id, secret = await resolve_agent_credentials(identity_ref)
+            client_id, secret = await resolve_agent_credentials(identity_ref, tenant_id=tenant_id)
         except AgentCredentialsUnresolvedError as exc:
             _log().warning(
                 "checks_investigation_credentials_unresolved",

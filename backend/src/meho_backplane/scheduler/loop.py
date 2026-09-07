@@ -561,6 +561,7 @@ async def _prepare_invocation(
     try:
         agent_client_id, agent_client_secret = await resolve_agent_credentials(
             definition.identity_ref,
+            tenant_id=row.tenant_id,
         )
     except AgentCredentialsUnresolvedError as exc:
         _log.warning(

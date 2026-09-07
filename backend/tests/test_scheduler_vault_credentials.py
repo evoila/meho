@@ -24,6 +24,7 @@ Vault. The live round-trip is covered by the integration suite.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +35,16 @@ from structlog.testing import capture_logs
 
 import meho_backplane.scheduler.vault_credentials as vc
 from meho_backplane.settings import get_settings
+
+#: A fixed tenant threaded through every read/write below (S10, #298 —
+#: the derivation is now per-(tenant, principal)).
+_TENANT = uuid.UUID("11111111-2222-3333-4444-555555555555")
+#: The path shape the default pattern renders for ``agent:reporter`` in
+#: ``_TENANT`` — recomputed here independently of the SUT so it pins the
+#: {tenant_id}_{client_id} contract rather than echoing it.
+_REPORTER_CLIENT_SEG = b"agent:reporter".hex().upper()
+_REPORTER_API_PATH = f"secret/data/agents/{_TENANT.hex}_{_REPORTER_CLIENT_SEG}/credentials"
+_REPORTER_LOGICAL = f"agents/{_TENANT.hex}_{_REPORTER_CLIENT_SEG}/credentials"
 
 
 def _async_return(value: Any) -> Callable[..., Any]:
@@ -180,9 +191,27 @@ def test_split_kv_v2_api_path_rejects_empty_logical(bad: str) -> None:
         vc.split_kv_v2_api_path(bad)
 
 
-def test_vault_path_for_client_id_sanitises_and_uppercases() -> None:
-    path = vc.vault_path_for_client_id("agent:reporter")
-    assert path == "secret/data/agents/AGENT_REPORTER/credentials"
+def test_vault_path_for_client_id_encodes_tenant_and_client() -> None:
+    path = vc.vault_path_for_client_id("agent:reporter", tenant_id=_TENANT)
+    assert path == _REPORTER_API_PATH
+
+
+def test_vault_path_distinct_for_separator_and_case_variants() -> None:
+    """S10 #298: name-variants that collapsed under the old sanitiser
+    (all -> ``AGENT_A_B``) now derive four *distinct* Vault paths."""
+    variants = ["agent:a-b", "agent:a_b", "agent:a.b", "agent:A-B"]
+    paths = {vc.vault_path_for_client_id(v, tenant_id=_TENANT) for v in variants}
+    assert len(paths) == len(variants)
+
+
+def test_vault_path_distinct_for_same_name_across_tenants() -> None:
+    """S10 #298: the same identity_ref in two tenants derives two distinct
+    Vault paths — the credential is scoped to its owning tenant."""
+    tenant_a = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    tenant_b = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    path_a = vc.vault_path_for_client_id("agent:reporter", tenant_id=tenant_a)
+    path_b = vc.vault_path_for_client_id("agent:reporter", tenant_id=tenant_b)
+    assert path_a != path_b
 
 
 # --- not configured ---------------------------------------------------
@@ -192,27 +221,27 @@ async def test_write_not_configured_raises(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
     get_settings.cache_clear()
     with pytest.raises(vc.SchedulerVaultNotConfiguredError):
-        await vc.write_agent_secret("agent:reporter", "s3cr3t")
+        await vc.write_agent_secret("agent:reporter", "s3cr3t", tenant_id=_TENANT)
 
 
 async def test_read_not_configured_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
     get_settings.cache_clear()
     with pytest.raises(vc.SchedulerVaultNotConfiguredError):
-        await vc.read_agent_secret("agent:reporter")
+        await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT)
 
 
 # --- write ------------------------------------------------------------
 
 
 async def test_write_persists_secret_at_derived_path(fake_kv: _FakeKvV2) -> None:
-    api_path = await vc.write_agent_secret("agent:reporter", "gen-secret")
+    api_path = await vc.write_agent_secret("agent:reporter", "gen-secret", tenant_id=_TENANT)
 
-    assert api_path == "secret/data/agents/AGENT_REPORTER/credentials"
+    assert api_path == _REPORTER_API_PATH
     assert len(fake_kv.writes) == 1
     write = fake_kv.writes[0]
     assert write["mount_point"] == "secret"
-    assert write["path"] == "agents/AGENT_REPORTER/credentials"
+    assert write["path"] == _REPORTER_LOGICAL
     assert write["secret"] == {vc.SECRET_FIELD: "gen-secret"}
 
 
@@ -222,7 +251,7 @@ async def test_write_unreachable_maps_to_broker_error(fake_kv: _FakeKvV2) -> Non
 
     fake_kv.create_or_update_secret = _boom  # type: ignore[assignment]
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
     # An unreachable Vault is already an unambiguous diagnosis; the
     # write path must not spend a lookup-self on it (#2652).
     assert excinfo.value.token_invalid is False
@@ -244,7 +273,7 @@ async def test_write_non_connection_transport_error_maps_to_broker_error(
 
     fake_kv.create_or_update_secret = _boom  # type: ignore[method-assign]
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
     assert excinfo.value.token_invalid is False
     assert fake_kv.token_api.lookup_calls == 0
 
@@ -267,7 +296,7 @@ async def test_write_denied_with_dead_token_sets_token_invalid(fake_kv: _FakeKvV
     fake_kv.token_api.lookup_raises = hvac.exceptions.Forbidden("permission denied")
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is True
     assert fake_kv.token_api.lookup_calls == 1
@@ -283,7 +312,7 @@ async def test_write_denied_with_live_token_keeps_policy_disposition(
     fake_kv.token_api.lookup_result = {"data": {"ttl": 2764800, "expire_time": None}}
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is False
     assert fake_kv.token_api.lookup_calls == 1
@@ -297,7 +326,7 @@ async def test_write_denied_with_unreachable_lookup_stays_conservative(
     fake_kv.token_api.lookup_raises = requests.exceptions.ConnectionError("down")
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is False
 
@@ -334,7 +363,7 @@ async def test_only_a_403_lookup_proves_the_token_is_dead(
     fake_kv.token_api.lookup_raises = lookup_error
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is expected_token_invalid
     assert fake_kv.token_api.lookup_calls == 1
@@ -362,7 +391,7 @@ async def test_non_403_write_rejection_skips_the_probe(
     fake_kv.create_or_update_secret = _boom  # type: ignore[assignment]
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is False
     assert fake_kv.token_api.lookup_calls == 0
@@ -400,10 +429,10 @@ async def test_read_returns_secret(fake_kv: _FakeKvV2) -> None:
     fake_kv.read_result = {
         "data": {"data": {vc.SECRET_FIELD: "gen-secret"}, "metadata": {"version": 1}}
     }
-    secret = await vc.read_agent_secret("agent:reporter")
+    secret = await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT)
     assert secret == "gen-secret"
     assert fake_kv.last_read == {
-        "path": "agents/AGENT_REPORTER/credentials",
+        "path": _REPORTER_LOGICAL,
         "mount_point": "secret",
     }
 
@@ -411,30 +440,30 @@ async def test_read_returns_secret(fake_kv: _FakeKvV2) -> None:
 async def test_read_missing_path_returns_none(fake_kv: _FakeKvV2) -> None:
     """A KV-v2 read of a non-existent path (InvalidPath) returns ``None``."""
     fake_kv.read_raises = hvac.exceptions.InvalidPath("404")
-    assert await vc.read_agent_secret("agent:reporter") is None
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) is None
 
 
 async def test_read_missing_field_returns_none(fake_kv: _FakeKvV2) -> None:
     """A payload without the secret field is treated as 'not in Vault'."""
     fake_kv.read_result = {"data": {"data": {"other": "x"}, "metadata": {}}}
-    assert await vc.read_agent_secret("agent:reporter") is None
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) is None
 
 
 async def test_read_malformed_payload_returns_none(fake_kv: _FakeKvV2) -> None:
     fake_kv.read_result = {"data": {}}
-    assert await vc.read_agent_secret("agent:reporter") is None
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) is None
 
 
 async def test_read_unreachable_maps_to_broker_error(fake_kv: _FakeKvV2) -> None:
     fake_kv.read_raises = requests.exceptions.Timeout("slow")
     with pytest.raises(vc.SchedulerVaultBrokerError):
-        await vc.read_agent_secret("agent:reporter")
+        await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT)
 
 
 async def test_read_vault_error_maps_to_broker_error(fake_kv: _FakeKvV2) -> None:
     fake_kv.read_raises = hvac.exceptions.Forbidden("denied")
     with pytest.raises(vc.SchedulerVaultBrokerError):
-        await vc.read_agent_secret("agent:reporter")
+        await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT)
 
 
 # --- renew-on-use (#2328) --------------------------------------------
@@ -442,12 +471,12 @@ async def test_read_vault_error_maps_to_broker_error(fake_kv: _FakeKvV2) -> None
 
 async def test_read_renews_token_on_success(fake_kv: _FakeKvV2) -> None:
     fake_kv.read_result = {"data": {"data": {vc.SECRET_FIELD: "s"}, "metadata": {}}}
-    assert await vc.read_agent_secret("agent:reporter") == "s"
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) == "s"
     assert fake_kv.token_api.renew_calls == 1
 
 
 async def test_write_renews_token_on_success(fake_kv: _FakeKvV2) -> None:
-    await vc.write_agent_secret("agent:reporter", "s")
+    await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
     assert fake_kv.token_api.renew_calls == 1
 
 
@@ -455,14 +484,14 @@ async def test_renew_failure_does_not_break_read(fake_kv: _FakeKvV2) -> None:
     """A failed best-effort renew is swallowed — the read still returns."""
     fake_kv.read_result = {"data": {"data": {vc.SECRET_FIELD: "s"}, "metadata": {}}}
     fake_kv.token_api.renew_raises = hvac.exceptions.Forbidden("not renewable")
-    assert await vc.read_agent_secret("agent:reporter") == "s"
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) == "s"
     assert fake_kv.token_api.renew_calls == 1
 
 
 async def test_missing_path_read_does_not_renew(fake_kv: _FakeKvV2) -> None:
     """InvalidPath (secret absent) returns before the renew step."""
     fake_kv.read_raises = hvac.exceptions.InvalidPath("404")
-    assert await vc.read_agent_secret("agent:reporter") is None
+    assert await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT) is None
     assert fake_kv.token_api.renew_calls == 0
 
 
@@ -586,9 +615,9 @@ async def test_write_dead_token_self_heals_and_retries(
     monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
     monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
 
-    api_path = await vc.write_agent_secret("agent:reporter", "s3cr3t")
+    api_path = await vc.write_agent_secret("agent:reporter", "s3cr3t", tenant_id=_TENANT)
 
-    assert api_path == "secret/data/agents/AGENT_REPORTER/credentials"
+    assert api_path == _REPORTER_API_PATH
     assert len(jwt_calls) == 1  # a jwt_login occurred
     assert jwt_calls[0]["role"] == "meho-mcp"  # vault_oidc_role fallback (#2757)
     assert jwt_calls[0]["jwt"] == "runner-jwt"
@@ -625,7 +654,7 @@ async def test_read_dead_token_self_heals_and_retries(
     monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
     monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
 
-    secret = await vc.read_agent_secret("agent:reporter")
+    secret = await vc.read_agent_secret("agent:reporter", tenant_id=_TENANT)
 
     assert secret == "gen-secret"  # the retry against the re-minted client won
     assert len(jwt_calls) == 1
@@ -644,7 +673,7 @@ async def test_dead_token_remint_unavailable_falls_back_loud(fake_kv: _FakeKvV2)
     fake_kv.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is True
     assert fake_kv.writes == []
@@ -669,7 +698,7 @@ async def test_selfheal_retry_failure_fails_loud(
     monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is True
     assert kv.writes == []
@@ -689,7 +718,7 @@ async def test_remint_login_denied_falls_back_loud(
     monkeypatch.setattr(vc, "_to_thread_jwt_login", _login_denied)
 
     with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
-        await vc.write_agent_secret("agent:reporter", "s")
+        await vc.write_agent_secret("agent:reporter", "s", tenant_id=_TENANT)
 
     assert excinfo.value.token_invalid is True
     assert fake_kv_any_token.writes == []

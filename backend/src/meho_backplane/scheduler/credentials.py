@@ -36,38 +36,45 @@ When **neither** source yields a secret, the resolver raises
 loop logs ``scheduler_credentials_unresolved`` and leaves the trigger
 ``active`` for the next tick).
 
-Identity-ref -> client-id derivation
-------------------------------------
+Per-principal, per-tenant key derivation (security S10, #298)
+-------------------------------------------------------------
 
-``AgentDefinition.identity_ref`` is the Keycloak client-id reference
-set at definition-create time, in the form ``agent:<name>`` (see
-:mod:`~meho_backplane.agents.service` -- the create path normalises
-the reference). The client-id portion is what the
-``client_credentials`` grant authenticates as, so the env-var key the
-scheduler derives is rooted at the bare ``identity_ref`` (sanitised
-for env-var conventions).
+Both the Vault path and the env-var name are derived from **two** inputs
+— the agent's ``identity_ref`` *and* the owning ``tenant_id`` — so that
+two distinct principals can never resolve to the same storage key:
 
-The pattern's ``{client_id}`` placeholder is substituted with the
-sanitised identity_ref:
+* ``AgentDefinition.identity_ref`` is the Keycloak client-id reference
+  set at definition-create time, in the form ``agent:<name>`` /
+  ``runner:<name>``. Its ``{client_id}`` segment is derived by
+  :func:`agent_client_id_from_identity_ref`, a **reversible, injective**
+  hex encoding of the UTF-8 bytes — *not* a lossy sanitiser. The old
+  ``[^A-Za-z0-9_]`` -> ``_`` collapse mapped ``agent:a-b``, ``agent:a_b``
+  and ``agent:a.b`` onto one key (``AGENT_A_B``); the hex encoding keeps
+  them distinct (``6167656e743a612d62`` etc.), and because hex is a
+  byte-level encoding it survives the trailing ``upper()`` without
+  re-colliding case variants (``agent:a-b`` vs ``agent:A-B``).
+* ``{tenant_id}`` is the owning tenant's UUID rendered as ``.hex``. The
+  scheduler / event-matcher / checks-investigator read under the
+  **trigger's** tenant, which is the tenant the principal was registered
+  under, so read and write derive the same key. A principal registered
+  in a different tenant resolves to a different key — the tenant-isolation
+  invariant this filing exists to enforce.
 
-* Non-alphanumeric characters (``:``, ``/``, ``-``, ``.``, ...) collapse
-  to ``_`` so an ``identity_ref`` like ``agent:incident-triage`` is
-  reachable as ``AGENT_INCIDENT_TRIAGE`` (the only env-var-legal form
-  of that string).
-* The whole substituted name is upper-cased.
-* Default pattern ``MEHO_AGENT_SECRET_{client_id}`` therefore yields
-  ``MEHO_AGENT_SECRET_AGENT_INCIDENT_TRIAGE``.
+The env-var name applies a final ``upper()`` across the whole substituted
+pattern; the hex ``{client_id}`` and hex ``{tenant_id}`` are both
+``upper()``-stable, so the uppercase env name and the (mixed-case) Vault
+path address the same logical principal.
 
 :func:`agent_client_id_from_identity_ref` is deterministic + pure (no
-side effects, no I/O) so the env-var-name derivation can be unit-tested
-without fixtures. :func:`resolve_agent_credentials` performs a Vault read
-(I/O) before falling back to :func:`os.environ`.
+side effects, no I/O) so the key derivation can be unit-tested without
+fixtures. :func:`resolve_agent_credentials` performs a Vault read (I/O)
+before falling back to :func:`os.environ`.
 """
 
 from __future__ import annotations
 
 import os
-import re
+import uuid
 
 import structlog
 
@@ -79,70 +86,93 @@ __all__ = [
     "AgentCredentialsUnresolvedError",
     "agent_client_id_from_identity_ref",
     "resolve_agent_credentials",
+    "tenant_key_segment",
 ]
-
-#: Pattern matching any character that is not legal in an env-var name.
-#: POSIX env names are ``[A-Z_][A-Z0-9_]*``; the sanitisation here uses
-#: the same alphabet plus a lowercase tolerance (the post-substitution
-#: ``upper()`` lifts it). Anchored as a class so :func:`re.sub` walks
-#: the string once with no backtracking.
-_ENV_NAME_FORBIDDEN: re.Pattern[str] = re.compile(r"[^A-Za-z0-9_]")
 
 
 class AgentCredentialsUnresolvedError(RuntimeError):
     """The scheduler could not source credentials for a scheduled fire.
 
-    Raised when the env-var (or future Vault path) the pattern resolves
-    to is not present / empty. The scheduler loop catches this, logs +
-    audits the skip, and leaves the trigger ``active`` so an operator
-    who wires the secret unblocks the schedule on the next tick.
+    Raised when neither the Vault path nor the env-var fallback the
+    pattern resolves to yields a secret. The scheduler loop catches this,
+    logs + audits the skip, and leaves the trigger ``active`` so an
+    operator who wires the secret unblocks the schedule on the next tick.
     """
 
 
 def agent_client_id_from_identity_ref(identity_ref: str) -> str:
-    """Return the env-var-safe client-id derived from *identity_ref*.
+    """Return the storage-key ``{client_id}`` segment for *identity_ref*.
 
-    Sanitises by replacing every non-``[A-Za-z0-9_]`` character with
-    ``_``. Preserves case for the caller's later
-    upper-/lower-casing; the secret-key pattern in
-    :attr:`Settings.scheduler_agent_secret_env_pattern` applies the
-    final ``upper()`` after the substitution.
+    A **reversible, injective** hex encoding of the ``identity_ref``'s
+    UTF-8 bytes (``bytes.fromhex(result).decode("utf-8")`` recovers the
+    original). Two distinct identity refs always produce two distinct
+    segments — the property the per-principal Vault path and env-var name
+    depend on (security S10, #298).
 
-    Pure / deterministic. Callers should not rely on the result being
-    reversible -- ``agent:x:y`` and ``agent_x_y`` map to the same
-    sanitised form on purpose (env-vars are a flat namespace).
+    This replaces the pre-#298 lossy sanitiser that collapsed every
+    non-``[A-Za-z0-9_]`` character to ``_``: that mapped ``agent:a-b``,
+    ``agent:a_b`` and ``agent:a.b`` onto the same key, so a second
+    registration silently clobbered the first's stored secret. Hex is a
+    byte-level encoding, so it also survives the callers' trailing
+    ``upper()`` without re-colliding case variants (``agent:a-b`` vs
+    ``agent:A-B``) — every byte difference is preserved as a distinct
+    hex digit pair, and ``upper()`` only lifts ``a``-``f`` to ``A``-``F``
+    uniformly.
+
+    Pure / deterministic — no I/O, no settings read.
     """
-    return _ENV_NAME_FORBIDDEN.sub("_", identity_ref)
+    return identity_ref.encode("utf-8").hex()
 
 
-def _env_var_name_for(identity_ref: str) -> str:
-    """Return the env-var name the secret pattern resolves to for *identity_ref*.
+def tenant_key_segment(tenant_id: uuid.UUID) -> str:
+    """Return the storage-key ``{tenant_id}`` segment for *tenant_id*.
 
-    Substitutes the sanitised + upper-cased identity_ref into
+    The UUID's 32-hex-digit ``.hex`` form: env-var-legal (no hyphens) and
+    Vault-path-legal, and — being fixed-width with no ``_`` — unambiguous
+    when concatenated with the ``{client_id}`` segment under a ``_``
+    separator. Pure / deterministic.
+    """
+    return tenant_id.hex
+
+
+def _env_var_name_for(identity_ref: str, tenant_id: uuid.UUID) -> str:
+    """Return the env-var name the secret pattern resolves to.
+
+    Substitutes the per-tenant ``{tenant_id}`` segment and the reversible
+    ``{client_id}`` segment into
     :attr:`Settings.scheduler_agent_secret_env_pattern`, then upper-cases
     the whole result. Operators who set a non-upper-cased pattern (e.g.
-    ``meho_agent_secret_{client_id}``) otherwise resolve to a mixed-case
-    env-var name that Linux's case-sensitive lookup would miss — the
-    precondition gate would skip every fire with a
+    ``meho_agent_secret_{tenant_id}_{client_id}``) otherwise resolve to a
+    mixed-case env-var name that Linux's case-sensitive lookup would miss
+    — the precondition gate would then skip every fire with a
     ``credentials_unresolved`` warning pointing at the secret rather than
     the case-mismatch. The contract is "the whole substituted name is
-    upper-cased"; this makes the code match it.
+    upper-cased"; this makes the code match it. Both hex segments are
+    ``upper()``-stable, so the uppercase env name still names a distinct
+    key per principal.
     """
     settings = get_settings()
-    sanitised = agent_client_id_from_identity_ref(identity_ref).upper()
-    return settings.scheduler_agent_secret_env_pattern.format(client_id=sanitised).upper()
+    client_seg = agent_client_id_from_identity_ref(identity_ref)
+    return settings.scheduler_agent_secret_env_pattern.format(
+        tenant_id=tenant_key_segment(tenant_id),
+        client_id=client_seg,
+    ).upper()
 
 
-def _secret_from_env(identity_ref: str) -> str:
+def _secret_from_env(identity_ref: str, tenant_id: uuid.UUID) -> str:
     """Return the agent secret from the env var, or ``""`` when unset/empty."""
-    return os.environ.get(_env_var_name_for(identity_ref), "").strip()
+    return os.environ.get(_env_var_name_for(identity_ref, tenant_id), "").strip()
 
 
-async def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
+async def resolve_agent_credentials(identity_ref: str, *, tenant_id: uuid.UUID) -> tuple[str, str]:
     """Resolve ``(client_id, client_secret)`` for a scheduled-fire agent.
 
-    *identity_ref* is :attr:`AgentDefinition.identity_ref` (the
-    Keycloak client-id reference set at definition-create time).
+    *identity_ref* is :attr:`AgentDefinition.identity_ref` (the Keycloak
+    client-id reference set at definition-create time). *tenant_id* is the
+    owning tenant of the firing trigger / dashboard — the same tenant the
+    principal was registered under, so the read derives the key the write
+    used. A principal registered in a different tenant resolves to a
+    different key and does not leak across the tenant boundary (S10 #298).
 
     **Vault-first** (G0.19-T2 #1478): the secret is read from Vault under
     the scheduler's static service token, falling back to the env-var
@@ -163,7 +193,7 @@ async def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
             active for the next tick.
     """
     # Local import avoids a module-load cycle (vault_credentials imports
-    # this module's sanitiser for its Vault-path derivation).
+    # this module's key-segment helpers for its Vault-path derivation).
     from meho_backplane.scheduler.vault_credentials import (
         SchedulerVaultBrokerError,
         SchedulerVaultNotConfiguredError,
@@ -172,7 +202,7 @@ async def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
 
     # 1. Vault-first.
     try:
-        vault_secret = await read_agent_secret(identity_ref)
+        vault_secret = await read_agent_secret(identity_ref, tenant_id=tenant_id)
     except SchedulerVaultNotConfiguredError:
         # No scheduler Vault identity wired — fall through to the env-var
         # path silently (the documented fallback configuration).
@@ -192,15 +222,16 @@ async def resolve_agent_credentials(identity_ref: str) -> tuple[str, str]:
         return identity_ref, vault_secret
 
     # 2. Env-var fallback / break-glass.
-    env_secret = _secret_from_env(identity_ref)
+    env_secret = _secret_from_env(identity_ref, tenant_id)
     if env_secret:
         return identity_ref, env_secret
 
-    env_name = _env_var_name_for(identity_ref)
+    env_name = _env_var_name_for(identity_ref, tenant_id)
     raise AgentCredentialsUnresolvedError(
-        f"no client_credentials secret resolved for identity_ref={identity_ref!r}; "
-        f"neither the Vault path (scheduler_agent_vault_path_pattern, read under "
-        f"VAULT_SCHEDULER_TOKEN) nor the fallback env var {env_name!r} yielded a "
-        "secret. Register the agent over the API (persists the secret to Vault) or "
-        "wire the agent's Keycloak client secret into the backplane pod env and retry."
+        f"no client_credentials secret resolved for identity_ref={identity_ref!r} "
+        f"(tenant={tenant_id}); neither the Vault path "
+        f"(scheduler_agent_vault_path_pattern, read under VAULT_SCHEDULER_TOKEN) "
+        f"nor the fallback env var {env_name!r} yielded a secret. Register the "
+        "agent over the API (persists the secret to Vault) or wire the agent's "
+        "Keycloak client secret into the backplane pod env and retry."
     )

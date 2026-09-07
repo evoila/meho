@@ -410,7 +410,7 @@ def _dash(
 
 
 def _patch_creds(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake(identity_ref: str) -> tuple[str, str]:
+    async def _fake(identity_ref: str, *, tenant_id: UUID) -> tuple[str, str]:
         return identity_ref, "secret"
 
     monkeypatch.setattr(inv, "resolve_agent_credentials", _fake)
@@ -961,7 +961,7 @@ async def test_credentials_unresolved_is_contained(monkeypatch: pytest.MonkeyPat
     await _seed_definition()
     stub = _install_stub()
 
-    async def _raise(identity_ref: str) -> tuple[str, str]:
+    async def _raise(identity_ref: str, *, tenant_id: UUID) -> tuple[str, str]:
         raise AgentCredentialsUnresolvedError("no secret")
 
     monkeypatch.setattr(inv, "resolve_agent_credentials", _raise)

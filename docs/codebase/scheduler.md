@@ -111,7 +111,8 @@ DBOS rebase swaps only the loop module.
                                                  |
                                                  v
                               +------------------------------------------+
-                              | resolve_agent_credentials(identity_ref)  |
+                              | resolve_agent_credentials(identity_ref,  |
+                              |     tenant_id=row.tenant_id)             |
                               |   -> (client_id, client_secret)          |
                               | AgentInvoker.run_scheduled(name, inputs, |
                               |     agent_client_id=..,                  |
@@ -130,34 +131,42 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
    `AgentDefinition.identity_ref` (e.g. `agent:reporter`). The
    `identity_ref` verbatim is the `client_id` passed to `run_scheduled`
    (Keycloak's namespace tolerates the `:` separator).
-2. `resolve_agent_credentials(identity_ref)` (in
+2. `resolve_agent_credentials(identity_ref, tenant_id=...)` (in
    [scheduler/credentials.py](../../backend/src/meho_backplane/scheduler/credentials.py))
-   sanitises the ref (non-alphanumeric chars to `_`, upper-case) and
-   resolves the secret:
+   derives the storage key from **two** inputs — the ref and the owning
+   `tenant_id` (the trigger's tenant) — and resolves the secret. The
+   `{client_id}` segment is a **reversible hex encoding** of the ref's
+   UTF-8 bytes (`agent_client_id_from_identity_ref`), not a lossy
+   sanitiser: two distinct principals — name-variants within a tenant
+   (`agent:a-b` vs `agent:a_b`), or the same name across tenants — never
+   collapse onto one key (security S10, #298):
    - **Vault (first).**
      [`read_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)
      reads the secret from `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
-     (default `secret/data/agents/{client_id}/credentials`) under
-     `VAULT_SCHEDULER_TOKEN`. The `{client_id}` token is **not** the raw
-     `identity_ref` — `vault_path_for_client_id` substitutes the
-     **sanitised, UPPER-CASED** form (non-alphanumeric chars to `_`,
-     then `.upper()`), the same shape the env-var key uses below. For
-     `agent:ops-writer` the resolved path is
-     `secret/data/agents/AGENT_OPS_WRITER/credentials` (not a raw
-     `agent:ops-writer` key). Both the read here and the write below call
-     this one helper, so the two paths cannot diverge — an operator
-     hand-provisioning the Vault secret or policy must target the
-     sanitised path. The raw KV-v2 API path is split into hvac's
+     (default `secret/data/agents/{tenant_id}_{client_id}/credentials`)
+     under `VAULT_SCHEDULER_TOKEN`. `vault_path_for_client_id`
+     substitutes `{tenant_id}` with the tenant's `.hex` and `{client_id}`
+     with the UPPER-CASED hex of the ref — so `agent:ops-writer` in
+     tenant `t` resolves to
+     `secret/data/agents/<t.hex>_<hex(agent:ops-writer)>/credentials`.
+     The default joins the two under one `_` (a single dynamic path
+     segment) so the deployed `secret/data/agents/*/credentials` ACL
+     keeps matching without a policy re-scope. Both the read here and the
+     write below call this one helper with the same tenant, so the two
+     paths cannot diverge. The raw KV-v2 API path is split into hvac's
      `(mount_point, logical_path)` form by `split_kv_v2_api_path`.
      This is the path registration writes to (see below), so an agent
      registered + defined purely over the API is schedulable with **no
      pod env var and no redeploy**. A missing path / unset token / read
-     error falls through to the env var.
+     error falls through to the env var. Because the read tenant is the
+     trigger's tenant, a principal registered in a *different* tenant
+     resolves to a different key and does not resolve here — the
+     tenant-isolation invariant.
    - **Env var (fallback / break-glass).** When Vault yields nothing,
      the secret is read from the env var derived from
      `SCHEDULER_AGENT_SECRET_ENV_PATTERN` (default
-     `MEHO_AGENT_SECRET_{client_id}`). For `agent:reporter` the
-     resolved env var is `MEHO_AGENT_SECRET_AGENT_REPORTER`. Operators
+     `MEHO_AGENT_SECRET_{tenant_id}_{client_id}`), threaded with the same
+     tenant + reversible client segment and upper-cased whole. Operators
      wire it the same way `ANTHROPIC_API_KEY` is wired when Vault is
      unavailable.
 3. When **neither** source yields a secret,
@@ -175,13 +184,15 @@ The write side: registering an agent principal
 captures the Keycloak-generated client secret (`get_client_secret`) and
 persists it to Vault at `SCHEDULER_AGENT_VAULT_PATH_PATTERN`
 ([`write_agent_secret`](../../backend/src/meho_backplane/scheduler/vault_credentials.py)),
-under the same scheduler service token. The write resolves the path
-through the **same** `vault_path_for_client_id` helper as the read, so it
-lands on the sanitised, UPPER-CASED path (`agent:ops-writer` →
-`secret/data/agents/AGENT_OPS_WRITER/credentials`) — write and read can
-never target different keys. A Vault-write failure rolls back the
-just-created Keycloak client so registration never produces an
-unschedulable agent.
+under the same scheduler service token, passing the **principal's**
+`tenant_id`. The write resolves the path through the **same**
+`vault_path_for_client_id` helper (and tenant) as the read, so it lands
+on the per-tenant, per-principal key
+(`secret/data/agents/<tenant.hex>_<hex(agent:ops-writer)>/credentials`)
+— write and read can never target different keys, and a name-variant or
+cross-tenant registration can no longer clobber another principal's
+secret (S10, #298). A Vault-write failure rolls back the just-created
+Keycloak client so registration never produces an unschedulable agent.
 
 `VAULT_SCHEDULER_TOKEN` is a static token bound to a narrow read/write
 policy on the agent-credentials path — the lowest-friction

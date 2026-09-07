@@ -121,11 +121,21 @@ async def test_claim_resume_concurrent_race_yields_exactly_one_winner(
     """N concurrent claims on one request resolve to exactly one winner (#2293).
 
     The real-row-lock proof the SQLite unit suite cannot give: fire eight
-    ``claim_resume`` calls at once against a single freshly-parked request;
+    ``claim_resume`` calls at once against a single approved request;
     exactly one wins the conditional UPDATE and the rest lose after it
     commits. ``resumed_at`` ends up stamped exactly once.
+
+    The claim requires the row to be ``approved`` in the same statement as
+    the single-resumer latch (security F12 / #274), so the request is
+    committed ``approved`` before the race — a resume can never follow a
+    non-approved transition.
     """
     request = await _commit_run_bound_pending(requester_sub="agent:race")
+
+    reviewer = _make_operator(sub="human:reviewer", kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as session:
+        await approve_request(session, request.id, operator=reviewer, params=None)
+        await session.commit()
     assert await _reload_resumed_at(request.id) is None
 
     outcomes = await asyncio.gather(*(claim_resume(request.id) for _ in range(8)))

@@ -678,6 +678,7 @@ async def test_meho_automation_list_conforms(
                 CapabilityDeclaration(kind=CapabilityKind.META_TOOL_FAMILY, name="automation"),
             ],
         ),
+        service_account_sub="svc-account-uuid",
     )
     payload = _assert_conforms("meho_automation_list", _call(client, "meho_automation_list", {}))
     assert [p["addon"] for p in payload["providers"]] == ["automation"]

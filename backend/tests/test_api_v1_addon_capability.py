@@ -97,15 +97,18 @@ def _token(
     )
 
 
-def _service_token(key: Any) -> str:
+def _service_token(key: Any, *, sub: str = "addon-svc") -> str:
     """A paired add-on's ``principal_kind=service`` / ``read_only`` token."""
-    return _token(key, sub="addon-svc", role=TenantRole.READ_ONLY, principal_kind="service")
+    return _token(key, sub=sub, role=TenantRole.READ_ONLY, principal_kind="service")
 
 
-def _mock_kc_ok() -> MagicMock:
+def _mock_kc_ok(*, sub: str = "addon-svc", internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
     mock_client = AsyncMock()
-    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
-    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
+    mock_client.create_client = AsyncMock(return_value=internal_id)
+    # The declare route now authorizes by the caller's service-account sub, so
+    # the pairing must capture the same sub the declaring service token carries
+    # (``addon-svc``) — otherwise a legitimate self-declaration would 404.
+    mock_client.get_service_account_user_id = AsyncMock(return_value=sub)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
     mock_client.delete_client = AsyncMock(return_value=None)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -304,3 +307,67 @@ async def test_show_activation_flips_with_pairing_health(client: TestClient) -> 
     body = unhealthy.json()
     assert body["active"] is False
     assert len(body["capabilities"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_declare_cannot_target_another_pairing(client: TestClient) -> None:
+    """Object-level authz: a paired service declares only its OWN surfaces.
+
+    Two paired add-ons share a tenant. Service A (bound to ``automation``)
+    cannot replace ``other``'s advertised surfaces; an unrelated service
+    subject is denied; A's own declaration still succeeds and B's surfaces are
+    left untouched.
+    """
+    await _seed_tenant()
+    key = make_rsa_keypair("kid-decl-authz")
+    admin = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        with patch(_PATCH_TARGET, _mock_kc_ok(sub="addon-svc")):
+            client.post(
+                "/api/v1/addons/pairings",
+                json={
+                    "name": "automation",
+                    "addon_contract_version": BACKPLANE_CONTRACT_VERSION,
+                    "addon_min_backplane_version": BACKPLANE_CONTRACT_VERSION,
+                },
+                headers=admin,
+            )
+        with patch(
+            _PATCH_TARGET,
+            _mock_kc_ok(sub="other-svc", internal_id="cc000000-0000-0000-0000-0000000cafe1"),
+        ):
+            client.post(
+                "/api/v1/addons/pairings",
+                json={
+                    "name": "other",
+                    "addon_contract_version": BACKPLANE_CONTRACT_VERSION,
+                    "addon_min_backplane_version": BACKPLANE_CONTRACT_VERSION,
+                },
+                headers=admin,
+            )
+
+        a = {"Authorization": f"Bearer {_service_token(key, sub='addon-svc')}"}
+        stranger = {"Authorization": f"Bearer {_service_token(key, sub='stranger-svc')}"}
+
+        # A cannot replace B's advertised surfaces — 404, indistinguishable
+        # from an absent pairing (never reveal another add-on's existence).
+        impersonate = client.put(
+            "/api/v1/addons/pairings/other/capabilities", json=_decl_body(), headers=a
+        )
+        assert impersonate.status_code == 404, impersonate.text
+        assert impersonate.json()["detail"] == "addon_not_paired"
+
+        # An unrelated service subject is denied on A's own surface.
+        outsider = client.put(_CAPS_URL, json=_decl_body(), headers=stranger)
+        assert outsider.status_code == 404, outsider.text
+
+        # A's own declaration still succeeds.
+        own = client.put(_CAPS_URL, json=_decl_body(), headers=a)
+        assert own.status_code == 200, own.text
+        assert own.json()["addon"] == "automation"
+
+        # B's surfaces were never touched by A's impersonation attempt.
+        b_view = client.get("/api/v1/addons/pairings/other/capabilities", headers=admin)
+        assert b_view.status_code == 200, b_view.text
+        assert b_view.json()["capabilities"] == []

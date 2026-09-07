@@ -59,7 +59,13 @@ permissions:
 jobs:
   readme-version:
     name: README Version Check
-    runs-on: meho-runners-ci
+    # Untrusted-PR runner isolation (F06, meho-internal#268). The check
+    # runs an inline shell against checked-out PR content; on a fork PR
+    # both the workflow body and the content are untrusted, and the job
+    # needs nothing internal (git history + tags only), so fork PRs are
+    # routed to a disposable GitHub-hosted runner while trusted refs
+    # stay on the internal pool. See docs/codebase/devops.md.
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

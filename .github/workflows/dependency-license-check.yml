@@ -74,7 +74,15 @@ jobs:
     # This carries the narrowing that used to live in `on.pull_request.
     # paths`. See the comment on that trigger above for why the filter
     # cannot stay there for a *required* check.
-    runs-on: meho-runners-ci
+    #
+    # Untrusted-PR runner isolation (F06, meho-internal#268). All three
+    # jobs here run PR-controlled build metadata — `pip install -e
+    # ./backend` executes the project's build backend, and the diff
+    # step runs against checked-out PR content — so a fork PR is routed
+    # to a disposable GitHub-hosted runner while trusted refs (same-repo
+    # PR, push, merge_group) stay on the internal pool. See
+    # docs/codebase/devops.md "Untrusted pull-request isolation".
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     outputs:
       manifests: ${{ steps.detect.outputs.manifests }}
@@ -113,7 +121,9 @@ jobs:
     name: Python License Check
     needs: changes
     if: needs.changes.outputs.manifests == 'true'
-    runs-on: meho-runners-ci
+    # Fork PRs to a disposable runner; trusted refs to the internal
+    # pool — see the `changes` job above (F06, meho-internal#268).
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -242,7 +252,9 @@ jobs:
     name: NPM License Check
     needs: changes
     if: needs.changes.outputs.manifests == 'true'
-    runs-on: meho-runners-ci
+    # Fork PRs to a disposable runner; trusted refs to the internal
+    # pool — see the `changes` job above (F06, meho-internal#268).
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

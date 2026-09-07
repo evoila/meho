@@ -39,7 +39,16 @@ called by **every** KV-v2 handler (`read`, `list`, `versions`, `put`,
 **before** the `vault_client_for_operator(...)` login. `read_only` is
 `True` for the read/list/versions handlers and `False` for
 put/patch/delete; it gates the platform-path exemption (below) to
-read-only verbs. On a violation it raises
+read-only verbs.
+
+The secret broker's vault-kv adapter
+([`connectors/secret/vault_endpoint.py`](../../backend/src/meho_backplane/connectors/secret/vault_endpoint.py),
+the `secret.move` source+sink) is a **second** KV-v2 read/write path, so
+it calls the same guard — `read_only=True` in `read_secret`, `read_only=False`
+in `write_secret`, each before its own `vault_client_for_operator(...)`
+login — so a cross-tenant `secret.move` is denied at the app layer before
+any Vault round-trip, exactly as a cross-tenant `vault.kv.*` call is (S08,
+[#296](https://github.com/evoila/meho/issues/296)). On a violation it raises
 `VaultTenantScopeError`; the dispatcher's `connector_error` branch wraps
 it into a structured `OperationResult` with
 `extras["exception_class"] == "VaultTenantScopeError"` — distinct from the

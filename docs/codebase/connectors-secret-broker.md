@@ -68,7 +68,13 @@ boundary redaction:
   field). Reads via `read_secret_version` + the KV-v2 `data.data`
   double-unwrap + `strip_credential_value`; writes via
   `create_or_update_secret` (a single-field body, `cas=None`). Both
-  through `vault_client_for_operator`.
+  through `vault_client_for_operator`. Because this is a **second** KV-v2
+  read/write path alongside the `vault.kv.*` handlers, both methods call
+  the default-on `enforce_tenant_scope` guard
+  ([`vault/tenant_scope.py`](connectors-vault-tenant-scope.md), `read_only=True`
+  on read, `read_only=False` on write) **before** the Vault login, so a
+  cross-tenant `secret.move` is denied at the app layer before any Vault
+  round-trip (S08, #296).
 - **`KeycloakCredentialSecretEndpoint`**
   (`connectors/keycloak/secret_endpoint.py`) — the second adapter (#1578),
   registered under kind `"keycloak"`. **Sink-only**: keycloak credentials
@@ -179,6 +185,11 @@ the posture and relies on the existing gate). The policy refinement
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar
   follow-up, not wired here.
+- **Tenant scope (S08, #296):** the vault-kv adapter enforces the same
+  default-on per-tenant subtree as the `vault.kv.*` handlers via
+  `enforce_tenant_scope` before each Vault call. The keycloak sink is a
+  Keycloak-admin path (not KV-v2) and is out of that guard's scope — it
+  already resolves its target through the tenant-scoped `resolve_target`.
 - The `reason` param is recorded for the approver/audit trail but is not
   read by the handler; it is surfaced to the approver in the ref-only
   `proposed_effect` summary (#1579).

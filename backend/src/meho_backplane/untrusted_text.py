@@ -14,6 +14,16 @@ compromised or adversarial session can plant instructions that a later
 reader would otherwise absorb as if they were trusted context (stored
 prompt injection).
 
+The same envelope also wraps the ``meho-docs`` add-on's **federated
+corpus chunk text** — external, third-party-controlled content, not
+agent-authored — at its LLM-facing read boundaries (the ``search_docs``
+and ``ask_docs`` tools, the ``ask_docs`` synthesis prompt, and the
+``meho://docs/{collection}/{product}/{version}/{chunk_id}`` resource),
+bringing the docs add-on to parity with kb / memory
+(evoila-bosnia/meho-internal#304). The provenance differs (federated
+vs. agent-authored) but the trust boundary is identical: chunk text is
+data to ground on, never a directive channel.
+
 The defence here is structural, not content-based: no filtering,
 scoring, or injection detection. The stored text is re-served intact,
 wrapped in a delimiter envelope with a guard sentence, so the reading
@@ -50,6 +60,8 @@ References
 ----------
 
 * Task: evoila-bosnia/meho-internal#154 (Goal #87 / Initiative #101).
+* Extension to the federated docs corpus:
+  evoila-bosnia/meho-internal#304 (Initiative #262).
 * Precedent: :mod:`meho_backplane.conventions.preamble`
   (``GUARD_PREFIX`` / ``BLOCK_START`` / ``BLOCK_END``).
 * Trust-boundary contract on the announcement fields:

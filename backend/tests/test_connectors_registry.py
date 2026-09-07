@@ -390,6 +390,16 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # the real get_settings() -> KeyError on KEYCLOAK_ISSUER_URL
                     # (this test pins no env).
                     flight_recorder_reaper_enabled=False,
+                    # S19 #307 added the audit raw-payload age-off reaper to
+                    # the lifespan, gated on RAW_PAYLOAD_PRUNE_ENABLED (default
+                    # on). Pin it off — a bare MagicMock attribute is truthy, so
+                    # without this the gate reads True and the real
+                    # start_audit_raw_payload_reaper is called, whose
+                    # task-creation yield lets the unconditionally started
+                    # topology refresh scheduler run one loop iteration, which
+                    # hits the real get_settings() -> KeyError on
+                    # KEYCLOAK_ISSUER_URL (this test pins no env).
+                    raw_payload_prune_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -458,6 +468,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # scheduler yield it triggers) back into this env-free test.
                 start_operation_run_reaper=MagicMock(),
                 stop_operation_run_reaper=AsyncMock(),
+                # S19 #307 audit raw-payload age-off reaper — same defensive
+                # patch (the gate above is pinned off) so a future default flip
+                # can't smuggle the real reaper (and the topology scheduler
+                # yield its task creation triggers) back into this env-free test.
+                start_audit_raw_payload_reaper=MagicMock(),
+                stop_audit_raw_payload_reaper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -548,6 +564,16 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # the real get_settings() -> KeyError on KEYCLOAK_ISSUER_URL
                     # (this test pins no env).
                     flight_recorder_reaper_enabled=False,
+                    # S19 #307 added the audit raw-payload age-off reaper to
+                    # the lifespan, gated on RAW_PAYLOAD_PRUNE_ENABLED (default
+                    # on). Pin it off — a bare MagicMock attribute is truthy, so
+                    # without this the gate reads True and the real
+                    # start_audit_raw_payload_reaper is called, whose
+                    # task-creation yield lets the unconditionally started
+                    # topology refresh scheduler run one loop iteration, which
+                    # hits the real get_settings() -> KeyError on
+                    # KEYCLOAK_ISSUER_URL (this test pins no env).
+                    raw_payload_prune_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -612,6 +638,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # scheduler yield it triggers) back into this env-free test.
                 start_operation_run_reaper=MagicMock(),
                 stop_operation_run_reaper=AsyncMock(),
+                # S19 #307 audit raw-payload age-off reaper — same defensive
+                # patch (the gate above is pinned off) so a future default flip
+                # can't smuggle the real reaper (and the topology scheduler
+                # yield its task creation triggers) back into this env-free test.
+                start_audit_raw_payload_reaper=MagicMock(),
+                stop_audit_raw_payload_reaper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

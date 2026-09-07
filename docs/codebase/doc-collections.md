@@ -329,8 +329,12 @@ entitled to no collection, so a non-docs tenant's preamble is
 token-capped (`MAX_CATALOGUE_TOKENS`); over-budget it renders a summary
 form pointing at `list_doc_collections` and logs
 `doc_catalogue_band_over_budget`, mirroring the priming band. The guard
-delimiters are wrapper-emitted (never substituted from row content), so a
-malicious `when_to_use` carrying the terminator cannot escape the block.
+delimiters are wrapper-emitted, but the metadata fields
+(`vendor` / `when_to_use` / `description`) are interpolated verbatim and
+constrained by length only, so `_neutralise_delimiters` rewrites any
+`BLOCK_START` / `BLOCK_END` substring in the rendered entry before
+wrapping -- a malicious `when_to_use` carrying the terminator cannot plant
+a second boundary, and the assembled band holds exactly one delimiter pair.
 
 ## Create / register a collection (#1739)
 

@@ -189,6 +189,50 @@ async def test_service_principal_safe_read_auto_executes() -> None:
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_client_credentials_shape_principal_parks_caution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-credentials token classified via the S11 shape test parks a caution op.
+
+    Ties the auth-layer classification (:func:`_extract_principal_kind`) to
+    the dispatch consequence: with the #3178 username-prefix marker disabled
+    (empty prefix), a client-credentials token — ``azp`` present, no
+    interactive-session claim — classifies ``service`` on the
+    marker-independent shape test, so a mutating ``caution`` op it dispatches
+    parks for a human decision instead of auto-executing (the S11 fail-open
+    this Task closes). Before the fix the same token defaulted to ``user``
+    and this op auto-executed (``enforce_subop_policy`` returning ``None``).
+    """
+    from meho_backplane.auth.jwt import _extract_principal_kind
+
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    get_settings.cache_clear()
+    settings = get_settings()
+    claims = {
+        "azp": "deploy-bot",
+        "client_id": "deploy-bot",
+        # Prefix disabled: the #3178 username marker cannot fire on this
+        # username, so only the shape test can classify it as a service token.
+        "preferred_username": "service-account-deploy-bot",
+    }
+    kind = _extract_principal_kind(claims, settings)
+    assert kind is PrincipalKind.SERVICE
+
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=kind),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert not await _grant_use_rows()
+
+
 # ---------------------------------------------------------------------------
 # standing grant clears the gate + records grant-use audit (#3151)
 # ---------------------------------------------------------------------------

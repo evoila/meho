@@ -52,15 +52,29 @@ always wins, but a Keycloak client-credentials client often carries **no**
 such claim (no `principal_kind` mapper), which historically fell back to
 the `user` default and left this whole gate — and any standing grants —
 silently inert. `_extract_principal_kind` therefore infers `service` for
-the **absent-claim** case when the token is positively identified as an IdP
-service account: its username claim (default `preferred_username`,
-`JWT_SERVICE_ACCOUNT_USERNAME_CLAIM`) bears Keycloak's reserved
-`service-account-<clientId>` prefix (default `service-account-`,
-`JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`). Fail-closed for the policy path:
-only a positive marker *upgrades*; any unrecognised shape stays `user`. As
-a residual-drift signal, `_non_agent_verdict` emits a WARN
-(`policy_gate_grant_holder_classified_non_service`) whenever a **parking**
-non-service principal still holds ≥1 live grant.
+the **absent-claim** case on either of two positive markers:
+
+1. **Username-prefix marker (#3178).** The token's username claim (default
+   `preferred_username`, `JWT_SERVICE_ACCOUNT_USERNAME_CLAIM`) bears
+   Keycloak's reserved `service-account-<clientId>` prefix (default
+   `service-account-`, `JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`).
+2. **Token-shape marker (security review S11, `_is_client_credentials_token`).**
+   Independent of the username mapper: the token carries a client-identity
+   claim (`azp` or the RFC 9068 `client_id`) and **none** of the
+   interactive-session claims (`auth_time` / `session_state` / `sid`) that
+   Keycloak stamps on an authorization-code / direct-grant token. This
+   backstops marker 1 for a realm that clears the prefix
+   (`JWT_SERVICE_ACCOUNT_USERNAME_PREFIX=""`) or omits/renames the
+   `preferred_username` mapper — the config-dependent fail-open S11 closed
+   (a false negative on marker 1 alone would have let a client-credentials
+   principal auto-execute a mutating `caution`/`dangerous` op).
+
+Fail-closed for the policy path: only a positive marker *upgrades*; any
+unrecognised shape stays `user`, and an interactive human token (which
+always carries a session claim) is never upgraded, so the `user`
+default-allow is preserved. As a residual-drift signal, `_non_agent_verdict`
+emits a WARN (`policy_gate_grant_holder_classified_non_service`) whenever a
+**parking** non-service principal still holds ≥1 live grant.
 
 **"Mutating" is grounded in existing descriptor fields** (no new column,
 `_is_mutating`): an ingested op is read-class iff its HTTP `method` ∈

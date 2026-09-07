@@ -18,8 +18,8 @@ Coverage matrix (per #1404 acceptance criteria):
   ``exit_code``.
 * Timeout: a socket that never closes is torn down at the deadline; the
   handler returns partial output + ``timed_out=true`` + ``exit_code=None``.
-* ``self._ws_api_clients`` is cached per ``secret_ref`` and closed on
-  ``aclose`` (no leaked sockets).
+* ``self._ws_api_clients`` is cached per target (the tenant-unique
+  ``(tenant_id, id)`` key) and closed on ``aclose`` (no leaked sockets).
 * 1 MiB cap: a stream over the cap is truncated from the front and
   ``truncated_byte_count`` is recorded.
 * ``stdin`` / ``tty`` are pinned ``False`` on the wire (no interactive
@@ -33,9 +33,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.stream.ws_client import (
@@ -68,6 +69,9 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: str
+    # Tenant-unique cache key components (#1642, security F04).
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET = _StubTarget(
@@ -488,7 +492,7 @@ async def test_exec_single_oversized_frame_is_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ws_client_cached_per_secret_ref_and_closed_on_aclose() -> None:
+async def test_ws_client_cached_per_target_and_closed_on_aclose() -> None:
     connector = _make_connector()
     operator = _make_operator()
 
@@ -515,8 +519,8 @@ async def test_ws_client_cached_per_secret_ref_and_closed_on_aclose() -> None:
         c1 = await connector._get_ws_api_client(_TARGET, operator)
         c2 = await connector._get_ws_api_client(_TARGET, operator)
 
-    assert c1 is c2, "second call must hit the per-secret_ref cache"
-    assert len(built) == 1, "only one WsApiClient built for one secret_ref"
+    assert c1 is c2, "second call must hit the per-target cache"
+    assert len(built) == 1, "only one WsApiClient built for one target"
     assert connector._cache_key(_TARGET) in connector._ws_api_clients
 
     await connector.aclose()

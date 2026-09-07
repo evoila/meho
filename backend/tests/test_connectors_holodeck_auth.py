@@ -56,6 +56,7 @@ import pytest
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors import all_connectors_v2
 from meho_backplane.connectors._shared.pwsh import PwshRunError
+from meho_backplane.connectors.adapters.ssh import SshHostKeyUnpinnedError
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.holodeck.connector import parse_photon_version
 from meho_backplane.connectors.registry import clear_registry
@@ -127,9 +128,18 @@ _FAKE_KEY_FOOTER = "-----END " + "OPENSSH PRIVATE KEY" + "-----"
 _CANARY_PRIVATE_KEY = f"{_FAKE_KEY_HEADER}\nFAKE-CANARY-KEY-BODY\n{_FAKE_KEY_FOOTER}\n"
 
 
-def _target_with_secret(name: str, secret: dict[str, Any]) -> _StubTarget:
+def _target_with_secret(
+    name: str, secret: dict[str, Any], *, pin_host_key: bool = True
+) -> _StubTarget:
     secret_path = f"meho/testing/holodeck/{name}"
-    _VAULT_SECRETS[secret_path] = secret
+    merged = dict(secret)
+    # HolodeckConnector inherits the base fail-closed host-key contract
+    # (#270); these credential-focused tests opt the throwaway targets out
+    # of verification so the credential branch is what is exercised. Pass
+    # ``pin_host_key=False`` to leave a secret unpinned (fail-closed case).
+    if pin_host_key and "known_hosts" not in merged and "known_hosts_insecure" not in merged:
+        merged["known_hosts_insecure"] = True
+    _VAULT_SECRETS[secret_path] = merged
     return _StubTarget(
         name=name,
         host=f"{name}.test.invalid",
@@ -257,7 +267,7 @@ async def test_auth_config_password_default() -> None:
     """Password-only secret -> ``{username, password}``; no key path taken."""
     connector = HolodeckConnector()
     auth = await connector._auth_config(_password_target())
-    assert auth == {"username": "root", "password": _CANARY_PASSWORD}
+    assert auth == {"username": "root", "known_hosts": None, "password": _CANARY_PASSWORD}
     assert "client_keys" not in auth
 
 
@@ -278,7 +288,7 @@ async def test_auth_config_key_preferred_when_present() -> None:
     # ``strip_credential_value`` trims the surrounding whitespace before
     # the key reaches asyncssh (#1474); internal newlines are preserved.
     imp.assert_called_once_with(_CANARY_PRIVATE_KEY.strip())
-    assert auth == {"username": "root", "client_keys": [stub_key]}
+    assert auth == {"username": "root", "known_hosts": None, "client_keys": [stub_key]}
     assert "password" not in auth
 
 
@@ -286,6 +296,18 @@ async def test_auth_config_raises_when_neither_credential_is_set() -> None:
     connector = HolodeckConnector()
     with pytest.raises(ValueError, match="ssh_private_key or password"):
         await connector._auth_config(_no_cred_target())
+
+
+async def test_auth_config_fails_closed_when_host_key_unconfigured() -> None:
+    """An unpinned secret (no pin, no opt-out) refuses before connecting (#270)."""
+    connector = HolodeckConnector()
+    target = _target_with_secret(
+        "holorouter-unpinned",
+        {"username": "root", "password": _CANARY_PASSWORD},
+        pin_host_key=False,
+    )
+    with pytest.raises(SshHostKeyUnpinnedError):
+        await connector._auth_config(target)
 
 
 # ---------------------------------------------------------------------------

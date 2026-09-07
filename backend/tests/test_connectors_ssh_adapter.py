@@ -51,7 +51,12 @@ import pytest
 from meho_backplane.connectors._shared.system_operator import SYSTEM_OPERATOR_SUB
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters import SshConnector
-from meho_backplane.connectors.adapters.ssh import _POOL_TTL_S
+from meho_backplane.connectors.adapters.ssh import (
+    _POOL_TTL_S,
+    SshHostKeyUnpinnedError,
+    _known_hosts_from_secret,
+    _secret_flag_is_true,
+)
 from meho_backplane.connectors.adapters.ssh import SshConnector as _SshConnectorDirect
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -68,6 +73,30 @@ _SERVER_KEY = asyncssh.generate_private_key("ssh-ed25519")
 _CLIENT_KEY = asyncssh.generate_private_key("ssh-ed25519")
 _CLIENT_PUB = _CLIENT_KEY.convert_to_public()
 _PASSWORD = "test-secret"  # NOSONAR — in-process asyncssh test server only, no real system
+
+# Host-key pin material (#270). The in-process server presents
+# ``_SERVER_KEY``; ``_SERVER_PUB_OPENSSH`` is that public key in the
+# OpenSSH one-line format a ``known_hosts`` entry uses. ``_WRONG_PUB_OPENSSH``
+# is an unrelated key used to prove a mismatched pin fails closed before
+# any credential is offered.
+_SERVER_PUB_OPENSSH = _SERVER_KEY.convert_to_public().export_public_key("openssh").decode().strip()
+_WRONG_PUB_OPENSSH = (
+    asyncssh.generate_private_key("ssh-ed25519")
+    .convert_to_public()
+    .export_public_key("openssh")
+    .decode()
+    .strip()
+)
+
+# Sentinel marking "pin the real server key" (the secure default a
+# target builder applies) apart from an explicit ``known_hosts=None``
+# (omit the pin entirely — the unpinned, fail-closed case).
+_PIN_SERVER_KEY = object()
+
+
+def _known_hosts_line(host: str, pub_openssh: str = _SERVER_PUB_OPENSSH) -> str:
+    """Build one OpenSSH ``known_hosts`` line: ``<host> <keytype> <base64>``."""
+    return f"{host} {pub_openssh}"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +172,23 @@ def vault_secrets() -> Iterator[dict[str, dict[str, Any]]]:
         yield registry
 
 
+def _host_key_fields(host: str, known_hosts: Any, known_hosts_insecure: bool) -> dict[str, Any]:
+    """Assemble the host-key trust fields a target's secret carries (#270).
+
+    ``known_hosts=_PIN_SERVER_KEY`` (the default) pins the real server
+    key so the secure path is exercised; a string pins that verbatim;
+    ``None`` omits the pin entirely. ``known_hosts_insecure`` sets the
+    audited opt-out flag instead.
+    """
+    if known_hosts_insecure:
+        return {"known_hosts_insecure": True}
+    if known_hosts is _PIN_SERVER_KEY:
+        return {"known_hosts": _known_hosts_line(host)}
+    if known_hosts is None:
+        return {}
+    return {"known_hosts": known_hosts}
+
+
 def _password_target(
     name: str = "srv-01",
     *,
@@ -151,6 +197,8 @@ def _password_target(
     username: str = "test",
     target_id: str | None = None,
     tenant_id: str = "00000000-0000-0000-0000-000000000000",
+    known_hosts: Any = _PIN_SERVER_KEY,
+    known_hosts_insecure: bool = False,
 ) -> Any:
     # Carries ``id`` and ``tenant_id`` because the connection pool keys on
     # ``target_cache_key`` (``(tenant_id, id)``); a double missing either
@@ -158,7 +206,11 @@ def _password_target(
     # a distinct ``id`` from ``name`` so distinct-name targets in the same
     # tenant land on distinct pool keys by default.
     secret_path = f"meho/testing/ssh/{tenant_id}/{name}"
-    _VAULT_SECRETS[secret_path] = {"username": username, "password": _PASSWORD}
+    _VAULT_SECRETS[secret_path] = {
+        "username": username,
+        "password": _PASSWORD,
+        **_host_key_fields(host, known_hosts, known_hosts_insecure),
+    }
     return types.SimpleNamespace(
         name=name,
         host=host,
@@ -177,10 +229,16 @@ def _key_target(
     username: str = "test",
     target_id: str | None = None,
     tenant_id: str = "00000000-0000-0000-0000-000000000000",
+    known_hosts: Any = _PIN_SERVER_KEY,
+    known_hosts_insecure: bool = False,
 ) -> Any:
     private_key_pem = _CLIENT_KEY.export_private_key("pkcs8-pem").decode()
     secret_path = f"meho/testing/ssh/{tenant_id}/{name}"
-    _VAULT_SECRETS[secret_path] = {"username": username, "ssh_private_key": private_key_pem}
+    _VAULT_SECRETS[secret_path] = {
+        "username": username,
+        "ssh_private_key": private_key_pem,
+        **_host_key_fields(host, known_hosts, known_hosts_insecure),
+    }
     return types.SimpleNamespace(
         name=name,
         host=host,
@@ -491,9 +549,20 @@ async def test_aclose_skips_already_closed_connections(
 
 
 def _target_with_secret(name: str, secret: dict[str, Any]) -> Any:
-    """Register *secret* at a per-name Vault path and return a matching target."""
+    """Register *secret* at a per-name Vault path and return a matching target.
+
+    These are *credential*-focused ``_auth_config`` unit tests, so a
+    host-key opt-out is injected by default (unless the secret already
+    carries host-key fields) — host-key enforcement itself is covered by
+    the dedicated pin / mismatch / opt-out tests above. Without this,
+    every credential assertion would trip the fail-closed host-key guard
+    first (#270).
+    """
     secret_path = f"meho/testing/ssh/cfg/{name}"
-    _VAULT_SECRETS[secret_path] = secret
+    merged = dict(secret)
+    if "known_hosts" not in merged and "known_hosts_insecure" not in merged:
+        merged["known_hosts_insecure"] = True
+    _VAULT_SECRETS[secret_path] = merged
     return types.SimpleNamespace(name=name, host="h", port=22, secret_ref=secret_path)
 
 
@@ -512,6 +581,10 @@ async def test_auth_config_key_auth_returns_client_keys(
     assert "client_keys" in cfg
     assert len(cfg["client_keys"]) == 1
     assert "password" not in cfg
+    # _auth_config always threads the resolved host-key trust value (#270);
+    # here the opt-out injected by the helper resolves to None.
+    assert "known_hosts" in cfg
+    assert cfg["known_hosts"] is None
 
 
 @pytest.mark.asyncio
@@ -681,3 +754,164 @@ async def test_idle_ttl_evicts_stale_connection(
     assert ssh_second is not ssh_first
     assert not ssh_second.is_closed()
     await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Host-key verification (#270, F08) — fail-closed pin / mismatch / opt-out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pinned_host_key_connects_and_runs_command(
+    ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
+) -> None:
+    """A secret pinning the server's real host key connects (secure path)."""
+    conn = _ConcreteSshConnector()
+    # Default builder pins the real server key; make it explicit here.
+    target = _password_target(
+        name="pinned-ok",
+        host=ssh_server.host,
+        port=ssh_server.port,
+        known_hosts=_known_hosts_line(ssh_server.host),
+    )
+
+    result = await conn._run_command(target, "echo ok")
+
+    assert result.exit_status == 0
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wrong_host_key_pin_fails_before_auth(
+    ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
+) -> None:
+    """A pin for the wrong host key aborts at key exchange, before credentials.
+
+    ``asyncssh`` raises :exc:`asyncssh.HostKeyNotVerifiable` during the
+    handshake when the presented key does not match the pin, so no
+    password / private key is ever offered to the impostor — the F08
+    fail-closed contract.
+    """
+    conn = _ConcreteSshConnector()
+    target = _password_target(
+        name="wrong-pin",
+        host=ssh_server.host,
+        port=ssh_server.port,
+        known_hosts=_known_hosts_line(ssh_server.host, _WRONG_PUB_OPENSSH),
+    )
+
+    with pytest.raises(asyncssh.HostKeyNotVerifiable):
+        await conn._connect(target)
+
+    assert conn._connections == {}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unpinned_secret_fails_closed(
+    ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
+) -> None:
+    """A secret with neither a pin nor the opt-out raises before connecting."""
+    conn = _ConcreteSshConnector()
+    target = _password_target(
+        name="unpinned",
+        host=ssh_server.host,
+        port=ssh_server.port,
+        known_hosts=None,
+    )
+
+    with pytest.raises(SshHostKeyUnpinnedError):
+        await conn._connect(target)
+
+    assert conn._connections == {}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_insecure_opt_out_connects_and_warns(
+    ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
+) -> None:
+    """``known_hosts_insecure`` restores no-verification behaviour, warned."""
+    conn = _ConcreteSshConnector()
+    target = _password_target(
+        name="opt-out",
+        host=ssh_server.host,
+        port=ssh_server.port,
+        known_hosts_insecure=True,
+    )
+
+    with patch("meho_backplane.connectors.adapters.ssh.logger") as mock_logger:
+        result = await conn._run_command(target, "echo ok")
+
+    assert result.exit_status == 0
+    warned = [
+        c
+        for c in mock_logger.warning.call_args_list
+        if c.args[:1] == ("ssh_host_key_check_disabled",)
+    ]
+    assert warned, "opt-out path must log ssh_host_key_check_disabled"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_rejects_auth_config_missing_known_hosts(
+    ssh_server: Any, vault_secrets: dict[str, dict[str, Any]]
+) -> None:
+    """A subclass _auth_config that omits ``known_hosts`` fails closed at _connect."""
+
+    class _NoHostKeyConnector(_ConcreteSshConnector):
+        async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
+            return {"username": "test", "password": _PASSWORD}
+
+    conn = _NoHostKeyConnector()
+    target = _password_target(name="no-hk", host=ssh_server.host, port=ssh_server.port)
+
+    with pytest.raises(SshHostKeyUnpinnedError):
+        await conn._connect(target)
+    await conn.aclose()
+
+
+def test_known_hosts_from_secret_pin_takes_precedence_over_opt_out() -> None:
+    """When both a pin and the opt-out are set, the pin (secure) wins."""
+    secret = {
+        "known_hosts": _known_hosts_line("10.0.0.1"),
+        "known_hosts_insecure": True,
+    }
+    resolved = _known_hosts_from_secret("t", secret)
+    assert isinstance(resolved, asyncssh.SSHKnownHosts)
+
+
+def test_known_hosts_from_secret_opt_out_returns_none() -> None:
+    assert _known_hosts_from_secret("t", {"known_hosts_insecure": "true"}) is None
+
+
+def test_known_hosts_from_secret_unpinned_raises() -> None:
+    with pytest.raises(SshHostKeyUnpinnedError):
+        _known_hosts_from_secret("t", {"username": "u"})
+
+
+def test_known_hosts_from_secret_blank_pin_is_not_a_pin() -> None:
+    """A whitespace-only ``known_hosts`` is treated as absent (fail closed)."""
+    with pytest.raises(SshHostKeyUnpinnedError):
+        _known_hosts_from_secret("t", {"known_hosts": "   "})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("TRUE", True),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("false", False),
+        ("0", False),
+        ("", False),
+        (None, False),
+        (1, False),
+    ],
+)
+def test_secret_flag_is_true(value: Any, expected: bool) -> None:
+    assert _secret_flag_is_true(value) is expected

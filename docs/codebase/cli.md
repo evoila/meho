@@ -2079,6 +2079,14 @@ output, or process supervisor logs. The pattern mirrors the
 reference shell script's mode-600 tempfile dance, adapted for Go's
 stdin reader.
 
+Prefer a **scoped provisioning identity** over the master-realm
+`admin` user where the deployment supports it: a service account
+granted only the `realm-management` client roles this verb needs
+(`manage-clients`, `manage-users`, `query-groups`) has a far smaller
+blast radius than the master-admin credential if it is ever exposed.
+The verb accepts any admin-capable identity via `--admin-username`;
+the master realm is only the default, not a requirement.
+
 ### HTTP client
 
 Stdlib `net/http` + `encoding/json` — no Keycloak Go SDK in
@@ -2088,11 +2096,20 @@ protocol-mappers + client-scopes + users + groups, all under
 a bad supply-chain tradeoff. The same discipline as the rest of the
 CLI: every transitive import has to justify its place in `go.sum`.
 
-The `--insecure-skip-tls-verify` flag flips `tls.Config.InsecureSkipVerify`
-on a custom transport for the one-time bootstrap case where the
-operator workstation has not yet trusted the realm's internal CA.
-The flag is opt-in and explicit; the default uses the system trust
-store via `http.DefaultTransport`.
+**TLS trust (F08 / #270).** The default uses the system trust store via
+`http.DefaultTransport`. For a realm fronted by an internal CA, prefer
+`--keycloak-ca-bundle <realm-ca.pem>`: it loads that bundle into the
+client's `tls.Config.RootCAs` (`newCABundleTLSConfig`) with certificate-
+chain **and** hostname verification left on, so the master-realm
+admin-password grant and every subsequent Bearer-token request run over
+verified TLS. `--insecure-skip-tls-verify` remains as a last-resort
+escape hatch that flips `tls.Config.InsecureSkipVerify` (turning both
+checks off) — it now prints a loud stderr warning naming the exposed
+admin password + token, and is **mutually exclusive** with
+`--keycloak-ca-bundle` (passing both is refused at the validation
+boundary). The blanket-skip flag sends the admin credentials over an
+unverified connection, so a CA-bundle pin is the correct choice whenever
+the CA cert is available.
 
 ### Tests
 

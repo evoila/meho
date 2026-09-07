@@ -434,6 +434,43 @@ decode / impersonation / WIF-selection / STS-exchange / error /
 no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
 — no live GCP (`tests/test_connectors_gsm_creds.py`).
 
+## SSH host-key trust (F08 / #270)
+
+The SSH adapter (`connectors/adapters/ssh.py`) reads its host-key trust
+material from the **same** KV-v2 secret this seam resolves, so host-key
+provisioning is a Vault-secret concern documented here. Two optional
+fields sit alongside `username` / `password` / `ssh_private_key`:
+
+- **`known_hosts`** — one or more OpenSSH `known_hosts`-format lines
+  (`<host-pattern> <keytype> <base64>`) pinning the target's host
+  key(s). When present, `asyncssh.import_known_hosts` parses it and the
+  connection verifies the presented key during key exchange; a
+  mismatch or unknown host raises `asyncssh.HostKeyNotVerifiable`
+  **before** any password / private key is offered.
+- **`known_hosts_insecure`** — a truthy flag (`true` / `1` / `yes` /
+  `on`, or a JSON boolean) that restores the pre-#270 no-verification
+  behaviour for that one target, logging `ssh_host_key_check_disabled`
+  on every connect. It is the audited, opt-in escape hatch (the SSH
+  analogue of the target-level `verify_tls=false` and the
+  `meho admin keycloak --insecure-skip-tls-verify` flag), never the
+  default.
+
+A secret carrying **neither** field fails closed: `_auth_config` raises
+`SshHostKeyUnpinnedError` before the connection opens. A pin always
+wins over the opt-out when both are present.
+
+**Provisioning.** Capture the target's public host key once from a
+trusted vantage (`ssh-keyscan -t ed25519 <host>`, reviewed against the
+host's `/etc/ssh/ssh_host_*_key.pub` out of band) and store the line
+under `known_hosts` in the target's Vault secret. Prefer a single
+modern key type (ed25519) per host.
+
+**Rotation.** When a host's key legitimately changes (reinstall, key
+rotation), update the `known_hosts` field in Vault; the next pool miss
+picks up the new pin. Because the pin lives in the secret, host-key
+rotation follows the same reviewed Vault-write path as credential
+rotation — no code change, no redeploy.
+
 ## Dependencies
 
 - **`hvac`** (2.4.0 resolved) — `client.secrets.kv.v2.read_secret_version`

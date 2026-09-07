@@ -43,6 +43,7 @@ from __future__ import annotations
 import re
 import smtplib
 import socket
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from email.message import EmailMessage
 from pathlib import Path
@@ -134,10 +135,24 @@ class _RecordingSMTP:
 
     instances: ClassVar[list[_RecordingSMTP]]
 
-    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        *,
+        context: object | None = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        # The implicit-TLS (SMTP_SSL) constructor receives the validating
+        # context; the plaintext SMTP constructor gets None and the context
+        # arrives later on ``starttls``. Both are captured so tests can
+        # assert the transport hands a verifying context to every TLS path
+        # (#270).
+        self.init_context = context
+        self.starttls_context: object | None = None
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.sent_messages: list[EmailMessage] = []
         type(self).instances.append(self)
@@ -152,6 +167,7 @@ class _RecordingSMTP:
         self.calls.append(("ehlo", ()))
 
     def starttls(self, *, context: object | None = None) -> None:
+        self.starttls_context = context
         self.calls.append(("starttls", ()))
 
     def login(self, user: str, password: str) -> None:
@@ -173,6 +189,66 @@ class _ExplodingSMTP:
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise AssertionError("smtplib.SMTP must not be constructed when the send is refused")
+
+
+def _self_signed_ca_pem() -> str:
+    """Build a throwaway self-signed CA certificate as PEM text.
+
+    Used only to prove ``_build_tls_context`` loads a pinned bundle as a
+    trust anchor; the key is discarded — nothing is signed with it.
+    """
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "meho-mail-test-ca")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM).decode()
+
+
+def _assert_validating_context(ctx: object) -> None:
+    """Assert *ctx* is an SSL context that verifies the peer (#270).
+
+    The whole point of the fix is that neither TLS path is handed
+    ``None`` (which makes smtplib fall back to the unverified
+    ``ssl._create_stdlib_context``). A verifying context has hostname
+    checking on and ``CERT_REQUIRED``.
+    """
+    assert isinstance(ctx, ssl.SSLContext), f"expected an ssl.SSLContext, got {ctx!r}"
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+class _TLSFailingSMTPSSL:
+    """``SMTP_SSL`` stand-in whose constructor raises a cert-verify error."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise ssl.SSLCertVerificationError("certificate verify failed: self-signed")
+
+
+class _STARTTLSFailingSMTP(_RecordingSMTP):
+    """Plaintext ``SMTP`` stand-in whose ``starttls`` raises a cert-verify error."""
+
+    instances: ClassVar[list[_RecordingSMTP]] = []
+
+    def starttls(self, *, context: object | None = None) -> None:
+        raise ssl.SSLCertVerificationError("certificate verify failed: unknown CA")
 
 
 @pytest.fixture
@@ -375,6 +451,9 @@ async def test_starttls_and_login_run_in_sequence_when_configured(
     (client,) = recording_smtp.instances
     assert (client.host, client.port) == ("smtp.internal", 587)
     assert client.timeout == mail_transport._SMTP_TIMEOUT_SECONDS
+    # STARTTLS receives an explicit validating context (#270): hostname
+    # checking on, CERT_REQUIRED — not the unverified stdlib fallback.
+    _assert_validating_context(client.starttls_context)
     assert [name for name, _ in client.calls] == [
         "ehlo",
         "starttls",
@@ -423,7 +502,76 @@ async def test_port_465_uses_implicit_tls_without_starttls(
     assert result == MailSendResult(sent=True, reason=None)
     (client,) = recording_smtp.instances
     assert client.port == 465
+    # Implicit TLS: the validating context is handed to the SMTP_SSL
+    # constructor, so the handshake verifies the cert before any data (#270).
+    _assert_validating_context(client.init_context)
     assert [name for name, _ in client.calls] == ["ehlo", "send_message", "quit"]
+
+
+async def test_implicit_tls_cert_verification_failure_refuses_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 465 handshake against an untrusted cert refuses with smtp_tls_error.
+
+    The failure is raised by ``SMTP_SSL``'s constructor — before any AUTH
+    or message data — and maps to the dedicated TLS reason code rather
+    than a misleading connect error (#270).
+    """
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP", _ExplodingSMTP)
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP_SSL", _TLSFailingSMTPSSL)
+    _configure_mail_env(monkeypatch, MAIL_SMTP_PORT="465")
+
+    result = await send_email(to=["oncall@example.com"], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="smtp_tls_error")
+
+
+async def test_starttls_cert_verification_failure_refuses_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STARTTLS upgrade against an untrusted cert refuses with smtp_tls_error.
+
+    The upgrade raises before ``login`` / ``send_message``, so no
+    credential or message reaches the unverified peer.
+    """
+    _STARTTLSFailingSMTP.instances = []
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP", _STARTTLSFailingSMTP)
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP_SSL", _ExplodingSMTP)
+    _configure_mail_env(
+        monkeypatch,
+        MAIL_SMTP_USERNAME="meho-mailer",
+        MAIL_SMTP_PASSWORD="s3cret",
+    )
+
+    result = await send_email(to=["oncall@example.com"], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="smtp_tls_error")
+    (client,) = _STARTTLSFailingSMTP.instances
+    call_names = [name for name, _ in client.calls]
+    assert "login" not in call_names
+    assert "send_message" not in call_names
+    assert not client.sent_messages
+
+
+def test_build_tls_context_defaults_to_system_trust() -> None:
+    """No CA bundle ⇒ a verifying context over the system trust store."""
+    ctx = mail_transport._build_tls_context("")
+    _assert_validating_context(ctx)
+
+
+def test_build_tls_context_pins_ca_bundle(tmp_path: Path) -> None:
+    """A CA-bundle path ⇒ a verifying context that loads that bundle (#270)."""
+    ca_pem = _self_signed_ca_pem()
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text(ca_pem)
+
+    ctx = mail_transport._build_tls_context(str(bundle))
+
+    _assert_validating_context(ctx)
+    # The pinned CA is loaded as a trust anchor (it replaces the system
+    # roots, matching the target-level tls_ca_pin posture).
+    subjects = [dict(ca["subject"][0]) for ca in ctx.get_ca_certs()]
+    assert any(s.get("commonName") == "meho-mail-test-ca" for s in subjects)
 
 
 async def test_plaintext_channel_refuses_auth_instead_of_logging_in(

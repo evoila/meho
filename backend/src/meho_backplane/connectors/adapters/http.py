@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import ssl
 from typing import Any
 
@@ -124,6 +125,30 @@ class SsrfBlockedError(httpx.ConnectError):
     dispatcher plumbing. Explicitly excluded from :func:`_retryable`:
     the rejection is deterministic policy, not a transient network
     failure, so retrying would only re-run the DNS lookup.
+    """
+
+
+class ResponseTooLargeError(Exception):
+    """Dispatch refused: a vendor response body exceeded the byte cap.
+
+    Raised by :func:`_read_capped_json_response` when a vendor response —
+    declared via ``Content-Length`` or measured while streaming — exceeds
+    :data:`_MAX_RESPONSE_BYTES`, *before* the body (or its parsed object
+    graph) is materialised. The shared generic-connector transport
+    otherwise buffers every vendor response fully into memory, so a single
+    oversized body — from a compromised/malicious appliance, a MITM on a
+    ``verify_tls=false`` channel, or a pathologically large legitimate
+    listing — could exhaust the single-replica pod's heap and OOM-kill it
+    (evoila-bosnia/meho-internal#297).
+
+    A plain :class:`Exception` (not an :class:`httpx.HTTPError`): it is a
+    policy rejection, not a transport fault, so it flattens through the
+    dispatcher's generic ``except Exception`` arm into the structured
+    ``connector_error`` shape carrying this message. Being outside the
+    ``httpx.ConnectError`` / ``httpx.HTTPStatusError`` families, it is
+    automatically excluded from :func:`_retryable` (a deterministic
+    over-cap verdict never resolves on replay), with no explicit exclusion
+    needed.
     """
 
 
@@ -304,6 +329,133 @@ def json_payload_or_empty(resp: httpx.Response) -> dict[str, Any]:
     if resp.status_code == httpx.codes.NO_CONTENT or not resp.content:
         return {}
     return resp.json()  # type: ignore[no-any-return]
+
+
+#: Default ceiling on a single vendor response body the shared dispatch
+#: transport will buffer, in bytes (100 MiB). Large enough for any realistic
+#: JSON listing — full vCenter inventory / event pulls are single-digit to
+#: low-tens of MiB, and set-shaped results are reduced to a handle *after*
+#: parse (JSONFlux, dispatcher step 8) — while bounding a multi-GB transfer
+#: from a compromised/malicious appliance, a ``verify_tls=false`` MITM, or a
+#: pathological legitimate listing that would otherwise OOM the
+#: single-replica pod (evoila-bosnia/meho-internal#297). Mirrors the
+#: streamed byte-cap idiom the spec-fetch (``openapi._MAX_SPEC_BYTES``) and
+#: event-ingest (``events_ingest._read_capped_body``) paths already enforce;
+#: this closes the same gap on the outbound-dispatch path.
+_DEFAULT_MAX_RESPONSE_BYTES = 100 * 1024 * 1024
+
+
+def _resolve_max_response_bytes() -> int:
+    """Resolve the response-body cap, honouring an operator env override.
+
+    ``MEHO_CONNECTOR_MAX_RESPONSE_BYTES`` (a positive integer byte count)
+    tunes the cap per deployment — a tighter-memory pod can lower it. An
+    unset, non-integer, or non-positive value falls back to
+    :data:`_DEFAULT_MAX_RESPONSE_BYTES` so a typo never silently disables
+    the guard.
+    """
+    raw = os.environ.get("MEHO_CONNECTOR_MAX_RESPONSE_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_RESPONSE_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_RESPONSE_BYTES
+    return value if value > 0 else _DEFAULT_MAX_RESPONSE_BYTES
+
+
+#: Resolved once at import; the streaming guard reads the module global by
+#: name at call time, so a test (or a reload after an env change) can rebind
+#: it to a small value without allocating a real over-cap body.
+_MAX_RESPONSE_BYTES = _resolve_max_response_bytes()
+
+
+def _reject_oversize_content_length(resp: httpx.Response) -> None:
+    """Fast-reject a response whose declared ``Content-Length`` exceeds the cap.
+
+    Fires before a single body byte is read, so an honest oversized
+    response costs nothing to refuse. A missing header falls through to the
+    streaming running-total guard (the real backstop against an absent,
+    understated, or content-encoded length); a malformed header is likewise
+    left to that guard rather than trusted.
+    """
+    declared = resp.headers.get("content-length")
+    if declared is None:
+        return
+    try:
+        length = int(declared)
+    except ValueError:
+        return
+    if length > _MAX_RESPONSE_BYTES:
+        raise ResponseTooLargeError(
+            f"vendor response Content-Length {length} exceeds the "
+            f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
+        )
+
+
+async def _read_capped_json_response(
+    client: httpx.AsyncClient,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json: dict[str, Any] | None = None,
+    data: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    extensions: dict[str, Any] | None = None,
+    timeout: Any = httpx.USE_CLIENT_DEFAULT,
+) -> httpx.Response:
+    """Issue the request with a streamed, byte-capped read of the response.
+
+    Shared success-path front for :meth:`HttpConnector._request_json` and
+    :meth:`HttpConnector._post_json`. The default non-streaming
+    ``client.request(...)`` buffers the whole vendor body into memory before
+    the caller can inspect its size; this streams instead
+    (:meth:`httpx.AsyncClient.stream` -> the pooled
+    :class:`_SameOriginRedirectClient`'s ``send`` override, so the
+    same-origin redirect and destination-pinning transport behaviour is
+    unchanged) and enforces a two-part cap: a ``Content-Length`` fast-reject
+    up front, then a running byte total across
+    :meth:`~httpx.Response.aiter_bytes` chunks that aborts the moment the
+    body would exceed :data:`_MAX_RESPONSE_BYTES`. At most the cap (plus one
+    trailing chunk) is ever held in memory, and an over-cap body raises
+    :exc:`ResponseTooLargeError` before :func:`json_payload_or_empty` can
+    parse it.
+
+    An under-cap body is joined and re-materialised into a fully-read
+    :class:`httpx.Response` carrying the original status, headers, request,
+    and extensions, so every downstream step — the flight-recorder span,
+    ``raise_for_status``, and ``json_payload_or_empty`` — sees a response
+    byte-identical to the non-streamed path.
+    """
+    async with client.stream(
+        method,
+        path,
+        params=params,
+        json=json,
+        data=data,
+        headers=headers,
+        extensions=extensions,
+        timeout=timeout,
+    ) as resp:
+        _reject_oversize_content_length(resp)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > _MAX_RESPONSE_BYTES:
+                raise ResponseTooLargeError(
+                    f"vendor response body exceeded the "
+                    f"{_MAX_RESPONSE_BYTES}-byte response-body cap"
+                )
+            chunks.append(chunk)
+        return httpx.Response(
+            status_code=resp.status_code,
+            headers=resp.headers,
+            content=b"".join(chunks),
+            request=resp.request,
+            extensions=resp.extensions,
+        )
 
 
 # Hard cap on the same-origin redirect chain followed by
@@ -766,7 +918,8 @@ class HttpConnector(Connector):
         # span is recorded before ``raise_for_status`` so a vendor 4xx/5xx is
         # captured too.
         _fr_start = flight_recorder_capture.span_start()
-        resp = await client.request(
+        resp = await _read_capped_json_response(
+            client,
             method,
             path,
             params=params,
@@ -873,7 +1026,8 @@ class HttpConnector(Connector):
         # its matching content-type; a hard-excluded (login / token / DELETE)
         # op has its body dropped by the redaction engine's family rules.
         _fr_start = flight_recorder_capture.span_start()
-        resp = await client.request(
+        resp = await _read_capped_json_response(
+            client,
             verb,
             path,
             params=params,

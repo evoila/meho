@@ -132,12 +132,16 @@ class SensorRequiresSafeOperationError(Exception):
     at create; the boundary maps it to 422 ``sensor_requires_safe_operation``
     (the MCP transport surfaces the same code as an invalid-params error).
 
-    This is a **create-time honesty guard, not the security boundary**:
-    the dispatch-time policy gate
-    (:func:`meho_backplane.operations.dispatcher.dispatch`) still runs on
-    every #2505 evaluation, so a descriptor whose ``safety_level`` is later
-    re-ingested harder fails closed at dispatch even for an already-created
-    sensor.
+    This is a **create-time honesty guard**. The dispatch-time policy gate
+    (:func:`meho_backplane.operations.dispatcher.dispatch`) does run on every
+    #2505 evaluation, but for the sensor runner's synthetic ``USER`` operator it
+    fails closed at dispatch only for the ``destructive`` and
+    ``requires_approval`` tiers -- it does not re-consult ``safety_level`` for
+    the ``caution`` / ``dangerous`` tiers on that path. The safe-tier floor for
+    a re-ingested op is re-asserted separately by the runner itself
+    (:func:`meho_backplane.checks.runner._run_evaluation`, #303): a sensored op
+    re-classified above ``safe`` after create records ``unknown`` instead of
+    dispatching.
     """
 
     #: Machine-readable error code surfaced on every transport.

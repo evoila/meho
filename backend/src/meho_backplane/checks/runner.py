@@ -83,14 +83,17 @@ with ``sub=sensor.identity_sub`` (#2503's per-row column, default
 ``"__sensor__"``), ``tenant_id=sensor.tenant_id``,
 ``TenantRole.OPERATOR`` -- the topology-refresh ``_system_operator`` mould with
 the sub sourced from the row. ``principal_kind`` defaults to ``USER``, so
-:func:`~meho_backplane.operations._validate.policy_gate` auto-executes the
-``safe`` op (#2503's registration guard enforces ``safe`` **at Sensor create
-time**; the runner does not re-validate ``safety_level`` at dispatch, matching
-the platform's default-allow-on-``requires_approval`` policy, so an op
-re-registered to a higher safety level *after* a Sensor is created would still
-run here -- a caution/dangerous escalation is a platform-level concern, not
-re-gated in the runner. The agent-credential path is never touched here and
-no agent run may exist on this path).
+:func:`~meho_backplane.operations._validate.policy_gate` would auto-execute the
+op: the non-agent verdict parks only the ``destructive`` and
+``requires_approval`` tiers, never re-consulting ``safety_level`` for a ``USER``
+(that consultation lives behind the SERVICE-only branch). #2503's registration
+guard enforces ``safe`` **at Sensor create time**, but a versioned re-ingest
+could later re-classify a sensored op to ``caution`` / ``dangerous`` while
+keeping ``requires_approval=False``. So :func:`_run_evaluation` **re-asserts the
+safe-tier floor at dispatch** (#303): it re-resolves the current descriptor and
+fails closed to ``unknown`` unless it is still ``safe`` -- no non-safe mutation
+runs here unattended. The agent-credential path is never touched here and no
+agent run may exist on this path.
 
 ``raw_jwt`` is the runner's own **service-principal** token (#2642) when
 ``CHECK_RUNNER_CLIENT_ID`` / ``CHECK_RUNNER_CLIENT_SECRET`` are configured, and
@@ -149,6 +152,7 @@ from meho_backplane.db.advisory import advisory_lock
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.metrics import note_loop_tick
+from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.scheduler.cron import (
@@ -352,11 +356,51 @@ def _target_resolution_outcome(envelope: dict[str, object]) -> AssertionOutcome:
     )
 
 
-async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
-    """Resolve the sensor's target, dispatch its op, and evaluate. Never raises.
+async def _safe_tier_floor(snap: _SensorSnapshot) -> AssertionOutcome | None:
+    """Re-assert the safe-tier floor at dispatch (#303). ``None`` means proceed.
 
-    The stored ``target`` is resolved through the shared ``call_operation`` seam
-    (:func:`~meho_backplane.operations.meta_tools._resolve_target_or_error`)
+    The create guard
+    (:class:`~meho_backplane.checks.service.SensorRequiresSafeOperationError`)
+    proves ``safety_level == "safe"`` only at registration. The non-agent policy
+    verdict never re-consults ``safety_level`` for the runner's synthetic
+    ``USER`` operator (it parks only the ``destructive`` / ``requires_approval``
+    tiers), so an op re-ingested to ``caution`` / ``dangerous`` after the Sensor
+    was created -- while keeping ``requires_approval=False`` -- would otherwise
+    auto-execute its mutation on every unattended tick. Re-resolve the current
+    descriptor with the same helper the create guard uses
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`) and fail
+    closed to ``unknown`` when it is missing or no longer ``safe``; a still-safe
+    op returns ``None`` and dispatches unchanged. ``parse_connector_id`` is
+    forgiving (never raises); a descriptor read that errors rides
+    :func:`_run_evaluation`'s never-raises contract to ``unknown`` as well.
+    """
+    product, version, impl_id = parse_connector_id(snap.connector_id)
+    descriptor = await lookup_descriptor(
+        tenant_id=snap.tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        op_id=snap.op_id,
+    )
+    if descriptor is None:
+        return _unknown_outcome("op_descriptor_missing")
+    if descriptor.safety_level != "safe":
+        return _unknown_outcome(
+            "op_not_safe_at_dispatch",
+            safety_level=descriptor.safety_level,
+        )
+    return None
+
+
+async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
+    """Re-gate on safety, resolve the target, dispatch the op, and evaluate. Never raises.
+
+    A **dispatch-time safe-tier floor** guards the dispatch (:func:`_safe_tier_floor`,
+    #303): a sensored op re-classified above ``safe`` after create records
+    ``unknown`` here instead of auto-executing unattended.
+
+    The stored ``target`` is then resolved through the shared ``call_operation``
+    seam (:func:`~meho_backplane.operations.meta_tools._resolve_target_or_error`)
     before dispatch -- the dispatcher's connector resolver reads ``product`` /
     ``version`` off a resolved :class:`~meho_backplane.db.models.Target` row, not
     off the raw stored dict, so skipping this step mislabelled every
@@ -369,6 +413,13 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
     now = datetime.now(UTC)
     try:
         async with asyncio.timeout(_EVAL_TIMEOUT_SECONDS):
+            # Dispatch-time safe-tier floor (#303): refuse to dispatch a
+            # sensored op that is no longer ``safe``. Runs before the operator
+            # is built or the target is resolved, so a re-classified op does
+            # neither -- it just records ``unknown``.
+            floor_outcome = await _safe_tier_floor(snap)
+            if floor_outcome is not None:
+                return floor_outcome
             # Inside the timeout: building the operator may mint a
             # check-runner principal token (#2642), i.e. reach Keycloak. That
             # call carries its own HTTP timeout, but a slow IdP must burn the

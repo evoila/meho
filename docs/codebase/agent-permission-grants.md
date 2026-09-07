@@ -92,7 +92,7 @@ operator handle only — never email, groups, or other profile fields.
 tenant_admin POST /api/v1/agents/grants
          │
          ▼
-api/v1/agent_grants.py → require_role(TENANT_ADMIN)
+api/v1/agent_grants.py → require_role(TENANT_ADMIN) + require_human_principal (#289)
          │
          ▼
 AgentGrantService.grant()
@@ -133,9 +133,18 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 |---|---|---|---|
 | `GET` | `/api/v1/agents/grants` | tenant_admin | List; `?principal_sub=`, `?include_expired=` |
 | `GET` | `/api/v1/agents/grants/{id}` | tenant_admin | Show one |
-| `POST` | `/api/v1/agents/grants` | tenant_admin | Create (permanent or elevation) |
-| `POST` | `/api/v1/agents/grants/elevate` | tenant_admin | Create elevation (`expires_at` required) |
+| `POST` | `/api/v1/agents/grants` | tenant_admin **+ human** | Create (permanent or elevation). Machine `principal_kind` → 403 `human_principal_required` (#289). |
+| `POST` | `/api/v1/agents/grants/elevate` | tenant_admin **+ human** | Create elevation (`expires_at` required). Machine `principal_kind` → 403 `human_principal_required` (#289). |
 | `DELETE` | `/api/v1/agents/grants/{id}` | tenant_admin | Revoke |
+
+The two **write** verbs that mint or widen a grant — `POST /agents/grants` and
+`POST /agents/grants/elevate` — carry `require_human_principal` (`auth/rbac.py`)
+in addition to the `tenant_admin` role gate, so a machine `principal_kind`
+(`agent` / `service` / `runner`) is refused 403 `human_principal_required`
+regardless of role. This is the REST peer of the MCP human-only block below: an
+agent minted `tenant_admin` cannot mint or widen its own (or a sibling's) grant
+over REST any more than it can over MCP (meho-internal#289). `list` / `show` /
+`revoke` keep the role-only gate.
 
 ## MCP surface
 
@@ -153,7 +162,8 @@ meho agent grant elevate --principal <sub> --op <pattern> --verdict V --expires 
 meho agent grant revoke <grant-id> [--confirm]
 ```
 
-All verbs require `tenant_admin`.
+All verbs require `tenant_admin`; `create` and `elevate` additionally require a
+**human** principal (machine `principal_kind` → 403, #289).
 
 ## Dependencies
 

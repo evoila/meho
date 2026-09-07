@@ -226,6 +226,12 @@ data:
   TOPOLOGY_HISTORY_RETENTION_DAYS: {{ .Values.topology.historyRetentionDays | quote }}
   TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: {{ .Values.topology.historyPruneIntervalSeconds | quote }}
   TOPOLOGY_HISTORY_PRUNE_ENABLED: {{ .Values.topology.historyPruneEnabled | quote }}
+  # Security review S19 (#307) — audit_log.raw_payload age-off knobs. NULLs
+  # only the pre-redaction body past `retentionDays`; the redacted record of
+  # account is retained. `retentionDays: 0` keeps un-redacted bodies forever.
+  RAW_PAYLOAD_RETENTION_DAYS: {{ .Values.auditRawPayload.retentionDays | quote }}
+  RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS: {{ .Values.auditRawPayload.pruneIntervalSeconds | quote }}
+  RAW_PAYLOAD_PRUNE_ENABLED: {{ .Values.auditRawPayload.pruneEnabled | quote }}
   # Broadcast v2 T2 (#2547) — durable-announcement retention knobs. The
   # env-var names are the backplane's contract
   # (`backend/src/meho_backplane/settings.py`). `retentionDays: 0` is the

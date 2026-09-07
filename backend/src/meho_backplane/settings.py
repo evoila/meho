@@ -1765,8 +1765,20 @@ class Settings(BaseModel):
     #: at the T3 route) rather than returning a silent empty result.
     corpus_url: str = ""
     #: Optional RFC 8707 resource indicator (``aud``) the corpus binds
-    #: the forwarded token to. Empty ("") forwards no audience.
+    #: the downstream token to. Empty ("") forwards no audience.
     corpus_audience: str = ""
+    #: Deployment-configured bearer credential the corpus federation
+    #: client (:func:`~meho_backplane.auth.corpus.search_corpus`) presents
+    #: to the corpus. This is a dedicated, corpus-scoped service credential
+    #: owned by the deployment — NOT the caller's inbound operator JWT.
+    #: Replaying the operator's raw bearer to a tenant-configurable corpus
+    #: URL leaked a Vault-capable credential to an attacker-controlled sink
+    #: (evoila-bosnia/meho-internal#290), so the operator JWT is never
+    #: forwarded. Empty ("") sends no ``Authorization`` header — a corpus
+    #: that requires auth then fails closed (401 → ``CorpusUnavailable`` →
+    #: 503) rather than receiving the operator bearer. ``repr=False`` keeps
+    #: the secret out of ``Settings`` reprs / structured logs.
+    corpus_service_token: str = Field(default="", repr=False)
     #: Bound on the corpus HTTP request (connect / read / write), in
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
@@ -2441,6 +2453,7 @@ def get_settings() -> Settings:
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
+        corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),

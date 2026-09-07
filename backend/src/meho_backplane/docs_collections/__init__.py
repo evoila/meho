@@ -34,6 +34,7 @@ from meho_backplane.docs_collections.schemas import (
 from meho_backplane.docs_collections.service import (
     DocCollectionBackendTypeError,
     DocCollectionConflictError,
+    DocCollectionEndpointError,
     DocCollectionGlobalError,
     DocCollectionNotDisabledError,
     create_doc_collection,
@@ -48,6 +49,7 @@ __all__ = [
     "DocCollectionConflictError",
     "DocCollectionCreate",
     "DocCollectionCreateResponse",
+    "DocCollectionEndpointError",
     "DocCollectionGlobalError",
     "DocCollectionNotDisabledError",
     "DocCollectionNotFoundError",

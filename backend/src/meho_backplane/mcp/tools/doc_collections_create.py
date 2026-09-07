@@ -52,6 +52,7 @@ from meho_backplane.docs_collections import (
     DocCollectionBackendTypeError,
     DocCollectionConflictError,
     DocCollectionCreate,
+    DocCollectionEndpointError,
     create_doc_collection,
     project_doc_collection,
 )
@@ -228,6 +229,8 @@ async def _create_doc_collections_handler(
                 # built off attributes still attached to the live session.
                 created = project_doc_collection(row)
         except DocCollectionBackendTypeError as exc:
+            raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
+        except DocCollectionEndpointError as exc:
             raise McpInvalidParamsError(str(exc), data=exc.detail) from exc
         except DocCollectionConflictError as exc:
             raise McpInvalidParamsError(

@@ -271,6 +271,26 @@ def test_unknown_backend_type_is_invalid_params(
     [(TenantRole.TENANT_ADMIN, frozenset({_DOCS_CAPABILITY}))],
     indirect=True,
 )
+def test_non_public_endpoint_is_invalid_params(
+    admin_client: tuple[TestClient, Operator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-https / non-public corpus endpoint → INVALID_PARAMS (MCP analogue of 422, #290)."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    client, _op = admin_client
+    body = _call_create(
+        client,
+        _valid_args(backend={"type": "corpus-http", "ref": {"endpoint": "https://127.0.0.1/s"}}),
+    )
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert body["error"]["data"]["kind"] == "endpoint_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "admin_client",
+    [(TenantRole.TENANT_ADMIN, frozenset({_DOCS_CAPABILITY}))],
+    indirect=True,
+)
 def test_duplicate_key_is_invalid_params(
     admin_client: tuple[TestClient, Operator],
     seeded_operator_tenant: None,  # noqa: F811

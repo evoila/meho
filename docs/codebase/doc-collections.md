@@ -359,6 +359,18 @@ The service primitive
   a structured `422` whose detail enumerates the registered types (the
   `create_target` unknown-product shape). This moves the failure forward
   from a deferred probe/search-time `503` to create time.
+- **`backend.ref` corpus endpoint SSRF-screened (#290)** — for a
+  `corpus-http` collection the `backend.ref["endpoint"]` (alias `url`) is
+  the URL later dialed with a credential, so it is screened at create:
+  `https` scheme + a public, allowlist-aware host, via the shared target
+  SSRF guard (`assert_public_destination_async` — the same
+  `MEHO_TARGET_SSRF_ALLOWLIST`-aware guard the connector target dial uses).
+  A non-`https` or private/link-local/metadata endpoint raises
+  `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`) and
+  is never persisted, closing a credential-capture + SSRF path a
+  `tenant_admin` could otherwise open. Absent endpoint (the legacy global
+  `settings.corpus_url` deploy) is nothing to screen here; that global is
+  deployment-owned and screened again at dial time.
 - **Server-derived fields** — `id` / `created_at` / `updated_at` are
   generated; `status` defaults to `provisioning` (a follow-up `probe`
   promotes it); the probe-written liveness stays `NULL`.
@@ -376,7 +388,8 @@ Three fronts forward to the same primitive:
   (`DocCollectionCreateResponse`, #1756; see
   [The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)),
   `tenant_admin`-gated (parity with the lifecycle routes). The route maps
-  the two service exceptions to `422` / `409`.
+  the service exceptions to `422` (unknown backend type / rejected
+  endpoint) / `409` (conflict).
 - **MCP** — the `create_doc_collections` write-class tool
   (`meho_backplane.mcp.tools.doc_collections_create`), `tenant_admin` +
   `required_capability="meho-docs"`. The exceptions map to JSON-RPC

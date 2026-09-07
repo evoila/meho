@@ -42,6 +42,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.corpus import corpus_endpoint_host
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections.lifecycle import (
@@ -53,11 +54,17 @@ from meho_backplane.docs_collections.lifecycle import (
 )
 from meho_backplane.docs_collections.schemas import DocCollectionCreate
 from meho_backplane.docs_search.backends import BackendReadiness, resolve_backend
+from meho_backplane.docs_search.backends.corpus_http import CORPUS_HTTP_BACKEND_TYPE
 from meho_backplane.docs_search.backends.registry import all_backends
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination_async,
+)
 
 __all__ = [
     "DocCollectionBackendTypeError",
     "DocCollectionConflictError",
+    "DocCollectionEndpointError",
     "DocCollectionGlobalError",
     "DocCollectionNotDisabledError",
     "create_doc_collection",
@@ -126,6 +133,62 @@ class DocCollectionConflictError(Exception):
         super().__init__(f"doc collection {collection_key!r} already exists in the {scope} scope")
 
 
+class DocCollectionEndpointError(Exception):
+    """The ``backend.ref`` corpus endpoint is not an allowed destination.
+
+    A ``corpus-http`` collection's ``backend.ref["endpoint"]`` (alias
+    ``url``) is the URL the federation transport later dials with a
+    credential attached. Left unscreened, a ``tenant_admin`` could point it
+    at ``http://``, loopback, RFC 1918 space, or ``169.254.169.254`` (cloud
+    metadata) — a credential-capture + SSRF path
+    (evoila-bosnia/meho-internal#290). The create rejects a non-``https`` or
+    non-public endpoint here so it never persists, mirroring the
+    ``create_target`` SSRF screen. Carries a structured 422 ``detail`` (a
+    stable ``kind`` + a human ``message``); it never echoes any resolved
+    address, so the error is not an internal-DNS oracle.
+    """
+
+    def __init__(self, endpoint: str, reason: str) -> None:
+        self.endpoint = endpoint
+        self.detail: dict[str, object] = {
+            "kind": "endpoint_not_allowed",
+            "endpoint": endpoint,
+            "message": (
+                f"backend.ref endpoint {endpoint!r} is not allowed: {reason}. "
+                f"The corpus endpoint must be an https:// URL that resolves to "
+                f"a public address; an on-prem corpus on private space is opted "
+                f"in via MEHO_TARGET_SSRF_ALLOWLIST."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+async def _screen_backend_endpoint(body: DocCollectionCreate) -> None:
+    """Reject a ``corpus-http`` create whose endpoint is non-public / non-https.
+
+    Extracts the corpus endpoint from ``backend.ref`` (the ``endpoint`` key,
+    alias ``url``) and screens it with the shared target SSRF guard —
+    ``https`` scheme + a public, allowlist-aware host — the same
+    :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
+    the connector target dial uses. Absent endpoint (the legacy global
+    ``settings.corpus_url`` deploy) is nothing to screen here; that global is
+    deployment-owned and screened at dial time. Only ``corpus-http`` names a
+    dialed URL, so the screen is scoped to that backend type.
+    """
+    if body.backend.type != CORPUS_HTTP_BACKEND_TYPE:
+        return
+    ref = body.backend.ref
+    raw = ref.get("endpoint") or ref.get("url")
+    endpoint = raw.strip() if isinstance(raw, str) else None
+    if not endpoint:
+        return
+    try:
+        host = corpus_endpoint_host(endpoint)
+        await assert_public_destination_async(host)
+    except TargetDestinationBlockedError as exc:
+        raise DocCollectionEndpointError(endpoint, str(exc)) from exc
+
+
 async def create_doc_collection(
     session: AsyncSession,
     operator: Operator,
@@ -164,6 +227,9 @@ async def create_doc_collection(
             the front maps it to 422.
         DocCollectionConflictError: a collection with this ``collection_key``
             already exists in the operator's scope; the front maps it to 409.
+        DocCollectionEndpointError: the ``corpus-http`` ``backend.ref``
+            endpoint is not an ``https`` public destination; the front maps
+            it to 422.
     """
     # Bind the canonical op_id up-front so a persisted audit row is
     # filterable by ``op_id="meho.docs.*"`` even if the insert raises
@@ -184,6 +250,11 @@ async def create_doc_collection(
     valid_types = sorted(all_backends())
     if valid_types and body.backend.type not in valid_types:
         raise DocCollectionBackendTypeError(body.backend.type, valid_types)
+
+    # Screen the corpus endpoint BEFORE the insert so a non-https / non-public
+    # destination is rejected at create (a structured 422), never persisted
+    # and never dialed with a credential (#290).
+    await _screen_backend_endpoint(body)
 
     now = datetime.now(UTC)
     row = DocCollectionORM(

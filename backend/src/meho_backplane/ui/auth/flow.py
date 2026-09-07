@@ -73,6 +73,23 @@ Security discipline (#865 is auth)
   callback consumes it (single-use semantics). A second callback
   with the same ``state`` finds no verifier and is rejected.
 
+* ``browser_binding`` is the login-CSRF defence (F10, #272). ``state``
+  and a server-side verifier map do NOT by themselves tie the flow to
+  the browser that started it: an attacker can start their own login,
+  capture the resulting callback URL (which carries ``state``), and
+  induce a victim to follow it -- completing the flow in the victim's
+  browser and logging the victim into the attacker's account. To close
+  that, :func:`build_authorization_request` mints a second random
+  per-flow secret, stores it in the :class:`PendingFlow`, and returns it
+  so the route sets it as a short-lived ``HttpOnly`` cookie on the
+  initiating browser. :func:`exchange_code_for_tokens` requires the
+  callback to replay that cookie value and rejects the flow when it is
+  missing or does not match -- before the token exchange or any session
+  creation. The binding value is deliberately independent of ``state``
+  because ``state`` is on the URL the attacker controls; the binding
+  lives only in the browser cookie (RFC 9700 §2.1: bind the flow to the
+  initiating user-agent).
+
 References
 ----------
 
@@ -91,6 +108,7 @@ References
 from __future__ import annotations
 
 import asyncio
+import hmac
 import time
 from dataclasses import dataclass
 from typing import Any, Final
@@ -366,13 +384,16 @@ async def build_authorization_request(
     *,
     redirect_uri: str,
     return_to: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """Mint a PKCE-protected authorization URL and register the verifier.
 
-    Returns ``(authorization_url, state)``. The route handler 302s the
-    browser at *authorization_url* and stores nothing client-side --
-    the verifier (and the originally-requested *return_to* URL) live
-    in :class:`PKCEVerifierStore`, keyed on the returned *state*.
+    Returns ``(authorization_url, state, browser_binding)``. The route
+    handler 302s the browser at *authorization_url*, sets
+    *browser_binding* as a short-lived ``HttpOnly`` cookie on the
+    initiating browser (the login-CSRF defence, F10 #272), and stores
+    nothing else client-side -- the verifier, the *browser_binding*, and
+    the originally-requested *return_to* URL all live in
+    :class:`PKCEVerifierStore`, keyed on the returned *state*.
 
     Parameters
     ----------
@@ -399,6 +420,12 @@ async def build_authorization_request(
     # compliant URL-safe random string. Length 48 yields ~64 chars of
     # base64 -- comfortably above the spec's 43-128 char floor.
     code_verifier = generate_token(48)
+    # Browser-binding secret (F10, #272): an independent random token
+    # the route hands to the initiating browser via cookie. Kept
+    # separate from ``state`` because ``state`` rides the callback URL
+    # an attacker can replay; the binding value must live only in the
+    # browser to tie the flow to the user-agent that started it.
+    browser_binding = generate_token(48)
     resource = _resource_indicator(settings)
     async with _build_oauth_client(settings, redirect_uri=redirect_uri) as client:
         url, state = client.create_authorization_url(
@@ -406,8 +433,13 @@ async def build_authorization_request(
             code_verifier=code_verifier,
             resource=resource,
         )
-    await get_verifier_store().put(state, code_verifier=code_verifier, return_to=return_to)
-    return url, state
+    await get_verifier_store().put(
+        state,
+        code_verifier=code_verifier,
+        return_to=return_to,
+        browser_binding=browser_binding,
+    )
+    return url, state, browser_binding
 
 
 async def _post_to_token_endpoint(
@@ -480,11 +512,39 @@ def _project_token_response(token: dict[str, Any], return_to: str) -> TokenExcha
     )
 
 
+def _verify_browser_binding(pending: PendingFlow, browser_binding: str | None) -> None:
+    """Reject the flow when the callback's browser cookie does not match.
+
+    The login-CSRF defence (F10, #272). *browser_binding* is the value
+    the initiating browser replayed from its short-lived cookie; a
+    genuine completion carries the same secret
+    :func:`build_authorization_request` stashed in *pending*. A missing
+    cookie (an attacker-induced callback in a browser that never started
+    the flow) or a mismatched one fails closed here -- **before** the
+    token-endpoint POST and any session creation. The comparison is
+    constant-time (:func:`hmac.compare_digest`) so a timing side channel
+    cannot recover the stored value.
+
+    The ``isascii`` guard keeps a hostile cookie carrying non-ASCII
+    bytes from raising ``TypeError`` inside ``compare_digest`` (which
+    refuses non-ASCII ``str`` operands) -- such a value can never equal
+    the stored token (an ASCII :func:`generate_token` output), so it is
+    treated as a mismatch and fails closed rather than 500ing.
+    """
+    if (
+        browser_binding is None
+        or not browser_binding.isascii()
+        or not hmac.compare_digest(browser_binding, pending.browser_binding)
+    ):
+        raise OAuthFlowError("browser_binding_mismatch")
+
+
 async def exchange_code_for_tokens(
     *,
     redirect_uri: str,
     authorization_response: str,
     state: str | None,
+    browser_binding: str | None,
 ) -> TokenExchangeResult:
     """Exchange the callback's ``code`` + stored ``code_verifier`` for tokens.
 
@@ -503,6 +563,12 @@ async def exchange_code_for_tokens(
         cross-checks the response's ``state`` against this value and
         raises :class:`MismatchingStateError` on mismatch -- the
         belt-and-braces CSRF guard.
+    browser_binding
+        The value the initiating browser replayed from its short-lived
+        login-binding cookie (F10, #272). ``None`` when the callback
+        carried no such cookie. Cross-checked against the secret stashed
+        at login; a missing or mismatched value fails the flow closed
+        before the token exchange, defeating login CSRF.
 
     Returns
     -------
@@ -515,7 +581,8 @@ async def exchange_code_for_tokens(
     OAuthFlowConfigurationError
         Client knobs are unset.
     OAuthFlowError
-        ``state`` is unknown / expired / the response is malformed.
+        ``state`` is unknown / expired, the browser binding is missing
+        or mismatched, or the response is malformed.
     httpx.HTTPError
         Network failure on the token-endpoint POST.
     """
@@ -529,6 +596,9 @@ async def exchange_code_for_tokens(
     pending = await get_verifier_store().pop(state)
     if pending is None:
         raise OAuthFlowError("unknown_or_expired_state")
+    # Reject a callback the initiating browser did not start BEFORE the
+    # token POST / session creation (login-CSRF defence, F10 #272).
+    _verify_browser_binding(pending, browser_binding)
     token = await _post_to_token_endpoint(
         settings,
         endpoints,

@@ -38,6 +38,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 import meho_backplane.checks.investigate as inv
 from meho_backplane.checks.repository import create_sensor, record_sensor_result
@@ -51,6 +52,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     CheckDashboard,
     CheckDashboardSensor,
+    EndpointDescriptor,
     Sensor,
     SensorCadenceKind,
     Tenant,
@@ -99,6 +101,43 @@ async def _seed_tenant(tenant_id: uuid.UUID = _TENANT) -> None:
             await session.commit()
 
 
+async def _seed_safe_descriptor() -> None:
+    """Seed the global safe ``vmware.vm.list`` descriptor the runner re-resolves.
+
+    The runner re-asserts the safe-tier floor at dispatch (#303) by resolving
+    the current descriptor, so a sensor created through the repository (which
+    bypasses the service create guard) needs its op to resolve to a ``safe``
+    descriptor for the dispatch path to run -- as in production, where the
+    create guard guarantees one exists. Idempotent.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        existing = await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.product == "vmware",
+                EndpointDescriptor.version == "9.0",
+                EndpointDescriptor.impl_id == "vmware-rest",
+                EndpointDescriptor.op_id == "vmware.vm.list",
+            )
+        )
+        if existing.scalars().first() is not None:
+            return
+        session.add(
+            EndpointDescriptor(
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id="vmware.vm.list",
+                source_kind="ingested",
+                method="GET",
+                path="/vmware.vm.list",
+                parameter_schema={"type": "object", "properties": {}},
+                safety_level="safe",
+            )
+        )
+        await session.commit()
+
+
 async def _create_sensor(
     *,
     retry_times: int,
@@ -106,6 +145,7 @@ async def _create_sensor(
     interval_seconds: int = 300,
 ) -> uuid.UUID:
     await _seed_tenant()
+    await _seed_safe_descriptor()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await create_sensor(

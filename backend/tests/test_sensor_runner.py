@@ -47,6 +47,7 @@ import httpx
 import pytest
 import respx
 import structlog
+from sqlalchemy import select
 
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
@@ -89,6 +90,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.scheduler.loop import _SCHEDULER_ADVISORY_LOCK_KEY
 from meho_backplane.settings import get_settings
@@ -133,14 +135,18 @@ async def _seed_tenant(tenant_id: uuid.UUID = _TENANT) -> None:
             await session.commit()
 
 
-async def _seed_safe_descriptor() -> None:
-    """Insert the global safe ``vmware.vm.list`` descriptor the create guard reads.
+async def _seed_safe_descriptor(safety_level: str = "safe") -> None:
+    """Insert the global ``vmware.vm.list`` descriptor the create guard reads.
 
     ``SensorAdminService.create`` resolves ``connector_id="vmware-rest-9.0"`` +
     ``op_id="vmware.vm.list"`` to a ``safety_level='safe'`` descriptor before it
     writes the row; the runner-file helpers create rows via the repository
     directly (bypassing the guard), so the descriptor is only needed by the
     tests that exercise the real service create path (#2699).
+
+    *safety_level* defaults to ``"safe"``; a test simulating a versioned
+    re-ingest that raised the tier after create passes ``"caution"`` /
+    ``"dangerous"`` to prove the runner's dispatch-time floor (#303).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -153,6 +159,46 @@ async def _seed_safe_descriptor() -> None:
                 source_kind="ingested",
                 method="GET",
                 path="/vmware.vm.list",
+                parameter_schema={"type": "object", "properties": {}},
+                safety_level=safety_level,
+            )
+        )
+        await session.commit()
+
+
+async def _ensure_safe_descriptor(connector_id: str, op_id: str) -> None:
+    """Seed a global ``safe`` descriptor for *(connector_id, op_id)* if none exists.
+
+    The runner re-asserts the safe-tier floor at dispatch (#303) by resolving
+    the current descriptor, so a sensor created straight through the repository
+    (which bypasses the service create guard) needs its op to resolve to a
+    ``safe`` descriptor for the dispatch path to run at all -- exactly as in
+    production, where the create guard guarantees one exists. Idempotent: a
+    connector that already registered its descriptor (the net / k8s typed ops,
+    or a test that seeded a non-``safe`` tier first) is left untouched.
+    """
+    product, version, impl_id = parse_connector_id(connector_id)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        existing = await session.execute(
+            select(EndpointDescriptor).where(
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+                EndpointDescriptor.op_id == op_id,
+            )
+        )
+        if existing.scalars().first() is not None:
+            return
+        session.add(
+            EndpointDescriptor(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                op_id=op_id,
+                source_kind="ingested",
+                method="GET",
+                path=f"/{op_id}",
                 parameter_schema={"type": "object", "properties": {}},
                 safety_level="safe",
             )
@@ -174,6 +220,7 @@ async def _create_interval_sensor(
     params: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     await _seed_tenant(tenant_id)
+    await _ensure_safe_descriptor(connector_id, op_id)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await create_sensor(
@@ -209,6 +256,7 @@ async def _create_cron_sensor(
     base: datetime,
 ) -> uuid.UUID:
     await _seed_tenant(tenant_id)
+    await _ensure_safe_descriptor("vmware-rest-9.0", "vmware.vm.list")
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = await create_sensor(
@@ -735,6 +783,87 @@ async def test_ok_dispatch_routes_payload_into_evaluator_and_persists(
     assert row.last_evidence["observed"] == 3
     assert row.last_evaluated_at is not None
     assert row.state_since is not None
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch-time safe-tier floor (#303)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sensor_dispatch_skips_op_reingested_above_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sensored op re-classified above ``safe`` after create is not dispatched.
+
+    The create guard only proves safety at registration; a versioned re-ingest
+    could re-classify the op to ``caution`` while keeping
+    ``requires_approval=False``, which the non-agent policy verdict would
+    auto-execute for the runner's synthetic ``USER``. The runner's dispatch-time
+    floor (#303) must fail closed: ``dispatch`` is never reached and the
+    persisted outcome is ``unknown``.
+    """
+    dispatched = 0
+
+    async def _counting_dispatch(**_kwargs: Any) -> OperationResult:
+        nonlocal dispatched
+        dispatched += 1
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _counting_dispatch)
+
+    # Seed the descriptor at ``caution`` *before* the sensor is created, so the
+    # factory's idempotent safe-seed leaves it as-is -- the op the live sensor
+    # references now resolves above the safe floor at dispatch time.
+    await _seed_tenant()
+    await _seed_safe_descriptor(safety_level="caution")
+    sensor_id = await _create_interval_sensor(interval_seconds=300)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    assert dispatched == 0, "a caution-tier op must not dispatch on the sensor cadence"
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "op_not_safe_at_dispatch"
+    assert row.last_evidence["safety_level"] == "caution"
+
+
+@pytest.mark.asyncio
+async def test_sensor_dispatch_runs_when_op_is_safe_at_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``safe`` op still dispatches and routes its payload to the evaluator.
+
+    Happy-path regression guard paired with
+    :func:`test_sensor_dispatch_skips_op_reingested_above_safe`: the
+    dispatch-time floor must let a genuinely ``safe`` op through unchanged.
+    """
+    dispatched = 0
+
+    async def _counting_dispatch(**_kwargs: Any) -> OperationResult:
+        nonlocal dispatched
+        dispatched += 1
+        return _ok_result({"count": 3})
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _counting_dispatch)
+
+    await _seed_tenant()
+    await _seed_safe_descriptor(safety_level="safe")
+    sensor_id = await _create_interval_sensor(interval_seconds=300)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    assert dispatched == 1, "a safe-tier op must dispatch on the sensor cadence"
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok"
+    assert row.last_value == 3
+    assert row.last_evidence is not None
+    assert row.last_evidence["observed"] == 3
 
 
 @pytest.mark.asyncio

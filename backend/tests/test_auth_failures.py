@@ -585,6 +585,161 @@ def test_kid_not_in_jwks_after_refresh_returns_invalid_token() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Forced-refresh bound (S22 / #310) — negative-kid cache + refresh cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_kid_burst_forces_at_most_one_jwks_refetch() -> None:
+    """A burst of *distinct* unknown-``kid`` tokens forces at most one
+    Keycloak discovery+JWKS round-trip, not one per request (S22 / #310).
+
+    Each token carries a different fabricated ``kid`` (so a per-``kid``
+    negative cache alone can't dedupe them) and is signed by a key the
+    JWKS never publishes. Without the forced-refresh cooldown every
+    request would drive a fresh discovery+JWKS fetch; with it, the first
+    request performs the initial fill plus one forced refresh and every
+    later request in the window fails closed without touching Keycloak.
+    Pins the cross-request bound the DoS hypothesis (#279 item 4) needed.
+    """
+    signing_key = make_rsa_keypair("kid-signer")
+    other_key = make_rsa_keypair("kid-O")
+
+    with respx.mock as mock_router:
+        discovery_route, jwks_route = mock_discovery_and_jwks(
+            mock_router,
+            public_jwks(other_key),
+        )
+        client = TestClient(_build_app())
+        for i in range(5):
+            token = mint_token(signing_key, kid=f"kid-unknown-{i}")
+            response = client.get(
+                "/whoami",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 401
+            assert response.json() == {"detail": "invalid_token"}
+
+    # Initial fill (1) + exactly one forced refresh (1) = 2 hits each,
+    # regardless of how many distinct unknown kids arrived in the window.
+    assert discovery_route.call_count == 2
+    assert jwks_route.call_count == 2
+
+
+def test_negative_kid_cache_short_circuits_repeat_after_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``kid`` confirmed absent after a forced refresh is remembered, so a
+    replay is failed closed without another Keycloak round-trip even once
+    the forced-refresh cooldown has elapsed (S22 / #310).
+
+    The cooldown timestamp is reset between requests to isolate the
+    negative cache: only the negative-``kid`` cache can be what prevents
+    the second fetch.
+    """
+    from meho_backplane.auth import jwt as jwt_module
+
+    signing_key = make_rsa_keypair("kid-signer")
+    other_key = make_rsa_keypair("kid-O")
+    token = mint_token(signing_key, kid="kid-bogus")
+
+    with respx.mock as mock_router:
+        discovery_route, jwks_route = mock_discovery_and_jwks(
+            mock_router,
+            public_jwks(other_key),
+        )
+        client = TestClient(_build_app())
+
+        first = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert first.status_code == 401
+        assert first.json() == {"detail": "invalid_token"}
+        # Initial fill + one forced refresh confirms the kid is absent.
+        assert discovery_route.call_count == 2
+        assert jwks_route.call_count == 2
+
+        # Neutralise the cooldown so it can't be what blocks the retry.
+        monkeypatch.setattr(jwt_module, "_last_forced_refresh_at", float("-inf"))
+
+        second = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert second.status_code == 401
+        assert second.json() == {"detail": "invalid_token"}
+
+    # The negative cache short-circuited the replay: no extra fetch.
+    assert discovery_route.call_count == 2
+    assert jwks_route.call_count == 2
+
+
+def test_forced_refresh_cooldown_refuses_second_refetch_then_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside the cooldown a *different* unknown ``kid`` fails closed with no
+    refetch; once the window elapses a genuine rotation still refreshes
+    once and authenticates (S22 / #310).
+
+    Distinct unknown kids are used for the two blocked requests so the
+    negative cache can't be the thing blocking the second — only the
+    cooldown can. The final valid rotation proves the cooldown is a
+    cooldown, not a permanent block on legitimate key rotation.
+    """
+    from meho_backplane.auth import jwt as jwt_module
+
+    key_a = make_rsa_keypair("kid-A")
+    key_b = make_rsa_keypair("kid-B")
+    signing_key = make_rsa_keypair("kid-signer")
+    token_a = mint_token(key_a)
+    token_b = mint_token(key_b)
+
+    with respx.mock as mock_router:
+        _discovery_route, jwks_route = mock_discovery_and_jwks(
+            mock_router,
+            public_jwks(key_a),
+        )
+        client = TestClient(_build_app())
+
+        # Prime the cache with the kid-A keyset.
+        primed = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        assert primed.status_code == 200
+        assert jwks_route.call_count == 1
+
+        # First unknown kid: one permitted forced refresh (kid still absent).
+        first_bogus = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {mint_token(signing_key, kid='kid-x')}"},
+        )
+        assert first_bogus.status_code == 401
+        assert jwks_route.call_count == 2
+
+        # Second, *different* unknown kid inside the cooldown: refused,
+        # no refetch (the negative cache doesn't hold this kid).
+        second_bogus = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {mint_token(signing_key, kid='kid-y')}"},
+        )
+        assert second_bogus.status_code == 401
+        assert jwks_route.call_count == 2
+
+        # Window elapses; Keycloak rotates to kid-B.
+        monkeypatch.setattr(jwt_module, "_last_forced_refresh_at", float("-inf"))
+        jwks_route.mock(return_value=httpx.Response(200, json=public_jwks(key_b)))
+
+        rotated = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token_b}"},
+        )
+        assert rotated.status_code == 200
+        # Genuine rotation refreshed once more.
+        assert jwks_route.call_count == 3
+
+
+# ---------------------------------------------------------------------------
 # JWKS unreachable / malformed
 # ---------------------------------------------------------------------------
 

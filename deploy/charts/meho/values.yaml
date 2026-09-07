@@ -972,6 +972,21 @@ broadcast:
   service:
     type: ClusterIP
     port: 6379
+  # -- Valkey requirepass authentication (subchart `auth` block). Default on:
+  # the subchart renders a Secret and the backplane client authenticates with
+  # the same value via secretKeyRef. See charts/broadcast/values.yaml.
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: requirepass
+    password: ""
+  # -- Broadcast subchart's own ingress NetworkPolicy (subchart
+  # `networkPolicy` block). Admits tcp/6379 only from the backplane Pods.
+  networkPolicy:
+    enabled: true
+    backplanePodLabels:
+      app.kubernetes.io/name: meho
+    extraAllowedSelectors: []
 
 # Pre-install / pre-upgrade migration Job (Helm hook).
 #

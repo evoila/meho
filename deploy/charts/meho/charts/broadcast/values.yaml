@@ -71,6 +71,43 @@ service:
   # -- Service port (Redis-protocol default 6379).
   port: 6379
 
+# -- Valkey `requirepass` authentication. Default on: the chart renders a
+# Secret holding a password (or reuses `existingSecret`), the store starts
+# with `requirepass`, and the backplane client authenticates with the same
+# Secret value. `protected-mode` is kept on as defense in depth while auth
+# is enabled. Disable only when an external, separately-secured store is
+# used.
+auth:
+  enabled: true
+  # -- Reference an operator-supplied Secret instead of a chart-managed one.
+  # When set, the chart renders no Secret and both the store and the client
+  # read the password from this Secret at `existingSecretPasswordKey`.
+  existingSecret: ""
+  # -- Key holding the requirepass value (in the chart-managed Secret, or in
+  # `existingSecret` when supplied).
+  existingSecretPasswordKey: requirepass
+  # -- Explicit password. When empty and no `existingSecret` is set the
+  # chart generates a 32-char alphanumeric password on first install and
+  # preserves it across upgrades via a lookup of the existing Secret.
+  password: ""
+
+# -- The broadcast subchart's own ingress NetworkPolicy. Selects the
+# broadcast Pod and admits tcp/<service.port> only from the backplane Pods
+# (and any `extraAllowedSelectors`). Independent of the umbrella chart's
+# NetworkPolicy so the store's isolation does not depend on the parent — a
+# Pod is ingress-isolated only when some policy selects it, and the parent
+# policy selects the backplane, not this store.
+networkPolicy:
+  enabled: true
+  # -- Pod-selector labels identifying the backplane Pods admitted to the
+  # store. Defaults to the umbrella chart's `meho.selectorLabels` name; the
+  # `.Release.Name` instance label is appended automatically.
+  backplanePodLabels:
+    app.kubernetes.io/name: meho
+  # -- Extra pod selectors (label maps) admitted to the store, for
+  # explicitly-listed in-cluster consumers. Default empty.
+  extraAllowedSelectors: []
+
 # -- Pod-level annotations.
 podAnnotations: {}
 

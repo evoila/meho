@@ -34,7 +34,9 @@ resources that make up a running backplane:
 - Migration Job — `pre-install,pre-upgrade` Helm hook running
   `python -m meho_backplane.db.migrate` before the Deployment rolls forward.
 - Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
-  per ADR 0005.
+  per ADR 0005, plus its **own** ingress NetworkPolicy and a chart-managed
+  `requirepass` Secret (#276) so the store is ingress-isolated and
+  authenticated regardless of the umbrella policy.
 
 ## Log shipping (stdout → collector)
 
@@ -82,9 +84,11 @@ deploy/charts/meho/
         ├── values.yaml
         └── templates/
             ├── _helpers.tpl
-            ├── deployment.yaml   # single-replica Recreate; readonly rootfs + emptyDir /data
-            ├── service.yaml      # ClusterIP :6379 (port name "redis")
-            └── configmap.yaml    # minimal valkey.conf (no auth, no persistence)
+            ├── deployment.yaml    # single-replica Recreate; readonly rootfs + emptyDir /data
+            ├── service.yaml       # ClusterIP :6379 (port name "redis")
+            ├── configmap.yaml     # minimal valkey.conf (requirepass Secret-sourced, no persistence)
+            ├── secret.yaml        # chart-managed requirepass Secret (#276)
+            └── networkpolicy.yaml # own ingress policy: 6379 from backplane only (#276)
 ```
 
 ## Chart contract
@@ -212,6 +216,15 @@ egress rules to:
   is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
 
+The broadcast clause above is an **egress** allowance on the backplane
+side. A Pod is ingress-isolated only when *some* NetworkPolicy selects it,
+and this policy selects the backplane Pods — not the broadcast store. The
+broadcast subchart therefore ships its **own** ingress NetworkPolicy
+(`charts/broadcast/templates/networkpolicy.yaml`, #276) selecting the
+broadcast Pod and admitting `tcp/6379` only from the backplane Pods (and
+any `broadcast.networkPolicy.extraAllowedSelectors`), so the store's
+isolation does not depend on the umbrella policy alone.
+
 Ingress is permitted only from the namespace whose
 `kubernetes.io/metadata.name` label matches
 `networkPolicy.ingressControllerNamespace` (default `ingress-nginx`,
@@ -335,7 +348,8 @@ implementation of that decision.
 | Slug | `broadcast` (not `redis`) | The protocol contract matters more than the brand |
 | Workload | `Deployment` (not `StatefulSet`), single replica | Streams are ephemeral in v0.1; HA via Sentinel/Cluster is v0.2+ |
 | Persistence | None (no PVC, `save ""`, `appendonly no`) | Restart-loss of stream history is acceptable in v0.1 |
-| Auth | None (no `requirepass`) | v0.1 single-tenant; gated at the network layer by the umbrella chart's NetworkPolicy |
+| Auth | `requirepass` (default on), Secret-sourced via `secretKeyRef` (#276) | Defense in depth alongside the ingress policy; `protected-mode` stays on |
+| Network isolation | Own ingress NetworkPolicy — `tcp/6379` from backplane Pods only (#276) | The parent policy selects the backplane, not the store; the store needs its own selector to be isolated |
 | Update strategy | `Recreate` | Single-replica + port-bind constraint makes RollingUpdate worse |
 | Probes | TCP `connect` on 6379 | Minimal — avoids coupling to `redis-cli` / `valkey-cli` binary naming variance |
 | Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `BROADCAST_REDIS_URL` env |
@@ -373,6 +387,21 @@ dialing localhost while the healthy Service is never contacted. ADR 0005
 locked `redis-py` as the driver — it parses `redis://` schemes against a
 Valkey endpoint unchanged (wire-protocol compatibility carries from
 Redis 7.2.4).
+
+**Valkey auth (#276).** `broadcast.auth.enabled: true` (the default)
+renders a chart-managed Secret (`<release>-broadcast-auth`, key
+`requirepass`) — the password is `broadcast.auth.password` when set, an
+operator's `broadcast.auth.existingSecret` when supplied, or a generated
+32-char value preserved across upgrades via a `lookup` of the existing
+Secret. The store reads it into a runtime config file at Pod start-up (kept
+out of the ConfigMap and off the process command line); the backplane reads
+the *same* Secret into `BROADCAST_REDIS_PASSWORD`, and
+`Settings.broadcast_redis_password` is applied as the `password` kwarg on
+both `redis.asyncio.from_url` clients (`broadcast/client.py`). The
+`BROADCAST_REDIS_URL` above stays password-free so no secret rides a
+plaintext env `value:`. Setting `broadcast.auth.enabled: false` drops the
+Secret, the client password, and flips `protected-mode` off so the
+NetworkPolicy-gated port still accepts connections.
 
 **Operator-supplied secrets.** The Job + the backplane both consume
 `DATABASE_URL` from a Kubernetes Secret named by
@@ -1562,8 +1591,9 @@ when application code is the only delta.
 - HPA / PDB / topologySpreadConstraints — deferred to v0.2. v0.1 is
   single-replica per Goal #11 scope. (ServiceMonitor + PrometheusRule
   shipped in #2885 — see "Metrics scrape wiring" under Chart contract.)
-- Broadcast subchart HA (Sentinel/Cluster), persistence, auth —
-  deferred to v0.2 per ADR 0005.
+- Broadcast subchart HA (Sentinel/Cluster) and persistence — deferred
+  to v0.2 per ADR 0005. (Valkey `requirepass` auth + the subchart's own
+  ingress NetworkPolicy shipped in #276 — see "Broadcast subchart" above.)
 - `broadcast.externalEndpoint` opt-out for operators with a managed
   Redis/Valkey already running — deferred to v0.2 (the
   `broadcast.enabled: false` knob lands in v0.1 as the disable path).

@@ -1194,6 +1194,14 @@ class Settings(BaseModel):
         default="redis://localhost:6379",
         min_length=1,
     )
+    #: Optional ``requirepass`` for the broadcast Valkey store. The Helm
+    #: chart enables Valkey auth by default and injects this via
+    #: ``BROADCAST_REDIS_PASSWORD`` (secretKeyRef), keeping the password out
+    #: of the plaintext ``BROADCAST_REDIS_URL``. ``None`` (unset) means the
+    #: client connects without auth — the pre-auth default and the local-dev
+    #: ``redis://localhost:6379`` path. Applied as the ``password`` kwarg on
+    #: :func:`redis.asyncio.from_url` in :mod:`meho_backplane.broadcast.client`.
+    broadcast_redis_password: str | None = Field(default=None)
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
     #: Default per-source fixed-window cap for the inbound event-ingest
@@ -2089,6 +2097,10 @@ def get_settings() -> Settings:
             "BROADCAST_REDIS_URL",
             "redis://localhost:6379",
         ),
+        # ``or None`` collapses an empty-string env to no-auth, so an
+        # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
+        # zero-length password on the AUTH command.
+        broadcast_redis_password=os.environ.get("BROADCAST_REDIS_PASSWORD") or None,
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),

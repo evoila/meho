@@ -54,6 +54,15 @@ permissions:
 jobs:
   semgrep:
     name: Semgrep SAST
+    # Fork-PR guard (F06, meho-internal#268): never execute PR-controlled
+    # code from a fork on the internal `meho-runners-ci` pool. Unlike the
+    # other PR workflows, this job runs inside a container pulled from
+    # the internal Harbor proxy (harbor.evba.lab, see below), which a
+    # disposable GitHub-hosted runner cannot reach — so untrusted fork
+    # PRs are skipped here rather than relocated. The required `Semgrep
+    # SAST` context still runs for real on the trusted merge_group
+    # (queue-admission) and push refs. Same stance as ci.yml.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners-ci
     timeout-minutes: 15
     # Pulled through the in-cluster Harbor proxy cache

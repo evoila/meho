@@ -72,6 +72,7 @@ import respx
 from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from meho_backplane.auth import vault as vault_module
@@ -807,3 +808,143 @@ def test_docker_skip_reason_explains_ci_path() -> None:
     """
     assert "CI" in _SKIP_REASON
     assert "Docker" in _SKIP_REASON
+
+
+# ---------------------------------------------------------------------------
+# Security S18 #306 — audit_log append-only trigger enforcement
+# ---------------------------------------------------------------------------
+
+
+async def _exercise_audit_log_append_only(async_url: str) -> dict[str, Any]:
+    """INSERT one audit row, then probe UPDATE / DELETE / SELECT.
+
+    Returns a structured result so the synchronous test body can assert
+    on each outcome by name. Each mutating statement runs in its own
+    transaction so a rejected ``UPDATE`` / ``DELETE`` (rolled back on the
+    trigger's ``RAISE``) does not poison the ``INSERT`` verification.
+
+    The trigger installed by migration ``0100`` fires ``BEFORE UPDATE OR
+    DELETE ... FOR EACH ROW`` and raises, so both mutations must surface a
+    :class:`sqlalchemy.exc.DBAPIError` (asyncpg ``RaiseError``, SQLSTATE
+    ``P0001``) while the ``INSERT`` and the read-back succeed.
+    """
+    engine = create_async_engine(async_url)
+    results: dict[str, Any] = {}
+    try:
+        # INSERT — the append path must still work. Only the four NOT NULL
+        # columns without a server default are supplied; id / occurred_at /
+        # payload take their PostgreSQL-side defaults.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO audit_log (operator_sub, method, path, status_code) "
+                    "VALUES ('op-s18-trigger', 'GET', '/api/v1/health', 200)"
+                )
+            )
+
+        # UPDATE — must be rejected by the trigger.
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("UPDATE audit_log SET status_code = 500"))
+            results["update_raised"] = False
+            results["update_error"] = ""
+        except DBAPIError as exc:
+            results["update_raised"] = True
+            results["update_error"] = str(exc.orig)
+
+        # DELETE — must be rejected by the trigger.
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("DELETE FROM audit_log"))
+            results["delete_raised"] = False
+            results["delete_error"] = ""
+        except DBAPIError as exc:
+            results["delete_raised"] = True
+            results["delete_error"] = str(exc.orig)
+
+        # SELECT — the row survived both blocked mutations, unchanged.
+        async with engine.connect() as conn:
+            count = (await conn.execute(text("SELECT COUNT(*) FROM audit_log"))).scalar_one()
+            status = (
+                await conn.execute(
+                    text("SELECT status_code FROM audit_log ORDER BY occurred_at DESC LIMIT 1")
+                )
+            ).scalar_one()
+        results["row_count"] = count
+        results["status_code"] = status
+    finally:
+        await engine.dispose()
+    return results
+
+
+@pytest.mark.skipif(not _DOCKER_AVAILABLE, reason=_SKIP_REASON)
+class TestAuditLogAppendOnlyTrigger:
+    """Migration ``0100`` makes ``audit_log`` UPDATE / DELETE fail at the datastore.
+
+    CLAUDE.md postulate 7 (v0.1-spec section 6) asserts the audit trail is
+    append-only and tamper-evident. Before #306 that was a code convention;
+    ``0100`` enforces it with a ``BEFORE UPDATE OR DELETE`` trigger so the
+    property survives a compromise of the app DB role. This class is the
+    Postgres-container proof of that enforcement; it mirrors the
+    testcontainers + ``alembic upgrade`` discipline of
+    :class:`TestForwardCompatRollback` and skips when Docker is absent (the
+    convention-level coverage runs everywhere; the trigger is Postgres-only).
+    """
+
+    def test_audit_log_update_delete_raises(
+        self,
+        env_overrides: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After ``upgrade head``, raw UPDATE / DELETE raise; INSERT / SELECT succeed.
+
+        Synchronous for the same reason every ``alembic upgrade head``
+        driving test in this suite is: ``alembic.command.upgrade`` invokes
+        :func:`asyncio.run` internally via the env.py async cookbook, so a
+        :func:`pytest.mark.asyncio` decoration would crash on re-entry. The
+        raw-SQL probe is wrapped in its own ``asyncio.run`` boundary.
+        """
+        from testcontainers.postgres import PostgresContainer
+
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
+            sync_url = pg.get_connection_url()
+            async_url = _async_url_from(sync_url)
+
+            monkeypatch.setenv("DATABASE_URL", async_url)
+            get_settings.cache_clear()
+            reset_engine_for_testing()
+
+            cfg = alembic_config()
+            cfg.set_main_option("sqlalchemy.url", async_url)
+            command.upgrade(cfg, "head")
+
+            state = asyncio.run(_exercise_audit_log_append_only(async_url))
+
+            assert state["update_raised"], (
+                "UPDATE audit_log must be rejected by the append-only trigger; "
+                "it succeeded, so the tamper-evidence invariant is not enforced"
+            )
+            assert "append-only" in state["update_error"], (
+                "the trigger's RAISE message must explain the append-only rule; "
+                f"got {state['update_error']!r}"
+            )
+            assert state["delete_raised"], (
+                "DELETE FROM audit_log must be rejected by the append-only trigger; "
+                "it succeeded, so an attacker could erase the trail"
+            )
+            assert "append-only" in state["delete_error"], (
+                "the trigger's RAISE message must explain the append-only rule; "
+                f"got {state['delete_error']!r}"
+            )
+            assert state["row_count"] == 1, (
+                "the INSERT must succeed and the blocked UPDATE/DELETE must leave "
+                f"the single row intact; saw {state['row_count']} rows"
+            )
+            assert state["status_code"] == 200, (
+                "the blocked UPDATE must not have taken effect; "
+                f"status_code is {state['status_code']}, expected the inserted 200"
+            )
+
+            asyncio.run(dispose_engine())
+            reset_engine_for_testing()

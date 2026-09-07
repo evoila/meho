@@ -37,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // defaultCLIOfflineSessionIdleSeconds is the offline-session idle
@@ -293,19 +294,32 @@ func newInsecureClient() *http.Client {
 	return c
 }
 
-// readPassword prompts on stderr and reads one line from in,
-// returning the trimmed string. Falls back to the env var
-// MEHO_ADMIN_BOOTSTRAP_NONINTERACTIVE for unit tests (when stdin is
-// not a TTY we still want to support a piped password without
-// hanging the cobra Run).
+// readPassword prompts on stderr and reads one line from in, returning
+// the trimmed string. When in is a terminal it reads with echo
+// suppressed via golang.org/x/term, so a secret typed at the prompt
+// never lands in the terminal, scrollback, or a session recording;
+// piped / non-TTY input (unit tests, a here-string) falls back to a
+// plain buffered line read so the cobra Run never hangs.
 func readPassword(in io.Reader, errOut io.Writer, prompt string) (string, error) {
 	if _, err := fmt.Fprint(errOut, prompt); err != nil {
 		return "", err
 	}
-	reader := bufio.NewReader(in)
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
+	var line string
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		b, err := term.ReadPassword(int(f.Fd()))
+		// ReadPassword consumes the trailing Enter without echoing
+		// it, so emit the newline the operator expects to see.
+		fmt.Fprintln(errOut)
+		if err != nil {
+			return "", err
+		}
+		line = string(b)
+	} else {
+		raw, err := bufio.NewReader(in).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		line = raw
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if line == "" {

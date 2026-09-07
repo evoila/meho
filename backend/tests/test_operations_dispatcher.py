@@ -487,6 +487,85 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_ingested_rejects_undeclared_param(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#293 (S05): an undeclared param on an ingested op -> ``invalid_params``.
+
+    Regression for the generic-connector query-injection gap: an ingested
+    descriptor persisted *before* the ingester emitted
+    ``additionalProperties: false`` carries a permissive schema, so a param
+    the op never declared used to pass validation and get forwarded onto
+    the vendor query string. The dispatcher now validates ingested ops
+    against a strict schema, so the additive key is rejected here -- before
+    any connector is resolved or vendor request built. The descriptor is
+    deliberately built WITHOUT ``additionalProperties`` to prove the
+    dispatch-seam backstop, not just the freshly-ingested strict schema.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="demo",
+        version="1.0",
+        impl_id="demo-rest",
+        op_id="GET:/api/things",
+        source_kind="ingested",
+        method="GET",
+        path="/api/things",
+        handler_ref=None,
+        summary="List things",
+        description="Pre-#293 ingested op with a permissive schema.",
+        tags=[],
+        # No ``additionalProperties`` clause -- the pre-fix persisted shape.
+        parameter_schema={
+            "type": "object",
+            "properties": {"filter": {"type": "string", "x-meho-param-loc": "query"}},
+        },
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    operator = _make_operator()
+    target = _FakeTarget(product="demo", version="1.0")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="demo-rest-1.0",
+        op_id="GET:/api/things",
+        target=target,
+        # ``filter`` is declared; ``cascade`` is not -- the injected switch.
+        params={"filter": "name=foo", "cascade": "true"},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("invalid_params:")
+    assert result.extras["error_code"] == "invalid_params"
+    validation = result.extras["validation_errors"]
+    assert isinstance(validation, list)
+    assert any(err["validator"] == "additionalProperties" for err in validation)
+    # No vendor request was built -- the reject is a pre-dispatch fault, so
+    # no broadcast event fires for a would-be call.
+    assert captured_events == []
+
+
+@pytest.mark.asyncio
 async def test_dispatch_returns_invalid_op_schema_for_poisoned_descriptor(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],

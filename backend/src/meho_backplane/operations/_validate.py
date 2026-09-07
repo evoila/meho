@@ -49,6 +49,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "InvalidOpSchemaError",
     "compute_params_hash",
+    "ingested_schema_for_validation",
     "policy_gate",
     "validate_params",
 ]
@@ -141,6 +142,41 @@ def validate_params(
         missing_ref = f"#{pointer}" if pointer.startswith("/") else pointer
         raise InvalidOpSchemaError(missing_ref) from exc
     return out
+
+
+def ingested_schema_for_validation(parameter_schema: dict[str, Any]) -> dict[str, Any]:
+    """Return *parameter_schema* strengthened to reject undeclared params.
+
+    Fail-closed dispatch backstop (#293 / security review S05) for
+    ``source_kind='ingested'`` descriptors. The OpenAPI ingester now emits
+    ``additionalProperties: false`` on every built schema
+    (:func:`~meho_backplane.operations.ingest.openapi._build_parameter_schema`),
+    but a descriptor persisted before that fix carries no such clause, so
+    :func:`validate_params` -- JSON Schema 2020-12, which defaults
+    ``additionalProperties`` to ``true`` -- would accept a param the op
+    never declared and let the dispatcher forward it verbatim onto the
+    vendor query string. Applying the clause at the dispatch seam closes
+    that window for already-ingested connectors without a re-ingest, and
+    produces the *same* ``invalid_params`` error shape (``validator ==
+    "additionalProperties"``) a freshly-ingested strict descriptor does.
+
+    A no-op when the schema already declares ``additionalProperties`` (a
+    post-fix descriptor, or one an operator deliberately widened) or is
+    not an object schema with declared ``properties`` (an empty ``{}``
+    descriptor stays permissive, matching :func:`validate_params`). The
+    returned mapping is a shallow copy -- the stored descriptor's JSON
+    column is never mutated, and the nested ``properties`` /
+    ``components`` are shared by reference (``additionalProperties: false``
+    constrains only the top-level instance keys, so nested body/object
+    fields stay unconstrained).
+    """
+    if not isinstance(parameter_schema, dict):
+        return parameter_schema
+    if "properties" not in parameter_schema:
+        return parameter_schema
+    if "additionalProperties" in parameter_schema:
+        return parameter_schema
+    return {**parameter_schema, "additionalProperties": False}
 
 
 def _is_mutating(descriptor: EndpointDescriptor) -> bool:

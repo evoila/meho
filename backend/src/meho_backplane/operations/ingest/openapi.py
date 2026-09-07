@@ -85,6 +85,7 @@ from openapi_spec_validator.schemas import (
     openapi_v31_schema_validator as _oas31_schema_validator,
 )
 
+from meho_backplane.connectors._shared.pinned_transport import build_pinned_sync_transport
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
@@ -658,12 +659,41 @@ def _assert_fetchable_remote_url(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise InvalidSpecError("spec URI must include a hostname")
+    _screen_fetch_host(hostname)
+
+
+def _screen_fetch_host(hostname: str) -> list[str]:
+    """Resolve *hostname* and return the public addresses it may be fetched at.
+
+    The destination screen shared by :func:`_assert_fetchable_remote_url`
+    (which discards the result — it only needs the raise) and
+    :func:`_pin_fetch_addresses` (the pinning transport's connect-time
+    resolver, which dials one of the returned addresses). Resolving once
+    and connecting to that same answer is what closes the check/use gap:
+    without pinning, httpx re-resolves the name at connect time and a
+    resolver that has since moved the name into private space is followed
+    (evoila-bosnia/meho-internal#275).
+
+    Fails **closed**, unlike the target guard: an unresolvable name is
+    rejected here (the ingest path has no split-horizon fail-open case),
+    and there is no allowlist — the fetch path is public-https-only. Every
+    resolved address must be public; any private / loopback / link-local /
+    ULA / unspecified / multicast / reserved candidate rejects the whole
+    fetch. The message stays path-free (no resolved IP echoed) so the
+    response is not a network-topology oracle.
+
+    Raises:
+        InvalidSpecError: The hostname is unresolvable, resolves to no
+            addresses, resolves to an unrecognised address format, or any
+            resolved address is non-public.
+    """
     try:
         addr_infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise InvalidSpecError("spec URI hostname could not be resolved") from exc
     if not addr_infos:
         raise InvalidSpecError("spec URI hostname resolved to no addresses")
+    addresses: list[str] = []
     for _family, _type, _proto, _canonname, sockaddr in addr_infos:
         raw_ip = sockaddr[0]
         try:
@@ -682,6 +712,23 @@ def _assert_fetchable_remote_url(url: str) -> None:
                 "spec URI resolves to a non-public address; remote fetch "
                 f"refused. {_INLINE_SPEC_ONRAMP_REMEDIATION}."
             )
+        addresses.append(str(addr))
+    return addresses
+
+
+def _pin_fetch_addresses(host: str) -> list[str]:
+    """Connect-time destination screen for the spec-fetch pinning transport.
+
+    Passed to :func:`build_pinned_sync_transport` so the fetch client's
+    ``connect_tcp`` screens the host it is about to dial and connects only
+    to a validated address from that same resolution — for the initial
+    fetch and every redirect hop that opens a fresh connection. Delegates
+    to :func:`_screen_fetch_host`, so it raises :class:`InvalidSpecError`
+    on a non-public / unresolvable answer; httpx's transport exception
+    mapping re-raises that unmapped type unchanged, so it surfaces from
+    the fetch exactly like the pre-fetch guard's rejection.
+    """
+    return _screen_fetch_host(host)
 
 
 def _load_spec_bytes(spec_path_or_uri: str, content: str | None = None) -> bytes:
@@ -761,7 +808,16 @@ def _fetch_spec_bytes(spec_path_or_uri: str) -> bytes:
     _assert_fetchable_remote_url(spec_path_or_uri)
 
     current_url = spec_path_or_uri
-    with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=False) as client:
+    # Pin the fetch to a guard-validated address at the socket boundary
+    # (evoila-bosnia/meho-internal#275): the guard above (and per redirect
+    # hop below) screens the name, but httpx would otherwise re-resolve it
+    # at connect time. The pinning transport re-screens inside
+    # ``connect_tcp`` and dials only an address from that same resolution,
+    # so a resolver that changes its answer between the screen and the
+    # connect cannot steer the fetch at a private address. TLS SNI + cert
+    # verification and the ``Host:`` header keep the original hostname.
+    transport = build_pinned_sync_transport(_pin_fetch_addresses)
+    with httpx.Client(timeout=_HTTP_TIMEOUT, follow_redirects=False, transport=transport) as client:
         for _ in range(_MAX_REDIRECTS + 1):
             # Stream rather than buffer: ``client.get`` reads the whole
             # body into memory before the size cap below can fire, which

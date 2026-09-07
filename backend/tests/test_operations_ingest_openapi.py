@@ -43,6 +43,8 @@ from meho_backplane.operations.ingest.openapi import (
     _INLINE_SPEC_ONRAMP_REMEDIATION,
     _MAX_REDIRECTS,
     _assert_fetchable_remote_url,
+    _pin_fetch_addresses,
+    _screen_fetch_host,
     _server_base_path,
 )
 from meho_backplane.operations.ingest.refs import (
@@ -2356,3 +2358,92 @@ def test_find_unresolvable_local_refs_reports_only_dangling_pointers() -> None:
     # (str.isdigit accepts "²" but int() rejects it).
     assert find_unresolvable_local_refs({"$ref": "#/allOf/²", "allOf": [{}]}) == ["#/allOf/²"]
     assert find_unresolvable_local_refs({"$ref": "#/allOf/0", "allOf": [{}]}) == []
+
+
+# -- Spec-fetch address pinning (F13, evoila-bosnia/meho-internal#275) -------
+
+
+def test_screen_fetch_host_returns_public_addresses() -> None:
+    with patch(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        return_value=[
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("2001:4860:4860::8888", 443)),
+        ],
+    ):
+        assert _screen_fetch_host("cdn.example.test") == [
+            "93.184.216.34",
+            "2001:4860:4860::8888",
+        ]
+
+
+def test_screen_fetch_host_fails_closed_on_unresolvable() -> None:
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            side_effect=socket.gaierror("no such host"),
+        ),
+        pytest.raises(InvalidSpecError, match="could not be resolved"),
+    ):
+        _screen_fetch_host("nowhere.invalid")
+
+
+def test_screen_fetch_host_rejects_private_address() -> None:
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.5", 443))],
+        ),
+        pytest.raises(InvalidSpecError, match="non-public"),
+    ):
+        _screen_fetch_host("public-looking.example.test")
+
+
+def test_pin_fetch_addresses_delegates_to_screen() -> None:
+    # The pinning resolver returns exactly the screened public address set,
+    # and raises identically on a blocked answer.
+    with patch(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("93.184.216.34", 443))],
+    ):
+        assert _pin_fetch_addresses("cdn.example.test") == ["93.184.216.34"]
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 443))],
+        ),
+        pytest.raises(InvalidSpecError, match="non-public"),
+    ):
+        _pin_fetch_addresses("public-looking.example.test")
+
+
+def test_fetch_pins_and_blocks_resolver_flip_to_loopback() -> None:
+    """A resolver that flips public→loopback between screen and connect is refused.
+
+    The bounded resolver-change test for the ingest path (acceptance
+    criteria 2 + 6). The pre-fetch guard screens the public answer; the
+    pinning transport re-screens inside ``connect_tcp`` and sees the
+    loopback answer, so the fetch is refused before the socket opens — no
+    respx here, so the real transport (and the pin) is exercised.
+    """
+    import socket as _socket
+
+    calls = {"n": 0}
+
+    def _flip(hostname: str, port: object, **kwargs: object) -> list:
+        calls["n"] += 1
+        # 1st call: the pre-fetch guard screens a public answer (passes).
+        # 2nd call: the connect-time pin screens the loopback answer.
+        ip = "93.184.216.34" if calls["n"] == 1 else "127.0.0.1"
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 0, "", (ip, 443))]
+
+    with (
+        patch(
+            "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+            side_effect=_flip,
+        ),
+        pytest.raises(InvalidSpecError, match="non-public"),
+    ):
+        parse_openapi("https://spec.example.test/openapi.yaml")
+    # Both the pre-fetch screen and the connect-time pin resolved the name.
+    assert calls["n"] >= 2

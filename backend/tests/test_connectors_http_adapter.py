@@ -55,8 +55,10 @@ from __future__ import annotations
 import datetime as _dt
 import socket as _socket
 import ssl
+import tempfile as _tempfile
 import threading as _threading
 import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import patch
 from uuid import UUID
@@ -70,9 +72,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBackend
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnectorDirect
 from meho_backplane.connectors.adapters.http import (
+    SsrfBlockedError,
     _build_ca_pinned_ssl_context,
     _ca_pin_digest,
     _effective_scheme,
@@ -86,6 +90,7 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.targets.ssrf_guard import TARGET_SSRF_ALLOWLIST_ENV
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1728,3 +1733,239 @@ def test_same_origin_http_scheme_upgrade_is_cross_origin() -> None:
     http_same = httpx.URL("http://rabbit.example.com:15672/api/whoami/")
     assert _same_origin(http_base, https_same_host) is False
     assert _same_origin(http_base, http_same) is True
+
+
+# ---------------------------------------------------------------------------
+# Socket-boundary address pinning (F13, evoila-bosnia/meho-internal#275)
+#
+# These drive the real transport against loopback servers (respx is not
+# used — it short-circuits above ``connect_tcp``, which is exactly the seam
+# under test). They prove the pin dials only a guard-validated address, that
+# a resolver flip between the screen and the connect cannot reach a blocked
+# address, and that the original hostname is preserved for Host + TLS
+# SNI/CA verification.
+# ---------------------------------------------------------------------------
+
+
+class _PinRecordingHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 keepalive so a pooled client can reuse one connection across
+    # requests (the reuse test asserts a single accepted TCP connection).
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.server.received_hosts.append(self.headers.get("Host"))  # type: ignore[attr-defined]
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        return None
+
+
+class _PinLoopbackServer:
+    """A recording loopback HTTP(S) server on 127.0.0.1:0.
+
+    Counts accepted TCP connections (to prove keepalive reuse) and records
+    the ``Host`` header of every request. When *ssl_context* is given it
+    serves HTTPS by wrapping the listening socket.
+    """
+
+    def __init__(self, ssl_context: ssl.SSLContext | None = None) -> None:
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _PinRecordingHandler)
+        self._httpd.received_hosts = []  # type: ignore[attr-defined]
+        self.connections = 0
+        base_get_request = self._httpd.get_request
+
+        def _counting_get_request() -> Any:
+            self.connections += 1
+            return base_get_request()
+
+        self._httpd.get_request = _counting_get_request  # type: ignore[method-assign]
+        if ssl_context is not None:
+            self._httpd.socket = ssl_context.wrap_socket(self._httpd.socket, server_side=True)
+        self._thread = _threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def port(self) -> int:
+        return int(self._httpd.server_address[1])
+
+    @property
+    def received_hosts(self) -> list[str]:
+        return self._httpd.received_hosts  # type: ignore[attr-defined,no-any-return]
+
+    def stop(self) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+def _patch_target_resolver(monkeypatch: pytest.MonkeyPatch, *ips: str) -> None:
+    """Point the target guard's DNS seam at a fixed answer (no real DNS)."""
+    import ipaddress
+
+    addrs = [ipaddress.ip_address(ip) for ip in ips]
+    monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", lambda host: addrs)
+
+
+def _server_tls_context(hostname: str) -> tuple[ssl.SSLContext, str]:
+    """Return a TLS server context presenting a fresh CA-signed leaf for *hostname*.
+
+    Returns ``(server_ssl_context, ca_pem)`` — the CA PEM is what a target
+    pins via ``tls_ca_pin`` so the connector verifies the chain and the
+    hostname while the socket is pinned to loopback.
+    """
+    ca_key, ca_cert = _gen_ca()
+    leaf_key, leaf_cert = _gen_leaf(ca_key, ca_cert, hostname)
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    with _tempfile.NamedTemporaryFile("wb", suffix=".pem", delete=False) as cf:
+        cf.write(leaf_cert.public_bytes(serialization.Encoding.PEM))
+        cf.write(_key_pem(leaf_key))
+        chain_path = cf.name
+    server_ctx.load_cert_chain(chain_path)
+    return server_ctx, _pem(ca_cert)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_pinned_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pooled client is built on the address-pinning transport."""
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    _patch_target_resolver(monkeypatch, "127.0.0.1")
+    conn = _ConcreteHttpConnector()
+    client = await conn._http_client(_make_target(host="appliance.test"))
+    assert isinstance(client._transport._pool._network_backend, _PinnedAsyncBackend)
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pin_blocks_resolver_flip_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Screen a public answer, then the resolver flips to loopback: no dial.
+
+    The bounded resolver-change test (acceptance criterion 2). The
+    ``_http_client`` pre-check sees the public answer and pools a client;
+    the transport's ``connect_tcp`` re-screens, sees the loopback answer,
+    and refuses — so the live loopback server receives nothing.
+    """
+    monkeypatch.delenv(TARGET_SSRF_ALLOWLIST_ENV, raising=False)  # guard fully on
+    server = _PinLoopbackServer()
+    try:
+        import ipaddress
+
+        calls = {"n": 0}
+
+        def _flipping_resolver(host: str) -> list[Any]:
+            calls["n"] += 1
+            # 1st call: the pre-check screens a public answer (passes).
+            # 2nd call: the connect-time pin screens the loopback answer.
+            ip = "93.184.216.34" if calls["n"] == 1 else "127.0.0.1"
+            return [ipaddress.ip_address(ip)]
+
+        monkeypatch.setattr("meho_backplane.targets.ssrf_guard._resolve_addrs", _flipping_resolver)
+        conn = _ConcreteHttpConnector()
+        target = _make_target(host="rebind.test", port=server.port, extras={"scheme": "http"})
+        with pytest.raises(SsrfBlockedError):
+            await conn._get_json(target, "/api/items", operator=_make_operator("tok"))
+        assert server.received_hosts == []  # the blocked socket never opened
+        await conn.aclose()
+    finally:
+        server.stop()
+
+
+@pytest.mark.asyncio
+async def test_pin_dials_validated_address_and_preserves_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowlisted private target connects and keeps the original Host.
+
+    Acceptance criteria 3 + 5: the pin dials the validated loopback
+    address, and the ``Host:`` header still carries the hostname (only the
+    TCP target is rewritten).
+    """
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    _patch_target_resolver(monkeypatch, "127.0.0.1")
+    server = _PinLoopbackServer()
+    try:
+        conn = _ConcreteHttpConnector()
+        target = _make_target(host="appliance.test", port=server.port, extras={"scheme": "http"})
+        result = await conn._get_json(target, "/api/items", operator=_make_operator("tok"))
+        assert result == {"ok": True}
+        assert server.received_hosts == [f"appliance.test:{server.port}"]
+        await conn.aclose()
+    finally:
+        server.stop()
+
+
+@pytest.mark.asyncio
+async def test_pin_reuses_pooled_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two requests on one client reuse a single pinned connection (keepalive).
+
+    Acceptance criterion 4 (connection reuse): pinning must not defeat the
+    pool — the second request rides the warm connection, so the server sees
+    one TCP connection for two requests.
+    """
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    _patch_target_resolver(monkeypatch, "127.0.0.1")
+    server = _PinLoopbackServer()
+    try:
+        conn = _ConcreteHttpConnector()
+        target = _make_target(host="appliance.test", port=server.port, extras={"scheme": "http"})
+        await conn._get_json(target, "/api/a", operator=_make_operator("tok"))
+        await conn._get_json(target, "/api/b", operator=_make_operator("tok"))
+        assert len(server.received_hosts) == 2
+        assert server.connections == 1
+        await conn.aclose()
+    finally:
+        server.stop()
+
+
+@pytest.mark.asyncio
+async def test_pin_preserves_tls_sni_and_ca_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over real TLS: the pin dials loopback while SNI + CA-pin verify the name.
+
+    Acceptance criterion 3 end-to-end. The target pins the server's CA and
+    resolves (via the guard seam) to loopback; the handshake succeeds only
+    because SNI + certificate verification still use the hostname the leaf's
+    SAN was issued for, not the pinned IP.
+    """
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    _patch_target_resolver(monkeypatch, "127.0.0.1")
+    server_ctx, ca_pem = _server_tls_context("appliance.lab.internal")
+    server = _PinLoopbackServer(ssl_context=server_ctx)
+    try:
+        conn = _ConcreteHttpConnector()
+        target = _make_target(host="appliance.lab.internal", port=server.port, tls_ca_pin=ca_pem)
+        result = await conn._get_json(target, "/api/items", operator=_make_operator("tok"))
+        assert result == {"ok": True}
+        assert server.received_hosts == [f"appliance.lab.internal:{server.port}"]
+        await conn.aclose()
+    finally:
+        server.stop()
+
+
+@pytest.mark.asyncio
+async def test_pin_tls_hostname_mismatch_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin does not weaken hostname verification: a wrong-name cert fails.
+
+    The server presents a leaf for ``other.lab.internal`` but the target
+    dials ``appliance.lab.internal``; even though the CA is pinned and the
+    socket reaches loopback, the handshake fails closed on the SAN
+    mismatch — proving the pin left hostname verification intact.
+    """
+    monkeypatch.setenv(TARGET_SSRF_ALLOWLIST_ENV, "127.0.0.0/8")
+    _patch_target_resolver(monkeypatch, "127.0.0.1")
+    server_ctx, ca_pem = _server_tls_context("other.lab.internal")
+    server = _PinLoopbackServer(ssl_context=server_ctx)
+    try:
+        conn = _ConcreteHttpConnector()
+        target = _make_target(host="appliance.lab.internal", port=server.port, tls_ca_pin=ca_pem)
+        with pytest.raises(httpx.ConnectError):
+            await conn._get_json(target, "/api/items", operator=_make_operator("tok"))
+        await conn.aclose()
+    finally:
+        server.stop()

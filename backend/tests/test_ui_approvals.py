@@ -201,6 +201,14 @@ def _seed_request(
     """Insert one ``approval_request`` row; return its id."""
     rid = request_id or uuid.uuid4()
     effect = proposed_effect or {"op_id": op_id, "connector_id": connector_id}
+    # A live pending request carries a future deadline. The decision-time
+    # deadline gate (F12 / #274) refuses an overdue row on the approve path,
+    # so a decision-flow test must seed a non-expired deadline; ``None`` (the
+    # default) means "live" here. The expired-banner test passes a concrete
+    # past ``expires_at`` to override this.
+    stored_expires_at = (
+        expires_at if expires_at is not None else datetime.now(UTC) + timedelta(days=1)
+    )
 
     async def _do() -> uuid.UUID:
         sessionmaker = get_sessionmaker()
@@ -222,7 +230,7 @@ def _seed_request(
                     decided_at=decided_at,
                     work_ref=work_ref,
                     created_at=datetime(2026, 6, 15, 12, 0, tzinfo=UTC),
-                    expires_at=expires_at,
+                    expires_at=stored_expires_at,
                 ),
             )
         return rid

@@ -89,6 +89,58 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## Transactional decision transitions + decision-time deadline (F12 / #274)
+
+The TTL sweep above is a *background* safety net; it is not the only
+guard. Two hardening properties make the decision paths correct
+independently of the sweep and under concurrency (security review finding
+F12):
+
+1. **Decision-time deadline gate.** `approve_request` re-checks the
+   deadline on the row it is about to approve (`_load_pending_for_approval`
+   → `_deadline_has_passed`, the Python mirror of the sweep's
+   `_deadline_passed_clause`, same legacy null-expiry coalesce). An overdue
+   pending row is refused with `ApprovalRequestExpiredError` (mapped to HTTP
+   409 `approval_request_expired` on REST and the console) **even if the
+   sweeper is delayed or failing** — the sweep's default cadence is 300s and
+   its per-tick failures are swallowed to keep the loop alive, so trusting it
+   alone would leave an overdue intent approvable for a whole tick. The gate
+   only *refuses* the approval; the row stays `pending` for the sweep to
+   transition to `expired` with its decision audit row. `reject_request`
+   does **not** apply the gate — rejecting an overdue request is harmless
+   (both are non-executing terminal states).
+
+2. **Row-locked transitions — exactly one winner.** `approve_request` and
+   `reject_request` load the row `SELECT ... FOR UPDATE`
+   (`_load_for_tenant(..., for_update=True)`), and the sweep selects
+   `FOR UPDATE SKIP LOCKED`. A competing approve / reject / expiry on one
+   row therefore serialises on the row lock: the winner commits its
+   transition and its single decision audit row in one transaction; the
+   loser blocks on the lock, re-reads the committed terminal state, and hits
+   the pending guard (`ApprovalRequestAlreadyDecidedError`) or, for the
+   sweep, skips the locked row. The result is one winning transition, one
+   consistent decision record, and no conflicting overwrite. The
+   notification publishes only **after** commit (unchanged), so a phantom
+   event cannot outlive a rolled-back decision.
+
+The **execution claim** carries the same discipline: `claim_resume`'s
+conditional `UPDATE ... WHERE resumed_at IS NULL AND status = 'approved'`
+now requires the `approved` state in the same statement as the
+single-resumer latch (previously it checked only `resumed_at IS NULL`). So
+no execution can follow a losing / rejected / expired transition — a
+request another decision won cannot be claimed for dispatch — while the
+exactly-one-resumer latch (#2293) is preserved. Every resume surface already
+reaches the claim only after the decision committed `approved`, so this
+tightens the invariant without changing the live control flow; it fails
+closed if a resume is ever attempted against a non-approved row.
+
+On SQLite (the unit-test driver) `FOR UPDATE` / `SKIP LOCKED` are silent
+no-ops, so the concurrency guarantee is proven against real Postgres in
+`tests/integration/test_approval_transactional_transitions_e2e.py`
+(concurrent approve/reject and reject/expiry races, one-winner + one
+decision-row + no-execution-for-the-loser), alongside the sibling
+exactly-one-resumer suite.
+
 ## Subject + actor attribution on the request row (#1481)
 
 The `approval_request` row carries the RFC 8693 two-claim attribution

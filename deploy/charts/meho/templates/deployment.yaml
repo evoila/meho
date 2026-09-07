@@ -58,7 +58,19 @@ spec:
           # fallback: the values schema rejects empty `image.tag` so every
           # install pins the tag explicitly. Goal #11's deploy discipline
           # forbids any moving reference (including a chart-appVersion shadow).
+          #
+          # When `image.digest` is set (#284 / F15b), pin by the immutable
+          # manifest digest (`repository@sha256:...`) — the exact,
+          # content-addressed, scanned+signed digest the image pipeline
+          # promoted, and the reference a `cosign verify` / admission gate
+          # checks the signature against. `tag` stays the human-readable label
+          # of that release; the digest takes precedence in the rendered
+          # reference. With no digest set, fall back to the schema-required tag.
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

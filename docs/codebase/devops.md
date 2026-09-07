@@ -128,6 +128,38 @@ deploy discipline forbids moving references (including a chart-`appVersion`
 shadow), and the chart enforces that contract at the schema layer rather
 than relying on consumers to remember to `--set image.tag`.
 
+**Digest pinning (`image.digest`, #284 / F15b).** An optional
+`image.digest` (`sha256:<64 hex>`, schema-validated) makes the Deployment —
+and the migration Job, which the chart keeps byte-identical to the
+Deployment — render `repository@digest` instead of `repository:tag`. This
+pins the exact, content-addressed digest the image pipeline
+(`.github/workflows/image.yml`) scanned, promoted and cosign-signed: unlike
+a tag, a digest can never be re-pointed, and it is the reference a
+`cosign verify` gate checks the signature against. `tag` stays required as
+the human-readable release label; the digest wins in the rendered reference,
+and an empty digest (the default) keeps the tag path unchanged. The
+`image.yml` quarantine → scan → promote ordering guarantees any digest an
+operator can pin from a release alias was scanned before it was advertised.
+
+**Verifying provenance before deploy.** The install path SHOULD gate on a
+`cosign verify` of the pinned digest against the trusted keyless identity
+before `helm upgrade`, e.g.
+
+```bash
+cosign verify "ghcr.io/evoila/meho@${DIGEST}" \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```
+
+(full recipes, including `cosign verify-attestation` for the SBOM, live in
+[`backend/README.md`](../../backend/README.md)). As of #284 **no live
+admission policy enforces this** — the cluster has no Sigstore
+policy-controller / Kyverno image-verification rule, and the lab installer
+(`rdc-hetzner-dc/manifests/meho/install.sh`, a separate repo) runs
+`helm upgrade` without a `cosign verify` step. Adding that gate to the
+install path is the cross-repo follow-up; this chart supplies the digest pin
+it verifies against.
+
 `image.repository` accepts the lowercase OCI grammar including an optional
 `:<port>` segment after the host, so private registries like
 `registry.example.com:5000/team/meho` are valid. The pattern enforces the
@@ -525,6 +557,7 @@ them).
 | Path | Type | Notes |
 | --- | --- | --- |
 | `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
+| `image.digest` | string | Optional `sha256:<64 hex>` digest pin (#284). When set, the Deployment + migration Job render `repository@digest` instead of `repository:tag`; empty (default) uses `image.tag`. |
 | `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
@@ -933,6 +966,19 @@ these workflows:
   queue, preserving PR/push behaviour. When adding any range-deriving
   action to a required-check workflow, check its `merge_group` handling —
   the trigger alone is not enough.
+- **The TruffleHog scanner container image is digest-pinned (#284 /
+  F15b).** The action shells out to `docker run "${IMAGE}:${VERSION}"`,
+  defaulting `VERSION` to the mutable `:latest` tag — so the required
+  secret-scan gate would otherwise run whatever `:latest` resolves to at
+  pull time on the self-hosted `meho-runners-ci` pool. `secret-scan.yml`
+  now sets a job-level `TRUFFLEHOG_VERSION: <ver>@sha256:<digest>` and
+  feeds it to both the warm-cache pre-pull and the action's `version`
+  input, so both reference the same digest-pinned image. The action's
+  `uses:` SHA is bumped weekly by Dependabot (github-actions ecosystem);
+  Dependabot cannot resolve a digest held in a `with:`/`env:` value, so
+  the pinned scanner digest is bumped in lockstep in the same PR (the job
+  `env:` comment carries the `imagetools inspect` command that resolves
+  the new digest).
 
 `chart.yml` additionally guards its `publish` and `verify-anonymous-pull`
 jobs to `github.event_name == 'push'` (was `!= 'pull_request'`), so a

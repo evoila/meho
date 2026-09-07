@@ -28,6 +28,11 @@
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
           "description": "Image tag. Empty fails the schema — Goal #11 deploy discipline requires every install to pin an immutable tag. The pattern matches the OCI tag grammar (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`) so a forgotten `<REPLACE: ...>` placeholder from an example values file fails at install instead of producing an image reference Kubernetes rejects at Pod create."
         },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[0-9a-f]{64})?$",
+          "description": "Optional image manifest digest (`sha256:<64 hex>`). When set, the Deployment pins the image by digest (`repository@digest`) instead of `repository:tag` — the exact, content-addressed, scanned + cosign-signed digest the image pipeline promoted (#284 / F15b), and the reference a `cosign verify` / admission gate checks the signature against. `tag` stays required as the human-readable release label; the digest wins in the rendered image reference. Empty string (the default) deploys by `tag`. The pattern rejects any non-`sha256:` value so a malformed pin fails at install rather than producing an image reference Kubernetes rejects at Pod create."
+        },
         "pullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"]

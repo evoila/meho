@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — pfsense.mgmt_flow.summary: honour the pfctl -ss direction arrow so an outbound connection is not misreported as an inbound management-port hit (#3471)
+
+- `classify_mgmt_flows` (`connectors/pfsense/ops_mgmt_flow.py`) chose the server side of each live TCP state purely by port — testing `dst` first — and discarded the `->`/`<-` direction arrow `parse_pfctl_states` already captures. When a monitored host made an **outbound** connection to a management port and its ephemeral **source** port coincidentally landed in the management-port set (`{22, 443, 902, 5480}` by default), both endpoints carried a management-class port, the `dst`-first tie-break inverted the roles, and the local client was reported as a management-port server reached by an `unexpected` remote source — a false management-plane-exposure signal **byte-identical** to the row a genuine inbound breach produces, so a Sensor pinned to `$.unexpected_sources` / `$.unexpected_source_count` could not tell them apart. `_server_client_split` now resolves the server from the direction arrow first (`->` → the `dst` listener, `<-` → the `src` listener) and tests only that resolved server side for a management port and `mgmt_net` membership, so a coincidental client-side management port no longer flips the roles; the port heuristic survives only as a fallback for the bidirectional `<->` / missing-arrow form (which real `pfctl -ss` TCP states do not emit). Genuine inbound hits on a local management port are unchanged (still flagged), and a regression test covers the double-management-port state for each default management port on the client side. Read-only classification-attribution defect; no firewall behaviour changes.
+
 ## [0.33.5] - 2026-09-06
 
 ### Security — enforce the human-only governance rule on the REST approval-decision and grant/principal-admin routes, not just MCP (evoila-bosnia/meho-internal#289 / #3427)

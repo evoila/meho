@@ -793,6 +793,30 @@ Because the divergence is invisible without help, every surface now emits an
   capability + identity, and `error.data` carries
   `{"reason": "not_entitled", "required_capability"}` for self-correction.
 
+## Untrusted read-boundary guard (#304)
+
+Corpus `chunk.content` is **federated, externally-controlled** text — a
+third party's KB article can carry planted instructions. Every LLM-facing
+read boundary wraps it in the positional
+`<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>` envelope
+(`meho_backplane.untrusted_text.wrap_untrusted_text`), matching the kb /
+memory surfaces (evoila-bosnia/meho-internal#154, extended here by #304):
+
+- `search_docs` payload — `_search_chunk_payload` (`mcp/tools/docs.py`).
+- `ask_docs` citations — `_citation_payload` (`mcp/tools/docs.py`).
+- `ask_docs` synthesis prompt — `_render_chunks_for_prompt`
+  (`docs_search/synthesis.py`); `_SYNTHESIS_SYSTEM_PROMPT` carries the
+  matching provenance advisory.
+- `meho://docs/...` resource — `_docs_chunk_handler`
+  (`mcp/resources/docs.py`).
+
+The wrap is applied only at these boundaries, **never** at the shared
+`_project_chunk` projection (`docs_search/service.py`) — that projection
+also feeds non-LLM sinks (the CLI `meho docs search` and REST faces render
+to a human/HTTP caller), which must not inherit the envelope. The guard is
+structural (delimit + label), not content-based: no filtering, scoring, or
+injection detection. See `docs/codebase/untrusted-text-envelope.md`.
+
 ## Known issues / boundaries
 
 - The corpus request/response contract is a **consumer-side** dependency

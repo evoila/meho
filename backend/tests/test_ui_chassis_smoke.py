@@ -424,7 +424,7 @@ def test_callback_creates_session_and_redirects_to_dashboard() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = TestClient(_build_app(), base_url="https://testserver", follow_redirects=False)
         login_response = client.get("/ui/auth/login")  # default return_to=/ui/
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
         callback = client.get(
@@ -804,7 +804,7 @@ def test_full_flow_unauth_login_callback_then_dashboard() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = TestClient(_build_app(), base_url="https://testserver", follow_redirects=False)
         _trust_test_cookies(client)
         # Step 1: hit /ui/ unauthenticated -> 302 to login.
         first = client.get("/ui/")

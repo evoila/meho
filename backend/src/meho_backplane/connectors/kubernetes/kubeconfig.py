@@ -130,8 +130,18 @@ class KubernetesTargetLike(Protocol):
     path the operator-context Vault read resolves to a kubeconfig YAML
     string under the ``kubeconfig`` field (consumer's ``targets.yaml``
     convention, locked in decision #8).
+
+    ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
+    cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
+    the REST and websocket/exec client caches use, so two same-named
+    targets — or two same-``secret_ref`` targets — in different tenants
+    never share a cached client (evoila/meho#1642, security F04). The
+    concrete ``Target`` model (G0.3 #224 — closed) carries both fields as
+    UUIDs, so it satisfies this Protocol unchanged.
     """
 
+    id: object
+    tenant_id: object
     name: str
     host: str
     port: int | None

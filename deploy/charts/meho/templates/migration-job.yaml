@@ -101,8 +101,15 @@ spec:
           # wheel and shares the chassis's Alembic config / SQLAlchemy
           # version. A separate migration image would drift; using the
           # same image guarantees the migrations applied are exactly the
-          # ones the rolling-out Deployment expects.
+          # ones the rolling-out Deployment expects. That includes the
+          # digest pin (#284): when `image.digest` is set the Job runs the
+          # same content-addressed digest the Deployment does, not a tag
+          # that could resolve to different bytes.
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # The runner takes no CLI flags by design — its contract is
           # `alembic upgrade head` against the env-supplied DATABASE_URL.

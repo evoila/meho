@@ -26,6 +26,15 @@ image:
   # typically passes `--set image.tag=sha-<git-sha>`; Goal #11's deploy
   # discipline forbids the `:latest` tag entirely.
   tag: ""
+  # -- Image manifest digest (`sha256:<64 hex>`), optional. When set, the
+  # Deployment pins the image by digest (`repository@digest`) instead of
+  # `repository:tag` — the exact, content-addressed, scanned + cosign-signed
+  # digest the image pipeline promoted (#284 / F15b). This is the strongest
+  # deploy pin: unlike a tag, a digest can never be re-pointed, and it is the
+  # reference a `cosign verify` / admission gate checks the signature against.
+  # `tag` stays required as the human-readable release label; the digest wins
+  # in the rendered reference. Empty = deploy by `tag` (unchanged default).
+  digest: ""
   # -- Image pull policy.
   pullPolicy: IfNotPresent
 

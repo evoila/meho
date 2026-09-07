@@ -28,10 +28,11 @@ from __future__ import annotations
 import contextlib
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -68,6 +69,9 @@ class _K3sTarget:
     host: str
     port: int | None
     secret_ref: str
+    # Tenant-unique cache key components (#1642, security F04).
+    id: object = field(default_factory=uuid4)
+    tenant_id: object = field(default_factory=lambda: UUID(int=0))
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +238,24 @@ async def test_probe_against_unreachable_host_returns_not_ok(
 async def test_api_client_cached_across_calls_against_live_k3s(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> None:
-    """Second fingerprint against the same target reuses the cached client."""
+    """Second fingerprint against the same target reuses the cached client.
+
+    Fingerprints under a **real** operator: the client cache is closed to
+    the synthesised system operator (`operator=None`), so an operator-less
+    fingerprint deliberately rebuilds each call (security F04 / R02, #266).
+    A real operator is served the warm client on the second call.
+    """
     connector, target = k3s_connector
+    operator = _make_k3d_operator()
     # Derive the cache key from the SUT itself so the test tracks the
-    # connector's keying contract (currently ``target.secret_ref``;
-    # see ``KubernetesConnector._cache_key``). Indexing by
+    # connector's keying contract (the tenant-unique ``(tenant_id, id)``
+    # tuple; see ``KubernetesConnector._cache_key``). Indexing by
     # ``target.name`` instead raised ``KeyError`` whenever the k3s
     # testcontainer actually provisioned.
     cache_key = connector._cache_key(target)
-    await connector.fingerprint(target)
+    await connector.fingerprint(target, operator)
     cached_client_id_after_first = id(connector._api_clients[cache_key])
-    await connector.fingerprint(target)
+    await connector.fingerprint(target, operator)
     cached_client_id_after_second = id(connector._api_clients[cache_key])
     assert cached_client_id_after_first == cached_client_id_after_second
 

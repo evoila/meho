@@ -200,7 +200,9 @@ async def test_heartbeat_stamps_last_seen() -> None:
     service = AddonPairingService()
     with patch(_PATCH_TARGET, _mock_kc_ok()):
         await service.pair(_TENANT, "op-admin", _request())
-        entry = await service.heartbeat(_TENANT, "automation")
+        entry = await service.heartbeat(
+            _TENANT, "automation", service_account_sub="svc-account-uuid"
+        )
     assert entry.last_seen_at is not None
     rows = await _fetch(_TENANT)
     assert rows[0].last_seen_at is not None
@@ -210,7 +212,7 @@ async def test_heartbeat_stamps_last_seen() -> None:
 async def test_heartbeat_unpaired_raises() -> None:
     await _seed_tenant()
     with pytest.raises(AddonNotPairedError):
-        await AddonPairingService().heartbeat(_TENANT, "ghost")
+        await AddonPairingService().heartbeat(_TENANT, "ghost", service_account_sub="nobody")
 
 
 @pytest.mark.asyncio

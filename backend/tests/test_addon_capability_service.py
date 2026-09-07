@@ -83,12 +83,26 @@ def _fk_enforced(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def _mock_kc_ok(internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
+def _sub_for(name: str) -> str:
+    """The service-account sub a pairing named *name* captures at pair time.
+
+    Distinct per add-on: the object-level write guard resolves a pairing by
+    the caller's sub, so a shared sub across two pairings in one tenant would
+    make that resolution ambiguous. ``declare`` is authorized against this
+    value, so a caller passes ``_sub_for(name)`` to act on its own pairing.
+    """
+    return f"svc-{name}"
+
+
+def _mock_kc_ok(
+    internal_id: str = _KC_INTERNAL_ID,
+    service_account_sub: str = "svc-account-uuid",
+) -> MagicMock:
     mock_client = AsyncMock()
     mock_client.create_client = AsyncMock(return_value=internal_id)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
     mock_client.delete_client = AsyncMock(return_value=None)
-    mock_client.get_service_account_user_id = AsyncMock(return_value="svc-account-uuid")
+    mock_client.get_service_account_user_id = AsyncMock(return_value=service_account_sub)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     return MagicMock(return_value=mock_client)
@@ -110,7 +124,10 @@ async def _pair(name: str = "automation") -> None:
         addon_contract_version=BACKPLANE_CONTRACT_VERSION,
         addon_min_backplane_version=BACKPLANE_CONTRACT_VERSION,
     )
-    with patch(_PATCH_TARGET, _mock_kc_ok(f"{_KC_INTERNAL_ID[:-2]}{len(name):02d}")):
+    with patch(
+        _PATCH_TARGET,
+        _mock_kc_ok(f"{_KC_INTERNAL_ID[:-2]}{len(name):02d}", _sub_for(name)),
+    ):
         await AddonPairingService().pair(_TENANT, "op-admin", request)
 
 
@@ -155,6 +172,7 @@ async def test_declare_persists_and_stamps_contract_version() -> None:
             (CapabilityKind.META_TOOL_FAMILY, "inventory"),
             (CapabilityKind.EVENT_KIND, "run.step.completed"),
         ),
+        service_account_sub=_sub_for("automation"),
     )
     assert result.addon == "automation"
     assert result.active is True
@@ -181,10 +199,14 @@ async def test_redeclare_is_replace_all() -> None:
             (CapabilityKind.META_TOOL_FAMILY, "inventory"),
             (CapabilityKind.CLI_VERB_FAMILY, "vm"),
         ),
+        service_account_sub=_sub_for("automation"),
     )
     # A smaller re-declaration drops "vm" — no dead surface left behind.
     result = await service.declare(
-        _TENANT, "automation", _decl((CapabilityKind.META_TOOL_FAMILY, "inventory"))
+        _TENANT,
+        "automation",
+        _decl((CapabilityKind.META_TOOL_FAMILY, "inventory")),
+        service_account_sub=_sub_for("automation"),
     )
     assert [(c.kind, c.name) for c in result.capabilities] == [
         (CapabilityKind.META_TOOL_FAMILY, "inventory")
@@ -197,7 +219,10 @@ async def test_declare_on_unpaired_addon_raises() -> None:
     await _seed_tenant()
     with pytest.raises(AddonNotPairedError):
         await AddonCapabilityService().declare(
-            _TENANT, "ghost", _decl((CapabilityKind.CONSOLE_PANEL, "pairing"))
+            _TENANT,
+            "ghost",
+            _decl((CapabilityKind.CONSOLE_PANEL, "pairing")),
+            service_account_sub=_sub_for("ghost"),
         )
 
 
@@ -220,9 +245,13 @@ async def test_active_capabilities_filters_by_health_and_kind() -> None:
             (CapabilityKind.META_TOOL_FAMILY, "inventory"),
             (CapabilityKind.EVENT_KIND, "run.step.completed"),
         ),
+        service_account_sub=_sub_for("automation"),
     )
     await service.declare(
-        _TENANT, "ssp", _decl((CapabilityKind.EVENT_KIND, "portal.request.raised"))
+        _TENANT,
+        "ssp",
+        _decl((CapabilityKind.EVENT_KIND, "portal.request.raised")),
+        service_account_sub=_sub_for("ssp"),
     )
 
     everything = await service.active_capabilities(_TENANT)
@@ -245,7 +274,10 @@ async def test_activation_flips_when_pairing_goes_contract_incompatible() -> Non
     await _pair("automation")
     service = AddonCapabilityService()
     await service.declare(
-        _TENANT, "automation", _decl((CapabilityKind.META_TOOL_FAMILY, "inventory"))
+        _TENANT,
+        "automation",
+        _decl((CapabilityKind.META_TOOL_FAMILY, "inventory")),
+        service_account_sub=_sub_for("automation"),
     )
     assert (await service.list_declared(_TENANT, "automation")).active is True
     assert len(await service.active_capabilities(_TENANT)) == 1
@@ -280,6 +312,7 @@ async def test_unpair_cascade_deletes_capabilities(_fk_enforced: None) -> None:
             (CapabilityKind.META_TOOL_FAMILY, "inventory"),
             (CapabilityKind.CLI_VERB_FAMILY, "vm"),
         ),
+        service_account_sub=_sub_for("automation"),
     )
     assert await _capability_row_count("automation") == 2
 

@@ -198,6 +198,10 @@ class _K3sTarget:
 
     def __post_init__(self) -> None:
         self.id: UUID = uuid4()
+        # Tenant-unique cache key component (#1642, security F04). Aligns
+        # with the seeded Target ORM row's tenant so the connector's
+        # client cache and the resolver agree on the target identity.
+        self.tenant_id: UUID = _OPERATOR_TENANT_ID
         self.preferred_impl_id: str | None = None
 
         class _FP:

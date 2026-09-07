@@ -458,7 +458,7 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `summary` | `summary` | Verbatim from spec |
 | `description` | `description` | Verbatim from spec |
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
-| `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc` |
+| `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
 | `safety_level` | `safety_level` | HTTP-verb heuristic, operator-overridable at review |
 | `requires_approval` | `requires_approval` | Always `False` at parse time |
@@ -1816,6 +1816,21 @@ defect class out:
   refusal (extras carry `missing_ref` + re-ingest remediation) —
   covering rows persisted by pre-#3095 ingests until they are
   re-ingested.
+
+Undeclared params fail closed too (#293 / security review S05).
+`_build_parameter_schema` emits `additionalProperties: false` on every
+built object, so `validate_params` rejects a param the op never declared
+as `invalid_params` rather than letting it default onto the vendor query
+string (`_split_ingested_params` routes an undeclared name to the `query`
+bucket). For descriptors ingested before that clause existed, the
+dispatcher applies the same strictness at the Step-3 validation seam —
+`ingested_schema_for_validation` (`operations/_validate.py`), scoped to
+`source_kind='ingested'` — so the fail-closed posture covers persisted
+rows without a re-ingest and yields the same `additionalProperties`
+error shape a freshly-ingested strict descriptor does. Typed/composite
+ops already carry the clause; `response_schema` deliberately does not
+(the JSONFlux reducer must tolerate vendor fields the spec
+under-declares).
 
 ### Repairing pre-#3095 rows (#3102)
 

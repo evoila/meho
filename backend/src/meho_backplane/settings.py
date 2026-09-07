@@ -1637,6 +1637,16 @@ class Settings(BaseModel):
     mail_smtp_host: str = Field(default="")
     mail_smtp_port: int = Field(default=587, gt=0, le=65535)
     mail_smtp_starttls: bool = True
+    # F08 (#270) — both TLS paths (implicit ``SMTP_SSL`` and ``STARTTLS``)
+    # verify the MTA's certificate against a validating
+    # ``ssl.create_default_context`` with hostname checking on. Empty (the
+    # default) trusts the system CA bundle; set to a PEM CA-bundle path to
+    # pin an internal relay's CA instead (the file's CAs *replace* the
+    # system trust, matching the target-level ``tls_ca_pin`` posture). There
+    # is deliberately no blanket "skip verification" knob — an internal
+    # relay with a private CA is trusted by pointing this at its CA, never
+    # by disabling verification.
+    mail_smtp_ca_bundle: str = Field(default="")
     mail_smtp_username: str = Field(default="")
     mail_smtp_password: str = Field(default="", repr=False)
     mail_from: str = Field(default="")
@@ -2353,6 +2363,7 @@ def get_settings() -> Settings:
         mail_smtp_starttls=parse_bool_env(
             os.environ.get("MAIL_SMTP_STARTTLS", "true"),
         ),
+        mail_smtp_ca_bundle=os.environ.get("MAIL_SMTP_CA_BUNDLE", "").strip(),
         mail_smtp_username=os.environ.get("MAIL_SMTP_USERNAME", "").strip(),
         mail_smtp_password=os.environ.get("MAIL_SMTP_PASSWORD", "").strip(),
         mail_from=os.environ.get("MAIL_FROM", "").strip(),

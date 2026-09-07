@@ -286,9 +286,13 @@ resources continue to use `app.kubernetes.io/name=meho`.
 
 ## Vulnerability scan
 
-Every pushed image is scanned by [trivy](https://github.com/aquasecurity/trivy)
-for known CVEs in OS packages and language dependencies. Findings are
-surfaced two ways:
+Every built image is scanned by [trivy](https://github.com/aquasecurity/trivy)
+for known CVEs in OS packages and language dependencies **before it is
+published as a release**. On a push event the build pushes the manifest list
+to GHCR by digest only (a quarantine push with no tag); trivy scans that
+digest; only a clean scan lets the promote step apply the release aliases
+(`:sha-<sha>`, `:main`, `:v<x.y.z>`) and lets cosign sign + attest the digest.
+Findings are surfaced two ways:
 
 1. **GitHub Security tab.** The workflow uploads the SARIF report to repo →
    *Security* → *Code scanning alerts* (filter category `trivy-image-scan`).
@@ -302,15 +306,18 @@ surfaced two ways:
    jq '.runs[0].results | length' trivy-results.sarif
    ```
 
-**The scan gates main/tag builds.** `exit-code: '1'` fails the run on any
-fixable CRITICAL/HIGH CVE — a red-main alarm against silent CVE accumulation
-on a stale base image (`ignore-unfixed: true` drops CVEs with no upstream
-fix). It runs post-push on main and tags only; the step is skipped on
-pull_request, so it is not a PR merge gate. Because the two SARIF uploads are
-guarded on the scan step's outcome rather than the default `success()` gate,
-a failing scan still publishes its findings to the Security tab and the
-30-day artefact — so a red run's CVE list is one click away. Treat a red run
-as "bump the base-image digest and re-push", not "this merge is blocked".
+**The scan gates promotion of main/tag builds.** `exit-code: '1'` fails the
+run on any fixable CRITICAL/HIGH CVE (`ignore-unfixed: true` drops CVEs with
+no upstream fix). Because the promote / sign / attest steps carry the implicit
+`success()` guard, a failing scan skips all three: the scanned digest is never
+tagged with a release alias, never signed, and never attested — a failed gate
+cannot leave an artifact advertised as an approved release (#284 / F15b). The
+scan is skipped on `pull_request` (which never pushes an image), so it is not
+a PR merge gate. Because the two SARIF uploads are guarded on the scan step's
+outcome rather than the default `success()` gate, a failing scan still
+publishes its findings to the Security tab and the 30-day artefact — so a red
+run's CVE list is one click away. Treat a red run as "bump the base-image
+digest and re-run"; the build ships nothing until the scan is clean.
 
 ## What this skeleton intentionally omits
 

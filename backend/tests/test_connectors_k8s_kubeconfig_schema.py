@@ -21,9 +21,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -301,6 +302,9 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: str
+    # Tenant-unique cache key components (#1642, security F04).
+    id: object = field(default_factory=uuid4)
+    tenant_id: object = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET = _StubTarget(

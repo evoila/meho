@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -44,6 +45,11 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
 from meho_backplane.connectors._shared import credential_backend as cb
+from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.system_operator import (
+    SYSTEM_OPERATOR_SUB,
+    synthesise_system_operator,
+)
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
@@ -96,6 +102,11 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: str
+    # Tenant-unique cache key components (#1642, security F04). Distinct
+    # ``id`` per instance so two stub targets never collapse onto one
+    # cache entry; ``tenant_id`` defaults to the nil UUID.
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET_A = _StubTarget(
@@ -706,16 +717,32 @@ async def test_api_clients_per_target_are_distinct() -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
-    """Two tenants holding same-named targets get distinct ApiClients.
+async def test_api_client_same_secret_ref_different_tenants_get_distinct_clients() -> None:
+    """Same ``secret_ref`` in DIFFERENT tenants never share a cached ApiClient.
 
-    Locks in the forward-compat fix for G0.3 tenant-scoped target name
-    uniqueness — keying on ``target.name`` alone would silently
-    cross-pollinate ApiClients across tenants. ``secret_ref`` is the
-    operator's chosen globally-unique Vault path.
+    Regression guard for security F04 (evoila/meho#266): the REST client
+    cache used to key on ``target.secret_ref`` alone, so two targets in
+    different tenants that happen to share a Vault path collapsed onto one
+    entry — tenant B was served tenant A's authenticated client without
+    ever passing B's credential-store authorization. The cache keys on the
+    tenant-unique ``(tenant_id, id)`` tuple instead.
     """
-    tenant_a = _StubTarget(name="rke2-meho", host="t-a.test", port=6443, secret_ref="tenant-a/k8s")
-    tenant_b = _StubTarget(name="rke2-meho", host="t-b.test", port=6443, secret_ref="tenant-b/k8s")
+    tenant_a = _StubTarget(
+        name="rke2-meho",
+        host="t-a.test",
+        port=6443,
+        secret_ref="k8s/shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_b = _StubTarget(
+        name="rke2-meho",
+        host="t-b.test",
+        port=6443,
+        secret_ref="k8s/shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
 
     async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
         del operator
@@ -731,12 +758,234 @@ async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
         c_a = await connector._get_api_client(tenant_a, op)
         c_b = await connector._get_api_client(tenant_b, op)
 
+    # Each tenant triggered its own build -- no cross-tenant cache hit.
     assert c_a is not c_b
     assert factory.call_count == 2
     assert set(connector._api_clients.keys()) == {
-        tenant_a.secret_ref,
-        tenant_b.secret_ref,
+        target_cache_key(tenant_a),
+        target_cache_key(tenant_b),
     }
+
+
+def _ws_build_patches(built: list[MagicMock]) -> tuple[Any, Any]:
+    """Patch the WsApiClient build path so ``_get_ws_api_client`` needs no real config.
+
+    Mirrors :mod:`tests.test_connectors_k8s_exec`: the connector does a
+    local ``from kubernetes_asyncio.config import load_kube_config_from_dict``
+    inside :meth:`_get_ws_api_client`, so patching the module attribute is
+    picked up on each call. ``WsApiClient`` is patched on the connector
+    module (where it was imported) and records each built client.
+    """
+
+    def _make(**_kwargs: Any) -> MagicMock:
+        client_mock = MagicMock(close=AsyncMock())
+        built.append(client_mock)
+        return client_mock
+
+    return (
+        patch("kubernetes_asyncio.config.load_kube_config_from_dict", new=AsyncMock()),
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.WsApiClient",
+            side_effect=_make,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_ws_client_same_secret_ref_different_tenants_get_distinct_clients() -> None:
+    """Same ``secret_ref`` in DIFFERENT tenants never share a cached WsApiClient.
+
+    The exec/websocket cache is the second F04 fast-path (evoila/meho#266)
+    and must key on the same tenant-unique ``(tenant_id, id)`` tuple as the
+    REST cache — the exec forwarder is exactly the operator-less path an
+    attacker would ride.
+    """
+    tenant_a = _StubTarget(
+        name="rke2-meho",
+        host="t-a.test",
+        port=6443,
+        secret_ref="k8s/shared",
+        id=UUID(int=0x1),
+        tenant_id=UUID(int=0x100),
+    )
+    tenant_b = _StubTarget(
+        name="rke2-meho",
+        host="t-b.test",
+        port=6443,
+        secret_ref="k8s/shared",
+        id=UUID(int=0x2),
+        tenant_id=UUID(int=0x200),
+    )
+    connector = _make_connector_with_stub_kubeconfig()
+    op = _make_operator()
+    built: list[MagicMock] = []
+    load_patch, ws_patch = _ws_build_patches(built)
+    with load_patch, ws_patch:
+        c_a = await connector._get_ws_api_client(tenant_a, op)
+        c_b = await connector._get_ws_api_client(tenant_b, op)
+
+    assert c_a is not c_b
+    assert len(built) == 2
+    assert set(connector._ws_api_clients.keys()) == {
+        target_cache_key(tenant_a),
+        target_cache_key(tenant_b),
+    }
+
+
+@pytest.mark.asyncio
+async def test_rest_warm_cache_not_served_to_system_operator() -> None:
+    """A warm REST client primed by a real operator is NOT served to the system operator.
+
+    The system/operator-less caller (:func:`synthesise_system_operator`,
+    reachable through the operator-less ``k8s.ls`` forwarder) must fall
+    through to the fail-closed loader — it can never borrow a warm client a
+    real operator resolved (#1008). Keyed off ``SYSTEM_OPERATOR_SUB``.
+    """
+    call_log: list[str] = []
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del target
+        call_log.append(operator.sub)
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        side_effect=lambda _d: MagicMock(close=AsyncMock()),
+    ):
+        await connector._get_api_client(_TARGET_A, _make_operator())
+        await connector._get_api_client(_TARGET_A, synthesise_system_operator())
+
+    assert call_log == ["op-test", SYSTEM_OPERATOR_SUB]
+
+
+@pytest.mark.asyncio
+async def test_ws_warm_cache_not_served_to_system_operator() -> None:
+    """A warm exec/websocket client is NOT served to the system operator either."""
+    call_log: list[str] = []
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del target
+        call_log.append(operator.sub)
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    built: list[MagicMock] = []
+    load_patch, ws_patch = _ws_build_patches(built)
+    with load_patch, ws_patch:
+        await connector._get_ws_api_client(_TARGET_A, _make_operator())
+        await connector._get_ws_api_client(_TARGET_A, synthesise_system_operator())
+
+    assert call_log == ["op-test", SYSTEM_OPERATOR_SUB]
+
+
+@pytest.mark.asyncio
+async def test_rest_system_operator_fails_closed_against_warm_cache() -> None:
+    """With a warm cache, a system-operator load runs the loader and fails closed.
+
+    Proves the bypass is closed end to end: even though a real operator
+    primed the cache, the system caller hits the loader, which fails closed
+    per its contract (a system-initiated read cannot resolve per-target
+    credentials).
+    """
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del target
+        if operator.sub == SYSTEM_OPERATOR_SUB:
+            raise VaultCredentialsReadError(
+                "system-initiated calls cannot read per-target vendor credentials"
+            )
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        side_effect=lambda _d: MagicMock(close=AsyncMock()),
+    ):
+        await connector._get_api_client(_TARGET_A, _make_operator())  # warm the cache
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await connector._get_api_client(_TARGET_A, synthesise_system_operator())
+
+
+@pytest.mark.asyncio
+async def test_real_operator_reuse_unchanged_after_system_operator_call() -> None:
+    """Real-operator REST reuse is unaffected by the system-operator cache bypass.
+
+    The system operator falls through to the loader, which fails closed
+    (as it does in production — the placeholder JWT is rejected at the
+    operator-context Vault read), so it never clobbers the warm entry a
+    real operator primed. A second real-operator call still reuses the
+    same cached client (loader run once for the real operator).
+    """
+    real_calls = 0
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        nonlocal real_calls
+        del target
+        if operator.sub == SYSTEM_OPERATOR_SUB:
+            raise VaultCredentialsReadError(
+                "system-initiated calls cannot read per-target vendor credentials"
+            )
+        real_calls += 1
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        side_effect=lambda _d: MagicMock(close=AsyncMock()),
+    ):
+        c1 = await connector._get_api_client(_TARGET_A, _make_operator())  # cold real load
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await connector._get_api_client(_TARGET_A, synthesise_system_operator())  # bypass
+        c3 = await connector._get_api_client(_TARGET_A, _make_operator())  # warm real reuse
+
+    assert real_calls == 1
+    assert c1 is c3
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credentials_drops_and_closes_both_caches() -> None:
+    """Rotation / mutation / revocation evicts and closes both cached client types.
+
+    Satisfies the F04 (evoila/meho#266) requirement that credential
+    rotation, target mutation and revocation invalidate both cache types:
+    :meth:`invalidate_credentials` pops the REST and exec/websocket clients
+    for the target's tenant-unique key and closes them, so the next call
+    re-reads the (possibly rotated) credential and rebuilds.
+    """
+    connector = _make_connector_with_stub_kubeconfig()
+    op = _make_operator()
+    rest_client = MagicMock(close=AsyncMock())
+    built_ws: list[MagicMock] = []
+    load_patch, ws_patch = _ws_build_patches(built_ws)
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=rest_client,
+        ),
+        load_patch,
+        ws_patch,
+    ):
+        await connector._get_api_client(_TARGET_A, op)
+        await connector._get_ws_api_client(_TARGET_A, op)
+
+        key = connector._cache_key(_TARGET_A)
+        assert key in connector._api_clients
+        assert key in connector._ws_api_clients
+
+        await connector.invalidate_credentials(_TARGET_A)
+
+    rest_client.close.assert_awaited_once()
+    built_ws[0].close.assert_awaited_once()
+    assert connector._api_clients == {}
+    assert connector._ws_api_clients == {}
+
+    # Idempotent: invalidating an already-clean target is a no-op.
+    await connector.invalidate_credentials(_TARGET_A)
 
 
 @pytest.mark.asyncio

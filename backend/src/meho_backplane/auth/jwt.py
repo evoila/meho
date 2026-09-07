@@ -671,14 +671,22 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
     marker** of a service-account token, not a fuzzy heuristic.
 
     Fail-closed by construction (this is the policy path): the function
-    returns ``True`` **only** on a positive prefix match, so a token whose
-    shape we cannot positively identify falls through to the ``user``
-    default in :func:`_extract_principal_kind`. A false negative is safe —
-    the #3152 grants gate is fail-open into the human approval flow — but a
-    false positive would silently upgrade an ordinary user into the
-    unattended-dispatch surface, so the marker must be a positive signal
-    only. An empty configured prefix disables the marker (every token stays
-    ``user`` unless it carries an explicit ``principal_kind`` claim).
+    returns ``True`` **only** on a positive prefix match, so a token this
+    marker cannot identify falls through in :func:`_extract_principal_kind`
+    to the marker-independent :func:`_is_client_credentials_token` shape
+    test (security review S11), and only then to the ``user`` default. That
+    backstop matters: a prefix-marker false negative is safe **only**
+    because the shape test catches the client-credentials token it missed —
+    on its own it is *not* safe, because for a mutating ``caution`` /
+    ``dangerous`` op the #3152 gate auto-executes a ``user``-classified
+    principal instead of parking it (only ``requires_approval`` and the
+    ``destructive`` tier park for a ``user``). A false positive, conversely,
+    would silently upgrade an ordinary user into the unattended-dispatch
+    surface, so this marker must stay a positive prefix signal only. An
+    empty configured prefix disables *this* marker; the shape test still
+    classifies a real client-credentials token as ``service``, while an
+    ordinary user stays ``user`` unless it carries an explicit
+    ``principal_kind`` claim.
 
     Both the claim name (``JWT_SERVICE_ACCOUNT_USERNAME_CLAIM``) and the
     prefix (``JWT_SERVICE_ACCOUNT_USERNAME_PREFIX``) are configurable so a
@@ -691,6 +699,50 @@ def _is_service_account_token(claims: Any, settings: Settings) -> bool:
         return False
     username = claims.get(settings.jwt_service_account_username_claim)
     return isinstance(username, str) and username.startswith(prefix)
+
+
+#: Claims Keycloak stamps on a token minted from an *interactive* user
+#: session (authorization-code / direct-access grants) and never on a pure
+#: ``client_credentials`` token, which creates no user session. Their
+#: absence — paired with a positive client-identity claim — positively marks
+#: a non-interactive service token (standard OIDC / RFC 9068 claim names, not
+#: realm-configurable, so they are fixed here rather than in Settings).
+_INTERACTIVE_SESSION_CLAIMS: tuple[str, ...] = ("auth_time", "session_state", "sid")
+
+
+def _is_client_credentials_token(claims: Any) -> bool:
+    """Positively identify a non-interactive client-credentials token by *shape*.
+
+    Fail-close backstop for the #3152 gate (security review S11). The #3178
+    username-prefix marker (:func:`_is_service_account_token`) is the
+    *preferred* service-account signal, but it is disabled outright by an
+    empty ``JWT_SERVICE_ACCOUNT_USERNAME_PREFIX`` and silent when a realm
+    omits or renames the ``preferred_username`` mapper — leaving a
+    client-credentials principal to default to ``user`` and auto-execute the
+    mutating ``caution`` / ``dangerous`` ops a ``service`` classification
+    would park.
+
+    This marker keys on the token shape instead, independent of the username
+    mapper: an OAuth2 ``client_credentials`` grant carries a client-identity
+    claim (``azp`` — the authorized party — or the RFC 9068 ``client_id``)
+    but no interactive user session, so it never carries the session claims
+    Keycloak stamps on an authorization-code / direct-grant token
+    (:data:`_INTERACTIVE_SESSION_CLAIMS`). A positive client-identity claim
+    together with the absence of **every** interactive-session claim is a
+    positive signal of a non-interactive service token.
+
+    Fail-closed by construction: it returns ``True`` only on that positive
+    shape. An interactive human token always carries a session claim, so it
+    is never upgraded — the human-``user`` default-allow is preserved. A
+    degenerate token with no client-identity claim stays ``user`` too (the
+    absence of session claims alone never upgrades).
+    """
+    has_client_identity = any(
+        isinstance(claims.get(name), str) and claims.get(name) for name in ("azp", "client_id")
+    )
+    if not has_client_identity:
+        return False
+    return not any(claims.get(name) is not None for name in _INTERACTIVE_SESSION_CLAIMS)
 
 
 def _extract_client_id(claims: Any, settings: Settings) -> str | None:
@@ -735,16 +787,22 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
     custom kind needs the enum widened first — exactly like an out-of-enum
     ``tenant_role``.
 
-    When the claim is **absent**, the classification is inferred (#3178):
-    an IdP service-account (client-credentials) token — positively
-    identified by :func:`_is_service_account_token` — resolves to
-    ``service`` so the #3152 standing-grants gate evaluates it, and any
-    other token falls back to the pre-G11.2 human-``user`` default (which
-    keeps every existing human-operator token working without a Keycloak
-    mapper update). The inference runs **only** for the absent-claim case
-    and only *upgrades* on a positive marker, so it never overrides an
-    explicit claim and never downgrades — the fail-closed direction for the
-    policy path.
+    When the claim is **absent**, the classification is inferred (#3178,
+    security review S11): an IdP service-account (client-credentials) token
+    resolves to ``service`` so the #3152 standing-grants gate evaluates it,
+    and any other token falls back to the pre-G11.2 human-``user`` default
+    (which keeps every existing human-operator token working without a
+    Keycloak mapper update). Two positive markers are consulted, either
+    sufficient: the #3178 username-prefix marker
+    (:func:`_is_service_account_token`), and — because that marker is
+    disabled by an empty prefix and silent when the ``preferred_username``
+    mapper is absent or renamed — the marker-independent token-shape test
+    (:func:`_is_client_credentials_token`, S11) that classifies a
+    client-credentials token by its ``azp`` / ``client_id`` claim and the
+    absence of interactive-session claims. The inference runs **only** for
+    the absent-claim case and only *upgrades* on a positive marker, so it
+    never overrides an explicit claim and never downgrades — the fail-closed
+    direction for the policy path.
 
     The claim name is configurable via ``JWT_PRINCIPAL_KIND_CLAIM_NAME``
     (default ``principal_kind``) in :class:`~meho_backplane.settings.Settings`
@@ -757,8 +815,11 @@ def _extract_principal_kind(claims: Any, settings: Settings) -> PrincipalKind:
         # Claim absent. An explicit Keycloak ``principal_kind`` mapper is
         # the canonical way to set this, but a client-credentials client
         # often lacks it — so positively test for a service-account token
-        # before defaulting to the legacy human-``user`` fallback (#3178).
-        if _is_service_account_token(claims, settings):
+        # before defaulting to the legacy human-``user`` fallback. Either
+        # the #3178 username-prefix marker or the marker-independent
+        # token-shape test (S11, correct when the prefix is cleared or the
+        # ``preferred_username`` mapper is absent/renamed) is sufficient.
+        if _is_service_account_token(claims, settings) or _is_client_credentials_token(claims):
             return PrincipalKind.SERVICE
         return PrincipalKind.USER
     try:

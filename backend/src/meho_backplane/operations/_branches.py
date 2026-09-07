@@ -112,9 +112,20 @@ def _split_ingested_params(
     Algorithm: walk ``parameter_schema["properties"]``; for each
     property, read the ``x-meho-param-loc`` extension (default
     ``"query"`` -- the most common OpenAPI shape) and route the
-    matching params dict entry to the corresponding bucket. Params
-    not declared in the schema fall through to the **body** bucket --
-    the OpenAPI convention for free-form request bodies.
+    matching params dict entry to the corresponding bucket. A param
+    absent from ``properties`` has no ``x-meho-param-loc`` to read, so it
+    takes that same ``"query"`` default and routes to the **query**
+    bucket.
+
+    On the dispatch path such undeclared params never reach this splitter:
+    the dispatcher validates an ingested op against a schema with
+    ``additionalProperties: false`` (built in by the ingester since #293,
+    and applied as a backstop by
+    :func:`~meho_backplane.operations._validate.ingested_schema_for_validation`
+    for descriptors ingested before that fix), so an undeclared name is
+    already rejected as ``invalid_params`` upstream. The ``"query"``
+    default therefore only ever fires here for a caller that resolves
+    buckets without that gate (the read-only request preview).
 
     The four buckets are returned even when empty so the caller's
     request-building branch can pass them positionally without

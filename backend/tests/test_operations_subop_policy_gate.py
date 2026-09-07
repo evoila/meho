@@ -41,6 +41,10 @@ from meho_backplane.db.models import (
     EndpointDescriptor,
 )
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_queue import (
+    SelfApprovalForbiddenError,
+    approve_request,
+)
 from meho_backplane.operations.composite import (
     composite_dispatch_var,
     composite_resume_scope_var,
@@ -126,6 +130,15 @@ async def test_gated_subop_queues_for_approval(session: AsyncSession) -> None:
     assert row.status == ApprovalRequestStatus.PENDING.value
     assert row.params == _SUB_PARAMS
     assert row.principal_sub == "ops-operator-sub"
+    # #294 (security review S06): the parked sub-op row carries its real
+    # severity via ``proposed_effect`` -- before the fix the composite seam
+    # supplied no ``proposed_effect`` and ``create_pending_request`` defaulted
+    # to the identifier-only envelope (no ``safety_level``), silently disabling
+    # the tier-keyed self-approval carve-out (#3290) and blanking the reviewer
+    # severity (#1855). Stamped now via the dispatcher's shared
+    # ``_build_proposed_effect``, exactly as a dispatcher-parked write.
+    assert row.proposed_effect is not None
+    assert row.proposed_effect["safety_level"] == "dangerous"
 
 
 @pytest.mark.asyncio
@@ -417,3 +430,88 @@ async def test_subop_resume_scope_guard_fails_closed_on_second_gate(
     # No second park was written — the guard refused rather than queue.
     after = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert after == before
+
+
+# ===========================================================================
+# #294 (security review S06) -- proposed_effect stamping restores the
+# tier-keyed self-approval carve-out + the destructive-binding refusal on
+# composite sub-op parks
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_self_approval_of_dangerous_composite_subop_refused_under_break_glass(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Self-approval of a parked dangerous sub-op is refused even under break-glass.
+
+    The composite-seam analogue of
+    ``test_approval_queue.py::test_self_approval_refused_on_no_break_glass_tier_even_with_break_glass``.
+    The seam now stamps ``safety_level="dangerous"`` on the row via the
+    dispatcher's ``_build_proposed_effect`` (#294), so the tier-keyed carve-out
+    (#3290) fires and the requester cannot clear their own park even with
+    ``APPROVAL_ALLOW_SELF_APPROVAL=true``. Before the fix the row's
+    identifier-only envelope carried no ``safety_level``, so
+    ``_check_self_approval`` read ``None``, treated the row as
+    break-glass-eligible, and let the requester self-approve their own
+    dangerous write.
+    """
+    monkeypatch.setenv("APPROVAL_ALLOW_SELF_APPROVAL", "true")
+    get_settings.cache_clear()
+
+    requester = _operator()
+    result = await enforce_subop_policy(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id=_SUB_OP_ID,
+        safety_level="dangerous",
+        requires_approval=True,
+        target=None,
+        params=_SUB_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    request_id = uuid.UUID(result.extras["approval_request_id"])
+
+    # Requester == approver: refused unconditionally on the dangerous tier,
+    # even though break-glass is on.
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(SelfApprovalForbiddenError):
+            await approve_request(s2, request_id, operator=requester, params=_SUB_PARAMS)
+
+    # A refused self-approval is not a decision -- the row stays pending.
+    async with get_sessionmaker()() as s3:
+        row = await s3.get(ApprovalRequest, request_id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_destructive_subop_refused_without_preview_binding(
+    session: AsyncSession,
+) -> None:
+    """A ``destructive``-tier sub-op fails closed instead of parking a weak row (#294).
+
+    The dispatcher refuses to park a ``destructive`` op that carries no
+    ``preview_hash`` + blast-radius binding (#3197, ``_destructive_binding_refusal``).
+    The composite seam presents no ``preview_hash``, so a destructive sub-op is
+    routed through the same refusal here -- fail-closed, no durable row -- rather
+    than writing an identifier-only row the tier guards would misread. No shipped
+    composite passes ``destructive`` today; this is the defense-in-depth floor.
+    """
+    result = await enforce_subop_policy(
+        operator=_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="DELETE:/vcenter/datacenter/{datacenter}",
+        safety_level="destructive",
+        requires_approval=True,
+        target=None,
+        params={"datacenter": "datacenter-42"},
+    )
+    assert result is not None
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "preview_binding_required"
+
+    # Fail-closed: no identifier-only pending row was written for the park.
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0

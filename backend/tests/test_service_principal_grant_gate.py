@@ -525,11 +525,20 @@ def test_service_safety_gate_reason_destructive_parks_always(method: str | None)
 
 
 @pytest.mark.asyncio
-async def test_service_principal_destructive_parks_and_grant_never_satisfies() -> None:
-    """A ``destructive`` op parks for a service principal **even with a live
-    matching grant** — the tier is non-grantable (#3183), so
-    ``consult_and_record_grant`` refuses it before any lookup and no
-    grant-use audit row is written.
+async def test_service_principal_destructive_refused_and_grant_never_satisfies() -> None:
+    """A ``destructive`` op fails closed for a service principal **even with a
+    live matching grant** — the tier is non-grantable (#3183), so no grant-use
+    audit row is written.
+
+    Since #294 (security review S06) the composite seam refuses to *park* a
+    ``destructive`` sub-op that carries no ``preview_hash`` + blast-radius
+    binding — the same fail-closed rule the dispatcher enforces (#3197,
+    ``_destructive_binding_refusal``). The seam presents no ``preview_hash``,
+    so the op is **denied** (``preview_binding_required``) rather than parked
+    with an identifier-only row the tier guards would misread. This supersedes
+    the pre-#294 contract where a destructive service-principal sub-op parked
+    (``awaiting_approval``); the non-grantable property is unchanged and is now
+    enforced by the refusal itself.
     """
     grant_id = await _seed_grant()
     result = await enforce_subop_policy(
@@ -542,7 +551,10 @@ async def test_service_principal_destructive_parks_and_grant_never_satisfies() -
         params=_PARAMS,
     )
     assert result is not None
-    assert result.status == "awaiting_approval"
+    # Fail-closed: no bindable preview was presented, so the destructive sub-op
+    # is refused rather than parked with a weak identifier-only row (#294).
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "preview_binding_required"
     # The live grant did NOT clear the gate — no auto-approval was recorded.
     assert not await _grant_use_rows(grant_id)
 

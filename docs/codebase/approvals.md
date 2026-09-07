@@ -662,6 +662,19 @@ The per-op preview is opt-in via a builder registry in
   returns `None` — and the caller stores its own bare identifier-only
   default — only when connector resolution / hook execution itself raises.
 
+Two park points stamp through this same `_build_proposed_effect` seam: the
+dispatcher's `_handle_needs_approval` (above) and the composite direct-seam
+`enforce_subop_policy` (`operations/composite.py`), which re-applies the
+policy gate around a direct-session write sub-op. Before #294 (security
+review S06) only the dispatcher path stamped it — the composite seam parked
+with the bare identifier-only default, so a parked `dangerous` sub-op's row
+carried no `safety_level` and the #3290 no-self-approval-under-break-glass
+carve-out silently did not fire for it (nor did the reviewer row show its
+severity or blast radius). The seam now builds the same envelope and, for a
+`destructive`-tier sub-op, routes through `_destructive_binding_refusal` to
+**fail closed** when no `preview_hash` + blast-radius binding is present
+(#3197) — identical to the dispatcher.
+
 Three invariants make the hook safe to wire on the park path:
 
 1. **Generic echo default, opt-in bespoke builder (#1856); safety_level

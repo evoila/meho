@@ -78,6 +78,9 @@ from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_vault_secret_data,
 )
+from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
+    enforce_passive_kubeconfig,
+)
 
 __all__ = [
     "DEFAULT_KUBECONFIG_FIELD",
@@ -211,6 +214,16 @@ def parse_kubeconfig_yaml(kubeconfig_text: str) -> dict[str, Any]:
     :exc:`ValueError`, never the underlying :exc:`yaml.YAMLError`
     subclass, so callers don't need to import ``yaml`` just to catch
     parse failures.
+
+    This is a pure parse: it does **not** vet the kubeconfig's contents.
+    The production loaders
+    (:func:`load_kubeconfig_from_vault` / :func:`load_kubernetes_credential`)
+    pass the result through
+    :func:`~meho_backplane.connectors.kubernetes.kubeconfig_schema.enforce_passive_kubeconfig`
+    before it reaches ``kubernetes_asyncio``, so an ``exec`` provider,
+    legacy ``auth-provider`` block or local-file credential reference in
+    a tenant-controlled secret never reaches the library's
+    subprocess/file-read boundary.
     """
     try:
         parsed = yaml.safe_load(kubeconfig_text)
@@ -340,6 +353,13 @@ async def load_kubeconfig_from_vault(
     ValueError
         Raised by :func:`parse_kubeconfig_yaml` when the kubeconfig
         field is not parseable YAML or does not parse to a mapping.
+    meho_backplane.connectors.kubernetes.kubeconfig_schema.UnsupportedKubeconfigError
+        A :exc:`ValueError` subclass raised by
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig_schema.enforce_passive_kubeconfig`
+        when the parsed kubeconfig carries an ``exec`` provider, a legacy
+        ``auth-provider`` block, a local-file credential/CA reference, or
+        a structurally invalid endpoint/proxy/TLS field — rejected before
+        the dict reaches ``kubernetes_asyncio``.
     meho_backplane.auth.vault.VaultClientError
         Login-phase failure raised by the Vault backend —
         :class:`~meho_backplane.auth.vault.VaultUnreachableError`
@@ -384,7 +404,11 @@ async def load_kubeconfig_from_vault(
         field=field,
     )
 
-    return parse_kubeconfig_yaml(kubeconfig_text)
+    # Enforce the passive-only schema before the dict can reach
+    # ``kubernetes_asyncio``'s loader: reject exec providers, legacy
+    # auth-provider blocks and local-file credential/CA references, and
+    # return a fresh config built from only the validated fields.
+    return enforce_passive_kubeconfig(parse_kubeconfig_yaml(kubeconfig_text))
 
 
 async def load_kubernetes_credential(
@@ -443,7 +467,14 @@ async def load_kubernetes_credential(
             secret_ref=target.secret_ref,
             mode="kubeconfig",
         )
-        return KubeconfigCredential(parse_kubeconfig_yaml(kubeconfig_text))
+        # Enforce the passive-only schema before the dict reaches the
+        # library: exec providers, legacy auth-provider blocks and
+        # local-file credential/CA references are rejected here; a fresh
+        # config is built from only the validated fields. The WCP branch
+        # below never carries a kubeconfig dict, so it is unaffected.
+        return KubeconfigCredential(
+            enforce_passive_kubeconfig(parse_kubeconfig_yaml(kubeconfig_text))
+        )
 
     if WCP_USERNAME_FIELD in secret_data and WCP_PASSWORD_FIELD in secret_data:
         username = _require_str_field(

@@ -201,6 +201,68 @@ credential-agnostic and uses whatever SSO pair is staged. Sibling
 issue #2902 (operator-CLI login-token longevity) is a different surface
 (Keycloak OIDC) and shares no implementation with this WCP token dance.
 
+## Passive-only kubeconfig schema (F03, #265)
+
+A static kubeconfig is read from a per-target credential secret (Vault
+KV-v2 / GSM). Target creation is tenant-admin gated, so the kubeconfig is
+**tenant-controlled** — but a tenant's right to manage its own credential
+must not translate into code execution or arbitrary file reads inside the
+shared backplane process. `kubernetes_asyncio`'s kubeconfig loader
+honours the full client-side feature set, three parts of which reach an
+out-of-band sink the moment the document is loaded:
+
+- an **`exec` credential provider** spawns a *subprocess* with the
+  configured command/args (`KubeConfigLoader.load_from_exec_plugin`);
+- a legacy **`auth-provider`** block (`gcp` / `oidc` / vendor plugins)
+  performs a *network token fetch/refresh* (`load_gcp_token` /
+  `_load_oid_token`);
+- a **file-path reference** — cluster `certificate-authority`, user
+  `client-certificate` / `client-key` / `tokenFile` — makes the loader
+  *read that local path* off the backplane's own filesystem (`FileOrData`
+  falls back to the `<key>` file whenever the inline `<key>-data` sibling
+  is absent).
+
+`connectors/kubernetes/kubeconfig_schema.py` (`enforce_passive_kubeconfig`)
+enforces a minimal server-side schema **before** the parsed mapping can
+reach that loader. It:
+
+- **rejects** the three sink classes above with a specific, fail-closed
+  `UnsupportedKubeconfigError` (a `ValueError` subclass, so it flows
+  through the loaders' documented `ValueError` contract and the
+  dispatcher's catch-all → `connector_error`). The message names only the
+  offending section/field — never a credential value, endpoint, or
+  certificate — so it is safe to log (preserves the no-leak canary
+  discipline);
+- **explicitly validates** the cluster `server` endpoint (must be an
+  http(s) URL with a host), `proxy-url` (http/https/socks5 URL with a
+  host), `insecure-skip-tls-verify` (boolean), `tls-server-name`, and the
+  inline `certificate-authority-data`;
+- **rebuilds a fresh mapping** from only the accepted fields — the
+  untrusted input mapping is never returned or handed to the library.
+  Only inline authentication survives: a bearer `token`, HTTP-basic
+  `username`/`password`, and inline `client-certificate-data` /
+  `client-key-data` / cluster `certificate-authority-data`.
+
+Enforcement sits at the trust boundary — the Vault/GSM read — in **both**
+production loaders (`load_kubernetes_credential`, the default, and the
+legacy-injectable `load_kubeconfig_from_vault`), immediately after
+`parse_kubeconfig_yaml`. `parse_kubeconfig_yaml` itself stays a pure
+parse; the injectable `kubeconfig_loader=` / `credential_loader=` test
+seams build dicts directly and are trusted (never a tenant secret).
+
+The **WCP SSO path is unaffected**: a Supervisor secret carries
+`username`/`password`, resolves to a `WcpSsoCredential`, and never
+constructs a kubeconfig dict — so `enforce_passive_kubeconfig` is not on
+that path.
+
+No executable-provider facility is retained: `exec` is rejected
+unconditionally, with no parameter or elevation re-enabling it. A
+deployment that genuinely needs exec-plugin credentials would run that
+behind a separate platform-admin-managed, isolated facility (out of scope
+here). This mirrors the Kubernetes upstream warning that untrusted
+kubeconfig can cause code execution or file exposure
+([kubeconfig guidance](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/)).
+
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
 The `Connector.fingerprint(target, operator=None)` ABC signature

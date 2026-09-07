@@ -50,6 +50,10 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     load_kubernetes_credential,
     parse_kubeconfig_yaml,
 )
+from meho_backplane.connectors.kubernetes.kubeconfig_schema import (
+    UnsupportedKubeconfigError,
+    enforce_passive_kubeconfig,
+)
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS, KubernetesOp
 from meho_backplane.connectors.kubernetes.wcp import (
     WcpLoginError,
@@ -106,10 +110,12 @@ __all__ = [
     "KubernetesCredential",
     "KubernetesOp",
     "KubernetesTargetLike",
+    "UnsupportedKubeconfigError",
     "WcpLoginError",
     "WcpSsoCredential",
     "WcpToken",
     "build_wcp_api_configuration",
+    "enforce_passive_kubeconfig",
     "load_kubeconfig_from_vault",
     "load_kubernetes_credential",
     "parse_kubeconfig_yaml",

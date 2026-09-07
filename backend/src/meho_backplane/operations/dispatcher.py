@@ -331,6 +331,7 @@ from meho_backplane.operations._request_preview import (
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     compute_params_hash,
+    ingested_schema_for_validation,
     policy_gate,
     validate_params,
 )
@@ -2385,8 +2386,18 @@ async def dispatch(
         return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
     # --- Step 3: parameter_schema validation ------------------------------
+    # #293 (security review S05): for an ingested (generic-connector) op,
+    # validate against a schema that forbids undeclared params. Freshly
+    # ingested descriptors already carry ``additionalProperties: false``
+    # (openapi._build_parameter_schema); this backstop applies the same
+    # clause to descriptors ingested before that fix, so an undeclared
+    # param is rejected as ``invalid_params`` here rather than defaulting
+    # onto the vendor query string in ``_split_ingested_params``.
+    schema_to_validate = descriptor.parameter_schema
+    if descriptor.source_kind == "ingested":
+        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:
         # #3095: the stored schema itself is broken (dangling $ref) --
         # the descriptor is at fault, not the caller. Structured error

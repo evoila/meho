@@ -59,6 +59,7 @@ import pytest
 import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
 from meho_backplane.connectors.holodeck.ops_read import (
+    _K8S_ALLOWED_FLAGS,
     GROWTH_DIRS,
     READ_OPS,
     KubectlSafetyError,
@@ -184,23 +185,21 @@ def test_parse_kubectl_command_logs() -> None:
 
 
 def test_parse_kubectl_command_global_flag_separated() -> None:
-    """``kubectl --context foo get pods`` -- the verb is past the separated flag."""
-    verb, args = parse_kubectl_command("kubectl --context foo get pods")
+    """``kubectl --namespace holodeck get pods`` -- verb past a separated allowed flag."""
+    verb, args = parse_kubectl_command("kubectl --namespace holodeck get pods")
     assert verb == "get"
     assert args == ["pods"]
 
 
 def test_parse_kubectl_command_global_flag_attached() -> None:
-    """``kubectl --context=foo get pods`` -- attached-value flag form."""
-    verb, args = parse_kubectl_command("kubectl --context=foo get pods")
+    """``kubectl --namespace=holodeck get pods`` -- attached-value allowed flag form."""
+    verb, args = parse_kubectl_command("kubectl --namespace=holodeck get pods")
     assert verb == "get"
     assert args == ["pods"]
 
 
 def test_parse_kubectl_command_multiple_global_flags() -> None:
-    verb, _ = parse_kubectl_command(
-        "kubectl --kubeconfig=/tmp/x.yaml --namespace=holodeck get pods"
-    )
+    verb, _ = parse_kubectl_command("kubectl -A --namespace=holodeck get pods")
     assert verb == "get"
 
 
@@ -250,7 +249,7 @@ def test_parse_kubectl_command_rejects_mutating_verb(verb: str) -> None:
         "rm -rf /",
         "echo kubectl get pods",  # not starting with kubectl
         "kubectl",  # no verb
-        "kubectl --context=foo",  # no verb after global flags
+        "kubectl --namespace=foo",  # allowed global flag but no verb after it
     ],
 )
 def test_parse_kubectl_command_rejects_malformed(command: str) -> None:
@@ -272,6 +271,157 @@ def test_parse_kubectl_command_safelist_includes_top_explain() -> None:
 
 def test_parse_kubectl_command_safelist_includes_cluster_info() -> None:
     assert parse_kubectl_command("kubectl cluster-info")[0] == "cluster-info"
+
+
+# ---------------------------------------------------------------------------
+# parse_kubectl_command -- positive flag allowlist (F05)
+#
+# A read-only verb safelist plus a shell-metacharacter reject still let
+# through argument-level overrides -- endpoint (``--server``), disabled
+# TLS trust, raw kubeconfig views and file-writing options -- because
+# those flags carry no metacharacter and sit behind an allowed verb.
+# The parser now checks every flag (before AND after the verb, attached
+# AND separated) against a positive allowlist. These tests pin both
+# halves of that contract: ordinary reads keep working, overrides are
+# refused, and no command reaches SSH to prove it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl get pods -n holodeck",
+        "kubectl get pods --namespace=holodeck",
+        "kubectl get pods -A",
+        "kubectl get pods --all-namespaces",
+        "kubectl get pods -o json",
+        "kubectl get pods --output=yaml",
+        "kubectl get pods -o wide --show-labels --no-headers",
+        "kubectl get pods -l app=web",
+        "kubectl get pods --selector=app=web --field-selector=status.phase=Running",
+        "kubectl get pods --sort-by=.metadata.name",
+        "kubectl logs my-pod -c my-container --tail=100 --since=5m --timestamps",
+        "kubectl logs my-pod -p --all-containers --limit-bytes=4096",
+        "kubectl describe pod my-pod --show-events",
+        "kubectl top pods --containers --sort-by=cpu",
+        "kubectl auth can-i list pods --namespace=holodeck",
+        "kubectl explain pods --recursive --api-version=v1",
+        "kubectl config view -o yaml",
+    ],
+)
+def test_parse_kubectl_command_accepts_allowed_read_flags(command: str) -> None:
+    """Ordinary inventory reads with read-only scoping/format flags pass."""
+    verb, _ = parse_kubectl_command(command)
+    assert verb  # a verb resolved without raising
+
+
+#: ``(label, command)`` pairs whose flag is an endpoint / TLS-trust /
+#: credential / context override, a raw-credential view or a
+#: file-writing option. Each must be rejected -- and the matrix
+#: deliberately places the offending flag both BEFORE and AFTER the
+#: verb and in both attached (``--flag=value``) and separated
+#: (``--flag value``) forms.
+_K8S_OVERRIDE_FLAG_REJECTS: tuple[tuple[str, str], ...] = (
+    # Endpoint override -- before the verb, both forms.
+    ("server_attached_pre", "kubectl --server=https://evil.example:6443 get pods"),
+    ("server_separated_pre", "kubectl --server https://evil.example:6443 get pods"),
+    ("server_short_pre", "kubectl -s https://evil.example:6443 get pods"),
+    # Endpoint override -- after the verb, both forms.
+    ("server_attached_post", "kubectl get pods --server=https://evil.example:6443"),
+    ("server_separated_post", "kubectl get pods --server https://evil.example:6443"),
+    # Disabled TLS trust.
+    ("insecure_tls_pre", "kubectl --insecure-skip-tls-verify get pods"),
+    ("insecure_tls_post", "kubectl get pods --insecure-skip-tls-verify"),
+    ("tls_server_name", "kubectl get pods --tls-server-name=evil"),
+    ("ca_override", "kubectl --certificate-authority=/tmp/ca.crt get pods"),
+    ("client_cert", "kubectl get pods --client-certificate=/tmp/c.pem"),
+    ("client_key", "kubectl get pods --client-key=/tmp/k.pem"),
+    # Credential overrides.
+    ("token_attached", "kubectl --token=abc123 get pods"),
+    ("token_separated", "kubectl --token abc123 get pods"),
+    ("kubeconfig_pre", "kubectl --kubeconfig=/tmp/x.yaml get pods"),
+    ("kubeconfig_post", "kubectl get pods --kubeconfig=/tmp/x.yaml"),
+    ("username", "kubectl --username=admin get pods"),
+    ("password", "kubectl --password=hunter2 get pods"),
+    ("impersonate_user", "kubectl --as=system:admin get pods"),
+    ("impersonate_group", "kubectl --as-group=system:masters get pods"),
+    # Context / cluster / user selection.
+    ("context_attached", "kubectl --context=evil get pods"),
+    ("context_separated", "kubectl --context evil config view"),
+    ("cluster_select", "kubectl --cluster=evil get pods"),
+    ("user_select", "kubectl --user=evil get pods"),
+    # Raw credential view.
+    ("raw_config_view", "kubectl config view --raw"),
+    # File-writing options.
+    ("cluster_info_dump_dir", "kubectl cluster-info dump --output-directory=/tmp/dump"),
+    (
+        "cluster_info_dump_dir_sep",
+        "kubectl cluster-info dump --output-directory /tmp/dump",
+    ),
+    ("cache_dir", "kubectl get pods --cache-dir=/tmp/c"),
+    ("profile_output", "kubectl get pods --profile-output=/tmp/p"),
+    # Unknown / non-read flags (fail closed, e.g. streaming watch).
+    ("unknown_flag", "kubectl get pods --totally-made-up"),
+    ("watch_stream", "kubectl get pods --watch"),
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [c for _, c in _K8S_OVERRIDE_FLAG_REJECTS],
+    ids=[label for label, _ in _K8S_OVERRIDE_FLAG_REJECTS],
+)
+def test_parse_kubectl_command_rejects_override_flags(command: str) -> None:
+    """Endpoint/TLS/credential/context/raw/file flags are refused everywhere."""
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command(command)
+
+
+def test_parse_kubectl_command_override_reject_message_names_flag_not_value() -> None:
+    """The rejection names the flag but never echoes its (possibly secret) value."""
+    with pytest.raises(KubectlSafetyError) as excinfo:
+        parse_kubectl_command("kubectl --token=s3cr3t-bearer get pods")
+    message = str(excinfo.value)
+    assert "allowlist" in message
+    assert "s3cr3t-bearer" not in message
+
+
+def test_parse_kubectl_command_separated_value_does_not_hide_override() -> None:
+    """A value-flag with no value can't swallow a following override as its value."""
+    # ``--namespace`` expects a value; the next token ``--server=...``
+    # starts with ``-`` so it is NOT consumed as the value -- it is
+    # validated as its own flag and rejected.
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command("kubectl --namespace --server=https://evil get pods")
+
+
+def test_k8s_allowed_flags_carry_no_dangerous_global_flag() -> None:
+    """No allowlisted flag overlaps the kubectl endpoint/credential/TLS set."""
+    dangerous = {
+        "-s",
+        "--server",
+        "--kubeconfig",
+        "--token",
+        "--username",
+        "--password",
+        "--client-certificate",
+        "--client-key",
+        "--certificate-authority",
+        "--insecure-skip-tls-verify",
+        "--tls-server-name",
+        "--as",
+        "--as-group",
+        "--as-uid",
+        "--context",
+        "--cluster",
+        "--user",
+        "--raw",
+        "--output-directory",
+        "--output-file",
+        "--cache-dir",
+        "--profile-output",
+    }
+    assert _K8S_ALLOWED_FLAGS.isdisjoint(dangerous)
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +468,8 @@ def test_parse_kubectl_command_multiword_auth_whoami() -> None:
 
 
 def test_parse_kubectl_command_multiword_with_global_flag() -> None:
-    """Global flags before a multi-word verb don't break the 2-token prefix walk."""
-    verb, _ = parse_kubectl_command("kubectl --context=foo config view")
+    """Allowed global flags before a multi-word verb don't break the prefix walk."""
+    verb, _ = parse_kubectl_command("kubectl --namespace=holodeck config view")
     assert verb == "config view"
 
 
@@ -907,6 +1057,32 @@ async def test_k8s_exec_handler_rejects_shell_injection_before_ssh(
     assert result["stderr"] == ""
     assert "safety check" in result["error"]
     assert "shell metacharacter" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [c for _, c in _K8S_OVERRIDE_FLAG_REJECTS],
+    ids=[label for label, _ in _K8S_OVERRIDE_FLAG_REJECTS],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_rejects_override_flags_before_ssh(command: str) -> None:
+    """The k8s.exec handler refuses endpoint/TLS/credential/file flags BEFORE SSH.
+
+    Same discipline as the shell-injection guard: an argument-level
+    override carries no metacharacter and sits behind a read-only
+    verb, so the flag allowlist is the only thing standing between it
+    and the appliance. The reject must fire before ``_run_command`` is
+    awaited.
+    """
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.k8s_exec(_TARGET, {"command": command})
+        mock_cmd.assert_not_awaited()
+        assert mock_cmd.await_count == 0
+    assert result["exit_status"] is None
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+    assert "safety check" in result["error"]
 
 
 @pytest.mark.parametrize(

@@ -362,7 +362,15 @@ class _SeededBind9Connector(Bind9Connector):  # type: ignore[misc]
         self._test_creds = creds
 
     async def _auth_config(self, target: Any, operator: Any = None) -> dict[str, Any]:
-        return {"username": self._test_creds.username, "password": self._test_creds.password}
+        # ``known_hosts=None`` opts this ephemeral testcontainer out of
+        # host-key verification (#270): the container's host key is freshly
+        # generated per run, so there is nothing stable to pin here. Threaded
+        # explicitly because ``_connect`` now requires the key.
+        return {
+            "username": self._test_creds.username,
+            "password": self._test_creds.password,
+            "known_hosts": None,
+        }
 
 
 # ---------------------------------------------------------------------------

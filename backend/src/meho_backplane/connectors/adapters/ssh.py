@@ -45,9 +45,31 @@ concurrent requests to distinct targets proceed in parallel; only requests
 to the *same* target serialize during the SSH handshake. SSH key exchange
 is expensive — pooling matters more here than for HTTP.
 
-**Host key checking.** ``known_hosts=None`` disables host-key verification
-for v0.2; pinning is deferred to v0.2.next once a Vault-managed key store
-is in place.
+**Host key checking (fail-closed).** The Vault secret at ``secret_ref`` is
+the key store the v0.2 deferral was waiting on, so host-key verification
+is now enforced by default. Two optional fields on the resolved secret
+drive it:
+
+* ``known_hosts`` — one or more OpenSSH ``known_hosts``-format lines
+  pinning the target's host key(s) (``<host-pattern> <keytype>
+  <base64>``). When present it is parsed via
+  ``asyncssh.import_known_hosts`` and passed to ``asyncssh.connect``;
+  an unexpected or unknown host key then raises
+  :exc:`asyncssh.HostKeyNotVerifiable` during key exchange, **before**
+  any password or private key is offered to the peer.
+* ``known_hosts_insecure`` — a truthy escape hatch that restores the
+  old ``known_hosts=None`` (no verification) behaviour for a single
+  target, logging a loud ``ssh_host_key_check_disabled`` warning on
+  every connect. Mirrors the ``meho admin keycloak
+  --insecure-skip-tls-verify`` opt-in and the target-level
+  ``verify_tls=false`` posture: opt-in, per-target, never the default.
+
+A secret carrying neither field fails closed:
+:exc:`SshHostKeyUnpinnedError` is raised before the connection opens,
+so an unpinned target can never disclose a password to an impostor
+host by default. The host-key material is threaded through
+``_auth_config``'s return dict alongside the auth kwargs (subclasses
+that override ``_auth_config`` MUST include a ``known_hosts`` entry).
 
 **Timeouts.** ``_run_command`` wraps ``conn.run()`` in
 ``asyncio.wait_for``; expiry raises :exc:`asyncio.TimeoutError`.
@@ -80,6 +102,70 @@ logger = structlog.get_logger()
 type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
+
+
+class SshHostKeyUnpinnedError(ValueError):
+    """A target's Vault secret configures no host-key trust and no opt-out.
+
+    Raised (fail-closed) by :func:`_known_hosts_from_secret` before a
+    connection is opened when the resolved secret carries neither a
+    ``known_hosts`` pin nor a truthy ``known_hosts_insecure`` escape
+    hatch. Without a pin, host-key verification cannot be performed, and
+    connecting anyway would let an impostor host collect a password (or
+    supply forged command output on a key-only session) — the F08
+    finding this guard closes. Subclasses :exc:`ValueError` so the
+    G0.6 dispatcher shim maps it to a ``connector_error`` result, the
+    same class the missing-credentials guard in :meth:`SshConnector._auth_config`
+    already uses.
+    """
+
+    def __init__(self, target_name: str) -> None:
+        super().__init__(
+            f"target '{target_name}': host-key verification is unconfigured. "
+            "Add a `known_hosts` pin (OpenSSH known_hosts lines for the target's "
+            "host key) to the target's Vault secret, or set "
+            "`known_hosts_insecure: true` to opt out of verification for this "
+            "target (logged loudly on every connect)."
+        )
+
+
+def _secret_flag_is_true(value: object) -> bool:
+    """Interpret a Vault secret field as a boolean opt-in flag.
+
+    A KV-v2 field can round-trip as a native ``bool`` (JSON write) or as
+    a string (``vault kv put k=true``), so both shapes are honoured;
+    everything else is falsey.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _known_hosts_from_secret(
+    target_name: str, secret: dict[str, Any]
+) -> asyncssh.SSHKnownHosts | None:
+    """Resolve the ``asyncssh.connect(known_hosts=...)`` value for a secret.
+
+    Returns a parsed :class:`asyncssh.SSHKnownHosts` when the secret pins
+    ``known_hosts`` (enforced: an unexpected key raises
+    :exc:`asyncssh.HostKeyNotVerifiable` before auth), or ``None`` when
+    the secret sets a truthy ``known_hosts_insecure`` escape hatch
+    (verification disabled, warned). A secret with neither fails closed
+    via :exc:`SshHostKeyUnpinnedError`. A pin always wins over the
+    escape hatch when both are set — the secure reading of contradictory
+    config.
+    """
+    pin_raw = secret.get("known_hosts")
+    if pin_raw:
+        pin = strip_credential_value(pin_raw)
+        if pin:
+            return asyncssh.import_known_hosts(pin)
+    if _secret_flag_is_true(secret.get("known_hosts_insecure")):
+        logger.warning("ssh_host_key_check_disabled", target=target_name)
+        return None
+    raise SshHostKeyUnpinnedError(target_name)
 
 
 def _ssh_output(result: Any) -> str | None:
@@ -196,23 +282,34 @@ class SshConnector(Connector):
     async def _auth_config(
         self, target: Target, operator: Operator | None = None
     ) -> dict[str, Any]:
-        """Resolve ``target.secret_ref`` from Vault and derive auth kwargs.
+        """Resolve ``target.secret_ref`` from Vault and derive connect kwargs.
 
-        Returns ``{username, client_keys=[key]}`` for key auth, or
-        ``{username, password}`` for password auth. Raises :exc:`ValueError`
-        when the resolved secret carries neither ``ssh_private_key`` nor
-        ``password``; Vault resolution failures propagate per
-        :meth:`_resolve_secret`'s two-phase error contract.
+        Returns ``{username, known_hosts, client_keys=[key]}`` for key
+        auth, or ``{username, known_hosts, password}`` for password auth.
+        ``known_hosts`` is the fail-closed host-key trust value resolved
+        by :func:`_known_hosts_from_secret` (a parsed
+        :class:`asyncssh.SSHKnownHosts` pin, or ``None`` for the audited
+        per-target opt-out); it is threaded here so :meth:`_connect`
+        never has to re-read the secret. Raises :exc:`ValueError` when
+        the resolved secret carries neither ``ssh_private_key`` nor
+        ``password``, and :exc:`SshHostKeyUnpinnedError` when it pins no
+        host key and sets no opt-out; Vault resolution failures propagate
+        per :meth:`_resolve_secret`'s two-phase error contract.
         """
         secret = await self._resolve_secret(target, operator)
         username: str = strip_credential_value(secret.get("username", "root"))
+        known_hosts = _known_hosts_from_secret(target.name, secret)
         private_key_raw = secret.get("ssh_private_key")
         if private_key_raw:
             key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
-            return {"username": username, "client_keys": [key]}
+            return {"username": username, "known_hosts": known_hosts, "client_keys": [key]}
         password_raw = secret.get("password")
         if password_raw:
-            return {"username": username, "password": strip_credential_value(password_raw)}
+            return {
+                "username": username,
+                "known_hosts": known_hosts,
+                "password": strip_credential_value(password_raw),
+            }
         raise ValueError(
             f"target '{target.name}': the Vault secret at secret_ref must include "
             "ssh_private_key or password"
@@ -259,13 +356,20 @@ class SshConnector(Connector):
                 del self._connections[cache_key]
 
             auth_kwargs = await self._auth_config(target, operator)
+            # ``known_hosts`` is fail-closed: the base ``_auth_config`` (and
+            # every subclass override) resolves it via
+            # ``_known_hosts_from_secret``. A missing key here means a
+            # subclass override forgot to thread it — refuse rather than
+            # silently disable verification.
+            if "known_hosts" not in auth_kwargs:
+                raise SshHostKeyUnpinnedError(getattr(target, "name", "?"))
             conn = await asyncssh.connect(
                 target.host,
                 port=target.port or 22,
                 username=auth_kwargs["username"],
                 client_keys=auth_kwargs.get("client_keys"),
                 password=auth_kwargs.get("password"),
-                known_hosts=None,
+                known_hosts=auth_kwargs["known_hosts"],
             )
             self._connections[cache_key] = (conn, time.monotonic())
             logger.info("ssh_connected", target=target.name, host=target.host)

@@ -250,7 +250,10 @@ async def test_vault_to_keycloak_move_writes_credential_server_side(
     install_fake_client(monkeypatch, secret={"password": _SENTINEL})
 
     params = {
-        "from": "vault:secret/db/prod#password",
+        # Source lives in the operator's own tenant subtree so it passes the
+        # default-on vault-kv tenant-scope guard the broker now runs on its
+        # read path (S08 #296); the sink is a Keycloak-admin path, unguarded.
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
         "to": f"keycloak:{_TARGET_NAME}/{_REALM}/{_USERNAME}#password",
         "reason": "provision keycloak operator credential",
     }

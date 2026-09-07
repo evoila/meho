@@ -224,3 +224,30 @@ func TestDescribe404SurfacesError(t *testing.T) {
 		t.Errorf("stderr should surface a not-found message; got:\n%s", stderr)
 	}
 }
+
+// TestResolveSecret_NonTTYFallback asserts that when stdin is a piped
+// reader (not an *os.File on a TTY, as --secret-stdin from a pipe and
+// every unit test supplies), resolveSecret still takes the plain
+// buffered line read and returns the secret unchanged — the TTY branch's
+// term.ReadPassword only engages for a real terminal.
+func TestResolveSecret_NonTTYFallback(t *testing.T) {
+	// Neutralise any ambient env var so the stdin path is exercised.
+	t.Setenv(SecretEnvVar, "")
+
+	const want = "hmac-secret-from-pipe"
+	cmd := &cobra.Command{}
+	cmd.SetIn(strings.NewReader(want + "\n"))
+	var errOut bytes.Buffer
+	cmd.SetErr(&errOut)
+
+	got, hasSecret, err := resolveSecret(cmd, true)
+	if err != nil {
+		t.Fatalf("resolveSecret returned error: %v", err)
+	}
+	if !hasSecret {
+		t.Fatal("resolveSecret hasSecret = false, want true")
+	}
+	if got != want {
+		t.Fatalf("resolveSecret = %q, want %q", got, want)
+	}
+}

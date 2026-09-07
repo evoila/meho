@@ -59,8 +59,9 @@ func (e *errKeycloakAPI) Error() string {
 // with grant_type=password against the built-in admin-cli client, just
 // like the reference shell script. Returns the bearer access_token
 // string. The username + password are passed via form fields; the
-// caller is responsible for not echoing them — meho admin uses
-// ReadPassword + an env-var fallback that never enters argv.
+// caller is responsible for not echoing them — meho admin reads them
+// with echo suppressed on a TTY (term.ReadPassword) plus an env-var
+// fallback that never enters argv.
 func mintAdminToken(
 	ctx context.Context,
 	httpClient *http.Client,

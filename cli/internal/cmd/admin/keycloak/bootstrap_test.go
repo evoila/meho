@@ -1056,3 +1056,23 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 			putsAfterFirst, putsAfterSecond)
 	}
 }
+
+// TestReadPassword_NonTTYFallbackReadsPipedSecret asserts that when the
+// reader is not an *os.File on a TTY (a piped secret, as every unit test
+// and shell here-string supplies), readPassword still takes the plain
+// buffered line read and returns the secret unchanged — the TTY branch's
+// term.ReadPassword only engages for a real terminal.
+func TestReadPassword_NonTTYFallbackReadsPipedSecret(t *testing.T) {
+	const want = "s3cr3t-from-pipe"
+	var errOut bytes.Buffer
+	got, err := readPassword(strings.NewReader(want+"\n"), &errOut, "Password: ")
+	if err != nil {
+		t.Fatalf("readPassword returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("readPassword = %q, want %q", got, want)
+	}
+	if errOut.String() != "Password: " {
+		t.Fatalf("prompt written to errOut = %q, want %q", errOut.String(), "Password: ")
+	}
+}

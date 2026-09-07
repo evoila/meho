@@ -36,6 +36,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/output"
@@ -112,9 +113,25 @@ func resolveSecret(cmd *cobra.Command, useStdin bool) (string, bool, error) {
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), "Enter event-source secret: "); err != nil {
 		return "", false, err
 	}
-	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", false, err
+	in := cmd.InOrStdin()
+	var line string
+	// On an interactive terminal, suppress echo so the typed secret
+	// never lands in the terminal, scrollback, or a session recording.
+	// A piped --secret-stdin (and unit tests) take the plain line read.
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		b, err := term.ReadPassword(int(f.Fd()))
+		// ReadPassword consumes the trailing Enter without echoing it.
+		fmt.Fprintln(cmd.ErrOrStderr())
+		if err != nil {
+			return "", false, err
+		}
+		line = string(b)
+	} else {
+		raw, err := bufio.NewReader(in).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", false, err
+		}
+		line = raw
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if line == "" {

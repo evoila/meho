@@ -791,6 +791,34 @@
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
           }
         },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingSecret": { "type": "string" },
+            "existingSecretPasswordKey": { "type": "string", "minLength": 1 },
+            "password": { "type": "string" }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "backplanePodLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraAllowedSelectors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        },
         "podAnnotations": {
           "type": "object",
           "additionalProperties": { "type": "string" }

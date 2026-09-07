@@ -185,6 +185,46 @@ class TestClientLifecycle:
         assert kwargs.get("host") == "broadcast.test"
         assert kwargs.get("port") == 6379
 
+    def test_no_password_when_env_unset(self, _broadcast_env: None) -> None:
+        """Unset ``BROADCAST_REDIS_PASSWORD`` → no auth (pre-auth default)."""
+        kwargs = get_broadcast_client().connection_pool.connection_kwargs
+        assert kwargs.get("password") is None
+
+    def test_password_applied_from_settings(
+        self,
+        _broadcast_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``BROADCAST_REDIS_PASSWORD`` flows to the Valkey AUTH kwarg (F14a).
+
+        The Helm chart enables Valkey ``requirepass`` by default and injects
+        the password via ``BROADCAST_REDIS_PASSWORD`` (secretKeyRef) rather
+        than embedding it in the plaintext ``BROADCAST_REDIS_URL``. Both the
+        fast and blocking clients must authenticate with it.
+        """
+        monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "s3cr3t-req")
+        get_settings.cache_clear()
+        reset_broadcast_client_for_testing()
+        reset_broadcast_blocking_client_for_testing()
+
+        fast = get_broadcast_client().connection_pool.connection_kwargs
+        blocking = get_broadcast_blocking_client().connection_pool.connection_kwargs
+        assert fast.get("password") == "s3cr3t-req"
+        assert blocking.get("password") == "s3cr3t-req"
+
+    def test_blank_password_env_collapses_to_no_auth(
+        self,
+        _broadcast_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An accidentally-empty password env sends no AUTH, not a blank one."""
+        monkeypatch.setenv("BROADCAST_REDIS_PASSWORD", "")
+        get_settings.cache_clear()
+        reset_broadcast_client_for_testing()
+
+        kwargs = get_broadcast_client().connection_pool.connection_kwargs
+        assert kwargs.get("password") is None
+
     async def test_dispose_calls_aclose_and_clears_cache(self, _broadcast_env: None) -> None:
         client = get_broadcast_client()
         with patch.object(client, "aclose", new=AsyncMock()) as aclose:

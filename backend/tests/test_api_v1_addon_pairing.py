@@ -95,19 +95,20 @@ def _token(
     )
 
 
-def _service_token(key: Any) -> str:
+def _service_token(key: Any, *, sub: str = "addon-svc") -> str:
     """A paired add-on's ``principal_kind=service`` / ``read_only`` token."""
-    return _token(key, sub="addon-svc", role=TenantRole.READ_ONLY, principal_kind="service")
+    return _token(key, sub=sub, role=TenantRole.READ_ONLY, principal_kind="service")
 
 
-def _mock_kc_ok() -> MagicMock:
+def _mock_kc_ok(*, sub: str = "addon-svc", internal_id: str = _KC_INTERNAL_ID) -> MagicMock:
     mock_client = AsyncMock()
-    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.create_client = AsyncMock(return_value=internal_id)
     mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
-    # The service token below authenticates with sub="addon-svc"; the pair
-    # flow captures the same value as service_account_sub so the paired
-    # add-on's subscription binds to its own pairing (#3027).
-    mock_client.get_service_account_user_id = AsyncMock(return_value="addon-svc")
+    # The service token authenticates with sub="addon-svc"; the pair flow
+    # captures the same value as service_account_sub so the paired add-on's
+    # heartbeat / capability writes bind to its own pairing (#3025/#3026) and
+    # its step-event subscription binds to its own log (#3027).
+    mock_client.get_service_account_user_id = AsyncMock(return_value=sub)
     mock_client.delete_client = AsyncMock(return_value=None)
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
@@ -256,6 +257,54 @@ async def test_heartbeat_unpaired_is_404(client: TestClient) -> None:
         mock_discovery_and_jwks(r, public_jwks(key))
         resp = client.post("/api/v1/addons/pairings/ghost/heartbeat", headers=headers)
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cannot_target_another_pairing(client: TestClient) -> None:
+    """Object-level authz: a paired service heartbeats only its OWN pairing.
+
+    Two paired add-ons share a tenant. Service A (bound to ``automation``)
+    cannot stamp ``other``'s liveness; an unrelated service subject is denied;
+    A's own heartbeat still succeeds.
+    """
+    await _seed_tenant()
+    key = make_rsa_keypair("kid-hb-authz")
+    admin = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        with patch(_PATCH_TARGET, _mock_kc_ok(sub="addon-svc")):
+            client.post("/api/v1/addons/pairings", json=_pair_body(), headers=admin)
+        with patch(
+            _PATCH_TARGET,
+            _mock_kc_ok(sub="other-svc", internal_id="cc000000-0000-0000-0000-0000000beef1"),
+        ):
+            client.post(
+                "/api/v1/addons/pairings",
+                json={
+                    "name": "other",
+                    "addon_contract_version": BACKPLANE_CONTRACT_VERSION,
+                    "addon_min_backplane_version": BACKPLANE_CONTRACT_VERSION,
+                },
+                headers=admin,
+            )
+
+        a = {"Authorization": f"Bearer {_service_token(key, sub='addon-svc')}"}
+        stranger = {"Authorization": f"Bearer {_service_token(key, sub='stranger-svc')}"}
+
+        # A cannot stamp B's liveness — 404, indistinguishable from an absent
+        # pairing (never reveal another add-on's existence).
+        impersonate = client.post("/api/v1/addons/pairings/other/heartbeat", headers=a)
+        assert impersonate.status_code == 404, impersonate.text
+        assert impersonate.json()["detail"] == "addon_not_paired"
+
+        # An unrelated service subject is denied on A's own pairing.
+        outsider = client.post("/api/v1/addons/pairings/automation/heartbeat", headers=stranger)
+        assert outsider.status_code == 404, outsider.text
+
+        # A's own heartbeat still succeeds.
+        own = client.post("/api/v1/addons/pairings/automation/heartbeat", headers=a)
+        assert own.status_code == 200, own.text
+        assert own.json()["last_seen_at"] is not None
 
 
 @pytest.mark.asyncio

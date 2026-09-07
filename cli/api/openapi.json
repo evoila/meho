@@ -10262,7 +10262,7 @@
           "addon-pairing"
         ],
         "summary": "Heartbeat Pairing",
-        "description": "Record an add-on liveness heartbeat (paired service principal only).\n\nThe paired add-on authenticates as its own service principal and stamps\n``last_seen_at``. A non-service principal is 403; an unpaired add-on is\n404. Audited via the audit middleware.",
+        "description": "Record an add-on liveness heartbeat (paired service principal only).\n\nThe paired add-on authenticates as its own service principal and stamps\n``last_seen_at``. A non-service principal is 403. The pairing is resolved\nby the caller's service-account ``sub`` and must be ``{name}``'s own\npairing, so a paired service cannot heartbeat another add-on's pairing; a\ncaller that owns no pairing named ``{name}`` is 404 (indistinguishable from\nan absent one). Audited via the audit middleware.",
         "operationId": "heartbeat_pairing_api_v1_addons_pairings__name__heartbeat_post",
         "parameters": [
           {
@@ -10391,7 +10391,7 @@
           "addon-pairing"
         ],
         "summary": "Declare Capabilities",
-        "description": "Declare an add-on's advertised surfaces (paired service principal only).\n\nThe paired add-on authenticates as its own **service** principal and\nreplaces its declaration wholesale. A non-service principal is 403; an\nunpaired add-on is 404; an unknown capability kind or a malformed /\nduplicate declaration is 422 (rejected by the request schema before this\nhandler runs). Audited via the audit middleware.",
+        "description": "Declare an add-on's advertised surfaces (paired service principal only).\n\nThe paired add-on authenticates as its own **service** principal and\nreplaces its declaration wholesale. A non-service principal is 403. The\npairing is resolved by the caller's service-account ``sub`` and must be\n``{name}``'s own pairing, so a paired service cannot replace another\nadd-on's advertised surfaces; a caller that owns no pairing named\n``{name}`` is 404 (indistinguishable from an absent one). An unknown\ncapability kind or a malformed / duplicate declaration is 422 (rejected by\nthe request schema before this handler runs). Audited via the audit\nmiddleware.",
         "operationId": "declare_capabilities_api_v1_addons_pairings__name__capabilities_put",
         "parameters": [
           {

@@ -714,6 +714,30 @@
         }
       }
     },
+    "auditRawPayload": {
+      "type": "object",
+      "description": "Security review S19 (#307) audit_log.raw_payload age-off knobs. Rows whose `occurred_at` is older than `now() - retentionDays` have only `raw_payload` NULLed; the redacted `payload`, `redaction_policy_id`, and `redaction_manifest` are left intact. The age-off sweeper (`pruneEnabled` gated) is the only place the application clears `raw_payload`; the table is otherwise append-only. `retentionDays: 0` is the keep-forever opt-out sentinel (the loop still runs as a logged heartbeat but every tick is a no-op); `pruneEnabled: false` skips starting the loop entirely. The Pydantic validators in `backend/src/meho_backplane/settings.py` enforce the same bounds at app startup.",
+      "additionalProperties": false,
+      "required": ["retentionDays", "pruneIntervalSeconds", "pruneEnabled"],
+      "properties": {
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650,
+          "description": "Maximum age (in days) of the pre-redaction body in `audit_log.raw_payload`. Range [0, 3650]; 0 is the keep-forever opt-out sentinel (SECURITY TRADEOFF: un-redacted bodies then persist in `raw_payload` and every DB backup indefinitely); default 90 mirrors `topology.historyRetentionDays`."
+        },
+        "pruneIntervalSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "description": "Cadence of the in-process raw-payload age-off sweeper, in seconds. Range [60, 604800]; default 604800 (7d / weekly) matches the topology-history prune."
+        },
+        "pruneEnabled": {
+          "type": "boolean",
+          "description": "Whether to start the in-process raw-payload age-off sweeper. Set false when an external mechanism scrubs `raw_payload` instead. Distinct from `retentionDays: 0` (which keeps the loop running but every tick is a no-op heartbeat)."
+        }
+      }
+    },
     "broadcastAnnouncement": {
       "type": "object",
       "description": "Broadcast v2 T2 (#2547) durable-announcement retention knobs. Agent-authored announcements are persisted to an append-only `agent_announcement` DB table; the retention prune (`pruneEnabled` gated) is the only place the application deletes from it. `retentionDays: 0` is the keep-forever opt-out sentinel (the loop still runs as a logged heartbeat but every tick is a no-op); `pruneEnabled: false` skips starting the loop entirely. Distinct from the `broadcast` subchart (the Valkey substrate) and from the stream read-window heuristic (`BROADCAST_RETENTION_HOURS`). The Pydantic validators in `backend/src/meho_backplane/settings.py` enforce the same bounds at app startup.",

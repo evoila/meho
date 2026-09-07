@@ -844,6 +844,42 @@ class Settings(BaseModel):
         retention is policy-driven); ``enabled=False`` skips starting
         the loop entirely (no audit-row noise, no log line). Read once
         at lifespan startup; toggling post-start requires a pod restart.
+    raw_payload_retention_days:
+        Maximum age (in days) of the pre-redaction connector response
+        captured in ``audit_log.raw_payload`` (security review S19 #307).
+        Rows whose ``occurred_at`` is older than ``now() -
+        raw_payload_retention_days`` have **only** ``raw_payload`` NULLed by
+        the age-off sweeper (:mod:`meho_backplane.audit_retention`); the
+        redacted ``payload`` (carrying ``redaction_policy_id``), the
+        ``redaction_manifest`` and every other column -- the governance
+        record of account -- are left intact. Default 90 mirrors
+        ``topology_history_retention_days`` (auditor reconstruction stays
+        available for a quarter, then the un-redacted body ages off). ``0``
+        is the opt-out "keep forever" sentinel: **un-redacted pre-redaction
+        bodies then live in ``raw_payload`` and every DB backup forever** --
+        the security tradeoff flagged in the Helm values comment and
+        ``docs/architecture/audit.md``. Range ``[0, 3650]`` (10y ceiling is
+        functionally permanent for a v0.2 chassis). Read once per tick.
+    raw_payload_prune_interval_seconds:
+        Cadence of the #307 raw-payload age-off loop, in seconds. The task
+        (registered in the FastAPI lifespan) sleeps this long between sweeps.
+        Default 604800 (7d / weekly) matches the topology-history prune.
+        Range ``[60, 604800]``: below one minute competes with write load;
+        the ceiling is the weekly cadence -- operators wanting a tighter
+        exposure window lower ``raw_payload_retention_days`` instead (it pulls
+        the age-off horizon in without changing the sweep cadence). Tests
+        override to sub-second values via env-var monkeypatch +
+        :func:`get_settings` cache-clear.
+    raw_payload_prune_enabled:
+        Whether to start the #307 raw-payload age-off task in the FastAPI
+        lifespan. Default ``True``: the in-process ``asyncio`` loop is the
+        shipped age-off mechanism. Operators running a different mechanism
+        (k8s CronJob, archive-then-scrub) flip
+        ``RAW_PAYLOAD_PRUNE_ENABLED=false`` so the chassis does not race the
+        external job. Distinct from ``raw_payload_retention_days=0``: ``0``
+        keeps the loop running but every tick is a no-op (heartbeat proving
+        the age-off surface is alive); ``enabled=False`` skips starting the
+        loop entirely. Read once at lifespan startup.
     anthropic_api_key:
         Anthropic API key the G11.1 agent runtime's bounded tool-use loop
         authenticates with. Empty (the default) is fail-closed: the seam's
@@ -1454,6 +1490,15 @@ class Settings(BaseModel):
     topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
     topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     topology_history_prune_enabled: bool = True
+    # Security review S19 #307 — audit_log.raw_payload age-off knobs. Same
+    # opt-out shape as the topology-history prune: ``days=0`` keeps the loop
+    # as a heartbeat (un-redacted pre-redaction bodies then live forever, the
+    # documented security tradeoff), while ``enabled=False`` skips the loop for
+    # operators running an external age-off. NULLs only ``raw_payload``; the
+    # redacted ``payload`` record of account is left intact (see field docstring).
+    raw_payload_retention_days: int = Field(default=90, ge=0, le=3650)
+    raw_payload_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    raw_payload_prune_enabled: bool = True
     # G11.1-T1 #808 — agent runtime LLM access. The bounded tool-use loop
     # (``meho_backplane.agent``) runs against Anthropic for the G11
     # initiative; multi-provider routing is G11.5. ``anthropic_api_key``
@@ -2278,6 +2323,15 @@ def get_settings() -> Settings:
         ),
         topology_history_prune_enabled=parse_bool_env(
             os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
+        ),
+        raw_payload_retention_days=int(
+            os.environ.get("RAW_PAYLOAD_RETENTION_DAYS", "90"),
+        ),
+        raw_payload_prune_interval_seconds=int(
+            os.environ.get("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        raw_payload_prune_enabled=parse_bool_env(
+            os.environ.get("RAW_PAYLOAD_PRUNE_ENABLED", "true"),
         ),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         agent_default_model=os.environ.get(

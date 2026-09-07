@@ -1610,9 +1610,16 @@ parallel on every PR:
 
 `pr-smoke.yml` does **not** duplicate the image build with
 `image.yml` — it pushes a transient PR-tag, while `image.yml` on PRs
-builds without pushing (gate only). The two workflows share the GHA
-buildx cache scope, so the smoke's build typically hits a warm cache
-when application code is the only delta.
+builds without pushing (gate only). The smoke build **reads** the shared
+GHA buildx cache (`cache-from: type=gha`, the default `buildkit` scope),
+so it typically hits a warm cache when application code is the only
+delta — but it **exports** only to an isolated `cache-to:
+type=gha,scope=pr-smoke,mode=max` scope. Because `pr-smoke.yml` runs
+under `pull_request_target` with `GITHUB_REF` pinned to `main`, that
+isolation keeps an unmerged PR-head build from writing the default cache
+scope the cosign-signed `image.yml` release build restores from; the
+release image's trust chain never depends on cache produced by unmerged
+code, while the per-PR build keeps its warm-cache read.
 
 ## Dependencies
 

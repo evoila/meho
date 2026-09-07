@@ -120,6 +120,10 @@ from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.audit_retention import (
+    start_audit_raw_payload_reaper,
+    stop_audit_raw_payload_reaper,
+)
 from meho_backplane.auth.jwt import (
     AUDIENCE_NOT_CONFIGURED_REMEDIATION,
     keycloak_readiness_probe,
@@ -479,6 +483,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
+    audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
@@ -538,6 +543,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     evidence_retention: asyncio.Task[None] | None = None
     if settings.checks_evidence_prune_enabled:
         evidence_retention = start_evidence_retention_sweeper()
+    # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
+    # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
+    # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
+    # heartbeat (un-redacted pre-redaction bodies then live forever); NULLs
+    # only ``raw_payload`` — the redacted record of account is never touched.
+    audit_raw_payload_retention: asyncio.Task[None] | None = None
+    if settings.raw_payload_prune_enabled:
+        audit_raw_payload_retention = start_audit_raw_payload_reaper()
     # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     grant_expiry: asyncio.Task[None] | None = None
@@ -622,6 +635,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
+        audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
@@ -666,6 +680,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
+    if tasks.audit_raw_payload_retention is not None:
+        await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
     if tasks.evidence_retention is not None:
         await stop_evidence_retention_sweeper(tasks.evidence_retention)
     if tasks.announcement_retention is not None:

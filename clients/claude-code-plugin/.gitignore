@@ -1,0 +1,5 @@
+# Vendored dependency tree. Populated by `npm ci --omit=dev` — into the
+# operator's plugin cache by bin/meho-mcp-remote on first launch, or here by
+# a developer testing locally. Only the pinned package.json + package-lock.json
+# are committed; node_modules is rebuilt from the lock, never committed.
+/node_modules/

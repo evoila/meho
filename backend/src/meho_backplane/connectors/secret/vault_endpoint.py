@@ -38,6 +38,21 @@ The adapter's structlog events carry only the ``path`` and the ``field``
 *name* — never the field's value, and never the bytes carried by the
 :class:`SecretMaterial`. The value lives only inside the
 :class:`SecretMaterial` between the source read and the sink write.
+
+Tenant scope
+============
+
+This adapter is a **second** KV-v2 read/write path (alongside the
+``vault.kv.*`` handlers in :mod:`meho_backplane.connectors.vault.ops`), so
+both methods run the same default-on defense-in-depth guard,
+:func:`~meho_backplane.connectors.vault.tenant_scope.enforce_tenant_scope`,
+**before** the Vault login. A ``secret.move`` whose source or sink ref
+falls outside the operator's ``secret/tenants/{tenant_id}/`` subtree is
+denied with :class:`~meho_backplane.connectors.vault.tenant_scope.VaultTenantScopeError`
+at the app layer before any Vault round-trip — the broker and the KV-v2
+handlers agree on the tenant subtree (S08, #296). The guard backstops the
+per-tenant ``meho-mcp`` Vault ACL policy; it never grants access the
+policy denies.
 """
 
 from __future__ import annotations
@@ -56,6 +71,7 @@ from meho_backplane.connectors.secret.endpoints import (
     SecretMaterial,
     register_secret_endpoint,
 )
+from meho_backplane.connectors.vault.tenant_scope import enforce_tenant_scope
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
@@ -122,6 +138,14 @@ class VaultKvSecretEndpoint:
         hashed and forwarded, so source and sink agree byte-for-byte.
         """
         _log.debug("secret_broker.vault.read", path=self._path, field=self._field)
+        # Defense-in-depth tenant-scope check (#1643 / S08 #296): deny a path
+        # outside the operator's tenant namespace BEFORE the Vault login, so
+        # this second KV-v2 read path enforces the same per-tenant subtree as
+        # the ``vault.kv.*`` handlers. No-op unless
+        # ``vault_kv_tenant_scope_prefix`` is configured; behind the Vault
+        # ``meho-mcp`` ACL policy, never a replacement for it. ``read_only``
+        # so the platform-path allow-list applies on the read side.
+        enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=True)
         async with _auth_vault.vault_client_for_operator(operator) as client:
             payload = await asyncio.to_thread(
                 client.secrets.kv.v2.read_secret_version,
@@ -149,6 +173,11 @@ class VaultKvSecretEndpoint:
         guard is a policy-task concern (#1579), not the mechanism.
         """
         _log.debug("secret_broker.vault.write", path=self._path, field=self._field)
+        # Defense-in-depth tenant-scope check (#1643 / S08 #296): deny a write
+        # outside the operator's tenant namespace BEFORE the Vault login.
+        # ``read_only=False`` — a write to the shared platform path under a
+        # non-owning operator stays tenant-scoped (#1725 M1).
+        enforce_tenant_scope(operator, mount=self._mount, path=self._path, read_only=False)
         body: dict[str, str] = {self._field: material.value.decode("utf-8")}
         async with _auth_vault.vault_client_for_operator(operator) as client:
             await asyncio.to_thread(

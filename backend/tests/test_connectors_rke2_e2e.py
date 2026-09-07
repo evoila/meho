@@ -47,6 +47,7 @@ import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.rke2 import Rke2SshConnector
+from meho_backplane.connectors.rke2.ops_write import _ROTATED_TOKEN_MARKER
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
@@ -186,9 +187,13 @@ async def _fake_shell_process_factory(process: Any) -> None:
         # The safe-sudo wire command streams the script + password on stdin;
         # drain it (the real mktemp pipeline would consume it) so the client
         # write side doesn't break, then simulate a successful
-        # `rke2 token rotate` (exit 0, no stdout, never echoing a token).
+        # `rke2 token rotate` that mints the new token node-side and prints it
+        # back behind the read-back marker on stdout (rke2's own chatter would
+        # ride stderr). The handler stashes that value in Vault; the audit-row
+        # assertions below prove it never lands on the row.
         with contextlib.suppress(Exception):
             await process.stdin.read()
+        process.stdout.write(f"{_ROTATED_TOKEN_MARKER}={_MINTED_TOKEN_CANARY}\n")
         process.exit(0)
         return
     else:
@@ -598,8 +603,9 @@ from meho_backplane.db.models import AuditLog  # noqa: E402
 from meho_backplane.operations import dispatch  # noqa: E402
 from meho_backplane.targets.resolver import resolve_target  # noqa: E402
 
-# The minted token the handler generates on the approved path. Patched to a
-# fixed canary so the audit-row assertion can prove it never lands there.
+# The token the node mints and the handler reads back over the governed SSH
+# channel on the approved path. The fake shell emits this fixed canary so the
+# audit-row assertion can prove the read-back value never lands on the row.
 _MINTED_TOKEN_CANARY = "K10E2Ecanaryminted00000000deadbeefMUSTNOTLEAK"  # gitleaks:allow NOSONAR
 
 
@@ -669,10 +675,7 @@ async def test_rke2_token_rotate_approved_audit_row_has_no_token(
     """AC: approved resume rotates + stashes to Vault; the raw audit row has NO token."""
     del captured_events
     op_id = "rke2.token.rotate"
-    with (
-        _fake_vault_write(version=5),
-        patch("secrets.token_hex", return_value=_MINTED_TOKEN_CANARY),
-    ):
+    with _fake_vault_write(version=5):
         result = await _dispatch_rotate(rke2_e2e, approved=True)
 
     assert result["status"] == "ok", result.get("error")

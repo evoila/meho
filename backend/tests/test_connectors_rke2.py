@@ -1546,15 +1546,24 @@ import contextlib  # noqa: E402 -- grouped with the write-op section it serves
 
 from meho_backplane.auth.operator import Operator, TenantRole  # noqa: E402
 from meho_backplane.connectors.rke2.ops_write import (  # noqa: E402
+    _ROTATED_TOKEN_MARKER,
     WRITE_OPS,
+    _build_rotate_script,
     parse_rke2_release,
     rke2_token_rotate,
     rke2_version_rotate_verdict,
 )
 
-# A minted-token canary. The handler must NEVER surface the minted token in
-# its result envelope (the raw result is persisted on the audit row).
+# A rotated-token canary. The node mints the new token and the handler reads it
+# back over the SSH channel; the handler must NEVER surface that value in its
+# result envelope (the raw result is persisted on the audit row).
 _CANARY_NEW_TOKEN = "K10CANARYnewtokenvalueMUSTNOTLEAK0000deadbeef"  # gitleaks:allow NOSONAR
+
+
+def _rotate_stdout(token: str = _CANARY_NEW_TOKEN) -> str:
+    """The one-line read-back the rotate script prints on stdout."""
+    return f"{_ROTATED_TOKEN_MARKER}={token}\n"
+
 
 _OP_TENANT = uuid.UUID("00000000-0000-0000-0000-0000000024f9")
 _OPERATOR = Operator(
@@ -1660,7 +1669,7 @@ def test_parse_rke2_release_shapes() -> None:
 @pytest.mark.asyncio
 async def test_token_rotate_happy_path_returns_pointer_never_token() -> None:
     connector = Rke2SshConnector()
-    sudo_proc = _proc(stdout="", exit_status=0)
+    sudo_proc = _proc(stdout=_rotate_stdout(), exit_status=0)
     with (
         patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
         patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
@@ -1668,7 +1677,6 @@ async def test_token_rotate_happy_path_returns_pointer_never_token() -> None:
             "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
             new_callable=AsyncMock,
         ) as mock_sudo,
-        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
         _patch_vault_write(version=9) as write_mock,
     ):
         mock_secret.return_value = {"password": _CANARY_PASSWORD}
@@ -1682,15 +1690,17 @@ async def test_token_rotate_happy_path_returns_pointer_never_token() -> None:
     assert ref["backend"] == "vault"
     assert ref["kv_version"] == 9
     assert f"tenants/{_OP_TENANT}/rke2/" in ref["path"]
-    # THE audit rule: the minted token never appears in the returned result.
+    # THE audit rule: the read-back token never appears in the returned result.
     assert _CANARY_NEW_TOKEN not in repr(result)
-    # ...but it WAS written to Vault (the sink) and passed to the sudo script.
+    # ...but it WAS read off stdout and written to Vault (the sink).
     write_mock.assert_called_once()
     assert write_mock.call_args.kwargs["secret"] == {"token": _CANARY_NEW_TOKEN}
+    # The script rotates without ever quoting a token onto the rke2 argv.
     script = mock_sudo.await_args.args[2]
     assert "/var/lib/rancher/rke2/bin/rke2 token rotate" in script
     assert 'OLD=$(cat "$TOKENFILE")' in script  # OLD read server-side, never in Python
-    assert _CANARY_NEW_TOKEN in script  # new token quoted into the script body only
+    assert 'export RKE2_TOKEN="$OLD"' in script  # OLD reaches rke2 via env, not argv
+    assert _CANARY_NEW_TOKEN not in script  # the new token is minted node-side
 
 
 @pytest.mark.asyncio
@@ -1703,17 +1713,74 @@ async def test_token_rotate_vault_write_failure_is_honest_no_token() -> None:
             "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
             new_callable=AsyncMock,
         ) as mock_sudo,
-        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
         _patch_vault_write(raises=True),
     ):
         mock_secret.return_value = {"password": _CANARY_PASSWORD}
         mock_cmd.return_value = _proc(stdout=_preflight_stdout())
-        mock_sudo.return_value = _proc(exit_status=0)
+        mock_sudo.return_value = _proc(stdout=_rotate_stdout(), exit_status=0)
         result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
 
     assert result["rotated"] is True  # the cluster token DID rotate
     assert result["token_ref"] is None
     assert result["vault_error"] == "RuntimeError"
+    assert _CANARY_NEW_TOKEN not in repr(result)
+
+
+def test_token_rotate_keeps_tokens_off_argv() -> None:
+    """AC (S12 / meho-internal#300): neither token reaches the rke2 argv.
+
+    The OLD token rides the ``RKE2_TOKEN`` env (the upstream ``EnvVar`` backing
+    for ``--token``); the NEW token is minted node-side by ``rke2`` itself
+    (``--new-token`` omitted -- it has no env backing, so a value there would
+    land on the world-readable ``/proc/<pid>/cmdline``) and read back from the
+    ``0600`` token file. So the generated script carries no ``--token`` /
+    ``--new-token`` argv flag at all, and the ``$OLD`` marker appears only in an
+    ``export`` (env) context.
+    """
+    script = _build_rotate_script()
+
+    rotate_lines = [ln for ln in script.splitlines() if "token rotate" in ln]
+    assert rotate_lines, "expected an `rke2 token rotate` invocation line"
+    for line in rotate_lines:
+        # No token flag on the rke2 invocation -> nothing to place a token
+        # value or the $OLD marker behind on argv.
+        assert "--token" not in line
+        assert "--new-token" not in line
+
+    # The OLD token reaches rke2 only via the env, never as `--token "$OLD"`.
+    assert 'export RKE2_TOKEN="$OLD"' in script
+    assert '--token "$OLD"' not in script
+    # The builder takes no token argument and never interpolates a new-token
+    # value, so no new-token canary can appear after a `--new-token` flag.
+    assert "--new-token" not in script
+    # The rotated token is read back from the on-disk file, not from argv.
+    assert _ROTATED_TOKEN_MARKER in script
+    assert 'NEW=$(cat "$TOKENFILE")' in script
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_readback_absent_is_honest() -> None:
+    """Exit 0 with no read-back line -> honest partial state, no token, no Vault write."""
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch(
+            "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
+            new_callable=AsyncMock,
+        ) as mock_sudo,
+        _patch_vault_write() as write_mock,
+    ):
+        mock_secret.return_value = {"password": _CANARY_PASSWORD}
+        mock_cmd.return_value = _proc(stdout=_preflight_stdout())
+        # rke2 chatter with no marker line (rke2's own stdout would ride stderr).
+        mock_sudo.return_value = _proc(stdout="Token rotated, restart nodes\n", exit_status=0)
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+
+    assert result["rotated"] is True  # the cluster token DID rotate on the node
+    assert result["token_ref"] is None
+    assert result["readback_error"] == "rotated-token-not-read-back"
+    write_mock.assert_not_called()  # nothing read back -> nothing to stash
     assert _CANARY_NEW_TOKEN not in repr(result)
 
 
@@ -1782,7 +1849,6 @@ async def test_token_rotate_nonzero_exit_no_vault_no_output() -> None:
             "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
             new_callable=AsyncMock,
         ) as mock_sudo,
-        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
         _patch_vault_write() as write_mock,
     ):
         mock_secret.return_value = {"password": _CANARY_PASSWORD}

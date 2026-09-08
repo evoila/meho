@@ -35,6 +35,10 @@ from meho_backplane.settings import Settings, get_settings
 
 _CORPUS_URL = "https://corpus.test/search"
 _JWT = "header.payload.signature-secret"
+#: The deployment-configured corpus service credential (#290) — the bearer
+#: the transport presents to the corpus, distinct from the operator JWT
+#: (which is never forwarded).
+_SERVICE_TOKEN = "corpus-service-token-distinct-from-jwt"
 
 
 def _make_operator(jwt: str = _JWT) -> Operator:
@@ -111,9 +115,11 @@ def _patch_async_client(
 
 
 @pytest.mark.asyncio
-async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The client POSTs to corpus_url with Authorization: Bearer <raw_jwt>."""
-    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+async def test_forwards_configured_service_token_and_posts_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client POSTs with the configured corpus service token, not the JWT (#290)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     captured: list[httpx.Request] = []
     # MEHO.Knowledge's actual /search wire shape (#1732): a ``results``
     # envelope of chunks whose text/source-link fields are ``text`` /
@@ -153,7 +159,10 @@ async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPat
     sent = captured[0]
     assert sent.method == "POST"
     assert str(sent.url) == _CORPUS_URL
-    assert sent.headers["Authorization"] == f"Bearer {_JWT}"
+    # The deployment-configured service token is the bearer — never the
+    # caller's operator JWT (#290).
+    assert sent.headers["Authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    assert _JWT not in sent.headers.get("Authorization", "")
     import json
 
     body = json.loads(sent.content.decode())
@@ -161,6 +170,69 @@ async def test_forwards_bearer_jwt_and_posts_query(monkeypatch: pytest.MonkeyPat
     # The corpus reads ``top_k``, not ``limit`` (#1732).
     assert body["top_k"] == 5
     assert "limit" not in body
+
+
+@pytest.mark.asyncio
+async def test_operator_jwt_is_never_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller's raw operator JWT never rides the corpus request (#290).
+
+    The credential-capture leg: replaying ``operator.raw_jwt`` to a
+    tenant-configurable corpus URL leaked a Vault-capable bearer. The
+    transport must present only the deployment-configured service token.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"chunks": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    secret_jwt = "eyJ.super-secret-vault-capable.bearer"
+    await search_corpus(_make_operator(jwt=secret_jwt), "q")
+
+    # The operator JWT appears nowhere in the outbound request — not the
+    # Authorization header, not any other header.
+    assert secret_jwt not in repr(dict(captured[0].headers))
+    assert captured[0].headers["Authorization"] == f"Bearer {_SERVICE_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_no_service_token_sends_no_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unset service token sends no Authorization header (never the JWT, #290)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token="")
+    captured: list[httpx.Request] = []
+    transport = _transport_capturing(captured, httpx.Response(200, json={"chunks": []}))
+    _patch_async_client(monkeypatch, transport, [])
+
+    await search_corpus(_make_operator(), "q")
+
+    assert "Authorization" not in captured[0].headers
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://corpus.test/search",  # plaintext scheme
+        "https://127.0.0.1/search",  # loopback
+        "https://169.254.169.254/search",  # cloud metadata
+        "https://[::1]/search",  # IPv6 loopback
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A non-https / non-public corpus endpoint fails closed before any dial (#290).
+
+    No transport is patched: the destination screen must reject the URL
+    before the client is built, so a bug that skips the screen would try a
+    real dial (and, for the IP literals, reach loopback / metadata). The
+    error message is the screen's, distinguishing it from a connect error.
+    """
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch, corpus_url=bad_url)
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await search_corpus(_make_operator(), "q")
+    assert "not an allowed https public destination" in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -569,8 +641,10 @@ async def test_unrecognized_envelope_fails_loud_not_zero(
 
 
 @pytest.mark.asyncio
-async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The forwarded operator JWT must not appear in any structlog event.
+async def test_operator_jwt_and_service_token_never_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither the operator JWT nor the corpus service token appears in logs (#290).
 
     Capture surface (#1254 pattern, see ``docs/codebase/backend.md``): we
     bind a private :class:`structlog.testing.LogCapture` onto a
@@ -586,7 +660,7 @@ async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> No
     process-local and contextvar-free, so it is immune to any concurrent
     ``configure`` regardless of xdist scheduling.
     """
-    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     transport = _transport_capturing([], httpx.Response(503, text="down"))
     _patch_async_client(monkeypatch, transport, [])
 
@@ -618,8 +692,9 @@ async def test_forwarded_jwt_never_logged(monkeypatch: pytest.MonkeyPatch) -> No
     logs = capture.entries
     serialised = repr(logs)
     assert _JWT not in serialised
+    assert _SERVICE_TOKEN not in serialised
     # The failure is still observable by status — this canary fails loudly
-    # if the capture ever misses, so the JWT-absence check above cannot
+    # if the capture ever misses, so the secret-absence checks above cannot
     # pass vacuously against an empty list.
     assert any(event.get("status") == 503 for event in logs)
 
@@ -649,8 +724,8 @@ def test_derive_status_url(search_url: str, expected: str) -> None:
 async def test_corpus_status_gets_status_url_with_bearer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """corpus_status GETs the derived /readyz URL forwarding the operator JWT."""
-    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    """corpus_status GETs the derived /readyz URL with the service token (#290)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL, corpus_service_token=_SERVICE_TOKEN)
     captured: list[httpx.Request] = []
     response = httpx.Response(
         200,
@@ -671,7 +746,9 @@ async def test_corpus_status_gets_status_url_with_bearer(
     assert len(captured) == 1
     assert captured[0].method == "GET"
     assert str(captured[0].url) == derive_status_url(_CORPUS_URL)
-    assert captured[0].headers["Authorization"] == f"Bearer {_JWT}"
+    # The configured service token, not the operator JWT (#290).
+    assert captured[0].headers["Authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    assert _JWT not in captured[0].headers.get("Authorization", "")
 
 
 @pytest.mark.asyncio
@@ -714,6 +791,19 @@ async def test_corpus_status_unconfigured_raises(monkeypatch: pytest.MonkeyPatch
     _pin_settings(monkeypatch, corpus_url="")
     with pytest.raises(CorpusUnavailable):
         await corpus_status(_make_operator())
+
+
+@pytest.mark.asyncio
+async def test_corpus_status_screens_endpoint_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The readiness dial screens the endpoint the same way search does (#290)."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    _pin_settings(monkeypatch, corpus_url="https://169.254.169.254/v1/search")
+
+    with pytest.raises(CorpusUnavailable) as exc:
+        await corpus_status(_make_operator())
+    assert "not an allowed https public destination" in str(exc.value)
 
 
 @pytest.mark.asyncio

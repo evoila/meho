@@ -59,6 +59,9 @@ from meho_backplane.settings import Settings, get_settings
 
 _JWT = "header.payload.signature-secret"
 _CORPUS_URL = "https://corpus.test/search"
+#: Deployment-configured corpus service credential (#290) — the bearer the
+#: adapter presents, never the caller's operator JWT.
+_SERVICE_TOKEN = "corpus-service-token-distinct-from-jwt"
 
 
 def _make_operator(jwt: str = _JWT) -> Operator:
@@ -295,12 +298,17 @@ def test_blank_backend_type_is_unroutable() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_adapter_forwards_jwt_and_uses_backend_ref_endpoint(
+async def test_adapter_uses_service_token_and_backend_ref_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC2: the adapter forwards the JWT and POSTs to the ref's endpoint."""
+    """AC2: the adapter presents the configured service token (never the JWT, #290)
+    and POSTs to the ref's endpoint."""
     # Legacy global is a different URL; the ref must win.
-    _pin_settings(monkeypatch, corpus_url="https://legacy.test/search")
+    _pin_settings(
+        monkeypatch,
+        corpus_url="https://legacy.test/search",
+        corpus_service_token=_SERVICE_TOKEN,
+    )
     captured: list[httpx.Request] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -320,7 +328,9 @@ async def test_adapter_forwards_jwt_and_uses_backend_ref_endpoint(
 
     sent = captured[0]
     assert str(sent.url) == _CORPUS_URL  # ref endpoint, not the legacy global
-    assert sent.headers["Authorization"] == f"Bearer {_JWT}"
+    # The deployment-configured service token is the bearer, not the JWT (#290).
+    assert sent.headers["Authorization"] == f"Bearer {_SERVICE_TOKEN}"
+    assert _JWT not in sent.headers.get("Authorization", "")
     import json
 
     body = json.loads(sent.content.decode())

@@ -70,7 +70,11 @@ policy), not a rewrite.
 lock), the per-command timeout, the one-flight-recorder-span-per-command
 seam, and `aclose()`. It overrides only `fingerprint` / `probe` /
 `execute` and adds `about` plus the per-op bound-method handler shims. It
-does **not** override `_auth_config` and does **not** touch `known_hosts`.
+does **not** override `_auth_config`; it therefore inherits the base
+adapter's fail-closed host-key contract (#270) unchanged — a target
+whose Vault secret carries no `known_hosts` pin and no
+`known_hosts_insecure` opt-out is refused before the SSH connection
+opens (see `connectors-shared-vault-creds.md § SSH host-key trust`).
 
 **Credentials are per target — and that is exactly right here.** Because
 the Linux host *is* the target (a 1:1 target↔host mapping), "one
@@ -339,8 +343,11 @@ resolves at run time instead.
 - **`connectors-vmware-rest-guest-ops.md`** still names tier (b) as
   deferred; that pointer is updated to reference this built connector as
   part of the initiative wrap-up (T3), not T1.
-- **Host-key pinning** is inherited from the base as deferred to v0.2.next
-  (`known_hosts=None`); this connector sets no host-key policy of its own.
+- **Host-key verification** is inherited from the base adapter, which is
+  now fail-closed (#270): a Linux target's Vault secret must carry a
+  `known_hosts` pin (or the audited `known_hosts_insecure` opt-out) or
+  dispatch is refused before connecting. This connector sets no host-key
+  policy of its own beyond that inherited default.
 - **`file.read` is confined to read roots but not file-content-denylisted**
   — a root-SSH operator can already read those trees over raw SSH; the
   governed path adds audit, and confinement to config/log/state roots is

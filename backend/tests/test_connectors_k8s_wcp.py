@@ -25,9 +25,10 @@ import base64
 import json
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -86,6 +87,9 @@ class _StubTarget:
     secret_ref: str
     verify_tls: bool = True
     tls_ca_pin: str | None = None
+    # Tenant-unique cache key components (#1642, security F04).
+    id: object = field(default_factory=uuid4)
+    tenant_id: object = field(default_factory=lambda: UUID(int=0))
 
 
 _WCP_TARGET = _StubTarget(

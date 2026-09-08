@@ -128,6 +128,38 @@ deploy discipline forbids moving references (including a chart-`appVersion`
 shadow), and the chart enforces that contract at the schema layer rather
 than relying on consumers to remember to `--set image.tag`.
 
+**Digest pinning (`image.digest`, #284 / F15b).** An optional
+`image.digest` (`sha256:<64 hex>`, schema-validated) makes the Deployment —
+and the migration Job, which the chart keeps byte-identical to the
+Deployment — render `repository@digest` instead of `repository:tag`. This
+pins the exact, content-addressed digest the image pipeline
+(`.github/workflows/image.yml`) scanned, promoted and cosign-signed: unlike
+a tag, a digest can never be re-pointed, and it is the reference a
+`cosign verify` gate checks the signature against. `tag` stays required as
+the human-readable release label; the digest wins in the rendered reference,
+and an empty digest (the default) keeps the tag path unchanged. The
+`image.yml` quarantine → scan → promote ordering guarantees any digest an
+operator can pin from a release alias was scanned before it was advertised.
+
+**Verifying provenance before deploy.** The install path SHOULD gate on a
+`cosign verify` of the pinned digest against the trusted keyless identity
+before `helm upgrade`, e.g.
+
+```bash
+cosign verify "ghcr.io/evoila/meho@${DIGEST}" \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```
+
+(full recipes, including `cosign verify-attestation` for the SBOM, live in
+[`backend/README.md`](../../backend/README.md)). As of #284 **no live
+admission policy enforces this** — the cluster has no Sigstore
+policy-controller / Kyverno image-verification rule, and the lab installer
+(`rdc-hetzner-dc/manifests/meho/install.sh`, a separate repo) runs
+`helm upgrade` without a `cosign verify` step. Adding that gate to the
+install path is the cross-repo follow-up; this chart supplies the digest pin
+it verifies against.
+
 `image.repository` accepts the lowercase OCI grammar including an optional
 `:<port>` segment after the host, so private registries like
 `registry.example.com:5000/team/meho` are valid. The pattern enforces the
@@ -525,6 +557,7 @@ them).
 | Path | Type | Notes |
 | --- | --- | --- |
 | `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
+| `image.digest` | string | Optional `sha256:<64 hex>` digest pin (#284). When set, the Deployment + migration Job render `repository@digest` instead of `repository:tag`; empty (default) uses `image.tag`. |
 | `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
@@ -933,6 +966,19 @@ these workflows:
   queue, preserving PR/push behaviour. When adding any range-deriving
   action to a required-check workflow, check its `merge_group` handling —
   the trigger alone is not enough.
+- **The TruffleHog scanner container image is digest-pinned (#284 /
+  F15b).** The action shells out to `docker run "${IMAGE}:${VERSION}"`,
+  defaulting `VERSION` to the mutable `:latest` tag — so the required
+  secret-scan gate would otherwise run whatever `:latest` resolves to at
+  pull time on the self-hosted `meho-runners-ci` pool. `secret-scan.yml`
+  now sets a job-level `TRUFFLEHOG_VERSION: <ver>@sha256:<digest>` and
+  feeds it to both the warm-cache pre-pull and the action's `version`
+  input, so both reference the same digest-pinned image. The action's
+  `uses:` SHA is bumped weekly by Dependabot (github-actions ecosystem);
+  Dependabot cannot resolve a digest held in a `with:`/`env:` value, so
+  the pinned scanner digest is bumped in lockstep in the same PR (the job
+  `env:` comment carries the `imagetools inspect` command that resolves
+  the new digest).
 
 `chart.yml` additionally guards its `publish` and `verify-anonymous-pull`
 jobs to `github.event_name == 'push'` (was `!= 'pull_request'`), so a
@@ -1275,6 +1321,11 @@ arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
 
+This guard is `ci.yml`'s arm of the repo-wide untrusted-PR isolation
+model — the full inventory, the disposable-runner routing pattern, and
+the GitHub-settings enforcement live under "Untrusted pull-request
+isolation" below.
+
 ### Local reproduction
 
 Every gate the workflow runs can be reproduced locally with the same
@@ -1333,6 +1384,108 @@ of CI. Two actions are unique to `ci.yml`:
   v1 configs; pinning the binary to `v1.64.8` keeps the existing
   config valid. A future migration to the v2 schema flips both the
   action major and the binary version together.
+
+## Untrusted pull-request isolation
+
+Self-hosted runners are internal infrastructure. Any workflow that runs
+on the `meho-runners-ci` pool in response to a **fork** pull request runs
+attacker-controlled code (the fork's checked-out content, and for a fork
+`pull_request` event the fork's own copy of the workflow body) on that
+pool. GitHub documents this as the primary self-hosted-runner risk; see
+the [secure-use reference](https://docs.github.com/en/actions/reference/security/secure-use).
+`ci.yml`, `image.yml`, `chart.yml`, `pr-smoke.yml`, `plugin-test.yml`,
+`eval-gate.yml`, `mcpb-bundle.yml` and `consumer-tool-name-check.yml`
+already carried the fork guard; the audit below (F06, meho-internal#268)
+closed the workflows that did not.
+
+### Inventory — every PR-triggered job
+
+Jobs that run in response to `pull_request` / `pull_request_target` and
+their isolation posture:
+
+| Workflow | Runs untrusted PR code? | Isolation mechanism |
+| --- | --- | --- |
+| `ci.yml` | yes (build/test/lint) | fork guard on every job (skip on fork PR) |
+| `image.yml` | yes (Docker build) | fork guard (skip on fork PR) |
+| `chart.yml` | yes (helm template) | fork guard on the internal-pool PR job; publish/verify jobs are `push`-only |
+| `pr-smoke.yml` | yes (`pull_request_target`) | fork guard + `environment: rke2-ci` + PR-head-SHA checkout + isolated `pr-smoke` cache scope |
+| `migration-compat.yml` | yes (runs `check_migration_compat.py`) | **route**: fork PR → disposable GitHub-hosted runner |
+| `dependency-license-check.yml` | yes (`pip install -e ./backend` runs the build backend) | **route**: fork PR → disposable GitHub-hosted runner (all 3 jobs) |
+| `readme-version-check.yml` | yes (inline shell over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `secret-scan.yml` | yes (`docker run` TruffleHog over PR content) | **route**: fork PR → disposable GitHub-hosted runner |
+| `security-scan.yml` | yes (Semgrep over PR content) | **fork guard** (skip on fork PR — the job runs inside the internal Harbor-proxied container, which a GitHub-hosted runner cannot reach; the required context still runs on `merge_group` + `push`) |
+| `docs-site.yml`, `quality-gate.yml` | n/a | already on GitHub-hosted `ubuntu-latest` / `workflow_run` (trusted) |
+
+### Two in-repo isolation patterns
+
+- **Fork guard (skip).** The job-level `if:` the publish workflows use:
+
+  ```yaml
+  if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+  ```
+
+  A fork PR (`head.repo.full_name != github.repository`) skips the job;
+  a skipped required job reports **Success**, so branch protection is
+  satisfied while nothing executes on the internal pool. Used where the
+  job genuinely needs an internal resource — `security-scan.yml` runs in
+  a `harbor.evba.lab`-proxied container, so relocating it to a disposable
+  runner is impossible; the real scan runs on the trusted `merge_group`
+  (queue admission) and `push` refs instead.
+
+- **Route to a disposable runner.** Where the job needs no internal
+  route, deployment credential or trusted build cache — only a language
+  toolchain and public-registry egress — the fork PR runs on an
+  ephemeral GitHub-hosted runner rather than being skipped, so the check
+  still gives external contributors real feedback:
+
+  ```yaml
+  runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
+  ```
+
+  Trusted refs (same-repo PR, `push`, `merge_group`) stay on the internal
+  pool unchanged — this deliberately leaves the tuned `merge_group`
+  required-gate paths (e.g. `secret-scan.yml`'s ghcr warm-cache retry,
+  #3307/#3310) untouched and only relocates the untrusted fork-PR path.
+
+### Enforcement outside PR-editable YAML
+
+For a fork `pull_request`, GitHub runs the workflow body **from the PR
+head** — so the in-YAML arms above hold only while the fork does not also
+rewrite the workflow. They cover the exact exploit in the F06 finding (a
+fork PR touching *only* a checker script inherits `main`'s workflow and
+so routes off the internal pool), but the durable enforcement lives in
+GitHub settings, which a PR cannot edit. Effective settings recorded
+2026-09-07 (`gh api repos/evoila/meho/...`):
+
+- **Fork-PR approval policy** = `all_external_contributors`
+  (`actions/permissions/fork-pr-contributor-approval`) — every external
+  fork PR needs a maintainer's "Approve and run" before any workflow
+  runs. This is the primary containment (flipped 2026-09-06); keep it.
+- **Default workflow token** = `read`, `can_approve_pull_request_reviews`
+  = false (`actions/permissions/workflow`) — least privilege by default;
+  jobs opt into `packages: write` / `id-token: write` explicitly.
+- **Runner-group access** is an org-level setting (not readable from the
+  repo API) and must restrict which repositories/workflows may schedule
+  the `meho-runners-ci*` groups — the belt-and-suspenders against a fork
+  that rewrites `runs-on` back to the internal pool.
+- **`pull_request_target` environment approval**: `pr-smoke.yml`
+  references `environment: rke2-ci`, but that environment does not yet
+  exist (`copilot` and `github-pages` are the only ones). Before
+  `vars.RKE2_SMOKE_ENABLED` is flipped on, `rke2-ci` must be created with
+  required reviewers so the secret-bearing same-repo `pull_request_target`
+  run gates on a human.
+
+### Signing, deployment and cache separation
+
+Untrusted PR jobs carry no signing or deployment identity: cosign
+signing lives in `image.yml` (fork-guarded) and the `chart.yml` publish
+job (`push`-only), and `pr-smoke.yml` exports its buildx cache to an
+isolated `pr-smoke` scope so an unmerged PR-head build can never seed the
+default cache the cosign-signed `image.yml` release build restores from
+(#3475). The CI cluster is recorded as separate from the automation
+cluster; verifying the firewall/routing that a compromised CI runner
+could traverse is an infra check, tracked outside this repo.
+
 
 ## Per-PR ephemeral cluster smoke (`.github/workflows/pr-smoke.yml`)
 
@@ -1564,9 +1717,16 @@ parallel on every PR:
 
 `pr-smoke.yml` does **not** duplicate the image build with
 `image.yml` — it pushes a transient PR-tag, while `image.yml` on PRs
-builds without pushing (gate only). The two workflows share the GHA
-buildx cache scope, so the smoke's build typically hits a warm cache
-when application code is the only delta.
+builds without pushing (gate only). The smoke build **reads** the shared
+GHA buildx cache (`cache-from: type=gha`, the default `buildkit` scope),
+so it typically hits a warm cache when application code is the only
+delta — but it **exports** only to an isolated `cache-to:
+type=gha,scope=pr-smoke,mode=max` scope. Because `pr-smoke.yml` runs
+under `pull_request_target` with `GITHUB_REF` pinned to `main`, that
+isolation keeps an unmerged PR-head build from writing the default cache
+scope the cosign-signed `image.yml` release build restores from; the
+release image's trust chain never depends on cache produced by unmerged
+code, while the per-PR build keeps its warm-cache read.
 
 ## Dependencies
 

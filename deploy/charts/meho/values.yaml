@@ -26,6 +26,15 @@ image:
   # typically passes `--set image.tag=sha-<git-sha>`; Goal #11's deploy
   # discipline forbids the `:latest` tag entirely.
   tag: ""
+  # -- Image manifest digest (`sha256:<64 hex>`), optional. When set, the
+  # Deployment pins the image by digest (`repository@digest`) instead of
+  # `repository:tag` — the exact, content-addressed, scanned + cosign-signed
+  # digest the image pipeline promoted (#284 / F15b). This is the strongest
+  # deploy pin: unlike a tag, a digest can never be re-pointed, and it is the
+  # reference a `cosign verify` / admission gate checks the signature against.
+  # `tag` stays required as the human-readable release label; the digest wins
+  # in the rendered reference. Empty = deploy by `tag` (unchanged default).
+  digest: ""
   # -- Image pull policy.
   pullPolicy: IfNotPresent
 
@@ -588,6 +597,39 @@ topology:
   # proves retention is policy-driven); `false` here skips starting
   # the loop entirely (no audit-row noise, no log line).
   historyPruneEnabled: true
+
+# Audit raw-payload age-off (security review S19 #307). The connector-
+# boundary redaction middleware persists the pre-redaction connector
+# response verbatim into `audit_log.raw_payload` for auditor
+# reconstruction. Left unbounded, a rotated secret echoed in a response
+# outlives its rotation forever in `raw_payload` and every DB backup.
+# The age-off sweeper -- registered in the FastAPI lifespan as a weekly
+# `asyncio.create_task` loop, the same mold as the topology-history prune
+# -- NULLs *only* `raw_payload` on rows older than `retentionDays`; the
+# redacted `payload` (with `redaction_policy_id`) and `redaction_manifest`
+# -- the governance record of account -- are left intact and age off on
+# their own schedule. The column is not removed and within-window
+# reconstruction is preserved.
+auditRawPayload:
+  # -- Maximum age (in days) of the pre-redaction body in
+  # `audit_log.raw_payload`. Rows whose `occurred_at` is older than
+  # `now() - retentionDays` have only `raw_payload` NULLed. Default 90
+  # mirrors `topology.historyRetentionDays` (auditor reconstruction stays
+  # available for a quarter, then the un-redacted body ages off). Set `0`
+  # for keep-forever -- SECURITY TRADEOFF: un-redacted pre-redaction
+  # bodies then live in `raw_payload` and every DB backup indefinitely.
+  # Range [0, 3650] (10y ceiling).
+  retentionDays: 90
+  # -- Cadence of the in-process raw-payload age-off sweeper, in seconds.
+  # Default 604800 (7d / weekly) matches the topology-history prune. Range
+  # [60, 604800]: operators wanting a tighter exposure window lower
+  # `retentionDays` instead of raising the cadence.
+  pruneIntervalSeconds: 604800
+  # -- Whether to start the in-process raw-payload age-off sweeper. Set
+  # false when an external mechanism scrubs `raw_payload` instead.
+  # Distinct from `retentionDays: 0`: `0` keeps the loop as a no-op
+  # heartbeat; `false` skips starting the loop entirely.
+  pruneEnabled: true
 
 # Durable-announcement retention (Broadcast v2 #2547). Agent-authored
 # announcements published via `meho_broadcast_announce` are persisted to

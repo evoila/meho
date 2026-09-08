@@ -38,7 +38,15 @@ concurrency:
 jobs:
   check:
     name: Backward-compat migration guard
-    runs-on: meho-runners-ci
+    # Untrusted-PR runner isolation (F06, meho-internal#268). This job
+    # checks out and executes PR-controlled code
+    # (scripts/ci/check_migration_compat.py); on a fork PR that code is
+    # untrusted. It needs no internal route, deployment credential or
+    # build cache, so a fork PR is routed to a disposable GitHub-hosted
+    # runner instead of the internal `meho-runners-ci` pool; same-repo
+    # PRs (trusted) stay on the internal pool. See
+    # docs/codebase/devops.md "Untrusted pull-request isolation".
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'meho-runners-ci' }}
     timeout-minutes: 5
     steps:
       - name: Checkout

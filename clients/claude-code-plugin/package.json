@@ -1,0 +1,13 @@
+{
+  "name": "meho-claude-code-plugin",
+  "version": "0.0.0",
+  "description": "Vendored runtime dependency for the MEHO Claude Code plugin's stdio shim (bin/meho-mcp-remote). Not published; the shim runs `npm ci --omit=dev` from the committed lock to vendor an integrity-checked mcp-remote tree on first launch.",
+  "private": true,
+  "license": "Apache-2.0",
+  "dependencies": {
+    "mcp-remote": "0.1.38"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  }
+}

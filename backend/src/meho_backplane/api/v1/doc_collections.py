@@ -74,6 +74,7 @@ from meho_backplane.docs_collections import (
     DocCollectionConflictError,
     DocCollectionCreate,
     DocCollectionCreateResponse,
+    DocCollectionEndpointError,
     DocCollectionGlobalError,
     DocCollectionNotDisabledError,
     DocCollectionSummary,
@@ -253,6 +254,11 @@ async def create_doc_collection_endpoint(
     try:
         row = await create_doc_collection(session, operator, body)
     except DocCollectionBackendTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.detail,
+        ) from exc
+    except DocCollectionEndpointError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.detail,

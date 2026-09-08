@@ -32,10 +32,11 @@ runs in every CI lane regardless of Docker availability.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 from kubernetes_asyncio.client.models import (
@@ -138,6 +139,9 @@ class _StubTarget:
     host: str
     port: int | None
     secret_ref: str
+    # Tenant-unique cache key components (#1642, security F04).
+    id: object = field(default_factory=uuid4)
+    tenant_id: object = field(default_factory=lambda: UUID(int=0))
 
 
 _TARGET = _StubTarget(

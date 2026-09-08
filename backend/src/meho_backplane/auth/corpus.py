@@ -7,11 +7,35 @@ The ``search_docs`` add-on (Initiative #1518) routes vendor-document
 queries through the backplane to an **external** corpus service the ops
 team runs, rather than ingesting the corpus into MEHO's own substrate.
 This module is the one place that federation happens: a thin async
-``httpx`` client that POSTs a search request to ``settings.corpus_url``
-carrying ``Authorization: Bearer <operator.raw_jwt>`` — so the corpus's
-own audit log sees the operator identity, exactly as
-:func:`~meho_backplane.auth.vault.vault_client_for_operator` forwards the
-operator JWT to Vault's OIDC auth.
+``httpx`` client that POSTs a search request to a screened ``https``
+corpus URL carrying a **deployment-configured** corpus service credential
+(``settings.corpus_service_token``).
+
+The caller's raw inbound operator JWT is **never** forwarded
+(evoila-bosnia/meho-internal#290). The corpus URL is read from a
+tenant-configurable ``backend.ref`` (the ``meho-docs`` add-on's
+per-collection endpoint), so replaying the operator's Vault-capable
+bearer to it let a ``tenant_admin`` capture that credential (a
+credential-capture + SSRF path). Two controls close it here:
+
+* **Destination screen.** Every corpus dial requires the ``https``
+  scheme and screens the resolved host through the shared target SSRF
+  guard (:func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`),
+  so a corpus URL cannot be pointed at ``http://``, loopback, RFC 1918
+  space, or ``169.254.169.254``. On-prem corpora on private space are
+  opted back in via ``MEHO_TARGET_SSRF_ALLOWLIST`` (the same allowlist
+  the connector target-dial guard reads).
+* **Configured downstream credential.** The bearer presented to the
+  corpus is ``settings.corpus_service_token`` — a dedicated, corpus-scoped
+  service credential owned by the deployment, not the operator's inbound
+  bearer. An empty setting sends no ``Authorization`` header (a corpus
+  that requires auth then fails closed) rather than falling back to the
+  operator JWT.
+
+The tradeoff of no longer forwarding the operator JWT: the corpus's own
+audit log now attributes the call to the service principal, not the
+operator. MEHO's central ``audit_log`` (bound from the JWT the operator
+presented to the backplane) is unaffected.
 
 Fail-closed by construction. The corpus being unconfigured
 (``corpus_url`` unset), unreachable (network / timeout), or returning a
@@ -59,13 +83,19 @@ from pydantic import (
 )
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination_async,
+)
 
 __all__ = [
     "CorpusChunk",
+    "CorpusEndpointBlockedError",
     "CorpusSearchResponse",
     "CorpusStatusResponse",
     "CorpusUnavailable",
+    "corpus_endpoint_host",
     "corpus_status",
     "derive_status_url",
     "search_corpus",
@@ -90,6 +120,68 @@ class CorpusUnavailable(RuntimeError):  # noqa: N818 -- "Unavailable" reads bett
     def __init__(self, message: str, *, status: int | None = None) -> None:
         self.status = status
         super().__init__(message)
+
+
+class CorpusEndpointBlockedError(TargetDestinationBlockedError):
+    """A corpus endpoint URL is not an allowed ``https`` public destination.
+
+    Subclasses :class:`~meho_backplane.targets.ssrf_guard.TargetDestinationBlockedError`
+    (itself a :class:`ValueError`) so a single ``except`` at each
+    enforcement point catches both the scheme rejection raised here and the
+    non-public-address rejection the shared SSRF host guard raises — the
+    create path renders one 422, the dial path one :class:`CorpusUnavailable`.
+    """
+
+
+def corpus_endpoint_host(url: str) -> str:
+    """Return the host to SSRF-screen for a corpus *url*, requiring ``https``.
+
+    Parses *url* and returns the host component the transport will dial.
+    Rejects — with :class:`CorpusEndpointBlockedError` — any URL whose
+    scheme is not ``https`` or that names no host, so a corpus endpoint can
+    never be a plaintext (`http://`) or structurally-degenerate destination.
+    The returned host is what the caller passes to
+    :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`;
+    keeping the parse here (not in the guard) leaves the guard a
+    host-screening primitive shared verbatim with the connector target dial.
+    """
+    parts = urlsplit(url)
+    host = parts.hostname
+    if parts.scheme != "https" or not host:
+        raise CorpusEndpointBlockedError("corpus endpoint must be an https:// URL naming a host")
+    return host
+
+
+async def _screen_corpus_dial(url: str) -> None:
+    """Fail closed unless *url* is an ``https`` public corpus destination.
+
+    The connect-time enforcement point for both the search and the
+    readiness dial: requires ``https`` + a public host (allowlist-aware)
+    and maps any rejection onto :class:`CorpusUnavailable` so the consuming
+    route renders a 503. The message never echoes the resolved address (no
+    internal-topology oracle — the guard's posture).
+    """
+    try:
+        host = corpus_endpoint_host(url)
+        await assert_public_destination_async(host)
+    except TargetDestinationBlockedError as exc:
+        _log.warning("corpus_endpoint_blocked")
+        raise CorpusUnavailable(
+            "corpus endpoint is not an allowed https public destination"
+        ) from exc
+
+
+def _corpus_auth_headers(settings: Settings) -> dict[str, str]:
+    """Build the corpus ``Authorization`` header from the configured token.
+
+    Presents ``settings.corpus_service_token`` as a Bearer credential — the
+    deployment-owned, corpus-scoped service token, never the caller's
+    operator JWT (#290). An empty setting sends **no** header, so a corpus
+    that requires auth fails closed (401 → :class:`CorpusUnavailable`)
+    rather than the operator bearer being forwarded to it.
+    """
+    token = settings.corpus_service_token
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _parse_2xx_body[ModelT: BaseModel](
@@ -254,11 +346,12 @@ async def search_corpus(
     corpus_url: str | None = None,
     audience: str | None = None,
 ) -> CorpusSearchResponse:
-    """Search the external corpus as *operator*, returning cited chunks.
+    """Search the external corpus, returning cited chunks.
 
-    POSTs a JSON search request to *corpus_url* with
-    ``Authorization: Bearer <operator.raw_jwt>`` so the corpus
-    authenticates and audits the call as the operator. The request is
+    Screens *corpus_url* (``https`` + a public host, allowlist-aware) and
+    POSTs a JSON search request to it carrying the deployment-configured
+    corpus service credential (``settings.corpus_service_token``) — the
+    caller's raw operator JWT is **never** forwarded (#290). The request is
     bounded by ``settings.corpus_timeout_seconds`` across connect / read
     / write so a slow or hung corpus raises rather than blocking the
     event loop. *audience* (RFC 8707), when set, is forwarded as the
@@ -266,7 +359,11 @@ async def search_corpus(
     token to itself.
 
     Args:
-        operator: The verified operator whose JWT is forwarded.
+        operator: The verified operator. Retained for the
+            :class:`~meho_backplane.docs_search.backends.base.SearchBackend`
+            seam and central-audit context; it is **not** used to
+            authenticate to the corpus (the operator JWT is no longer
+            forwarded, #290).
         query: The free-text search query.
         metadata_filters: Optional binary ``{key: scalar}`` narrowing
             (e.g. ``{"product": "vmware", "version": "9.0"}``). The
@@ -285,17 +382,18 @@ async def search_corpus(
             forwards no audience.
 
     Raises:
-        CorpusUnavailable: when *corpus_url* is unset (unconfigured),
-            the corpus is unreachable / times out, or it returns a
-            non-2xx status. The upstream status is carried on the
-            exception (``status``) for non-2xx responses; the raw
-            response body is never included.
+        CorpusUnavailable: when *corpus_url* is unset (unconfigured), is
+            not an allowed ``https`` public destination, the corpus is
+            unreachable / times out, or it returns a non-2xx status. The
+            upstream status is carried on the exception (``status``) for
+            non-2xx responses; the raw response body is never included.
     """
     settings = get_settings()
     resolved_url = corpus_url if corpus_url is not None else settings.corpus_url
     if not resolved_url:
         # Fail-closed: an unconfigured corpus is unavailable, not empty.
         raise CorpusUnavailable("corpus_url is not configured")
+    await _screen_corpus_dial(resolved_url)
     resolved_audience = audience if audience is not None else settings.corpus_audience
 
     # MEHO.Knowledge's ``/search`` reads ``top_k`` for the hit cap and
@@ -308,7 +406,7 @@ async def search_corpus(
     if resolved_audience:
         payload["audience"] = resolved_audience
 
-    headers = {"Authorization": f"Bearer {operator.raw_jwt}"}
+    headers = _corpus_auth_headers(settings)
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
     try:
@@ -316,8 +414,8 @@ async def search_corpus(
             response = await client.post(resolved_url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         # ConnectError / TimeoutException / any transport failure — the
-        # corpus is unreachable. Log the cause by type (never the JWT or
-        # the query body) and fail closed.
+        # corpus is unreachable. Log the cause by type (never the service
+        # credential or the query body) and fail closed.
         _log.warning("corpus_unreachable", error=type(exc).__name__)
         raise CorpusUnavailable(f"corpus unreachable: {type(exc).__name__}") from exc
 
@@ -397,18 +495,22 @@ async def corpus_status(
     corpus_url: str | None = None,
     audience: str | None = None,
 ) -> CorpusStatusResponse:
-    """Read the external corpus's readiness as *operator* (T6 #1555).
+    """Read the external corpus's readiness (T6 #1555).
 
-    GETs the corpus readiness endpoint (:func:`derive_status_url` of the
-    search URL) with ``Authorization: Bearer <operator.raw_jwt>`` so the
-    corpus authenticates and audits the probe as the operator — the same
-    forward-the-JWT contract as :func:`search_corpus`. Bounded by
+    Screens the corpus URL (``https`` + a public host, allowlist-aware),
+    then GETs the corpus readiness endpoint (:func:`derive_status_url` of
+    the search URL) carrying the deployment-configured corpus service
+    credential (``settings.corpus_service_token``) — the caller's operator
+    JWT is **never** forwarded (#290), the same downstream-credential
+    contract as :func:`search_corpus`. Bounded by
     ``settings.corpus_timeout_seconds``; every fail-closed branch
     collapses to one :class:`CorpusUnavailable` so the probe route never
     persists a partial / stale liveness snapshot.
 
     Args:
-        operator: The verified operator whose JWT is forwarded.
+        operator: The verified operator. Retained for the backend-probe
+            seam and audit context; not used to authenticate to the corpus
+            (the operator JWT is no longer forwarded, #290).
         corpus_url: The corpus *search* endpoint (the readiness URL is
             derived from it). ``None`` falls back to ``settings.corpus_url``
             — the legacy single-collection deploy. The ``corpus-http``
@@ -419,23 +521,24 @@ async def corpus_status(
             empty string forwards none.
 
     Raises:
-        CorpusUnavailable: when *corpus_url* is unset (unconfigured), the
-            corpus is unreachable / times out, returns a non-2xx status,
-            or returns a body that does not match
-            :class:`CorpusStatusResponse`. The upstream status rides on
-            the exception (``status``) for non-2xx; the raw body is never
-            attached.
+        CorpusUnavailable: when *corpus_url* is unset (unconfigured), is
+            not an allowed ``https`` public destination, the corpus is
+            unreachable / times out, returns a non-2xx status, or returns
+            a body that does not match :class:`CorpusStatusResponse`. The
+            upstream status rides on the exception (``status``) for
+            non-2xx; the raw body is never attached.
     """
     settings = get_settings()
     resolved_url = corpus_url if corpus_url is not None else settings.corpus_url
     if not resolved_url:
         # Fail-closed: an unconfigured corpus has no readiness to report.
         raise CorpusUnavailable("corpus_url is not configured")
+    await _screen_corpus_dial(resolved_url)
     status_url = derive_status_url(resolved_url)
     resolved_audience = audience if audience is not None else settings.corpus_audience
 
     params = {"audience": resolved_audience} if resolved_audience else None
-    headers = {"Authorization": f"Bearer {operator.raw_jwt}"}
+    headers = _corpus_auth_headers(settings)
     timeout = httpx.Timeout(settings.corpus_timeout_seconds)
 
     try:

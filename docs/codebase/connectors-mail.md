@@ -71,6 +71,19 @@ too, not just agent-initiated sends.
 other port opens plaintext and upgrades via `starttls()` + re-`ehlo()`
 when `MAIL_SMTP_STARTTLS` is set (default true).
 
+**TLS trust (F08 / #270):** both TLS paths are handed an explicit
+validating context (`ssl.create_default_context` — `check_hostname=True`,
+`CERT_REQUIRED`), never smtplib's `context=None` fallback (which uses
+`ssl._create_stdlib_context` with verification and hostname checking
+**off**, so mail and credentials would flow to an unverified peer).
+`MAIL_SMTP_CA_BUNDLE` optionally pins an internal relay's CA (a PEM path;
+the bundle **replaces** the public roots, matching the target-level
+`tls_ca_pin` posture). There is no verification-disable knob — trust an
+internal relay by pointing `MAIL_SMTP_CA_BUNDLE` at its CA, never by
+turning verification off. A wrong-name / untrusted-chain / expired
+certificate is refused as `reason="smtp_tls_error"` before any AUTH or
+message data reaches the peer.
+
 **Credentials never ride a cleartext socket.** `_send_sync` carries an
 `encrypted` flag — true from construction under implicit TLS, true
 again once `starttls()` returns — and `login()` is gated on it.
@@ -96,6 +109,7 @@ unconfigured, or delivery-failed send is the **product**, not an error
 | `smtp_auth_requires_tls` | a username is configured but the channel is still cleartext |
 | `smtp_auth_error` | `SMTPAuthenticationError` |
 | `smtp_recipients_refused` | `SMTPRecipientsRefused` (server rejected every recipient) |
+| `smtp_tls_error` | `ssl.SSLError` on either TLS path (wrong name / untrusted chain / expired cert) |
 | `smtp_error` | any other `SMTPException` |
 
 The `except` ordering in `transport._send_sync` is load-bearing:
@@ -112,6 +126,7 @@ all in `Settings` (`settings.py`, env-mapped in `get_settings`):
 | `MAIL_SMTP_HOST` | `""` | MTA host; empty ⇒ transport unconfigured |
 | `MAIL_SMTP_PORT` | `587` | 465 ⇒ implicit TLS (`SMTP_SSL`) |
 | `MAIL_SMTP_STARTTLS` | `true` | upgrade via STARTTLS on non-465 ports; off + a username ⇒ `smtp_auth_requires_tls` |
+| `MAIL_SMTP_CA_BUNDLE` | `""` | PEM CA-bundle path pinning an internal relay's CA (replaces the system roots); empty ⇒ system trust. No disable-verification knob |
 | `MAIL_SMTP_USERNAME` | `""` | `login()` runs only when set, and only on an encrypted channel |
 | `MAIL_SMTP_PASSWORD` | `""` | `repr=False`; never logged |
 | `MAIL_FROM` | `""` | From header + envelope sender; empty ⇒ unconfigured |

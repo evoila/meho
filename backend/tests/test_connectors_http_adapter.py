@@ -74,12 +74,16 @@ from cryptography.x509.oid import NameOID
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.pinned_transport import _PinnedAsyncBackend
 from meho_backplane.connectors.adapters import HttpConnector
+from meho_backplane.connectors.adapters import http as http_adapter
 from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnectorDirect
 from meho_backplane.connectors.adapters.http import (
+    ResponseTooLargeError,
     SsrfBlockedError,
     _build_ca_pinned_ssl_context,
     _ca_pin_digest,
     _effective_scheme,
+    _resolve_max_response_bytes,
+    _retryable,
     _same_origin,
     _SameOriginRedirectClient,
 )
@@ -609,6 +613,207 @@ async def test_request_json_204_no_content_returns_empty_payload() -> None:
         )
 
     assert result == {}
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Response-body byte cap — reject oversize before buffer+parse
+# (evoila-bosnia/meho-internal#297)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_max_response_bytes_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cap honours a positive env override and fails safe on garbage."""
+    monkeypatch.setenv("MEHO_CONNECTOR_MAX_RESPONSE_BYTES", "4096")
+    assert _resolve_max_response_bytes() == 4096
+
+    # Non-integer and non-positive values fall back to the default, so a
+    # typo never silently disables the guard.
+    default = http_adapter._DEFAULT_MAX_RESPONSE_BYTES
+    monkeypatch.setenv("MEHO_CONNECTOR_MAX_RESPONSE_BYTES", "not-a-number")
+    assert _resolve_max_response_bytes() == default
+    monkeypatch.setenv("MEHO_CONNECTOR_MAX_RESPONSE_BYTES", "0")
+    assert _resolve_max_response_bytes() == default
+    monkeypatch.delenv("MEHO_CONNECTOR_MAX_RESPONSE_BYTES", raising=False)
+    assert _resolve_max_response_bytes() == default
+
+
+def test_oversize_error_is_connector_error_shaped_and_not_retryable() -> None:
+    """The cap error flattens to ``connector_error`` and is never retried.
+
+    It is a plain :class:`Exception` — outside the ``httpx.ConnectError`` /
+    ``httpx.HTTPStatusError`` families the dispatcher special-cases — so it
+    falls through to the generic ``except Exception`` arm that builds the
+    structured ``connector_error`` envelope. Being outside those families
+    also keeps it out of :func:`_retryable`, so a deterministic over-cap
+    verdict does not burn the idempotent-path tenacity budget.
+    """
+    err = ResponseTooLargeError("too big")
+    assert not isinstance(err, (httpx.ConnectError, httpx.HTTPStatusError))
+    assert _retryable(err) is False
+
+
+@pytest.mark.asyncio
+async def test_request_json_rejects_oversize_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GET body over the cap is rejected before it is ever ``resp.json()``-parsed.
+
+    The body is deliberately **invalid** JSON: if the transport buffered and
+    parsed it (the pre-#297 behaviour), the call would surface a
+    :exc:`json.JSONDecodeError`, not :exc:`ResponseTooLargeError`. Asserting
+    the cap error is raised proves the body was refused before the parse.
+    Here the over-cap size is declared via ``Content-Length``, so the
+    fast-reject arm fires.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    oversize_invalid_json = b"{ not valid json " + b"x" * 4096
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/inventory").respond(
+            200,
+            content=oversize_invalid_json,
+            headers={"content-type": "application/json"},
+        )
+        with pytest.raises(ResponseTooLargeError) as exc_info:
+            await conn._request_json(
+                target, "GET", "/api/inventory", operator=_make_operator("tok")
+            )
+
+    assert "cap" in str(exc_info.value)
+    assert "Content-Length" in str(exc_info.value)
+    assert route.called
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_rejects_oversize_response_without_content_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversize body with no ``Content-Length`` is caught by the streamed total.
+
+    An absent (or understated / content-encoded) length header cannot smuggle
+    an oversize body past the guard: the running byte total across
+    ``aiter_bytes`` chunks aborts once the cap is exceeded, before the whole
+    body is buffered.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    oversize = b'{"items": "' + b"y" * 4096 + b'"}'
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        # A ``ByteStream`` response has no ``Content-Length`` header, so the
+        # fast-reject arm is skipped and the streaming running-total guard is
+        # the one exercised here.
+        mock.get("/api/events").respond(
+            200,
+            stream=httpx.ByteStream(oversize),
+            headers={"content-type": "application/json"},
+        )
+        with pytest.raises(ResponseTooLargeError) as exc_info:
+            await conn._request_json(target, "GET", "/api/events", operator=_make_operator("tok"))
+
+    assert "Content-Length" not in str(exc_info.value)
+    assert "cap" in str(exc_info.value)
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oversize_response_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The idempotent path does not retry an over-cap rejection — exactly one call.
+
+    The cap verdict is deterministic, so — like the 4xx and SSRF-block arms —
+    it must not consume the tenacity retry budget (which would re-transfer the
+    oversize body three more times).
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/inventory").respond(
+            200,
+            content=b"x" * 4096,
+            headers={"content-type": "application/json"},
+        )
+        with pytest.raises(ResponseTooLargeError):
+            await conn._request_json(
+                target, "GET", "/api/inventory", operator=_make_operator("tok")
+            )
+
+    assert route.call_count == 1
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_under_cap_returns_parsed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An under-cap JSON response parses to its payload unchanged (regression guard)."""
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(200, json={"items": [1, 2, 3]})
+        result = await conn._request_json(
+            target, "GET", "/api/items", operator=_make_operator("tok")
+        )
+
+    assert result == {"items": [1, 2, 3]}
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_rejects_oversize_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The non-idempotent path enforces the same cap as ``_request_json``."""
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    oversize_invalid_json = b"{ not valid json " + b"z" * 4096
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.post("/api/sessions").respond(
+            200,
+            content=oversize_invalid_json,
+            headers={"content-type": "application/json"},
+        )
+        with pytest.raises(ResponseTooLargeError):
+            await conn._post_json(
+                target,
+                "/api/sessions",
+                operator=_make_operator("tok"),
+                json={"provider": "Local"},
+            )
+
+    assert route.called
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_under_cap_returns_parsed_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An under-cap non-idempotent response parses unchanged (regression guard)."""
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/widget").respond(200, json={"value": "vm-42"})
+        result = await conn._post_json(
+            target, "/api/widget", operator=_make_operator("tok"), json={"n": 1}
+        )
+
+    assert result == {"value": "vm-42"}
     await conn.aclose()
 
 

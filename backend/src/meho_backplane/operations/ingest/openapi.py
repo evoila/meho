@@ -1181,6 +1181,7 @@ def _safety_level_for(method: str) -> SafetyLevel:
     return "safe"
 
 
+# code-quality-allow: function-size - pre-existing spec builder; #293 adds one key
 def _build_parameter_schema(
     *,
     path: str,
@@ -1226,7 +1227,9 @@ def _build_parameter_schema(
     dispatcher uses ``x-meho-param-loc == "body"`` to recover the
     payload regardless of property name. Operations with no params
     at all get the empty-but-valid ``{"type": "object", "properties":
-    {}}``.
+    {}, "additionalProperties": false}``. The ``additionalProperties:
+    false`` clause (#293) makes ``validate_params`` reject any param the
+    op did not declare instead of defaulting it onto the vendor query.
 
     Nested ``$ref`` strings inside the inlined schemas are preserved
     verbatim, and the components they transitively reference are
@@ -1273,7 +1276,13 @@ def _build_parameter_schema(
         if body_property["required"]:
             required.append("body")
 
-    schema: dict[str, object] = {"type": "object", "properties": properties}
+    # #293 (S05): ``additionalProperties: false`` fails closed on any param
+    # the op never declared (else it defaults onto the vendor query string).
+    schema: dict[str, object] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
     if required:
         schema["required"] = required
     _attach_component_closure(

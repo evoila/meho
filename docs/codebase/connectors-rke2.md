@@ -58,12 +58,17 @@ T2 (#2429) adds the **first approval-gated write op** (in the
 - `rke2.token.rotate` — rotates the RKE2 server join token cluster-wide via
   `rke2 token rotate` over sudo-SSH. `safety_level="dangerous"`,
   `requires_approval=True`. Takes **no parameters and no token value**: the
-  new token is minted server-side, the OLD token is read on-disk as root
-  inside the rotate script, and the new token is written to Vault — only a
-  **pointer** to the Vault location plus non-secret metadata (`rotated` /
-  `node` / `exit_status`) is returned. A read-only fingerprint gate refuses a
-  non-server node, an inactive `rke2-server`, or a below-floor / known-bad
-  (`v1.27.10+rke2r1`) RKE2 version before any mutation.
+  OLD token is read on-disk as root inside the rotate script and handed to
+  `rke2` via the `RKE2_TOKEN` env (the upstream `EnvVar` backing for
+  `--token`); the new token is minted node-side by `rke2 token rotate` itself
+  (`--new-token` is omitted — it has no `EnvVar` backing, so a value there
+  would land on argv), read back over the SSH channel, and written to Vault —
+  only a **pointer** to the Vault location plus non-secret metadata (`rotated`
+  / `node` / `exit_status`) is returned. Neither token value ever reaches the
+  world-readable `/proc/<pid>/cmdline` of the rke2 process (S12,
+  meho-internal#300). A read-only fingerprint gate refuses a non-server node,
+  an inactive `rke2-server`, or a below-floor / known-bad (`v1.27.10+rke2r1`)
+  RKE2 version before any mutation.
 
 T3 (#2430) adds two more **approval-gated node-write ops**
 (`safety_level="dangerous"` / `requires_approval=true`), both in the shared
@@ -207,10 +212,14 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   - `rke2.token.rotate` (#2429): `rke2_token_rotate` (the async handler, bound
     via the `token_rotate` shim), `rke2_version_rotate_verdict` /
     `parse_rke2_release` (the pure version-gate logic against the per-minor
-    CVE-fix floor + the `v1.27.10+rke2r1` deny). The minted new token is
-    stashed in Vault under
-    `secret/tenants/<tenant_id>/rke2/<node>/server-token`; only a pointer is
-    returned. `_sudo.py` carries the family's own safe-`sudo -S` primitive
+    CVE-fix floor + the `v1.27.10+rke2r1` deny). The OLD token rides the
+    `RKE2_TOKEN` env (its upstream `--token` `EnvVar` backing) and the new
+    token is minted node-side by `rke2` (`--new-token` omitted), read back over
+    the SSH channel via the `_parse_rotated_token` marker line, and stashed in
+    Vault under `secret/tenants/<tenant_id>/rke2/<node>/server-token`; only a
+    pointer is returned, and neither token touches the rke2
+    `/proc/<pid>/cmdline`. `_sudo.py` carries the family's own safe-`sudo -S`
+    primitive
     (`run_remote_bash_with_sudo`) — the #697-hardened wire shape (script bytes
     first, password last on stdin, never in argv / history / log).
     `ops_write_preview.py` registers a non-secret park-time `proposed_effect`
@@ -383,8 +392,10 @@ dispatcher persists the **raw** handler result on the audit row and
 connector-boundary redaction never scrubs `raw_payload`, so the only reliable
 control is that the handler never returns the token — old or new. Both are
 handled off the result surface: the OLD token is read on-disk as root inside
-the sudo script (a shell `$(cat ...)`, never entering Python), and the NEW
-token is minted here, written to Vault, and returned only as a pointer. The
+the sudo script (a shell `$(cat ...)`, never entering Python) and passed to
+`rke2` via the `RKE2_TOKEN` env, and the NEW token is minted node-side by
+`rke2 token rotate` itself, read back over the SSH channel, written to Vault,
+and returned only as a pointer. The
 op is additionally pinned in `broadcast/events._CREDENTIAL_MINT_OPS`
 (defence-in-depth: `.rotate` would otherwise classify `other` and broadcast
 full detail) and its park-time preview carries no token value.

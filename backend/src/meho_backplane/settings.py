@@ -844,6 +844,42 @@ class Settings(BaseModel):
         retention is policy-driven); ``enabled=False`` skips starting
         the loop entirely (no audit-row noise, no log line). Read once
         at lifespan startup; toggling post-start requires a pod restart.
+    raw_payload_retention_days:
+        Maximum age (in days) of the pre-redaction connector response
+        captured in ``audit_log.raw_payload`` (security review S19 #307).
+        Rows whose ``occurred_at`` is older than ``now() -
+        raw_payload_retention_days`` have **only** ``raw_payload`` NULLed by
+        the age-off sweeper (:mod:`meho_backplane.audit_retention`); the
+        redacted ``payload`` (carrying ``redaction_policy_id``), the
+        ``redaction_manifest`` and every other column -- the governance
+        record of account -- are left intact. Default 90 mirrors
+        ``topology_history_retention_days`` (auditor reconstruction stays
+        available for a quarter, then the un-redacted body ages off). ``0``
+        is the opt-out "keep forever" sentinel: **un-redacted pre-redaction
+        bodies then live in ``raw_payload`` and every DB backup forever** --
+        the security tradeoff flagged in the Helm values comment and
+        ``docs/architecture/audit.md``. Range ``[0, 3650]`` (10y ceiling is
+        functionally permanent for a v0.2 chassis). Read once per tick.
+    raw_payload_prune_interval_seconds:
+        Cadence of the #307 raw-payload age-off loop, in seconds. The task
+        (registered in the FastAPI lifespan) sleeps this long between sweeps.
+        Default 604800 (7d / weekly) matches the topology-history prune.
+        Range ``[60, 604800]``: below one minute competes with write load;
+        the ceiling is the weekly cadence -- operators wanting a tighter
+        exposure window lower ``raw_payload_retention_days`` instead (it pulls
+        the age-off horizon in without changing the sweep cadence). Tests
+        override to sub-second values via env-var monkeypatch +
+        :func:`get_settings` cache-clear.
+    raw_payload_prune_enabled:
+        Whether to start the #307 raw-payload age-off task in the FastAPI
+        lifespan. Default ``True``: the in-process ``asyncio`` loop is the
+        shipped age-off mechanism. Operators running a different mechanism
+        (k8s CronJob, archive-then-scrub) flip
+        ``RAW_PAYLOAD_PRUNE_ENABLED=false`` so the chassis does not race the
+        external job. Distinct from ``raw_payload_retention_days=0``: ``0``
+        keeps the loop running but every tick is a no-op (heartbeat proving
+        the age-off surface is alive); ``enabled=False`` skips starting the
+        loop entirely. Read once at lifespan startup.
     anthropic_api_key:
         Anthropic API key the G11.1 agent runtime's bounded tool-use loop
         authenticates with. Empty (the default) is fail-closed: the seam's
@@ -1454,6 +1490,15 @@ class Settings(BaseModel):
     topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
     topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     topology_history_prune_enabled: bool = True
+    # Security review S19 #307 — audit_log.raw_payload age-off knobs. Same
+    # opt-out shape as the topology-history prune: ``days=0`` keeps the loop
+    # as a heartbeat (un-redacted pre-redaction bodies then live forever, the
+    # documented security tradeoff), while ``enabled=False`` skips the loop for
+    # operators running an external age-off. NULLs only ``raw_payload``; the
+    # redacted ``payload`` record of account is left intact (see field docstring).
+    raw_payload_retention_days: int = Field(default=90, ge=0, le=3650)
+    raw_payload_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    raw_payload_prune_enabled: bool = True
     # G11.1-T1 #808 — agent runtime LLM access. The bounded tool-use loop
     # (``meho_backplane.agent``) runs against Anthropic for the G11
     # initiative; multi-provider routing is G11.5. ``anthropic_api_key``
@@ -1637,6 +1682,16 @@ class Settings(BaseModel):
     mail_smtp_host: str = Field(default="")
     mail_smtp_port: int = Field(default=587, gt=0, le=65535)
     mail_smtp_starttls: bool = True
+    # F08 (#270) — both TLS paths (implicit ``SMTP_SSL`` and ``STARTTLS``)
+    # verify the MTA's certificate against a validating
+    # ``ssl.create_default_context`` with hostname checking on. Empty (the
+    # default) trusts the system CA bundle; set to a PEM CA-bundle path to
+    # pin an internal relay's CA instead (the file's CAs *replace* the
+    # system trust, matching the target-level ``tls_ca_pin`` posture). There
+    # is deliberately no blanket "skip verification" knob — an internal
+    # relay with a private CA is trusted by pointing this at its CA, never
+    # by disabling verification.
+    mail_smtp_ca_bundle: str = Field(default="")
     mail_smtp_username: str = Field(default="")
     mail_smtp_password: str = Field(default="", repr=False)
     mail_from: str = Field(default="")
@@ -1710,8 +1765,20 @@ class Settings(BaseModel):
     #: at the T3 route) rather than returning a silent empty result.
     corpus_url: str = ""
     #: Optional RFC 8707 resource indicator (``aud``) the corpus binds
-    #: the forwarded token to. Empty ("") forwards no audience.
+    #: the downstream token to. Empty ("") forwards no audience.
     corpus_audience: str = ""
+    #: Deployment-configured bearer credential the corpus federation
+    #: client (:func:`~meho_backplane.auth.corpus.search_corpus`) presents
+    #: to the corpus. This is a dedicated, corpus-scoped service credential
+    #: owned by the deployment — NOT the caller's inbound operator JWT.
+    #: Replaying the operator's raw bearer to a tenant-configurable corpus
+    #: URL leaked a Vault-capable credential to an attacker-controlled sink
+    #: (evoila-bosnia/meho-internal#290), so the operator JWT is never
+    #: forwarded. Empty ("") sends no ``Authorization`` header — a corpus
+    #: that requires auth then fails closed (401 → ``CorpusUnavailable`` →
+    #: 503) rather than receiving the operator bearer. ``repr=False`` keeps
+    #: the secret out of ``Settings`` reprs / structured logs.
+    corpus_service_token: str = Field(default="", repr=False)
     #: Bound on the corpus HTTP request (connect / read / write), in
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
@@ -2279,6 +2346,15 @@ def get_settings() -> Settings:
         topology_history_prune_enabled=parse_bool_env(
             os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
         ),
+        raw_payload_retention_days=int(
+            os.environ.get("RAW_PAYLOAD_RETENTION_DAYS", "90"),
+        ),
+        raw_payload_prune_interval_seconds=int(
+            os.environ.get("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        raw_payload_prune_enabled=parse_bool_env(
+            os.environ.get("RAW_PAYLOAD_PRUNE_ENABLED", "true"),
+        ),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
@@ -2353,6 +2429,7 @@ def get_settings() -> Settings:
         mail_smtp_starttls=parse_bool_env(
             os.environ.get("MAIL_SMTP_STARTTLS", "true"),
         ),
+        mail_smtp_ca_bundle=os.environ.get("MAIL_SMTP_CA_BUNDLE", "").strip(),
         mail_smtp_username=os.environ.get("MAIL_SMTP_USERNAME", "").strip(),
         mail_smtp_password=os.environ.get("MAIL_SMTP_PASSWORD", "").strip(),
         mail_from=os.environ.get("MAIL_FROM", "").strip(),
@@ -2376,6 +2453,7 @@ def get_settings() -> Settings:
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
+        corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),

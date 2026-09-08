@@ -72,10 +72,14 @@ async def declare_capabilities(
     """Declare an add-on's advertised surfaces (paired service principal only).
 
     The paired add-on authenticates as its own **service** principal and
-    replaces its declaration wholesale. A non-service principal is 403; an
-    unpaired add-on is 404; an unknown capability kind or a malformed /
-    duplicate declaration is 422 (rejected by the request schema before this
-    handler runs). Audited via the audit middleware.
+    replaces its declaration wholesale. A non-service principal is 403. The
+    pairing is resolved by the caller's service-account ``sub`` and must be
+    ``{name}``'s own pairing, so a paired service cannot replace another
+    add-on's advertised surfaces; a caller that owns no pairing named
+    ``{name}`` is 404 (indistinguishable from an absent one). An unknown
+    capability kind or a malformed / duplicate declaration is 422 (rejected by
+    the request schema before this handler runs). Audited via the audit
+    middleware.
     """
     if operator.principal_kind is not PrincipalKind.SERVICE:
         raise HTTPException(
@@ -89,7 +93,9 @@ async def declare_capabilities(
     )
     service = AddonCapabilityService()
     try:
-        return await service.declare(operator.tenant_id, name, payload)
+        return await service.declare(
+            operator.tenant_id, name, payload, service_account_sub=operator.sub
+        )
     except AddonNotPairedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

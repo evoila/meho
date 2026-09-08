@@ -87,6 +87,7 @@ References
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import timedelta
 from typing import Annotated, Final
@@ -105,6 +106,7 @@ from meho_backplane.auth.jwt import verify_jwt_for_audience
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.ui.auth.flow import (
+    AUTHORIZATION_FLOW_TTL_SECONDS,
     MISSING_CLIENT_SECRET_DETAIL,
     OAuthFlowConfigurationError,
     OAuthFlowError,
@@ -120,12 +122,16 @@ from meho_backplane.ui.auth.session_store import (
 
 __all__ = [
     "AUTHORIZATION_STATE_EXPIRED_DETAIL",
+    "LOGIN_BINDING_COOKIE_PREFIX",
     "LOGIN_PATH",
     "SESSION_COOKIE_NAME",
     "SESSION_TTL_MARGIN_SECONDS",
     "build_router",
+    "clear_login_binding_cookie",
     "clear_session_cookie",
     "compute_redirect_uri",
+    "login_binding_cookie_name",
+    "set_login_binding_cookie",
     "set_session_cookie",
 ]
 
@@ -170,6 +176,84 @@ _DEFAULT_RETURN_TO: Final[str] = "/ui/"
 #: ``_exchange_or_translate`` log discipline), so the body still does
 #: not telegraph what an attacker probed.
 AUTHORIZATION_STATE_EXPIRED_DETAIL: Final[str] = "authorization_state_expired"
+
+#: Name prefix of the short-lived login-binding cookie (F10, #272). The
+#: full cookie name embeds a hash of the flow's ``state`` (see
+#: :func:`login_binding_cookie_name`) so two concurrent logins from one
+#: browser get distinct cookies and never overwrite each other's
+#: binding -- a single fixed name would break legitimate concurrent
+#: login attempts. ``state`` is public (it travels on the callback URL),
+#: so hashing it into the name discloses nothing; the cookie *value* is
+#: the per-flow secret.
+LOGIN_BINDING_COOKIE_PREFIX: Final[str] = "meho_ob_"
+
+#: Path the login-binding cookie is scoped to. Narrower than the session
+#: cookie's ``/`` because the binding is written at ``/ui/auth/login``
+#: and read only at ``/ui/auth/callback`` -- both under ``/ui/auth`` --
+#: so there is no reason to expose it on ``/api/*`` requests.
+_LOGIN_BINDING_COOKIE_PATH: Final[str] = "/ui/auth"
+
+
+def login_binding_cookie_name(state: str) -> str:
+    """Per-flow name of the login-binding cookie, derived from *state*.
+
+    Hashing ``state`` into a bounded, cookie-name-safe hex suffix keeps
+    concurrent logins in one browser from clobbering each other's
+    binding cookie: each flow carries a distinct ``state`` and therefore
+    a distinct cookie name. The callback recomputes the same name from
+    the ``state`` on the callback URL, so no server-side lookup is
+    needed to find the right cookie.
+    """
+    digest = hashlib.sha256(state.encode("utf-8")).hexdigest()[:32]
+    return f"{LOGIN_BINDING_COOKIE_PREFIX}{digest}"
+
+
+def set_login_binding_cookie(response: RedirectResponse, state: str, browser_binding: str) -> None:
+    """Attach the short-lived login-binding cookie to *response* (F10, #272).
+
+    Sets the per-flow secret :func:`~meho_backplane.ui.auth.flow.
+    build_authorization_request` minted, so the callback can prove the
+    completing browser is the one that started the flow.
+
+    ``SameSite=Lax`` -- deliberately weaker than the session cookie's
+    ``Strict`` -- because the callback arrives as a top-level GET
+    navigation the IdP initiates from its own origin; for a separately
+    hosted Keycloak that is a cross-site navigation, and ``Strict``
+    would drop the cookie there and break every login. ``Lax`` is sent
+    on exactly that top-level navigation and withheld from every other
+    cross-site context (image loads, fetches, form POSTs), which is the
+    callback-compatible policy RFC 9700 calls for. ``HttpOnly`` +
+    ``Secure`` match the session cookie's hardening (no JS read, TLS
+    only). ``Max-Age`` mirrors the server-side flow TTL so an abandoned
+    login's cookie self-expires rather than lingering.
+    """
+    response.set_cookie(
+        key=login_binding_cookie_name(state),
+        value=browser_binding,
+        max_age=AUTHORIZATION_FLOW_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path=_LOGIN_BINDING_COOKIE_PATH,
+    )
+
+
+def clear_login_binding_cookie(response: Response, state: str) -> None:
+    """Erase the login-binding cookie once its flow completes (F10, #272).
+
+    Called on the callback success path so the single-use binding is
+    consumed and cleared. The attributes match
+    :func:`set_login_binding_cookie` (same name, path, ``Secure`` /
+    ``HttpOnly`` / ``SameSite``) so user agents that check attribute
+    parity on overwrite reliably expire it.
+    """
+    response.delete_cookie(
+        key=login_binding_cookie_name(state),
+        path=_LOGIN_BINDING_COOKIE_PATH,
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
 
 
 def compute_redirect_uri() -> str:
@@ -313,7 +397,7 @@ async def _handle_login(
     log = structlog.get_logger(__name__)
     return_to = _safe_return_to(return_to)
     try:
-        url, state = await build_authorization_request(
+        url, state, browser_binding = await build_authorization_request(
             redirect_uri=compute_redirect_uri(),
             return_to=return_to,
         )
@@ -334,7 +418,11 @@ async def _handle_login(
             detail="upstream_auth_provider_unreachable",
         ) from exc
     log.info("ui_auth_login_redirect", state=state, return_to=return_to)
-    return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    # Hand the initiating browser its login-binding cookie so the
+    # callback can prove this same browser completes the flow (F10 #272).
+    set_login_binding_cookie(response, state, browser_binding)
+    return response
 
 
 def _raise_idp_error(idp_error: str, idp_error_description: str | None) -> None:
@@ -355,14 +443,21 @@ async def _exchange_or_translate(
     *,
     state: str | None,
     authorization_response: str,
+    browser_binding: str | None,
 ) -> TokenExchangeResult:
     """Run the token exchange and map every error class to an HTTPException.
 
-    Encapsulates the chain of authlib / verifier-store / network
-    failures the callback can hit so the calling handler stays under
-    the 100-line code-quality cap. The token-side log discipline
+    Encapsulates the chain of authlib / verifier-store / browser-binding
+    / network failures the callback can hit so the calling handler stays
+    under the 100-line code-quality cap. The token-side log discipline
     (don't surface specific failure causes in the response body, only
     in structlog) lives here.
+
+    *browser_binding* is the value the callback replayed from the
+    login-binding cookie (F10, #272); a missing / mismatched value is
+    raised as an :class:`OAuthFlowError` inside
+    :func:`exchange_code_for_tokens` and collapses into the same
+    recoverable 400 as an expired ``state`` below.
     """
     log = structlog.get_logger(__name__)
     try:
@@ -370,6 +465,7 @@ async def _exchange_or_translate(
             redirect_uri=compute_redirect_uri(),
             authorization_response=authorization_response,
             state=state,
+            browser_binding=browser_binding,
         )
     except OAuthFlowConfigurationError:
         log.warning("ui_auth_oauth_not_configured", route="callback")
@@ -465,12 +561,20 @@ async def _handle_callback(
     del code
     if error:
         _raise_idp_error(error, error_description)
+    # The login-binding cookie the initiating browser holds for this
+    # ``state`` (F10, #272). Absent when the browser hitting this
+    # callback did not start the flow -- an attacker-induced callback in
+    # a victim's browser -- in which case the binding check inside
+    # ``exchange_code_for_tokens`` fails the flow closed before any
+    # token exchange or session creation.
+    browser_binding = request.cookies.get(login_binding_cookie_name(state)) if state else None
     # ``str(request.url)`` carries the full callback URL with query
     # string -- authlib's :meth:`fetch_token` parses ``code`` and
     # ``state`` out of it.
     tokens = await _exchange_or_translate(
         state=state,
         authorization_response=str(request.url),
+        browser_binding=browser_binding,
     )
     session_id, operator_sub, tenant_id = await _persist_session_from_tokens(tokens)
     log.info(
@@ -485,6 +589,11 @@ async def _handle_callback(
         status_code=status.HTTP_302_FOUND,
     )
     set_session_cookie(response, session_id)
+    # Single-use: the binding is consumed, so clear its cookie now that
+    # the flow has completed (F10, #272). ``state`` is non-None on any
+    # path that reaches here (a None state raises inside the exchange).
+    if state:
+        clear_login_binding_cookie(response, state)
     return response
 
 

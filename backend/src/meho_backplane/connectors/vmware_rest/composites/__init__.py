@@ -90,6 +90,11 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._supervisor import (
+    supervisor_disable_composite,
+    supervisor_enable_composite,
+    supervisor_status_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
@@ -154,6 +159,9 @@ __all__ = [
     "performance_summary_composite",
     "register_vmware_composite_operations",
     "service_control_composite",
+    "supervisor_disable_composite",
+    "supervisor_enable_composite",
+    "supervisor_status_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",

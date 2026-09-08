@@ -88,6 +88,12 @@ __all__ = [
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "SUPERVISOR_DISABLE_PARAMETER_SCHEMA",
+    "SUPERVISOR_DISABLE_RESPONSE_SCHEMA",
+    "SUPERVISOR_ENABLE_PARAMETER_SCHEMA",
+    "SUPERVISOR_ENABLE_RESPONSE_SCHEMA",
+    "SUPERVISOR_STATUS_PARAMETER_SCHEMA",
+    "SUPERVISOR_STATUS_RESPONSE_SCHEMA",
     "VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA",
     "VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA",
     "VM_CLONE_PARAMETER_SCHEMA",
@@ -4461,4 +4467,285 @@ GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "process_manager_moid", "program_path", "pid", "wait"],
+}
+
+
+# ---------------------------------------------------------------------------
+# namespace-management -- Supervisor (WCP) enable / disable / status (#3281)
+# ---------------------------------------------------------------------------
+
+
+#: ``vmware.composite.supervisor.enable`` parameter schema. The nested
+#: ``control_plane`` / ``workloads`` objects are the vendor
+#: ``EnableOnComputeClusterSpec`` sub-objects passed through to the enable POST
+#: body verbatim, so they keep ``additionalProperties: True`` (the full vendor
+#: spec -- LB config, DNS/NTP, image sync, CIDRs -- flows through unmodified).
+#: The schema pins the *structural* essentials (management network + control-
+#: plane storage policy, workload network_type + edge provider); the handler
+#: enforces the network-stack enums with a loud structured refusal
+#: (``unknown_network_provider``), so a bad provider fails closed in the
+#: composite rather than as an opaque vCenter 400.
+SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid (``domain-cN``) of the vSphere cluster to "
+                "enable the Supervisor on. Rides the ``{cluster}`` path segment of "
+                "``POST /vcenter/namespace-management/supervisors/{cluster}"
+                "?action=enable_on_compute_cluster`` (the current 9.x path; the "
+                "``clusters/{cluster}?action=enable`` form is deprecated as of vSphere 9.0)."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "User-friendly Supervisor name (EnableOnComputeClusterSpec.name).",
+        },
+        "control_plane": {
+            "type": "object",
+            "required": ["network", "storage_policy"],
+            "properties": {
+                "network": {
+                    "type": "object",
+                    "description": (
+                        "Management network for the control plane (Networks.Management."
+                        "Network): backing portgroup + IP management (gateway in CIDR "
+                        "form, 5-address node range) + DNS/NTP services."
+                    ),
+                },
+                "storage_policy": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "SPBM policy id backing the Supervisor Kubernetes API server "
+                        "(SpsStorageProfile). Required -- on NFS there is no default "
+                        "policy; pass the tag-based NFS policy id."
+                    ),
+                },
+                "size": {
+                    "type": "string",
+                    "description": (
+                        "Control-plane sizing hint (TINY/SMALL/MEDIUM/LARGE). Optional; "
+                        "defaults to SMALL. TINY = 8 GB per CP VM."
+                    ),
+                },
+                "count": {
+                    "type": "integer",
+                    "enum": [1, 3],
+                    "description": "Number of control-plane VMs (1 or 3). Optional; defaults to 3.",
+                },
+            },
+            "additionalProperties": True,
+            "description": (
+                "EnableOnComputeClusterSpec.control_plane -- passed through to the "
+                "enable body. Requires a management ``network`` and a ``storage_policy``."
+            ),
+        },
+        "workloads": {
+            "type": "object",
+            "required": ["network", "edge"],
+            "properties": {
+                "network": {
+                    "type": "object",
+                    "required": ["network_type"],
+                    "properties": {
+                        "network_type": {
+                            "type": "string",
+                            "description": (
+                                "Workload network stack (Supervisors.Networks.Workload."
+                                "NetworkType). One of VSPHERE (VDS + Foundation LB), "
+                                "NSX_VPC (NSX VPC), NSXT (classic NSX-T). An unknown "
+                                "value is refused loudly by the composite "
+                                "(status='unknown_network_provider')."
+                            ),
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+                "edge": {
+                    "type": "object",
+                    "required": ["provider"],
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Edge (load-balancer) provider (Networks.Edges."
+                                "EdgeProvider). One of VSPHERE_FOUNDATION (pairs with the "
+                                "VSPHERE stack -- no separate NSX edge cluster required), "
+                                "NSX / NSX_VPC / NSX_ADVANCED, or the deprecated HAPROXY. "
+                                "An unknown value is refused loudly by the composite."
+                            ),
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": True,
+            "description": (
+                "EnableOnComputeClusterSpec.workloads -- passed through to the enable "
+                "body. Requires a workload ``network`` (with ``network_type``) and an "
+                "``edge`` (with ``provider``); ``storage`` (ephemeral/image policies) is "
+                "optional and defaults from the control plane when omitted."
+            ),
+        },
+        "zone": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional pre-existing consumption fault-domain Zone id. Omitted -> a "
+                "zone is auto-created from the cluster's managed-object id."
+            ),
+        },
+    },
+    "required": ["cluster", "name", "control_plane", "workloads"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.enable`` response schema.
+SUPERVISOR_ENABLE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["enabling", "unknown_network_provider", "invalid_spec"],
+            "description": (
+                "``'enabling'`` -- the enable POST was accepted (asynchronous; poll "
+                "``vmware.composite.supervisor.status``). ``'unknown_network_provider'`` "
+                "-- workloads.network.network_type or workloads.edge.provider is not a "
+                "known 9.x value (refused before any write). ``'invalid_spec'`` -- a "
+                "required control_plane / workloads sub-field was missing (refused before "
+                "any write)."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "supervisor": {
+            "type": ["string", "null"],
+            "description": (
+                "New Supervisor id returned by the enable POST; ``null`` on any refusal."
+            ),
+        },
+        "network_type": {
+            "type": ["string", "null"],
+            "description": "Echoed workload network_type on success / provider refusal.",
+        },
+        "edge_provider": {
+            "type": ["string", "null"],
+            "description": "Echoed edge provider on success.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster", "supervisor"],
+}
+
+
+#: ``vmware.composite.supervisor.disable`` parameter schema.
+SUPERVISOR_DISABLE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid of the Supervisor-enabled cluster to tear "
+                "down. Rides ``POST /vcenter/namespace-management/clusters/{cluster}"
+                "?action=disable`` (``DELETE clusters/{cluster}`` 404s)."
+            ),
+        },
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.disable`` response schema.
+SUPERVISOR_DISABLE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["disabling"],
+            "description": (
+                "``'disabling'`` -- the disable POST was accepted (asynchronous; poll "
+                "``vmware.composite.supervisor.status``, config_status moves through "
+                "'REMOVING')."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster"],
+}
+
+
+#: ``vmware.composite.supervisor.status`` parameter schema.
+SUPERVISOR_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid to read Supervisor status for "
+                "(``GET /vcenter/namespace-management/clusters/{cluster}``)."
+            ),
+        },
+        "messages_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Optional cap on the inline ``messages`` / ``conditions`` arrays "
+                "(default 25). ``message_count`` / ``condition_count`` always carry the "
+                "uncapped sizes."
+            ),
+        },
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.status`` response schema. Shaped for inline
+#: polling: the scalar ``config_status`` / ``kubernetes_status`` / ``ready``
+#: stay top-level so a runbook OperationCallVerify step or a Sensor assertion
+#: reads them without a JSONFlux handle.
+SUPERVISOR_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "config_status": {
+            "type": ["string", "null"],
+            "description": (
+                "Clusters.ConfigStatus: CONFIGURING / REMOVING / RUNNING / ERROR. "
+                "``null`` when absent from the vCenter payload."
+            ),
+        },
+        "kubernetes_status": {
+            "type": ["string", "null"],
+            "description": "Clusters.KubernetesStatus: READY / WARNING / ERROR; else null.",
+        },
+        "ready": {
+            "type": "boolean",
+            "description": (
+                "True iff config_status == 'RUNNING' AND kubernetes_status == 'READY' -- "
+                "the single poll predicate a runbook / Sensor waits on."
+            ),
+        },
+        "messages": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Clusters.Message rows (severity + details).",
+        },
+        "conditions": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Clusters.Condition rows (type / status / severity).",
+        },
+        "message_count": {"type": "integer", "description": "Uncapped message count."},
+        "condition_count": {"type": "integer", "description": "Uncapped condition count."},
+    },
+    "required": ["cluster", "config_status", "kubernetes_status", "ready"],
 }

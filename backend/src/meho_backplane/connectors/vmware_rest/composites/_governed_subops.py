@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from meho_backplane.connectors.vmware_rest.composites import _host, _write
+from meho_backplane.connectors.vmware_rest.composites import _host, _supervisor, _write
 
 #: Connector the vmware-rest composites dispatch against. The composites are
 #: registered for vCenter 9.0 (``vmware-rest-9.0``); the discovery surface
@@ -80,6 +80,8 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.host.datastore_mount_nfs": _host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS,
     "vmware.composite.host.disk_mark_flash": _host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH,
     "vmware.composite.host.service_control": _host._VIM_SUB_OPS_HOST_SERVICE_CONTROL,
+    "vmware.composite.supervisor.enable": _supervisor._SUB_OPS_SUPERVISOR_ENABLE,
+    "vmware.composite.supervisor.disable": _supervisor._SUB_OPS_SUPERVISOR_DISABLE,
 }
 
 

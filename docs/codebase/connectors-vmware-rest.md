@@ -8,11 +8,12 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 38 hand-authored composites
-that orchestrate cross-spec workflows: 9 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 41 hand-authored composites
+that orchestrate cross-spec workflows: 10 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 29 write
+in `#2258`; plus the four guest-operations reads `#3100` and the
+Supervisor status read `#3281`) and 31 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
@@ -27,10 +28,13 @@ the three host-domain writes `host.datastore_mount_nfs` /
 `host.disk_mark_flash` / `host.service_control` / `#3182`, the two vim
 distributed-portgroup writes `network.portgroup.create` +
 `network.portgroup.security.set` / `#3091`, the content-library import
-`vm.import_from_library` / `#3229`, plus the two governed
+`vm.import_from_library` / `#3229`, the two governed
 guest-operations writes `vm.guest.file.write` / `#3100` +
 `vm.guest.program.run` / `#3255` (see
-`connectors-vmware-rest-guest-ops.md`)). The
+`connectors-vmware-rest-guest-ops.md`), plus the two Supervisor (WCP)
+namespace-management writes `supervisor.enable` + `supervisor.disable`
+/ `#3281` (see the **Supervisor (WCP) namespace-management composites**
+subsection under Control flow)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -268,10 +272,23 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   safety model live in `connectors-vmware-rest-guest-ops.md`; the freeform
   in-guest program-exec tier `StartProgramInGuest` #3100 deferred is now
   lifted as `guest.program.run` (#3255).
+- **Supervisor (WCP) namespace-management composites** (`#3281`, group
+  `namespace_management`, `composites/_supervisor.py`) — the governed
+  replacement for out-of-band `govc` / `kubectl-vsphere` Supervisor
+  enablement. Two `dangerous` / approval-gated writes,
+  `supervisor_enable_composite`
+  (`POST:/vcenter/namespace-management/supervisors/{cluster}?action=enable_on_compute_cluster`,
+  the current 9.x path — the `clusters/{cluster}?action=enable` form is
+  deprecated as of vSphere 9.0) and `supervisor_disable_composite`
+  (`POST:/vcenter/namespace-management/clusters/{cluster}?action=disable`),
+  plus one `safe` read, `supervisor_status_composite`
+  (`GET:/vcenter/namespace-management/clusters/{cluster}`). See the
+  **Supervisor (WCP) namespace-management composites** subsection under
+  Control flow.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 37
-  `_CompositeSpec` rows (9 read + 24 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 41
+  `_CompositeSpec` rows (10 read + 31 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -1603,6 +1620,72 @@ gate as every other write composite (there is no `caution` tier in this
 connector; only `vm.destroy` is `destructive`). Neither composite registers a
 park-time preview builder (matching `vm.import_from_library`); the read-back
 `previous` / `observed` rows in the response are the verification surface.
+
+### Supervisor (WCP) namespace-management composites (`supervisor.enable` / `supervisor.disable` / `supervisor.status`, #3281)
+
+`composites/_supervisor.py` (group `namespace_management`) governs vSphere
+Supervisor (Workload Control Plane) lifecycle on a cluster — the governed
+replacement for out-of-band `govc` / `kubectl-vsphere` enablement. Three ops:
+
+**`supervisor.enable`** (`dangerous` / `requires_approval=True`) issues
+`POST:/vcenter/namespace-management/supervisors/{cluster}?action=enable_on_compute_cluster`
+— the current 9.x path. The 7.x `clusters/{cluster}?action=enable` form is
+**deprecated as of vSphere 9.0** and is not used. The body is the nested
+`EnableOnComputeClusterSpec` (`name` + `control_plane` + `workloads` +
+optional `zone`), passed as the **top-level** POST body verbatim (the
+top-level-`*Spec` envelope convention documented above — never wrapped in
+`{"spec": {...}}`); `{cluster}` is the only path var, so the composite's
+`params` carry `cluster` plus the spec sub-objects and `_split_sub_op` lifts
+the remainder into the body. The handler validates the spec **server-side
+before any write**: `control_plane` must carry a management `network` and a
+`storage_policy` (on NFS there is no default SPBM policy), and the workload
+network stack — `workloads.network.network_type` (`VSPHERE` / `NSXT` /
+`NSX_VPC`) paired with `workloads.edge.provider` (`VSPHERE_FOUNDATION` / `NSX`
+/ `NSX_VPC` / `NSX_ADVANCED` / `HAPROXY`) — is checked against the
+authoritative 9.x enums and an unknown value is **refused loudly**
+(`status='unknown_network_provider'`, nothing reaches the wire, the gate is
+never consulted). The VDS + Foundation LB model is `VSPHERE` +
+`VSPHERE_FOUNDATION` (no separate NSX edge cluster required); the NSX VPC
+model is `NSX_VPC` + `NSX_VPC`. Enable is **asynchronous**: vCenter returns
+the new Supervisor id immediately (the handler returns
+`status='enabling'`), and the composite deliberately does **not** block the
+dispatcher polling the 30–60 min `CONFIGURING` → `RUNNING` convergence —
+readiness is the separate `supervisor.status` op.
+
+**`supervisor.disable`** (`dangerous` / `requires_approval=True`) issues
+`POST:/vcenter/namespace-management/clusters/{cluster}?action=disable`
+(`DELETE clusters/{cluster}` 404s — the action form is the documented
+teardown). No request body; removes the control-plane VMs + worker nodes but
+leaves the cluster's networking / zone intact for a fresh re-enable.
+Asynchronous (`status='disabling'`; poll `supervisor.status`, `config_status`
+moves through `REMOVING`).
+
+Both writes ride the standard governed REST sub-op seam
+(`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`): the
+top-level composite's own `dangerous` / `requires_approval=True` posture pops
+the human approval park at dispatch, and the governed child POST re-applies
+policy under the shared `dangerous` / `requires_approval=False` sub-op posture
+(`_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes each write's grant set).
+Both register echo-only park-time preview builders (`_write_preview`) — enable
+echoes cluster / name / size / count / network stack, disable echoes the
+cluster + an irreversibility marker.
+
+**`supervisor.status`** (`safe` / `requires_approval=False`) reads
+`GET:/vcenter/namespace-management/clusters/{cluster}` and reshapes
+`Clusters.Info` into a **poll-friendly, inline** envelope: the scalar
+`config_status` (`CONFIGURING` / `REMOVING` / `RUNNING` / `ERROR`),
+`kubernetes_status` (`READY` / `WARNING` / `ERROR`), and a derived `ready`
+flag (`RUNNING` AND `READY`) stay top-level so a runbook `OperationCallVerify`
+step or a Sensor assertion can poll `ready == true` / `config_status ==
+'RUNNING'` **directly**, never behind a JSONFlux handle. The `messages` +
+`conditions` arrays (which can grow during `CONFIGURING`) are capped inline
+(`messages_limit`, default 25); `message_count` / `condition_count` carry the
+uncapped sizes.
+
+The three op_ids are byte-for-byte the strings the ingest parser emits from
+the pinned `vcenter.yaml`; the reconcile guard
+`tests/acceptance/test_supervisor_op_id_reconcile.py` pins them (always-on
+string test + spec-backed parse).
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 

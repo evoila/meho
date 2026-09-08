@@ -72,7 +72,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 29 write composites (T6 / #509, single-VM vm.power / #2301, the
+# 31 write composites (T6 / #509, single-VM vm.power / #2301, the
 # mutating VI-JSON vm.disk.grow / #2893 + WSFC/FCI vm.disk.attach / #3256,
 # the folder-template
 # vm.clone_from_template / #2894, the vim cluster/inventory writes
@@ -81,8 +81,9 @@ from meho_backplane.settings import get_settings
 # GOSC composites guest.customization_spec.create + vm.customize / #2892,
 # the destructive-tier vm.destroy / #3198, the vim distributed-portgroup
 # writes network.portgroup.create + network.portgroup.security.set / #3091,
-# the content-library import vm.import_from_library / #3229, and the
-# guest-ops writes vm.guest.file.write / #3100 + vm.guest.program.run / #3255).
+# the content-library import vm.import_from_library / #3229, the
+# guest-ops writes vm.guest.file.write / #3100 + vm.guest.program.run / #3255,
+# and the Supervisor (WCP) writes supervisor.enable + supervisor.disable / #3281).
 _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.create",
     "vmware.composite.vm.clone",
@@ -114,6 +115,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Guest-ops channel writes (#3100 / #3255).
     "vmware.composite.vm.guest.file.write",
     "vmware.composite.vm.guest.program.run",
+    # Supervisor (WCP) namespace-management writes (#3281).
+    "vmware.composite.supervisor.enable",
+    "vmware.composite.supervisor.disable",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -131,9 +135,12 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.env.read",
     "vmware.composite.vm.guest.net.show",
     "vmware.composite.vm.guest.file.read",
+    # Supervisor (WCP) status read (#3281).
+    "vmware.composite.supervisor.status",
 )
 
-# 38 total -- 9 read (T5 / #508 + 4 guest-ops reads / #3100) + 29 write
+# 41 total -- 10 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281) + 31 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
@@ -142,7 +149,8 @@ _READ_OP_IDS: tuple[str, ...] = (
 # network.portgroup.create + network.portgroup.security.set + the
 # content-library import vm.import_from_library / #3229 + the guest-ops
 # program-exec write vm.guest.program.run / #3255 + the WSFC/FCI shared-attach
-# vm.disk.attach / #3256).
+# vm.disk.attach / #3256 + the Supervisor writes supervisor.enable +
+# supervisor.disable / #3281).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -236,6 +244,12 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.program.run": (
         "meho_backplane.connectors.vmware_rest.composites._guest.guest_program_run_composite"
     ),
+    "vmware.composite.supervisor.enable": (
+        "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_enable_composite"
+    ),
+    "vmware.composite.supervisor.disable": (
+        "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_disable_composite"
+    ),
 }
 
 
@@ -269,6 +283,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.host.service_control": "host",
     "vmware.composite.vm.guest.file.write": "guest_ops",
     "vmware.composite.vm.guest.program.run": "guest_ops",
+    "vmware.composite.supervisor.enable": "namespace_management",
+    "vmware.composite.supervisor.disable": "namespace_management",
 }
 
 
@@ -348,7 +364,8 @@ async def test_full_registration_produces_thirty_three_composite_rows(
     vm.guest.file.write #3100 + vm.guest.program.run #3255 + destructive-tier
     vm.destroy #3198 + #3091 portgroup writes network.portgroup.create /
     network.portgroup.security.set + content-library import
-    vm.import_from_library #3229) = 38 rows. DoD bar."""
+    vm.import_from_library #3229 + Supervisor writes supervisor.enable /
+    supervisor.disable #3281) = 41 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -362,7 +379,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 38
+    assert len(rows) == 41
 
 
 @pytest.mark.asyncio
@@ -689,14 +706,14 @@ async def test_write_composite_tags_include_composite_and_write(
 async def test_register_vmware_composite_operations_is_idempotent_across_thirty_three(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 38 rows total, embedding called 38x once."""
+    """Running the registrar twice -> 41 rows total, embedding called 41x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 38
+    assert first_count == 41
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 38.
+    # pipeline; the row count stays at 41.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -710,7 +727,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 38
+    assert len(rows) == 41
 
 
 # ---------------------------------------------------------------------------

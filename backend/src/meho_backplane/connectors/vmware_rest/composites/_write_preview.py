@@ -1131,9 +1131,56 @@ async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 26 write composites. Module-level so the
+async def _supervisor_enable_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``supervisor.enable`` — echo the cluster + network stack (no I/O).
+
+    Enabling a Supervisor stands up an entire Kubernetes control plane on a
+    cluster; the reviewer must see *which* cluster and *which* network stack
+    (the VDS + Foundation LB vs NSX VPC decision) they are approving. Echoes
+    the cluster moid, Supervisor name, control-plane sizing (size + count),
+    and the workload ``network_type`` + edge ``provider`` -- all from params,
+    no resolution read. Declines (``None``) on malformed params (the handler
+    does the full spec validation + loud provider refusal).
+    """
+    cluster = ctx.params.get("cluster")
+    name = ctx.params.get("name")
+    control_plane = ctx.params.get("control_plane")
+    workloads = ctx.params.get("workloads")
+    if not isinstance(cluster, str) or not isinstance(name, str):
+        return None
+    if not isinstance(control_plane, dict) or not isinstance(workloads, dict):
+        return None
+    network = workloads.get("network")
+    edge = workloads.get("edge")
+    return {
+        "cluster": cluster,
+        "name": name,
+        "size": control_plane.get("size"),
+        "count": control_plane.get("count"),
+        "network_type": network.get("network_type") if isinstance(network, dict) else None,
+        "edge_provider": edge.get("provider") if isinstance(edge, dict) else None,
+    }
+
+
+async def _supervisor_disable_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``supervisor.disable`` — echo the cluster being torn down (no I/O).
+
+    Teardown removes the Supervisor's control-plane VMs + worker nodes; the
+    reviewer must see which cluster. The ``irreversibility`` marker flags
+    that the Kubernetes instance is destroyed (the cluster networking / zone
+    survive for a fresh re-enable). Declines (``None``) on a malformed param.
+    """
+    cluster = ctx.params.get("cluster")
+    if not isinstance(cluster, str):
+        return None
+    return {"cluster": cluster, "irreversibility": "kubernetes-instance-destroyed"}
+
+
+#: op_id → builder for the write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
+    "vmware.composite.supervisor.enable": _supervisor_enable_preview,
+    "vmware.composite.supervisor.disable": _supervisor_disable_preview,
     "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
     "vmware.composite.vm.guest.program.run": _guest_program_run_preview,
     "vmware.composite.vm.create": _vm_create_preview,

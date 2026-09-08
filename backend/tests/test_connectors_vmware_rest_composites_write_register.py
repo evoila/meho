@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the 29 vmware-rest write composites.
+"""Registration tests for the 32 vmware-rest write composites.
 
 Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
 ``vm.power`` / #2301, the vim writes ``vm.disk.grow`` / #2893 +
@@ -10,7 +10,7 @@ hardware writes ``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``,
 and the GOSC composites ``guest.customization_spec.create`` /
 ``vm.customize`` / #2892):
 
-* All 28 expected write ``op_id`` rows land in ``endpoint_descriptor``
+* All 32 expected write ``op_id`` rows land in ``endpoint_descriptor``
   with ``source_kind="composite"``, ``requires_approval=True``, and
   ``safety_level="dangerous"`` (T4's defaults intentionally inherited) —
   except the destructive-tier ``vm.destroy`` / #3198, which is
@@ -20,7 +20,7 @@ and the GOSC composites ``guest.customization_spec.create`` /
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster`` /
   ``guest`` / ``networking`` per the canary's stub-LLM taxonomy.
 * Combined with the 9 read composites (#508's 5 + the 4 guest-ops
-  reads / #3100), the registrar produces **37 rows** total. (The former
+  reads / #3100), the registrar produces **41 rows** total. (The former
   host.network_uplinks / host.vsan_health reads were re-shipped as typed
   ops in #2258.)
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
@@ -72,7 +72,9 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 31 write composites (T6 / #509, single-VM vm.power / #2301, the
+# 34 write composites (T6 / #509, single-VM vm.power / #2301, the #3505
+# governed-allocation writes resource_pool.create / .delete +
+# cluster.drs_vm_host_rule.create, the
 # mutating VI-JSON vm.disk.grow / #2893 + WSFC/FCI vm.disk.attach / #3256,
 # the folder-template
 # vm.clone_from_template / #2894, the vim cluster/inventory writes
@@ -106,6 +108,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.network.portgroup.security.set",
     "vmware.composite.cluster.patch",
     "vmware.composite.cluster.drs_rule.create",
+    "vmware.composite.cluster.drs_vm_host_rule.create",
+    "vmware.composite.resource_pool.create",
+    "vmware.composite.resource_pool.delete",
     "vmware.composite.folder.create",
     "vmware.composite.guest.customization_spec.create",
     "vmware.composite.vm.customize",
@@ -144,8 +149,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.storage_policy.list",
 )
 
-# 44 total -- 11 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281 + storage_policy.list / #3494) + 33 write
+# 47 total -- 11 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281 + storage_policy.list / #3494) + 36 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
@@ -156,7 +161,8 @@ _READ_OP_IDS: tuple[str, ...] = (
 # program-exec write vm.guest.program.run / #3255 + the WSFC/FCI shared-attach
 # vm.disk.attach / #3256 + the Supervisor writes supervisor.enable +
 # supervisor.disable / #3281 + the storage-policy writes storage_policy.create
-# + storage_policy.delete / #3494).
+# + storage_policy.delete / #3494 + the #3505 governed-allocation writes
+# resource_pool.create + resource_pool.delete + cluster.drs_vm_host_rule.create).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -215,6 +221,16 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.cluster.drs_rule.create": (
         "meho_backplane.connectors.vmware_rest.composites._write.cluster_drs_rule_create_composite"
+    ),
+    "vmware.composite.cluster.drs_vm_host_rule.create": (
+        "meho_backplane.connectors.vmware_rest.composites._write."
+        "cluster_drs_vm_host_rule_create_composite"
+    ),
+    "vmware.composite.resource_pool.create": (
+        "meho_backplane.connectors.vmware_rest.composites._write.resource_pool_create_composite"
+    ),
+    "vmware.composite.resource_pool.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._write.resource_pool_delete_composite"
     ),
     "vmware.composite.folder.create": (
         "meho_backplane.connectors.vmware_rest.composites._write.folder_create_composite"
@@ -289,6 +305,9 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.network.portgroup.security.set": "networking",
     "vmware.composite.cluster.patch": "cluster",
     "vmware.composite.cluster.drs_rule.create": "cluster",
+    "vmware.composite.cluster.drs_vm_host_rule.create": "cluster",
+    "vmware.composite.resource_pool.create": "cluster",
+    "vmware.composite.resource_pool.delete": "cluster",
     "vmware.composite.folder.create": "vm",
     "vmware.composite.guest.customization_spec.create": "guest",
     "vmware.composite.vm.customize": "guest",
@@ -352,7 +371,7 @@ async def session() -> AsyncIterator[AsyncSession]:
 async def test_register_vmware_composite_operations_inserts_all_write_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar lands all 29 write op_ids in ``endpoint_descriptor``."""
+    """Running the registrar lands all 32 write op_ids in ``endpoint_descriptor``."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -395,23 +414,27 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 44
+    assert len(rows) == 47
 
 
 @pytest.mark.asyncio
 async def test_every_write_composite_row_uses_dangerous_requires_approval(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Each write row carries T4's defaults: dangerous + requires_approval=True.
+    """Each write row is approval-gated at its declared safety tier.
 
     Load-bearing: write composites should pop the approval queue on
     every dispatch. A misconfigured read-override would silently
     permit unauthenticated mutation; pinning the policy here means CI
     catches a regression before lifespan-startup.
 
-    The one exception is the destructive-tier ``vm.destroy`` (#3198): it is
-    ``safety_level="destructive"`` (a strictly harder tier than
-    ``dangerous``), still ``requires_approval=True``.
+    Tiers other than the ``dangerous`` default: the destructive-tier
+    ``vm.destroy`` (#3198) is ``safety_level="destructive"`` (a strictly
+    harder tier); the #3505 governed-allocation writes
+    ``resource_pool.create`` and the VM-Host affinity
+    ``cluster.drs_vm_host_rule.create`` are ``caution`` (a softer tier —
+    an allocation carve-out / a placement hint, not a mutation of running
+    state). All rows stay ``requires_approval=True``.
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
@@ -425,16 +448,24 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             .scalars()
             .all()
         )
-    # Prove the query actually returned all 29 write rows before iterating —
+    # Prove the query actually returned all 32 write rows before iterating —
     # otherwise the loop is vacuous when the set is empty / partial.
     assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
+    caution_ops = {
+        "vmware.composite.resource_pool.create",
+        "vmware.composite.cluster.drs_vm_host_rule.create",
+        "vmware.composite.storage_policy.create",
+    }
     for row in rows:
-        _non_dangerous_levels = {
-            "vmware.composite.vm.destroy": "destructive",
-            "vmware.composite.storage_policy.create": "caution",
-            "vmware.composite.storage_policy.delete": "destructive",
-        }
-        expected_level = _non_dangerous_levels.get(row.op_id, "dangerous")
+        if row.op_id in (
+            "vmware.composite.vm.destroy",
+            "vmware.composite.storage_policy.delete",
+        ):
+            expected_level = "destructive"
+        elif row.op_id in caution_ops:
+            expected_level = "caution"
+        else:
+            expected_level = "dangerous"
         assert row.safety_level == expected_level, (
             f"{row.op_id}: expected {expected_level}, got {row.safety_level!r}"
         )
@@ -496,9 +527,13 @@ async def test_write_handler_ref_round_trips_to_module_level_dotted_path(
 async def test_write_composites_land_in_vm_host_cluster_groups(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Group distribution: 12 in ``vm`` (11 ``vm.*`` + ``folder.create``),
-    2 ``host.*`` in ``host``, 2 ``cluster.*`` in ``cluster``, 2 GOSC in ``guest``,
-    2 portgroup writes in ``networking``.
+    """Group distribution: ``vm.*`` + ``folder.create`` in ``vm``, the
+    ``host.*`` writes in ``host``, the ``cluster.*`` writes + the two
+    ``resource_pool.*`` allocation writes in ``cluster`` (5: patch,
+    drs_rule.create, drs_vm_host_rule.create, resource_pool.create,
+    resource_pool.delete), the GOSC + guest-ops writes in ``guest`` /
+    ``guest_ops``, and the two portgroup writes in ``networking``. Asserted
+    per-op against :data:`_EXPECTED_GROUP_KEY_BY_OP`.
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
@@ -739,7 +774,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
     """Running the registrar twice -> 41 rows total, embedding called 41x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 44
+    assert first_count == 47
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
@@ -757,7 +792,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 44
+    assert len(rows) == 47
 
 
 # ---------------------------------------------------------------------------

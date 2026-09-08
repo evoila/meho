@@ -8,12 +8,12 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 44 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 47 hand-authored composites
 that orchestrate cross-spec workflows: 11 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
-Supervisor status read `#3281` + the storage-policy list read `#3494`) and 33 write
+Supervisor status read `#3281` + the storage-policy list read `#3494`) and 36 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed NFS tag-based SPBM `storage_policy.create` (caution) +
 `storage_policy.delete` (destructive) / `#3494`, the
@@ -21,7 +21,10 @@ single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
 `vm.disk.attach` / `#3256`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
-`cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
+`cluster.drs_rule.create` + `folder.create` / `#2895`, the governed
+resource-pool allocation writes `resource_pool.create` (`caution`) +
+`resource_pool.delete` (`dangerous`) and the VM-Host affinity
+`cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
 `vm.device.cdrom`, the two guest-customization (GOSC) composites
 `guest.customization_spec.create` + `vm.customize` / `#2892`, the
@@ -91,7 +94,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — eighteen module-level
+- **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
@@ -102,7 +105,25 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `network_portgroup_create_composite`,
   `network_portgroup_security_set_composite`,
   `cluster_patch_composite`, `guest_customization_spec_create_composite`,
-  `vm_customize_composite`). The `vm_resize` / `vm_nic_repoint` /
+  `vm_customize_composite`, and the `#3505` governed-allocation writes
+  `resource_pool_create_composite` / `resource_pool_delete_composite` /
+  `cluster_drs_vm_host_rule_create_composite`). The `resource_pool.create`
+  handler issues the REST `POST:/vcenter/resource-pool` through the same
+  governed `_write_sub_op` seam the other REST writes use, resolving the
+  parent either from an explicit `parent` moid or (the estate convenience)
+  from a `cluster` moid whose root resource pool it reads via one vim
+  `RetrievePropertiesEx` of `ClusterComputeResource.resourcePool`;
+  `resource_pool.delete` counts the pool's child pools + VMs first and
+  refuses (`not_empty`) a populated pool unless `force=true` (the REST
+  `DELETE` reparents children up to the parent). The VM-Host affinity
+  `cluster.drs_vm_host_rule.create` is a **sibling** of
+  `cluster.drs_rule.create` (which stays VM-VM only, contract unchanged):
+  one `ReconfigureComputeResource_Task` carries a `ClusterConfigSpecEx`
+  `groupSpec` delta (adds a `ClusterVmGroup` + `ClusterHostGroup`) plus a
+  `rulesSpec` delta (adds a `ClusterVmHostRuleInfo` referencing those groups
+  by name, with a `mandatory` must/should flag), riding the governed
+  `_write_vmomi_sub_op` seam + `poll_vim_task` like the VM-VM rule. The
+  `vm_resize` / `vm_nic_repoint` /
   `vm_device_cdrom` trio (`#2891`) is the post-clone hardware reconfigure
   trio — see the **Hardware write composites** subsection under Control
   flow. Since
@@ -289,8 +310,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Control flow.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 41
-  `_CompositeSpec` rows (11 read + 33 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 47
+  `_CompositeSpec` rows (11 read + 36 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -459,11 +480,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 32 `vmware.composite.*` rows with
+   queued registrar and upserts: the 41 `vmware.composite.*` rows with
    `source_kind="composite"` (9 reads with `safety_level="safe"` +
-   `requires_approval=False`; 23 writes with `safety_level="dangerous"`
-   + `requires_approval=True`, and the destructive-tier `vm.destroy` with
-   `safety_level="destructive"` + `requires_approval=True` / `#3198`),
+   `requires_approval=False`; 29 writes with `safety_level="dangerous"`
+   + `requires_approval=True`; the two #3505 governed-allocation writes
+   `resource_pool.create` + `cluster.drs_vm_host_rule.create` with
+   `safety_level="caution"` + `requires_approval=True`; and the
+   destructive-tier `vm.destroy` with `safety_level="destructive"` +
+   `requires_approval=True` / `#3198`),
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -713,7 +737,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 38 composites (9 reads + 29 writes) land as `source_kind="composite"`
+The 44 composites (10 reads + 34 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -903,6 +927,9 @@ enum) are:
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
+| `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |

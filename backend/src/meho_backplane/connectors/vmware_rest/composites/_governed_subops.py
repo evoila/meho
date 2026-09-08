@@ -74,6 +74,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_CLUSTER_PATCH + _write._VIM_SUB_OPS_CLUSTER_PATCH
     ),
     "vmware.composite.cluster.drs_rule.create": _write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE,
+    "vmware.composite.cluster.drs_vm_host_rule.create": (
+        _write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE
+    ),
+    "vmware.composite.resource_pool.create": (
+        _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
+    ),
+    "vmware.composite.resource_pool.delete": _write._SUB_OPS_RESOURCE_POOL_DELETE,
     "vmware.composite.folder.create": _write._VIM_SUB_OPS_FOLDER_CREATE,
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,

@@ -51,6 +51,11 @@ at the call site; the helper would default to those values anyway). The
 ``safety_level="destructive"`` op (still ``requires_approval=True``) — the
 governed-delete tier (decision
 ``docs/decisions/governed-delete-operations.md``).
+The #3505 governed-allocation writes add the first two ``caution`` rows —
+``resource_pool.create`` and the VM-Host affinity
+``cluster.drs_vm_host_rule.create`` — plus one more ``dangerous`` row,
+``resource_pool.delete`` (a reparent, not a destroy); all three still
+``requires_approval=True``.
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -97,6 +102,7 @@ from meho_backplane.connectors.vmware_rest.composites._supervisor import (
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
+    cluster_drs_vm_host_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
     guest_customization_spec_create_composite,
@@ -104,6 +110,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
+    resource_pool_create_composite,
+    resource_pool_delete_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
@@ -126,6 +134,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
+    CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
     CLUSTER_PATCH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
@@ -166,6 +176,10 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
+    RESOURCE_POOL_CREATE_RESPONSE_SCHEMA,
+    RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,
+    RESOURCE_POOL_DELETE_RESPONSE_SCHEMA,
     STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
     STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
     STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
@@ -240,11 +254,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
         "Use for cluster-level reads and orchestrated cluster ops "
         "that aggregate across hosts: DRS state + active "
-        "recommendations (read), and sequential cluster patch (write, "
-        "approval-gated). The right group when the question is "
-        "'what is DRS suggesting?' or 'patch every host in this "
-        "cluster in order'. Pair with the 'host' group when the "
-        "follow-up drills into one host's lifecycle (evacuate, "
+        "recommendations (read); sequential cluster patch (write, "
+        "approval-gated); the two DRS-rule writes — a VM-VM affinity / "
+        "anti-affinity rule by explicit VM list (drs_rule.create) and a "
+        "VM-Host rule pinning a VM group onto an (anti-)affine host group "
+        "(drs_vm_host_rule.create); and the governed resource-pool "
+        "allocation writes (resource_pool.create under a parent pool or a "
+        "cluster's root pool, and resource_pool.delete with a "
+        "refuse-then-force guard). The right group when the question is "
+        "'what is DRS suggesting?', 'patch every host in this cluster in "
+        "order', 'pin these VMs to these hosts', or 'carve out / tear down "
+        "a resource pool for this estate'. Pair with the 'host' group when "
+        "the follow-up drills into one host's lifecycle (evacuate, "
         "maintenance), and with 'vm' when DRS recommendations need "
         "to translate into actual VM migrations."
     ),
@@ -1013,6 +1034,77 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_vm_host_rule.create",
+        handler=cluster_drs_vm_host_rule_create_composite,
+        summary="Add a DRS VM-Host affinity rule (VM group + host group + run-on rule).",
+        description=(
+            "Pins the VMs of a named VM group onto (affine) or away from "
+            "(anti-affine) the hosts of a named host group — a VM-Host DRS "
+            "rule (ClusterVmHostRuleInfo), the placement primitive that binds "
+            "an estate's nested ESXi to a chosen subset of a cluster's hosts. "
+            "A sibling of cluster.drs_rule.create (which is VM-VM only, by "
+            "explicit VM list) that leaves that op's contract unchanged. No "
+            "REST path exists, so one vim "
+            "ClusterComputeResource.ReconfigureComputeResource_Task carries "
+            "both a ClusterConfigSpecEx.groupSpec delta (adds the VM + host "
+            "groups) and a rulesSpec delta (adds the rule), polled to a "
+            "terminal state. VM + host names resolve to MoRefs scoped to the "
+            "cluster; rule + group names are the idempotence keys "
+            "(status='rule_exists' / 'group_exists' before any write). "
+            "'mandatory' picks a 'must' vs a 'should' rule."
+        ),
+        parameter_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.resource_pool.create",
+        handler=resource_pool_create_composite,
+        summary="Create a resource pool under a parent pool or a cluster's root pool.",
+        description=(
+            "Creates a resource pool via the REST POST /vcenter/resource-pool "
+            "(Vcenter.ResourcePool.CreateSpec: name + parent + optional cpu / "
+            "memory allocation) and returns the new pool moid — the governed "
+            "allocation step a nested-lab estate is built on. Parent selection "
+            "is either an explicit 'parent' ResourcePool moid (nesting) or a "
+            "'cluster' moid whose root resource pool is resolved for you "
+            "(ClusterComputeResource.resourcePool) — the estate convenience, "
+            "since operators have a cluster, not a root-pool moid. Read-back "
+            "confirms the new pool lists under the resolved parent. Equivalent "
+            "of 'govc pool.create'."
+        ),
+        parameter_schema=RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
+        response_schema=RESOURCE_POOL_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "resource-pool"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.resource_pool.delete",
+        handler=resource_pool_delete_composite,
+        summary="Delete a resource pool; refuse a non-empty pool unless force.",
+        description=(
+            "Deletes a resource pool via the REST DELETE "
+            "/vcenter/resource-pool/{resourcePool}, which reparents the pool's "
+            "child pools + VMs up to its parent (it does not destroy them). A "
+            "non-empty pool is refused (status='not_empty') unless force=true "
+            "is passed; the delete then read-backs through the listing to "
+            "confirm the pool is absent (status='deleted'). safety_level="
+            "'dangerous' — the reparent, not a destroy. Equivalent of 'govc "
+            "pool.destroy'."
+        ),
+        parameter_schema=RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,
+        response_schema=RESOURCE_POOL_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "resource-pool"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,
         summary="Create a VM folder under a named parent (synchronous vim CreateFolder).",
@@ -1634,9 +1726,11 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 38 composites total -- 9 read (T5 / #508 + the 4 guest-ops
-    reads / #3100) + 29 write (T6 / #509 + the destructive-tier
-    ``vm.destroy`` / #3198,
+    Scope: 41 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 32 write (T6 / #509 + the destructive-tier
+    ``vm.destroy`` / #3198, the governed resource-pool allocation writes
+    ``resource_pool.create`` / ``resource_pool.delete`` + the VM-Host
+    affinity ``cluster.drs_vm_host_rule.create`` / #3505,
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893 + the WSFC/FCI shared-attach
     ``vm.disk.attach`` / #3256, the folder-template

@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-08
+
 ### Fixed
 
 - `pfsense.mgmt_flow.summary` honours the `pfctl -ss` direction arrow when splitting server/client, so operator-initiated flows are no longer reported as unexpected sources (#3471).

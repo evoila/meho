@@ -85,6 +85,11 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._supervisor import (
+    supervisor_disable_composite,
+    supervisor_enable_composite,
+    supervisor_status_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
@@ -156,6 +161,12 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
+    SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
+    SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
+    SUPERVISOR_ENABLE_RESPONSE_SCHEMA,
+    SUPERVISOR_STATUS_PARAMETER_SCHEMA,
+    SUPERVISOR_STATUS_RESPONSE_SCHEMA,
     VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
     VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA,
     VM_CLONE_PARAMETER_SCHEMA,
@@ -341,6 +352,24 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "guest', 'what does the guest think its network is?', 'drop this config "
         "file into the guest', or 'run Install-WindowsFeature inside the guest'. "
         "Requires VMware Tools in the guest."
+    ),
+    "namespace_management": (
+        "Use for governed vSphere Supervisor (Workload Control Plane / WCP) "
+        "lifecycle on a cluster -- the governed replacement for out-of-band "
+        "'govc'/'kubectl-vsphere' enablement. Writes (dangerous / "
+        "approval-required): enable the Supervisor on a single compute cluster "
+        "(supervisor.enable -- takes the nested EnableOnComputeClusterSpec: "
+        "control_plane + workloads with a network stack the composite validates, "
+        "VSPHERE+VSPHERE_FOUNDATION for the VDS + Foundation LB model or NSX_VPC "
+        "for NSX VPC), and disable/tear it down (supervisor.disable). Both are "
+        "asynchronous -- they return immediately and you poll for convergence. "
+        "Read (safe): supervisor.status -- read a cluster's config_status "
+        "(CONFIGURING -> RUNNING / ERROR) + kubernetes_status (READY) shaped so a "
+        "runbook OperationCallVerify step or a Sensor can poll ready==true. The "
+        "right group for 'stand up Kubernetes on this cluster', 'tear the "
+        "Supervisor down', or 'has the Supervisor come up yet?'. Pair with "
+        "'storage' for the SPBM policy id the enable spec needs and 'networking' "
+        "for the workload / management network context."
     ),
 }
 
@@ -1430,6 +1459,82 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
                 "OperationResult verbatim (awaiting_approval / denied)."
             ),
         },
+    ),
+    # ----------------------------------------------------------------
+    # namespace-management -- Supervisor (WCP) lifecycle (#3281).
+    # 2 dangerous / approval-required writes + 1 safe status read.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.enable",
+        handler=supervisor_enable_composite,
+        summary="Enable a vSphere Supervisor (WCP) on a single compute cluster.",
+        description=(
+            "Enables the vSphere Supervisor on a cluster via "
+            "POST /vcenter/namespace-management/supervisors/{cluster}"
+            "?action=enable_on_compute_cluster (the current 9.x path; the "
+            "clusters/{cluster}?action=enable form is deprecated as of vSphere "
+            "9.0). Takes the nested EnableOnComputeClusterSpec (name + "
+            "control_plane + workloads + optional zone). Validates the spec "
+            "server-side -- the control-plane essentials (management network + "
+            "SPBM storage policy) and the workload network stack -- and refuses "
+            "an unknown network_type / edge provider loudly "
+            "(status='unknown_network_provider') before any write. The VDS + "
+            "Foundation LB model is network_type=VSPHERE + edge "
+            "provider=VSPHERE_FOUNDATION (no separate NSX edge cluster); NSX VPC "
+            "is NSX_VPC/NSX_VPC. Asynchronous: returns the new Supervisor id "
+            "immediately (status='enabling') and does NOT block on the 30-60 min "
+            "convergence -- poll vmware.composite.supervisor.status. Governed "
+            "replacement for out-of-band 'govc'/'kubectl-vsphere' enablement."
+        ),
+        parameter_schema=SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_ENABLE_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.disable",
+        handler=supervisor_disable_composite,
+        summary="Disable / tear down the vSphere Supervisor on a cluster.",
+        description=(
+            "Tears the Supervisor down via "
+            "POST /vcenter/namespace-management/clusters/{cluster}?action=disable "
+            "(DELETE clusters/{cluster} 404s -- the action form is the documented "
+            "teardown). No request body; removes the control-plane VMs and worker "
+            "nodes but leaves the cluster's networking / zone intact for a fresh "
+            "re-enable. Asynchronous: returns status='disabling' immediately "
+            "-- poll vmware.composite.supervisor.status (config_status moves "
+            "through 'REMOVING'). Governed replacement for out-of-band teardown."
+        ),
+        parameter_schema=SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.status",
+        handler=supervisor_status_composite,
+        summary="Read a cluster's Supervisor config + kubernetes status (poll-friendly).",
+        description=(
+            "Reads GET /vcenter/namespace-management/clusters/{cluster} and "
+            "reshapes Clusters.Info into a compact, inline-pollable envelope: the "
+            "scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + "
+            "kubernetes_status (READY/WARNING/ERROR) + a derived ready flag stay "
+            "top-level so a runbook OperationCallVerify step or a Sensor assertion "
+            "can poll config_status=='RUNNING' / ready==true directly. The "
+            "messages + conditions arrays are capped inline (messages_limit). "
+            "Read-only -- never mutates cluster state. The status op enable/disable "
+            "hand the caller for the asynchronous convergence poll."
+        ),
+        parameter_schema=SUPERVISOR_STATUS_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_STATUS_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "read-only", "namespace-management", "supervisor", "wcp"],
+        safety_level="safe",
+        requires_approval=False,
     ),
 )
 

@@ -10,7 +10,11 @@ Copyright (c) 2026 evoila Group
 > repo's local Claude Code sessions prefer MEHO surfaces over local
 > script fallbacks. The template itself is the deliverable; this
 > guide is the wrapper that walks the install, verify, customise,
-> and refresh paths.
+> and refresh paths. The template — and the Claude Code plugin
+> skills — are **rendered** from one source,
+> [`contract/meho-first-routing.md`](./contract/meho-first-routing.md);
+> edit the contract and regenerate, never hand-edit the rendered
+> files.
 
 ## Why this template exists — the two-layer split
 
@@ -71,7 +75,7 @@ the operator's shell profile rather than hard-code it:
 
 ```bash
 # In ~/.bashrc / ~/.zshrc / etc., one line per tenant you operate.
-export MEHO_INSTANCE="https://meho.evba.lab"
+export MEHO_INSTANCE="https://meho.example.com"
 ```
 
 If you prefer to inline the value in the file, replace every
@@ -154,10 +158,10 @@ broadcast-pipeline regression to file under
 
 Open a fresh Claude Code session in the repo and ask:
 
-> *"How do I find recent activity against the rdc-vault target?"*
+> *"How do I find recent activity against the vault-prod target?"*
 
 A session that has read the template answers with `meho audit
-who-touched rdc-vault` (or `meho audit query --target rdc-vault`),
+who-touched vault-prod` (or `meho audit query --target vault-prod`),
 not with `grep -r vault scripts/` or by reading log files. Ask the
 same question pre-template-install and post-install on a fresh
 session to see the shift.
@@ -186,9 +190,9 @@ the comment marker the template ships with:
      Keep the canonical Layer-2 routing rules above untouched so
      diffs against upstream stay clean. -->
 
-## Tenant-specific rules (rdc-internal)
+## Tenant-specific rules (example-tenant)
 
-- Production cluster patches require Slack #ops approval before
+- Production cluster patches require team approval before
   `meho vmware cluster patch …`.
 - Vault paths under `secret/customer/<id>/…` are operator-touch-only;
   agents must escalate before reading.
@@ -198,9 +202,12 @@ Patterns to follow:
 
 * **Don't edit the top of the template in place** — the diff against
   upstream becomes noisy and re-pulls (Step 5) become merge
-  conflicts. If you disagree with a canonical rule, file an issue
-  upstream so the discussion lands in one place instead of
-  fragmenting across tenants.
+  conflicts. The canonical routing rules above the marker are
+  **generated** from
+  [`contract/meho-first-routing.md`](./contract/meho-first-routing.md);
+  a fix belongs in that contract upstream, not in your copy. If you
+  disagree with a canonical rule, file an issue upstream so the
+  discussion lands in one place instead of fragmenting across tenants.
 * **Tenant-wide operational rules belong in Layer 1, not Layer 2.**
   Use `meho conventions edit <slug>` (when the verb ships via
   [G7.1-T3 #315](https://github.com/evoila/meho/issues/315)) to

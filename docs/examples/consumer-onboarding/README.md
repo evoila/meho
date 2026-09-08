@@ -33,8 +33,17 @@ surfaces over per-machine fallbacks.
 | File | Purpose |
 |---|---|
 | `README.md` | This file. Directory pointer — explains the Layer 1 vs Layer 2 framing and when to add files here versus `docs/cross-repo/`. |
-| [`CLAUDE.md`](./CLAUDE.md) | The template itself. ~180 lines of routing rules a local Claude session reads on session start, telling it to prefer `meho` CLI verbs over local scripts. Copy into your consumer repo's root (or merge with an existing `CLAUDE.md`). |
+| [`contract/meho-first-routing.md`](./contract/meho-first-routing.md) | **The single source.** The evidence-first "prefer MEHO before any work" routing discipline, authored once. Both the `CLAUDE.md` template below and the Claude Code plugin skills are rendered from it. |
+| [`CLAUDE.md`](./CLAUDE.md) | The template itself — **generated** from the contract above, not hand-edited. Routing rules a local Claude session reads on session start, telling it to prefer MEHO surfaces (MCP tools and `meho` CLI verbs) over local scripts. Copy into your consumer repo's root (or merge with an existing `CLAUDE.md`). |
 | [`ONBOARDING.md`](./ONBOARDING.md) | How to install the template, how to verify a local session is routing through MEHO, how to add tenant-specific overrides, and how to refresh the template when MEHO ships a new minor version. |
+
+Editing the routing discipline: change
+[`contract/meho-first-routing.md`](./contract/meho-first-routing.md),
+then run `python scripts/ci/gen_consumer_routing.py` to re-render every
+vehicle. A pinned drift test (`backend/tests/test_consumer_routing_render.py`)
+fails CI if any rendered file is hand-edited — the same
+"single-authoritative-snapshot" shape as `test_mcp_surface_conformance.py`,
+applied to generated files.
 
 ## The two-layer surface
 

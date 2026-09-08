@@ -2,37 +2,63 @@
 SPDX-License-Identifier: Apache-2.0
 Copyright (c) 2026 evoila Group
 
-GENERATED FILE — DO NOT EDIT.
-Rendered from docs/examples/consumer-onboarding/contract/meho-first-routing.md
-by scripts/ci/gen_consumer_routing.py. Edit the contract source and re-run
-the generator; backend/tests/test_consumer_routing_render.py fails CI on drift.
+MEHO-first routing contract — the SINGLE authoritative source.
 
-This file is the **MEHO Layer-2 starter template**. Copy it into your
-consumer repo's root as `CLAUDE.md` (or merge it with an existing
-CLAUDE.md). It tells any local Claude Code session that opens your repo to
-prefer MEHO surfaces over per-machine fallbacks.
+This file is the one place the "prefer MEHO before any work" routing
+discipline is written. Two public delivery vehicles are RENDERED from it,
+never hand-edited:
 
-Claude Code users: install the versioned plugin instead of copy-merging —
-`claude plugin marketplace add evoila/meho` then `/plugin install meho@meho`
-carries the same routing discipline as skills, refreshed on upgrade. This
-template remains authoritative for non-plugin clients (Cline, Continue, CI
-bots) that read a `CLAUDE.md`.
+  * the Claude Code plugin skills
+    (clients/claude-code-plugin/skills/{prefer-meho,operations,knowledge,
+    memory,broadcast}/SKILL.md), and
+  * the Layer-2 copy-merge starter (docs/examples/consumer-onboarding/
+    CLAUDE.md), authoritative for non-plugin clients (Cline, Continue, CI
+    bots).
 
-Source of truth:
-  https://github.com/evoila/meho/blob/main/docs/examples/consumer-onboarding/contract/meho-first-routing.md
-The onboarding guide next to it (`ONBOARDING.md`) walks the install + verify
-path.
+Edit the routing discipline HERE, then run:
+
+    python scripts/ci/gen_consumer_routing.py
+
+to re-render every vehicle. A pinned drift test
+(backend/tests/test_consumer_routing_render.py) byte-compares the rendered
+files against this source and fails CI if a rendering was hand-edited —
+the same "single authoritative snapshot, pinned so it cannot silently
+drift" shape as backend/tests/test_mcp_surface_conformance.py, applied to
+generated files instead of the MCP wire listing.
+
+Authoring rules:
+
+  * The routing PROSE lives in the fragments below, delimited by
+    `<!-- fragment:START <id> -->` / `<!-- fragment:END <id> -->`. The
+    generator assembles each vehicle from an ordered list of fragment ids
+    plus per-vehicle framing (frontmatter, headers). The frontmatter and
+    "generated" banners live in the generator; the discipline lives here.
+  * Every MCP tool name MUST match docs/codebase/mcp.md exactly. The
+    consumer-tool-name guard (scripts/ci/check_consumer_tool_names.py)
+    scans this file too, so a typo fails CI here as loudly as in a
+    rendered file.
+  * No estate identifiers. Use `$MEHO_INSTANCE` and `meho.example.com`
+    placeholders only — no real hostnames, realms, IPs, or operator
+    names.
+  * Fragment headings are authored at the skill-native level (`##`). The
+    generator shifts them one level deeper (`###`) where a vehicle nests
+    them under a parent section (the CLAUDE.md "Preferred MEHO surfaces"
+    block).
 -->
 
-# CLAUDE.md — MEHO-first operations
+# MEHO-first routing contract
 
-This repo uses [MEHO](https://github.com/evoila/meho) for infrastructure
-operations. When you (Claude Code or another local agent) operate here,
-**prefer MEHO surfaces over local fallbacks** unless explicitly told
-otherwise. The routing discipline below is rendered from the
-[MEHO-first routing contract](./contract/meho-first-routing.md); edit the
-contract and regenerate, never hand-edit this file.
+This is a **routing contract**, not vendor knowledge. It defines the rule
+every session in a MEHO-wired repo follows for both **evidence and
+execution**: the MEHO backplane is the default surface for everything the
+work rests on — reads and writes, but also memory, knowledge, vendor docs,
+topology, audit, coordination, runbooks, and (where the add-on is paired)
+automation. Local capabilities — a connector wrapper, a raw vendor call, a
+local `kb/` or memory file — are break-glass fallbacks, never a first
+reach. A task with **no** connector call — a pure memory, knowledge, or
+vendor-doc question — is still a routing decision this contract governs.
 
+<!-- fragment:START why -->
 ## Why MEHO first
 
 MEHO writes an append-only audit row for every operation, broadcasts a live
@@ -42,7 +68,9 @@ wrapper, a raw `curl`, or a hand-edited file. Routing through the backplane
 by default keeps every action on one identity + audit plane, and turns a
 genuine capability gap into a filed, tracked issue instead of a silent
 old-habit reach.
+<!-- fragment:END why -->
 
+<!-- fragment:START discovery -->
 ## Backplane discovery — the first act of every session
 
 Before doing any work, establish **which backplane serves this repo** and
@@ -65,7 +93,9 @@ routing decision after it assumes a known, reachable backplane.
 - **Configured but unreachable** (VPN, pod, cert, or auth outage) is the
   transient fallback path: notify the operator and fall back for the
   session.
+<!-- fragment:END discovery -->
 
+<!-- fragment:START route-table -->
 ## Route by evidence need
 
 Once the backplane is known, route each need to its governed surface
@@ -85,7 +115,9 @@ verbs run the same governed dispatch.
 | **coordination** with other operators | MCP `meho_broadcast_recent` / `meho_broadcast_announce` / `meho_broadcast_watch` (MCP-only — no CLI verbs yet, see note) | recording intent in the work ticket |
 | a **guided multi-step procedure the agent drives itself** | MCP `meho_runbook_list_templates` / `meho_runbook_start` / `meho_runbook_next` / `meho_runbook_abort` | following a local runbook doc by hand |
 | **recurring, durable, multi-step** work | MCP `meho_automation_list` — route-if-discovered (see note) | a local script or manual sequence |
+<!-- fragment:END route-table -->
 
+<!-- fragment:START route-notes -->
 ## Notes on the rows that carry a nuance
 
 - **Docs are capability-gated.** `search_docs` / `ask_docs` answer only over
@@ -106,13 +138,108 @@ verbs run the same governed dispatch.
   (agent-driven, step-at-a-time, on the default surface) and automation
   blueprints (operator-launched, durable, a paired add-on family) are **not
   interchangeable**.
+<!-- fragment:END route-notes -->
 
-## Preferred MEHO surfaces
+<!-- fragment:START evidence-quality -->
+## Evidence quality stays visible
 
-The routing table above keys each need to a governed surface. The sections
-below give the concrete MCP tools and CLI verbs per area.
+Every answer that rests on retrieved docs, memory, or knowledge **cites its
+provenance**: the source, the observation time, the applicable product
+version, and any coverage gaps ("not in the corpus"; "memory scoped to one
+operator"; "knowledge last verified <date>"). A retrieved or remembered
+fact **never substitutes for a required live observation** — when the
+question is about a live target's current state, the corpus or memory tells
+you what to *expect*, and the governed read tells you what is *true*. Label
+**hypothesis vs verified** explicitly; an unmarked guess is worse than no
+answer.
+<!-- fragment:END evidence-quality -->
 
-### Knowledge — finding facts
+<!-- fragment:START close-loop -->
+## Close the loop
+
+A **verified** outcome goes back to the right store, through the backplane,
+so the next session inherits it:
+
+- an operator **preference** → scoped memory (`add_to_memory`, the narrowest
+  scope that fits);
+- a **reusable lesson** → tenant knowledge (`add_to_knowledge`);
+- a **repeatable procedure** → propose a runbook template (agent-driven) or
+  an automation blueprint (operator-launched).
+
+Mark **hypothesis vs verified** on the way in, and keep provenance (what was
+observed, when, against which target). Writing back through the backplane
+rather than a local file is what makes the outcome audited and visible to
+the team.
+
+**A session proposes; it never approves.** Parking a destructive operation
+for two-person review is a session action, but approving or rejecting that
+parked operation — and granting an elevated role — are **human decisions
+with no MCP path under any scope**: `meho_approvals_approve`,
+`meho_approvals_reject`, and `meho_agents_grant_elevate` exist in the
+console / CLI only, and an MCP `tools/call` for them answers with a
+remediation naming that path. Never wait on your own approval.
+<!-- fragment:END close-loop -->
+
+<!-- fragment:START constraints -->
+## Constraints for agent (service-principal) sessions
+
+- A client-credential service principal **has no agent session id** today
+  ([evoila/meho#3446](https://github.com/evoila/meho/issues/3446)), so
+  audit-replay-by-session does not reconstruct its work — query the audit
+  log by `work_ref` instead.
+- The **CLI has no broadcast verbs yet**
+  ([evoila/meho#3470](https://github.com/evoila/meho/issues/3470)); the
+  broadcast tools are MCP-only until parity ships.
+- A service principal **can park a destructive op for two-person approval
+  without holding a standing grant**
+  ([evoila/meho#3478](https://github.com/evoila/meho/issues/3478)) — the
+  propose-and-park path is open to an agent even where direct execution is
+  not. The approval decision itself remains human (see *Close the loop*).
+<!-- fragment:END constraints -->
+
+<!-- fragment:START break-glass -->
+## Break-glass — preference is not permission
+
+**Break-glass** is the word for any reach past the backplane: a local
+wrapper, a raw vendor call, or a local `kb/` / memory file used because the
+governed surface could not serve the need. It is never silent and never
+casual — it is an **explicit, recorded** action, and for a genuine
+capability gap a **filed** one.
+
+"MEHO can't do it" must be **established, not assumed**: check
+`search_operations` / `list_operation_groups` / `list_targets` against the
+live deploy before declaring a gap. Then, before breaking glass:
+
+1. **Notify** the operator in the conversation — what MEHO surface you
+   tried, why it can't cover the action (the verbatim error where one
+   exists), and the local invocation you are about to run instead.
+2. **File / cite** the gap — a genuine MEHO capability gap is one upstream
+   issue per *distinct* gap (repeat encounters cite, they don't re-file); a
+   target simply not registered yet is a consumer-side registration ticket,
+   not an upstream bug.
+3. **Record** the deviation on the work ticket, and **fall back** for that
+   one action. The next action starts again at the top of the routing rule.
+
+A capability gap the change depends on must be linked from the change (the
+signal or the registration ticket travels with the PR) — preference states
+where you *should* route; it is not permission to route past the backplane
+unrecorded.
+<!-- fragment:END break-glass -->
+
+<!-- fragment:START stays-local -->
+## What stays local
+
+- **Repo-discipline rules** — PR cadence, ticket + PR workflow — apply to
+  repo work, not infra ops.
+- **Per-machine credentials** — Vault is canonical for shared secrets; the
+  operator's MEHO token lives in the local keyring /
+  `~/.config/meho/credentials.json`. The broadcast feed never carries
+  credentials.
+- **Repo-internal generators and sidecar conventions.**
+<!-- fragment:END stays-local -->
+
+<!-- fragment:START kb-find -->
+## Knowledge — finding facts
 
 The MEHO knowledge base is the authoritative, searchable, audited store of
 operational facts for this tenant. Prefer it over local `kb/` files.
@@ -122,8 +249,10 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   whole knowledge store.
 - `meho kb show <slug>` — full body of one entry; `meho kb list` —
   enumerate entries.
+<!-- fragment:END kb-find -->
 
-### Knowledge — recording facts
+<!-- fragment:START kb-record -->
+## Knowledge — recording facts
 
 - Prefer `add_to_knowledge` (MCP) / `meho kb add <slug>` (CLI, `--body @-`
   to take the body from stdin) over creating or editing a file under `kb/`.
@@ -131,8 +260,10 @@ operational facts for this tenant. Prefer it over local `kb/` files.
   tenant.
 - `meho kb delete <slug>` — remove an entry; `meho kb ingest <directory>` —
   bulk-import an existing directory of markdown facts.
+<!-- fragment:END kb-record -->
 
-### Vendor docs (RAG) — capability-gated
+<!-- fragment:START kb-docs -->
+## Vendor docs (RAG) — capability-gated
 
 For a vendor- or version-specific fact (a configuration maximum, an API
 shape, a KB-article symptom), route to the docs collections the tenant has
@@ -147,8 +278,10 @@ ground it.
   coverage gap, rather than answering the vendor-version question from
   memory. These tools are gated by the `meho-docs` capability; a session
   without it does not see them.
+<!-- fragment:END kb-docs -->
 
-### Memory — recording preferences and notes
+<!-- fragment:START mem-record -->
+## Memory — recording preferences and notes
 
 MEHO memory carries operator preferences and durable notes across machines
 and scopes them correctly. Prefer it over per-laptop local memory files for
@@ -161,16 +294,20 @@ that fits:
   notes scoped to one tenant.
 - `meho remember "…" --scope tenant` — team-shared knowledge visible to the
   whole tenant (requires the `tenant_admin` role).
+<!-- fragment:END mem-record -->
 
-### Memory — recalling and managing
+<!-- fragment:START mem-manage -->
+## Memory — recalling and managing
 
 - `search_memory` (MCP) / `meho memory list` (CLI) — find or enumerate
   entries in scope.
 - `meho memory recall <scope>/<slug>` — read one entry.
 - `meho memory forget <scope>/<slug>` — remove one entry.
 - `meho memory promote <scope>/<slug>` — raise an entry to a broader scope.
+<!-- fragment:END mem-manage -->
 
-### Connectors — per-connector verbs
+<!-- fragment:START ops-connectors -->
+## Connectors — per-connector verbs
 
 Every operation through MEHO is authenticated, policy-checked, audited, and
 broadcast. MEHO ships per-connector verbs that pre-bake the connector so you
@@ -190,8 +327,10 @@ don't type it on every dispatch. Prefer them over `./scripts/<wrapper>.sh`:
   `meho k8s ls <path>`, `meho k8s logs <pod>`.
 - **Harbor / Hetzner / pfSense / gcloud / SDDC-Manager / VCF** — see
   `meho <connector> --help` for each.
+<!-- fragment:END ops-connectors -->
 
-### Generic dispatch and set-shaped results
+<!-- fragment:START ops-generic -->
+## Generic dispatch and set-shaped results
 
 When no alias verb exists yet, dispatch generically — same auth, audit, and
 policy as the alias verbs:
@@ -206,8 +345,10 @@ Any operation that returns a list larger than a handful of rows returns a
 **result handle**, not the raw payload. **Drill into it with `result_query`
 — never ask for the whole set dumped inline.** Page and filter through the
 handle; that is the only supported way to read set-shaped results.
+<!-- fragment:END ops-generic -->
 
-### Targets and topology
+<!-- fragment:START ops-targets-topology -->
+## Targets and topology
 
 - **Inventory** — prefer `list_targets` (MCP) / `meho targets describe
   <name>` / `meho targets list` (CLI, filter with `--product vault` /
@@ -218,8 +359,10 @@ handle; that is the only supported way to read set-shaped results.
   change. It is a governed read on the default surface, distinct from the
   flat inventory `list_targets` returns — reach for it before a change whose
   reach you have not established.
+<!-- fragment:END ops-targets-topology -->
 
-### Post-configure verification gate — observe readiness, don't infer it
+<!-- fragment:START linux-day0 -->
+## Post-configure verification gate — observe readiness, don't infer it
 
 When a provisioning run stands up a Linux host — or you finish configuring
 one — **readiness is an observation, not an inference from power-on**. A
@@ -275,8 +418,10 @@ meho operation call net-probe-1.x net.ntp_check  --params '{"host": "<ntp-host>"
 - Every step is a `safe`, read-only, audited op — the whole recipe is a
   governed alternative to a hand SSH session. Step 7 is served by the
   existing `net` connector, not a Linux verb.
+<!-- fragment:END linux-day0 -->
 
-### Audit (canonical history)
+<!-- fragment:START ops-audit -->
+## Audit (canonical history)
 
 Every MEHO op writes an audit row, so the audit log is the canonical,
 queryable history — no ad-hoc logging needed. The working path is the CLI;
@@ -293,8 +438,10 @@ the MCP `query_audit` tool is operator-gated (`mcp:admin`).
 A client-credential service principal has no agent session id today
 ([evoila/meho#3446](https://github.com/evoila/meho/issues/3446)); query its
 work by `work_ref` rather than by session.
+<!-- fragment:END ops-audit -->
 
-### Broadcast — cross-operator awareness
+<!-- fragment:START bcast-discipline -->
+## Broadcast — cross-operator awareness
 
 MEHO carries a per-tenant live feed of operator activity; other operators
 may be watching it and will see your work in real time. Follow this
@@ -315,16 +462,20 @@ tools are MCP-only — the CLI has no broadcast verbs yet
    conflicts surface mid-flight, not after the damage.
 4. **Report on completion** — announce with `phase="completion"` and a
    result summary.
+<!-- fragment:END bcast-discipline -->
 
-### Broadcast — read side for human operators
+<!-- fragment:START bcast-read -->
+## Broadcast — read side for human operators
 
 - `meho status --watch [--op-class read|write|credential_read|audit_query]
   [--principal <sub>] [--target <name>]` streams one-line events as they
   arrive; reconnect-with-replay is automatic.
 - The MCP resource `meho://tenant/<tenant_id>/feed` returns the most recent
   ~50 events as a snapshot for clients that poll rather than hold a socket.
+<!-- fragment:END bcast-read -->
 
-### Broadcast — two contracts to respect
+<!-- fragment:START bcast-trust -->
+## Broadcast — two contracts to respect
 
 - **Announcements are advisory, not enforced.** MEHO never blocks work on a
   missing announcement; the discipline is coordination guidance. The one
@@ -339,105 +490,4 @@ The dispatcher also auto-emits a broadcast event before and after every
 operation, so per-op awareness is handled implicitly. The four-step
 discipline above is the higher-level *intent* layer that per-op auto-emits
 do not cover.
-
-## Evidence quality stays visible
-
-Every answer that rests on retrieved docs, memory, or knowledge **cites its
-provenance**: the source, the observation time, the applicable product
-version, and any coverage gaps ("not in the corpus"; "memory scoped to one
-operator"; "knowledge last verified <date>"). A retrieved or remembered
-fact **never substitutes for a required live observation** — when the
-question is about a live target's current state, the corpus or memory tells
-you what to *expect*, and the governed read tells you what is *true*. Label
-**hypothesis vs verified** explicitly; an unmarked guess is worse than no
-answer.
-
-## Close the loop
-
-A **verified** outcome goes back to the right store, through the backplane,
-so the next session inherits it:
-
-- an operator **preference** → scoped memory (`add_to_memory`, the narrowest
-  scope that fits);
-- a **reusable lesson** → tenant knowledge (`add_to_knowledge`);
-- a **repeatable procedure** → propose a runbook template (agent-driven) or
-  an automation blueprint (operator-launched).
-
-Mark **hypothesis vs verified** on the way in, and keep provenance (what was
-observed, when, against which target). Writing back through the backplane
-rather than a local file is what makes the outcome audited and visible to
-the team.
-
-**A session proposes; it never approves.** Parking a destructive operation
-for two-person review is a session action, but approving or rejecting that
-parked operation — and granting an elevated role — are **human decisions
-with no MCP path under any scope**: `meho_approvals_approve`,
-`meho_approvals_reject`, and `meho_agents_grant_elevate` exist in the
-console / CLI only, and an MCP `tools/call` for them answers with a
-remediation naming that path. Never wait on your own approval.
-
-## Constraints for agent (service-principal) sessions
-
-- A client-credential service principal **has no agent session id** today
-  ([evoila/meho#3446](https://github.com/evoila/meho/issues/3446)), so
-  audit-replay-by-session does not reconstruct its work — query the audit
-  log by `work_ref` instead.
-- The **CLI has no broadcast verbs yet**
-  ([evoila/meho#3470](https://github.com/evoila/meho/issues/3470)); the
-  broadcast tools are MCP-only until parity ships.
-- A service principal **can park a destructive op for two-person approval
-  without holding a standing grant**
-  ([evoila/meho#3478](https://github.com/evoila/meho/issues/3478)) — the
-  propose-and-park path is open to an agent even where direct execution is
-  not. The approval decision itself remains human (see *Close the loop*).
-
-## Break-glass — preference is not permission
-
-**Break-glass** is the word for any reach past the backplane: a local
-wrapper, a raw vendor call, or a local `kb/` / memory file used because the
-governed surface could not serve the need. It is never silent and never
-casual — it is an **explicit, recorded** action, and for a genuine
-capability gap a **filed** one.
-
-"MEHO can't do it" must be **established, not assumed**: check
-`search_operations` / `list_operation_groups` / `list_targets` against the
-live deploy before declaring a gap. Then, before breaking glass:
-
-1. **Notify** the operator in the conversation — what MEHO surface you
-   tried, why it can't cover the action (the verbatim error where one
-   exists), and the local invocation you are about to run instead.
-2. **File / cite** the gap — a genuine MEHO capability gap is one upstream
-   issue per *distinct* gap (repeat encounters cite, they don't re-file); a
-   target simply not registered yet is a consumer-side registration ticket,
-   not an upstream bug.
-3. **Record** the deviation on the work ticket, and **fall back** for that
-   one action. The next action starts again at the top of the routing rule.
-
-A capability gap the change depends on must be linked from the change (the
-signal or the registration ticket travels with the PR) — preference states
-where you *should* route; it is not permission to route past the backplane
-unrecorded.
-
-## What stays local
-
-- **Repo-discipline rules** — PR cadence, ticket + PR workflow — apply to
-  repo work, not infra ops.
-- **Per-machine credentials** — Vault is canonical for shared secrets; the
-  operator's MEHO token lives in the local keyring /
-  `~/.config/meho/credentials.json`. The broadcast feed never carries
-  credentials.
-- **Repo-internal generators and sidecar conventions.**
-
-## Versioning
-
-This template is rendered from a versioned contract that rides MEHO
-releases. After upgrading the CLI (`meho version` reports the client
-version, `meho status` the backplane version), re-pull this file from
-upstream and merge the diff against your tenant-specific customisations
-below the marker. The
-[onboarding guide](https://github.com/evoila/meho/blob/main/docs/examples/consumer-onboarding/ONBOARDING.md)
-walks the refresh procedure.
-
-<!-- Add tenant-specific or repo-specific rules below this marker.
-     Keep the canonical Layer-2 routing rules above untouched so
-     diffs against upstream stay clean. -->
+<!-- fragment:END bcast-trust -->

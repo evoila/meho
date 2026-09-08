@@ -250,6 +250,27 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only; the park-time bespoke preview echoes only program
         # identity + argument byte size + env-var NAMES, never any value.
         "linux.script.run",
+        # #3497 — the governed SDDC Manager host-commission write pair. Both
+        # take the same ``{"spec": [<HostCommissionSpec>, ...]}`` params, and
+        # each spec item declares a ``password`` (the ESXi host root password
+        # POSTed to /v1/hosts/validations resp. /v1/hosts). ``password`` is a
+        # secret-*named* key the runtime ``scrub_broadcast_params`` key-scrub
+        # would catch, but the classifier-coverage lint (meho-internal #151)
+        # requires every op *declaring* a secret-shaped param to be statically
+        # pinned to a ``credential_*`` class so its broadcast collapses to
+        # aggregate-only, not merely field-redacted. ``.validate`` is not even
+        # a ``.write`` suffix (it would fall through to ``other``) and
+        # ``.commission`` would classify plain ``write`` — either would ship
+        # the host passwords on the feed. Pinning both collapses the params
+        # dict to aggregate-only. The sibling domain writes
+        # (``sddc.domain.validate`` / ``sddc.domain.create``) carry their
+        # passwords inside an open-``additionalProperties`` DomainCreationSpec
+        # (no *declared* secret prop), so the lint does not flag them; the
+        # runtime scrub catches their nested ``*password*`` keys and collapses
+        # the broadcast, exactly the two-layer split that pins ``vault.kv.put``
+        # statically while leaving its generic ``data`` container to the scrub.
+        "sddc.host.validate",
+        "sddc.host.commission",
     }
 )
 

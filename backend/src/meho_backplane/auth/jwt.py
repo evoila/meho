@@ -54,9 +54,12 @@ completes.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
 import time
 import warnings
+from collections import OrderedDict
 from typing import Any, NoReturn
 from uuid import UUID
 
@@ -149,12 +152,49 @@ _jwks_cache: dict[str, Any] | None = None
 _jwks_fetched_at: float = 0.0
 _jwks_lock: asyncio.Lock = asyncio.Lock()
 
+#: Forced-refresh cooldown (S22 / #310). On an unknown-``kid`` token the
+#: decoder forces a live JWKS re-fetch (discovery GET + JWKS GET) that
+#: deliberately skips the TTL. Unbounded, a stream of well-formed but
+#: unsigned bearer tokens carrying random ``kid`` headers would drive one
+#: Keycloak round-trip *per request* — an unauthenticated caller steering
+#: downstream work. This cooldown refuses a *second* forced refresh
+#: within the window (measured from the last permitted forced refresh, not
+#: from an ordinary cache-fill), so a burst of distinct unknown ``kid`` values
+#: costs at most one round-trip per window. A genuine key rotation arrives
+#: well after the last forced refresh (a natural traffic gap), so it still
+#: refreshes once and authenticates.
+_FORCE_REFRESH_COOLDOWN_SECONDS: float = 30.0
+
+#: Bounded negative cache of ``kid`` values confirmed absent from the
+#: keyset *after* a forced refresh (S22 / #310). A repeat of such a
+#: ``kid`` fails closed without another refresh, extending the bound
+#: past the cooldown for a kid an attacker replays slowly. Entries carry
+#: an insertion timestamp and expire after ``_NEGATIVE_KID_TTL_SECONDS``
+#: so a ``kid`` Keycloak later publishes recovers within the JWKS
+#: staleness envelope; the cache is size-bounded (LRU eviction) so it
+#: cannot itself grow without limit under a distinct-``kid`` flood.
+_NEGATIVE_KID_TTL_SECONDS: float = 300.0
+_NEGATIVE_KID_CACHE_MAX: int = 128
+
+#: Monotonic timestamp of the last permitted forced refresh. ``-inf``
+#: means "never", so the first forced refresh after startup (or after a
+#: cache clear) is always allowed — preserving the bounded single-retry
+#: contract and the genuine-rotation path.
+_last_forced_refresh_at: float = float("-inf")
+
+#: ``kid`` -> monotonic insertion time for the negative cache. An
+#: ``OrderedDict`` gives O(1) LRU bounding via ``move_to_end`` /
+#: ``popitem(last=False)``.
+_negative_kids: OrderedDict[str, float] = OrderedDict()
+
 
 def clear_jwks_cache() -> None:
     """Invalidate the JWKS cache. Test-only — never call from production."""
-    global _jwks_cache, _jwks_fetched_at
+    global _jwks_cache, _jwks_fetched_at, _last_forced_refresh_at
     _jwks_cache = None
     _jwks_fetched_at = 0.0
+    _last_forced_refresh_at = float("-inf")
+    _negative_kids.clear()
 
 
 async def _http_get_json(url: str) -> dict[str, Any]:
@@ -536,6 +576,78 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
+def _peek_kid(token: str) -> str | None:
+    """Return the ``kid`` from a compact JWS header without verifying anything.
+
+    Reads only the base64url-encoded header segment to key the negative
+    cache. No signature and no claim is trusted here — the actual
+    security decision still runs through full signature + claim
+    verification in :func:`_decode_with_jwks`; this is a lookup key, not
+    an authorization input. Returns ``None`` for any token whose header
+    can't be parsed or omits a string ``kid`` (such a token fails through
+    the unchanged ``malformed_jws`` / kid-miss paths).
+    """
+    try:
+        header_segment = token.split(".", 1)[0]
+        padded = header_segment + "=" * (-len(header_segment) % 4)
+        decoded = base64.urlsafe_b64decode(padded)
+        header = json.loads(decoded)
+    except ValueError:
+        # Covers bad base64 (binascii.Error), bad UTF-8
+        # (UnicodeDecodeError) and non-JSON (JSONDecodeError) — all
+        # ValueError subclasses — so a malformed header keys no cache.
+        return None
+    if not isinstance(header, dict):
+        return None
+    kid = header.get("kid")
+    return kid if isinstance(kid, str) else None
+
+
+def _is_known_missing_kid(kid: str, now: float) -> bool:
+    """Return True if *kid* is in the negative cache and its entry is fresh.
+
+    Expired entries are evicted on access so a ``kid`` Keycloak later
+    publishes recovers after ``_NEGATIVE_KID_TTL_SECONDS``. A fresh hit
+    is moved to the MRU end so the bounded cache keeps the actively
+    replayed bad keys.
+    """
+    inserted = _negative_kids.get(kid)
+    if inserted is None:
+        return False
+    if now - inserted >= _NEGATIVE_KID_TTL_SECONDS:
+        del _negative_kids[kid]
+        return False
+    _negative_kids.move_to_end(kid)
+    return True
+
+
+def _remember_missing_kid(kid: str, now: float) -> None:
+    """Record *kid* as confirmed-absent, bounding the cache by size (LRU)."""
+    _negative_kids[kid] = now
+    _negative_kids.move_to_end(kid)
+    while len(_negative_kids) > _NEGATIVE_KID_CACHE_MAX:
+        _negative_kids.popitem(last=False)
+
+
+async def _reserve_forced_refresh() -> bool:
+    """Return True when a forced JWKS refresh is permitted right now.
+
+    Records the reservation timestamp under ``_jwks_lock`` so a wave of
+    concurrent unknown-``kid`` requests reserves at most one refresh per
+    cooldown window; every later request in the window gets False and
+    fails closed. ``-inf`` initial state (and after a cache clear) makes
+    the first forced refresh always succeed, preserving the bounded
+    single-retry and genuine-rotation contracts.
+    """
+    global _last_forced_refresh_at
+    async with _jwks_lock:
+        now = time.monotonic()
+        if now - _last_forced_refresh_at < _FORCE_REFRESH_COOLDOWN_SECONDS:
+            return False
+        _last_forced_refresh_at = now
+        return True
+
+
 async def _decode_with_kid_rotation(
     token: str,
     settings: Settings,
@@ -559,6 +671,16 @@ async def _decode_with_kid_rotation(
     forced JWKS refresh is treated as a hard 401, preventing an
     infinite-refresh loop on a token whose ``kid`` truly does not exist.
 
+    The forced refresh is additionally bounded *across* requests (S22 /
+    #310): a bounded negative cache of ``kid`` values confirmed absent from a
+    freshly-fetched keyset, plus a cooldown that refuses a second live
+    refresh within the window, so a stream of unsigned bearer tokens
+    carrying random ``kid`` headers forces at most one Keycloak
+    discovery+JWKS round-trip per window rather than one per request. A
+    genuine key rotation still refreshes once and authenticates because
+    it arrives well after the last forced refresh. Both the chassis and
+    MCP chains inherit the bound through this shared decoder.
+
     ``expected_audience`` is forwarded to :func:`_decode_with_jwks` so
     callers (chassis ``verify_jwt`` vs MCP ``verify_mcp_jwt``) can
     enforce different audiences against the same JWKS + issuer pair.
@@ -581,7 +703,23 @@ async def _decode_with_kid_rotation(
     except _AUTHLIB_DECODE_ERRORS as exc:
         _raise_decode_401(exc, settings, expected_audience=expected_audience)
 
-    # Kid miss → refresh once and retry.
+    # Kid miss → refresh once and retry, but bound the forced re-fetch so
+    # a stream of unknown-``kid`` tokens can't drive one Keycloak
+    # round-trip per request (S22 / #310). Two guards gate the refresh:
+    #   1. a bounded negative cache short-circuits a ``kid`` already
+    #      confirmed absent from a freshly-fetched keyset;
+    #   2. a cooldown refuses a *second* live refresh within the window.
+    kid = _peek_kid(token)
+    if kid is not None and _is_known_missing_kid(kid, time.monotonic()):
+        raise _http_401("invalid_token")
+
+    if not await _reserve_forced_refresh():
+        # A forced refresh already ran inside the cooldown window; fail
+        # closed instead of hammering Keycloak once per unknown-kid
+        # request. A genuine rotation retries successfully once the
+        # window elapses (a real rotation is spaced well past it).
+        raise _http_401("invalid_token")
+
     try:
         jwks = await _fetch_jwks(force_refresh=True)
     except (httpx.HTTPError, KeyError):
@@ -593,6 +731,9 @@ async def _decode_with_kid_rotation(
         # A second ValueError after the forced refresh means the kid
         # truly is not in the JWKS — fail-closed as a structural
         # ``invalid_token`` (no claim-level diagnostic to surface).
+        # Remember it so a replay is short-circuited without a refresh.
+        if kid is not None:
+            _remember_missing_kid(kid, time.monotonic())
         raise _http_401("invalid_token") from retry_exc
     except _AUTHLIB_DECODE_ERRORS as retry_exc:
         _raise_decode_401(retry_exc, settings, expected_audience=expected_audience)

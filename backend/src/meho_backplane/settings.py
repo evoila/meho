@@ -1248,6 +1248,48 @@ class Settings(BaseModel):
     #: a source may override the cap per-source via
     #: ``event_source.extras["rate_per_minute"]``.
     events_ingest_rate_per_minute: int = Field(default=60, ge=0)
+    #: #3500 -- per-principal dispatch rate limit (requests per minute).
+    #: Applied on the shared dispatch path (``call_operation`` /
+    #: ``search_operations`` / ``preview_operation`` / ``result_query``,
+    #: on CLI, MCP and the REST dispatch route alike), keyed
+    #: ``meho:ratelimit:dispatch:{tenant}:{principal}`` on the broadcast
+    #: Valkey. ``0`` (the default) disables the limit entirely -- no
+    #: Valkey round-trip -- so existing tenants are unaffected until an
+    #: operator opts in. Set via ``DISPATCH_RATE_LIMIT_PER_MINUTE``.
+    dispatch_rate_limit_per_minute: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for ``dispatch_rate_limit_per_minute``.
+    #: CSV of ``<tenant-uuid>=<int>`` pairs (case-insensitive UUID,
+    #: whitespace ignored); a tenant absent from the map uses the global
+    #: default. Lets a shared instance hold an untrusted-visitor tenant to
+    #: a tight cap while production tenants keep headroom. Set via
+    #: ``DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES``.
+    dispatch_rate_limit_per_minute_overrides: str = ""
+    #: #3500 -- per-principal cap on concurrent in-flight top-level
+    #: dispatches, keyed ``meho:concurrency:dispatch:{tenant}:{principal}``.
+    #: ``0`` (the default) disables the cap. Set via
+    #: ``DISPATCH_MAX_CONCURRENT_OPS``.
+    dispatch_max_concurrent_ops: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for ``dispatch_max_concurrent_ops``
+    #: (same ``<tenant-uuid>=<int>`` CSV shape). Set via
+    #: ``DISPATCH_MAX_CONCURRENT_OPS_OVERRIDES``.
+    dispatch_max_concurrent_ops_overrides: str = ""
+    #: #3500 -- safety TTL (seconds) armed on a concurrency slot so a slot
+    #: leaked by a crashed worker self-heals rather than wedging a
+    #: principal forever. The normal path releases the slot when the op
+    #: finishes; this only bounds the crash case, so it is set generously
+    #: (an hour) to avoid expiring a genuinely long-running op's slot
+    #: early. Set via ``DISPATCH_CONCURRENCY_SLOT_TTL_SECONDS``.
+    dispatch_concurrency_slot_ttl_seconds: int = Field(default=3600, gt=0)
+    #: #3500 -- per-tenant cap on new MCP sessions per minute. MEHO holds
+    #: no session store, so this bounds ``initialize`` handshakes per
+    #: window (each is one new session) -- the cheap, deterministic proxy
+    #: for a "concurrent sessions" cap. ``0`` (the default) disables it.
+    #: Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE``.
+    mcp_session_start_limit_per_minute: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for
+    #: ``mcp_session_start_limit_per_minute`` (same ``<tenant-uuid>=<int>``
+    #: CSV shape). Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES``.
+    mcp_session_start_limit_per_minute_overrides: str = ""
     #: Look-back window (minutes) for the dispatch-time target-activity
     #: advisory (#2550). A write-class dispatch on a target with peer
     #: activity inside this window carries a compact
@@ -2198,6 +2240,30 @@ def get_settings() -> Settings:
         events_ingest_rate_per_minute=int(
             os.environ.get("EVENTS_INGEST_RATE_PER_MINUTE", "60"),
         ),
+        dispatch_rate_limit_per_minute=int(
+            os.environ.get("DISPATCH_RATE_LIMIT_PER_MINUTE", "0"),
+        ),
+        dispatch_rate_limit_per_minute_overrides=os.environ.get(
+            "DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES",
+            "",
+        ).strip(),
+        dispatch_max_concurrent_ops=int(
+            os.environ.get("DISPATCH_MAX_CONCURRENT_OPS", "0"),
+        ),
+        dispatch_max_concurrent_ops_overrides=os.environ.get(
+            "DISPATCH_MAX_CONCURRENT_OPS_OVERRIDES",
+            "",
+        ).strip(),
+        dispatch_concurrency_slot_ttl_seconds=int(
+            os.environ.get("DISPATCH_CONCURRENCY_SLOT_TTL_SECONDS", "3600"),
+        ),
+        mcp_session_start_limit_per_minute=int(
+            os.environ.get("MCP_SESSION_START_LIMIT_PER_MINUTE", "0"),
+        ),
+        mcp_session_start_limit_per_minute_overrides=os.environ.get(
+            "MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES",
+            "",
+        ).strip(),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),

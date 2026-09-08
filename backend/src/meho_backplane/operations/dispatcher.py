@@ -269,6 +269,7 @@ from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_and_broadcast_safe,
+    audit_rejection_safe,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -301,6 +302,7 @@ from meho_backplane.operations._errors import (
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
+    result_rate_limited,
     result_target_required,
     result_unknown_op,
     wrap_ok_result,
@@ -337,9 +339,18 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
+    COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
     DispatchChild,
+    composite_depth_var,
     get_dispatch_child,
+)
+from meho_backplane.operations.dispatch_limits import (
+    acquire_dispatch_slot,
+    check_dispatch_rate_limit,
+    release_dispatch_slot,
+    resolve_dispatch_concurrency_cap,
+    resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
@@ -350,6 +361,7 @@ from meho_backplane.redaction import (
     apply_connector_boundary_redaction,
     manifest_to_audit_payload,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CompositeRecursionLimitExceeded",
@@ -2435,6 +2447,68 @@ async def dispatch(
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
+    # --- Step 3.5: dispatch limits (#3500) --------------------------------
+    # Per-principal rate limit + per-principal concurrent-op cap, enforced
+    # here so CLI, MCP and the REST dispatch route are all covered by one
+    # seam (they all funnel through this function). Applied to TOP-LEVEL
+    # client requests only: a composite's internal ``dispatch_child`` fan-out
+    # (``composite_depth_var > 0``) is one client request, not many, and
+    # counting it would both misattribute volume and risk a self-deadlock
+    # against the cap; an approval-resume (``_approved``) is the continuation
+    # of a request already counted at park time. Both are exempt. Every limit
+    # defaults to disabled (0), so an unconfigured tenant reaches Step 4
+    # unchanged with no Valkey round-trip. A rejection is audited
+    # synchronously (``result_status='rate_limited'``) before any vendor
+    # traffic and surfaced as a structured 429-shaped envelope.
+    _dispatch_slot_key: str | None = None
+    if composite_depth_var.get() == COMPOSITE_DEPTH_TOP_LEVEL and not _approved:
+        _limit_settings = get_settings()
+        _rate_limit = resolve_dispatch_rate_limit(_limit_settings, operator.tenant_id)
+        _rate_retry = await check_dispatch_rate_limit(operator.tenant_id, operator.sub, _rate_limit)
+        if _rate_retry is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="rate_limited",
+                duration_ms=duration_ms,
+            )
+            return result_rate_limited(
+                op_id,
+                kind="rate",
+                limit=_rate_limit,
+                retry_after_seconds=_rate_retry,
+                duration_ms=duration_ms,
+            )
+        _conc_cap = resolve_dispatch_concurrency_cap(_limit_settings, operator.tenant_id)
+        _conc_retry, _dispatch_slot_key = await acquire_dispatch_slot(
+            operator.tenant_id,
+            operator.sub,
+            _conc_cap,
+            _limit_settings.dispatch_concurrency_slot_ttl_seconds,
+        )
+        if _conc_retry is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="rate_limited",
+                duration_ms=duration_ms,
+            )
+            return result_rate_limited(
+                op_id,
+                kind="concurrency",
+                limit=_conc_cap,
+                retry_after_seconds=_conc_retry,
+                duration_ms=duration_ms,
+            )
+
     # --- Step 4: policy gate ---------------------------------------------
     # Skipped on the approval-queue resume path (``_approved``): a human
     # operator already approved this exact call, so re-running the gate
@@ -2627,3 +2701,17 @@ async def dispatch(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        # #3500: release the concurrency slot (no-op when none was taken --
+        # the disabled / non-top-level / approved paths). Best-effort: a
+        # release hiccup must not turn a decided result into an exception,
+        # and the slot's safety TTL is the backstop if the DECR never lands.
+        try:
+            await release_dispatch_slot(_dispatch_slot_key)
+        except Exception:
+            import structlog as _structlog
+
+            _structlog.get_logger(__name__).exception(
+                "dispatch_slot_release_failed",
+                op_id=op_id,
+                operator_sub=operator.sub,
+            )

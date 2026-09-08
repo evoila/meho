@@ -65,6 +65,7 @@ __all__ = [
     "result_invalid_params",
     "result_no_connector",
     "result_no_target",
+    "result_rate_limited",
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
@@ -460,6 +461,47 @@ def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResul
         error=f"denied: {reason}",
         duration_ms=duration_ms,
         extras={"error_code": "denied", "reason": reason},
+    )
+
+
+def result_rate_limited(
+    op_id: str,
+    *,
+    kind: str,
+    limit: int,
+    retry_after_seconds: int,
+    duration_ms: float,
+) -> OperationResult:
+    """Dispatch rejected by a per-principal / per-tenant limit (#3500).
+
+    Returned before the op executes when the caller is over its
+    per-minute dispatch rate limit (``kind='rate'``) or its concurrent-op
+    cap (``kind='concurrency'``). No vendor traffic occurs; the rejection
+    is audited synchronously with ``result_status='rate_limited'``.
+
+    The structured envelope carries ``retry_after_seconds`` so an agent
+    can back off intelligently, and ``status_code_for_result`` maps the
+    status to a synthetic ``429`` on the audit row. The status is a
+    distinct ``rate_limited`` (not ``denied``/``error``) so consumers and
+    the audit ledger can tell an abuse-control rejection from a policy
+    denial or a connector error.
+    """
+    if kind == "rate":
+        reason = f"rate limit exceeded: {limit} dispatches per minute for this principal"
+    else:
+        reason = f"concurrent-op cap exceeded: {limit} in-flight dispatches for this principal"
+    return OperationResult(
+        status="rate_limited",
+        op_id=op_id,
+        error=f"rate_limited: {reason}; retry after {retry_after_seconds}s",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "rate_limited",
+            "kind": kind,
+            "limit": limit,
+            "retry_after_seconds": retry_after_seconds,
+            "reason": reason,
+        },
     )
 
 
@@ -1865,7 +1907,8 @@ def status_code_for_result(result_status: str) -> int:
     ``already_resumed`` -- the exactly-one-resumer no-op #2293, a benign
     "executed elsewhere", not a failure), ``202`` for awaiting approval /
     pending (accepted but not yet executed — the agent needs-approval
-    path), ``403`` for denied, ``500`` for error. The synthetic values
+    path), ``403`` for denied, ``429`` for rate_limited (over a
+    per-principal dispatch limit, #3500), ``500`` for error. The synthetic values
     are not surfaced to operators; the canonical signal lives in
     ``payload["result_status"]`` on the audit row.
     """
@@ -1877,6 +1920,8 @@ def status_code_for_result(result_status: str) -> int:
         return 202
     if result_status == "denied":
         return 403
+    if result_status == "rate_limited":
+        return 429
     if result_status == "pending":
         return 202
     return 500

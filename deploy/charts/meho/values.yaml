@@ -141,6 +141,30 @@ netdiag:
   # global off-switch. A malformed CIDR fails loudly at runtime naming
   # the offending token. See `docs/codebase/connectors-net-diagnostics.md`.
   probeAllowlist: ""
+  # -- Per-tenant probe-scope bound for the `net.*` connector (#3498).
+  # `net.*` ops are targetless (destination is a param) and
+  # agent-auto-runnable, so on a shared instance the single instance-wide
+  # `probeAllowlist` above cannot be narrowed for one (untrusted) tenant
+  # without removing the probe scope other tenants' sensors depend on.
+  # This map layers a per-tenant bound IN FRONT of that floor. It renders
+  # into `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`, read per probe alongside
+  # `probeAllowlist` (`TENANT_PROBE_ALLOWLIST_ENV`). Format: semicolon-
+  # separated `<tenant-uuid>=<comma-separated CIDRs/IPs/hostnames>`
+  # entries (each value uses the same grammar as `probeAllowlist`), e.g.
+  # `11111111-1111-1111-1111-111111111111=10.3.0.0/20,10.3.5.5;22222222-2222-2222-2222-222222222222=`.
+  #   * a tenant ABSENT from the map inherits `probeAllowlist` (the
+  #     default — existing deployments unchanged);
+  #   * a tenant PRESENT with a populated scope is bounded to exactly that
+  #     scope (the instance allowlist is not consulted for it);
+  #   * a tenant PRESENT with an EMPTY value (`<uuid>=`) has EVERY
+  #     targetless `net.*` probe denied — the way to give an untrusted
+  #     visitor tenant no network vantage while production keeps its
+  #     sensors.
+  # Default `""` renders no per-tenant bounds (a genuine no-op). A
+  # malformed entry (missing `=`, non-UUID key, or bad CIDR) fails loudly
+  # at runtime naming the offending piece. See
+  # `docs/codebase/connectors-net-diagnostics.md`.
+  probeAllowlistTenants: ""
 
 service:
   type: ClusterIP

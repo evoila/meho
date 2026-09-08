@@ -151,6 +151,17 @@ data:
   # `deploy/charts/meho/values.yaml` (`netdiag.probeAllowlist`) and
   # `docs/codebase/connectors-net-diagnostics.md`.
   MEHO_NETDIAG_PROBE_ALLOWLIST: {{ .Values.netdiag.probeAllowlist | quote }}
+  # Per-tenant probe-scope bound for the net.* connector (#3498), layered
+  # in front of MEHO_NETDIAG_PROBE_ALLOWLIST above. Read per probe from the
+  # environment by allowlist.py (TENANT_PROBE_ALLOWLIST_ENV) — NOT via
+  # settings.py. Rendered unconditionally: the default "" means no
+  # per-tenant bounds (every tenant inherits the instance allowlist).
+  # Semicolon-separated <tenant-uuid>=<comma-separated CIDRs/IPs/hostnames>;
+  # an empty value (<uuid>=) denies every targetless net.* probe for that
+  # tenant. See deploy/charts/meho/values.yaml
+  # (netdiag.probeAllowlistTenants) and
+  # docs/codebase/connectors-net-diagnostics.md.
+  MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS: {{ .Values.netdiag.probeAllowlistTenants | quote }}
   # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
   # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
   # so a wedged pipeline can't sit at `status=running` until a pod restart;

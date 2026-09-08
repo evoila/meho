@@ -486,7 +486,7 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
     count = _clamp_int(params.get("count"), _DEFAULT_PROBE_COUNT, 1, _MAX_PROBE_COUNT)
     timeout = _clamp_float(params.get("timeout_seconds"), _DEFAULT_PING_TIMEOUT, _MAX_PING_TIMEOUT)
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     return await asyncio.to_thread(_blocking_ping, host, count, timeout)
 
@@ -508,7 +508,7 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
         params.get("hop_timeout_seconds"), _DEFAULT_HOP_TIMEOUT, _MAX_HOP_TIMEOUT
     )
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     return await asyncio.to_thread(_blocking_trace, host, port, max_hops, hop_timeout)
 
@@ -526,7 +526,7 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
     port = _clamp_int(params.get("port"), _DEFAULT_TRACE_PORT, 1, 65535)
     timeout = _clamp_float(params.get("timeout_seconds"), _DEFAULT_PING_TIMEOUT, _MAX_HOP_TIMEOUT)
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     return await asyncio.to_thread(_blocking_path_mtu, host, port, timeout)
 

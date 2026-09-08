@@ -180,10 +180,13 @@ class TestClassifyOp:
             # SDDC Manager's typed GET /v1/credentials read (#2306) — the
             # nested-infra credential inventory (system of record).
             ("sddc.credential.list", "credential_read"),
+            # The governed guest-cluster kubeconfig read (#3496) — reads a
+            # Secret's data value and stages it to a tenant-scoped Vault ref.
+            ("k8s.secret.read_to_ref", "credential_read"),
         ],
     )
     def test_credential_read_allowlist(self, op_id: str, expected: str) -> None:
-        """Exact-match allowlist — decision #3 names these; #2306 adds the SDDC read."""
+        """Exact-match allowlist — decision #3 names these; #2306/#3496 add the SDDC + k8s reads."""
         assert classify_op(op_id) == expected
 
     @pytest.mark.parametrize(

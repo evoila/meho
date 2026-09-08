@@ -99,6 +99,13 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # collapse to aggregate-only, on top of the op's requires_approval
         # gate and the connector-boundary secret scrub.
         "sddc.credential.list",
+        # The governed guest-cluster kubeconfig read (#3496). Reads a Secret's
+        # data value on a k8s / vSphere-Supervisor target and stages it to a
+        # tenant-scoped Vault secret_ref (returning only the ref, never the
+        # value). Classified credential_read — same posture as the SDDC read —
+        # so audit + broadcast collapse to aggregate-only on top of its
+        # requires_approval gate; the result is value-free by construction.
+        "k8s.secret.read_to_ref",
     }
 )
 

@@ -63,10 +63,14 @@ from meho_backplane.connectors.mail.allowlist import (
     parse_recipient_allowlist,
 )
 from meho_backplane.connectors.mail.ops import register_mail_typed_operations
+from meho_backplane.connectors.mail.tenant_policy import (
+    reset_tenant_mail_policy_cache_for_testing,
+    resolve_tenant_recipient_allowlist,
+)
 from meho_backplane.connectors.mail.transport import MailSendResult, send_email
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.settings import get_settings
@@ -104,9 +108,11 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
+    reset_tenant_mail_policy_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
+    reset_tenant_mail_policy_cache_for_testing()
 
 
 def _configure_mail_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
@@ -995,3 +1001,198 @@ def test_parse_recipient_allowlist_accepts_the_documented_shapes(
 
     assert addresses == frozenset({"oncall@ops.test"})
     assert domains == frozenset({"example.com", "example.org", "corp.test"})
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant recipient allowlist (#3499) — narrows on top of the instance floor
+# ---------------------------------------------------------------------------
+
+#: The operator ``_make_operator`` dispatches as; the seeded tenant row's id.
+_TENANT_ID = UUID(int=0)
+
+
+async def _seed_tenant_mail_allowlist(value: str | None) -> None:
+    """Insert the dispatch tenant row carrying *value* in ``mail_recipient_allowlist``.
+
+    ``value=None`` leaves the column NULL (inherit); ``""`` is deny; a string is
+    the tenant's own allowlist. The row id matches ``_make_operator``'s
+    ``tenant_id`` so the dispatch resolver reads exactly this policy.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            Tenant(
+                id=_TENANT_ID,
+                slug="dispatch-tenant",
+                name="Dispatch Tenant",
+                mail_recipient_allowlist=value,
+            )
+        )
+        await session.commit()
+
+
+async def test_tenant_allowlist_unset_inherits_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """No tenant row (or NULL column) ⇒ inherit: the instance floor governs.
+
+    Instance allowlist admits ``example.com``; with no per-tenant override the
+    send goes through (sent=True), proving the tenant screen did not interpose.
+    """
+    _configure_mail_env(monkeypatch)  # instance MAIL_RECIPIENT_ALLOWLIST=example.com
+    # No _seed_tenant_mail_allowlist call -> the resolver sees no row -> inherit.
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is True
+    assert result.result["reason"] is None
+
+
+async def test_tenant_empty_allowlist_denies_before_any_smtp_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """An empty tenant allowlist denies every recipient before any connection.
+
+    The instance floor would admit ``oncall@example.com``, but the tenant's
+    empty allowlist refuses first — proving tenant-empty ⇒ deny, evaluated
+    ahead of the (exploding) transport.
+    """
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist("")
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "sent": False,
+        "reason": "not_in_recipient_allowlist",
+        "to": ["oncall@example.com"],
+        "subject": "s",
+    }
+
+
+async def test_tenant_allowlist_narrows_within_the_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A tenant address-entry refuses another mailbox the instance domain admits.
+
+    Instance floor admits the whole ``example.com`` domain; the tenant narrows
+    to the single address ``oncall@example.com``. A send to
+    ``other@example.com`` is refused by the tenant screen even though the
+    instance floor would allow it — the narrowing is real and comes first.
+    """
+    _configure_mail_env(monkeypatch)  # instance = example.com (domain)
+    await _seed_tenant_mail_allowlist("oncall@example.com")
+
+    result = await _dispatch_send({"to": ["other@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+    assert result.result["reason"] == "not_in_recipient_allowlist"
+
+
+async def test_tenant_allowlist_admits_a_listed_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """A recipient in both the tenant allowlist and the instance floor sends."""
+    _configure_mail_env(monkeypatch)  # instance = example.com
+    await _seed_tenant_mail_allowlist("oncall@example.com")
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is True
+    assert result.result["reason"] is None
+
+
+async def test_tenant_allowlist_cannot_widen_past_the_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A recipient the tenant lists but the instance floor does not is refused.
+
+    The tenant screen passes ``x@evil.test`` (it is in the tenant allowlist),
+    but the instance floor — applied by the transport afterwards — does not
+    list ``evil.test``, so the send is still refused. The tenant can only
+    narrow, never widen. (Exploding SMTP proves no connection opened.)
+    """
+    _configure_mail_env(monkeypatch)  # instance = example.com only
+    await _seed_tenant_mail_allowlist("evil.test")
+
+    result = await _dispatch_send({"to": ["x@evil.test"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+    assert result.result["reason"] == "not_in_recipient_allowlist"
+
+
+async def test_resolver_returns_none_for_unknown_tenant() -> None:
+    """An absent tenant row resolves to None (inherit), not deny."""
+    assert await resolve_tenant_recipient_allowlist(UUID(int=123)) is None
+
+
+async def test_resolver_parses_a_set_value() -> None:
+    """A non-null column parses to the ``(addresses, domains)`` tuple."""
+    await _seed_tenant_mail_allowlist("oncall@ops.test,example.com")
+    resolved = await resolve_tenant_recipient_allowlist(_TENANT_ID)
+    assert resolved == (frozenset({"oncall@ops.test"}), frozenset({"example.com"}))
+
+
+async def test_resolver_fails_closed_to_deny_on_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB read error resolves to deny (empty allowlist), never to inherit."""
+
+    def _boom() -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.mail.tenant_policy.get_sessionmaker",
+        _boom,
+    )
+    resolved = await resolve_tenant_recipient_allowlist(UUID(int=7))
+    assert resolved == (frozenset(), frozenset())
+
+
+async def test_tenant_denied_send_writes_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A tenant-denied ``mail.send`` is audited synchronously (sent=false).
+
+    The empty tenant allowlist refuses the send before any SMTP connection,
+    and the durable ``audit_log`` row records the refusal (``sent=false``,
+    ``reason=not_in_recipient_allowlist``) with recipients/subject and never
+    the body — the #3499 "denied delivery is audited" acceptance criterion.
+    """
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist("")  # tenant deny
+
+    result = await _dispatch_send(
+        {"to": ["oncall@example.com"], "subject": "blocked", "body": "secret body"}
+    )
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    mail_rows = [r for r in rows if r.path == _OP_ID]
+    assert len(mail_rows) == 1
+    raw = mail_rows[0].raw_payload
+    assert raw is not None
+    assert raw["sent"] is False
+    assert raw["reason"] == "not_in_recipient_allowlist"
+    assert raw["to"] == ["oncall@example.com"]
+    assert "body" not in raw

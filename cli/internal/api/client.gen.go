@@ -8380,6 +8380,41 @@ type TenantFlightRecorderPolicyUpdate struct {
 	FlightRecorderRetentionDays *int  `json:"flight_recorder_retention_days"`
 }
 
+// TenantMailRecipientPolicy Resolved per-tenant mail-recipient policy -- the PATCH read-back shape (#3499).
+//
+// Frozen; maps 1:1 to the tenant's “mail_recipient_allowlist“ column plus the
+// tenant id. “mail_recipient_allowlist“ is nullable: “None“ means
+// **inherit** (no per-tenant narrowing; the deployment-level
+// “MAIL_RECIPIENT_ALLOWLIST“ instance floor alone governs the send), “""“
+// means **deny** (an empty tenant allowlist refuses every dispatched
+// “mail.send“), and a comma-separated string is the tenant's own recipient
+// space (still intersected with the instance floor at the transport).
+type TenantMailRecipientPolicy struct {
+	MailRecipientAllowlist *string            `json:"mail_recipient_allowlist"`
+	TenantId               openapi_types.UUID `json:"tenant_id"`
+}
+
+// TenantMailRecipientPolicyUpdate “PATCH /api/v1/tenants/mail-recipient-policy“ body (#3499).
+//
+// The single field is optional-partial (“model_dump(exclude_unset=True)“ in
+// the handler keys off “model_fields_set“, so a JSON “null“ is
+// distinguished from an absent key). “extra='forbid'“ rejects unknown keys
+// with a 422.
+//
+//   - absent = leave the column unchanged.
+//   - “null“ = clear back to **inherit** (the instance floor alone governs the
+//     tenant's “mail.send“).
+//   - “""“ = **deny** (an empty tenant allowlist refuses every dispatched
+//     send) -- the shared-instance containment lever.
+//   - a comma-separated address/domain string = the tenant's own recipient
+//     space. Validated with the same grammar as the instance floor
+//     (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),
+//     so a malformed entry (whitespace, “foo@“, bare “@“, ...) is a 422 at
+//     write time rather than a silent inert allowlist at dispatch time.
+type TenantMailRecipientPolicyUpdate struct {
+	MailRecipientAllowlist *string `json:"mail_recipient_allowlist"`
+}
+
 // TenantRole Per-tenant role granted to the operator by the JWT issuer.
 //
 // The set is intentionally small in v0.2: a closed three-value enum
@@ -10036,6 +10071,11 @@ type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams struc
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams defines parameters for UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch.
+type UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DependenciesApiV1TopologyDependenciesNameGetParams defines parameters for DependenciesApiV1TopologyDependenciesNameGet.
 type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
@@ -10657,6 +10697,9 @@ type UpdateTargetApiV1TargetsNamePatchJSONRequestBody = TargetUpdate
 
 // UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody defines body for UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch for application/json ContentType.
 type UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody = TenantFlightRecorderPolicyUpdate
+
+// UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody defines body for UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch for application/json ContentType.
+type UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody = TenantMailRecipientPolicyUpdate
 
 // AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody defines body for AnnotateEdgeRouteApiV1TopologyEdgesPost for application/json ContentType.
 type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotateEdgeRequest
@@ -12854,6 +12897,11 @@ type ClientInterface interface {
 	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBody request with any body
+	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBody(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DependenciesApiV1TopologyDependenciesNameGet request
 	DependenciesApiV1TopologyDependenciesNameGet(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16256,6 +16304,30 @@ func (c *Client) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch
 
 func (c *Client) UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBody(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -30308,6 +30380,61 @@ func NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequestWi
 	return req, nil
 }
 
+// NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequest calls the generic UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch builder with application/json body
+func NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequest(server string, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequestWithBody generates requests for UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch with any type of body
+func NewUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchRequestWithBody(server string, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/tenants/mail-recipient-policy")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDependenciesApiV1TopologyDependenciesNameGetRequest generates requests for DependenciesApiV1TopologyDependenciesNameGet
 func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams) (*http.Request, error) {
 	var err error
@@ -42555,6 +42682,11 @@ type ClientWithResponsesInterface interface {
 
 	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error)
 
+	// UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBodyWithResponse request with any body
+	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBodyWithResponse(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error)
+
+	UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithResponse(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error)
+
 	// DependenciesApiV1TopologyDependenciesNameGetWithResponse request
 	DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error)
 
@@ -46977,6 +47109,29 @@ func (r UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse)
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantMailRecipientPolicy
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53789,6 +53944,23 @@ func (c *ClientWithResponses) UpdateFlightRecorderPolicyApiV1TenantsFlightRecord
 		return nil, err
 	}
 	return ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse(rsp)
+}
+
+// UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBodyWithResponse request with arbitrary body returning *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse
+func (c *ClientWithResponses) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBodyWithResponse(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error) {
+	rsp, err := c.UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithResponse(ctx context.Context, params *UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchParams, body UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error) {
+	rsp, err := c.UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatch(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse(rsp)
 }
 
 // DependenciesApiV1TopologyDependenciesNameGetWithResponse request returning *DependenciesApiV1TopologyDependenciesNameGetResponse
@@ -61699,6 +61871,39 @@ func ParseUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRespons
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest TenantFlightRecorderPolicy
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse parses an HTTP response from a UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchWithResponse call
+func ParseUpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse(rsp *http.Response) (*UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateMailRecipientPolicyApiV1TenantsMailRecipientPolicyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantMailRecipientPolicy
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

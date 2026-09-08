@@ -51,10 +51,11 @@ from dataclasses import asdict, dataclass
 from typing import cast
 
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from meho_backplane.features import build_features_block
+from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.settings import get_settings
 
 __all__ = [
@@ -525,9 +526,18 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready")
+@router.get("/ready", dependencies=[Depends(verify_metrics_access)])
 async def ready() -> JSONResponse:
     """Readiness probe with deploy-time feature-gate visibility.
+
+    Guarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`
+    (#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the
+    caller must present a matching bearer token or the request is refused
+    401 — so the ``features`` block's four-eyes / feature-gate posture is
+    not readable unauthenticated on a shared ingress. ``/healthz`` (pure
+    liveness) is deliberately left unguarded, so a bearer-less liveness path
+    always exists; a deployment that turns the guard on carries the token on
+    the readiness probe via ``httpHeaders``.
 
     Returns 200 with
     ``{"status": "ready", "checks": [...], "features": {...}}`` when

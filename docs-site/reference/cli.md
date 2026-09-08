@@ -4153,7 +4153,7 @@ meho targets probe <name-or-alias> [flags]
 
 ## `meho tenants`
 
-Operate per-tenant policy (flight-recorder capture policy)
+Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
 
 ```
 meho tenants
@@ -4181,6 +4181,27 @@ meho tenants flight-recorder-policy set [flags]
 - `--enabled` — per-tenant capture default (F1); send true or false
 - `--json` — emit the resolved policy as JSON instead of the human summary
 - `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
+
+### `meho tenants mail-recipient-policy`
+
+Manage the tenant's mail-recipient allowlist (tenant_admin)
+
+```
+meho tenants mail-recipient-policy
+```
+
+#### `meho tenants mail-recipient-policy set`
+
+Set or clear the tenant mail-recipient allowlist (tenant_admin)
+
+```
+meho tenants mail-recipient-policy set [flags]
+```
+
+- `--allowlist` — the tenant's permitted recipient space (comma-separated addresses/domains); empty string denies all mail for the tenant
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--clear` — clear the per-tenant override back to inheriting the instance floor
+- `--json` — emit the resolved policy as JSON instead of the human summary
 
 ## `meho topology`
 

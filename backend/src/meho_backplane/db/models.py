@@ -770,6 +770,36 @@ class Tenant(Base):
         nullable=True,
         default=None,
     )
+    # Per-tenant mail-recipient allowlist (#3499). A **narrowing** override on
+    # top of the deployment-level ``MAIL_RECIPIENT_ALLOWLIST`` instance floor
+    # (:mod:`meho_backplane.connectors.mail.allowlist`), evaluated in the
+    # ``mail.send`` dispatch handler before the transport's instance screen.
+    # Tri-state, but on a Text column rather than a Boolean:
+    #
+    # * ``NULL`` (default) -- **inherit**: no per-tenant narrowing; the
+    #   instance floor alone governs this tenant's dispatched ``mail.send``.
+    # * ``""`` (empty string) -- **deny**: the tenant's parsed allowlist is
+    #   empty, so every dispatched ``mail.send`` for this tenant is refused
+    #   (same inverted-default "empty ⇒ inert" semantics as the instance
+    #   floor). This is the shared-instance containment lever: an untrusted
+    #   tenant can be pinned to no mail while other tenants keep alert mail.
+    # * a comma-separated address/domain string -- the recipients permitted
+    #   for this tenant, still intersected with the instance floor at the
+    #   transport (a tenant can only narrow, never widen past the floor).
+    #
+    # Read per dispatch by the cache-aware resolver in
+    # :mod:`meho_backplane.connectors.mail.tenant_policy` (fail-**closed** to
+    # deny on a read error, the opposite direction from the flight-recorder
+    # resolver's fail-open: this is a delivery-authorization decision, so doubt
+    # reduces exposure). The checks notifier's direct-import
+    # ``transport.send_email`` path is not tenant-dispatched and keeps only the
+    # instance floor. Nullable, so migration ``0101`` needs no backfill. No
+    # index -- read by primary-key lookup on a cache miss, never a filter.
+    mail_recipient_allowlist: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(

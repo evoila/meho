@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import structlog
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -173,6 +173,7 @@ from meho_backplane.memory import (
     stop_memory_expiry_sweeper,
 )
 from meho_backplane.metrics import render_metrics
+from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
 from meho_backplane.operations.approval_expiry import (
@@ -1349,7 +1350,7 @@ async def root() -> dict[str, str]:
     return {"name": _APP_NAME, "version": __version__}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(verify_metrics_access)])
 async def metrics() -> Response:
     """Prometheus exposition endpoint.
 
@@ -1357,6 +1358,11 @@ async def metrics() -> Response:
     the ``http_requests_total`` counter the middleware increments) in
     the legacy ``text/plain; version=0.0.4`` format that every
     Prometheus scraper understands.
+
+    Guarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`
+    (#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the
+    caller must present a matching bearer token or the request is refused
+    401 before any registry content is rendered.
     """
     body, content_type = render_metrics()
     return Response(content=body, media_type=content_type)

@@ -38,7 +38,7 @@
           "health"
         ],
         "summary": "Ready",
-        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).",
+        "description": "Readiness probe with deploy-time feature-gate visibility.\n\nGuarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`\n(#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the\ncaller must present a matching bearer token or the request is refused\n401 \u2014 so the ``features`` block's four-eyes / feature-gate posture is\nnot readable unauthenticated on a shared ingress. ``/healthz`` (pure\nliveness) is deliberately left unguarded, so a bearer-less liveness path\nalways exists; a deployment that turns the guard on carries the token on\nthe readiness probe via ``httpHeaders``.\n\nReturns 200 with\n``{\"status\": \"ready\", \"checks\": [...], \"features\": {...}}`` when\nat least one probe is registered and every probe reports ``ok``.\nReturns 503 with\n``{\"status\": \"not_ready\", \"checks\": [...], \"features\": {...}}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.\n\nThe ``features`` block (G0.14-T7 #1148) enumerates the four gated\nfeatures and their configured-vs-missing-env state. It is emitted\non **both** branches \u2014 the operator's \"is this deploy correctly\nwired?\" question is independent of the probe-registry verdict.\nSee :func:`meho_backplane.features.build_features_block` for the\nblock's shape and the audit table in\n``docs/codebase/error-message-shape.md`` for why this surface\nexists (signals 16, 17).",
         "operationId": "ready_ready_get",
         "responses": {
           "200": {
@@ -1398,6 +1398,60 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TenantFlightRecorderPolicy"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tenants/mail-recipient-policy": {
+      "patch": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Update Mail Recipient Policy",
+        "description": "Set or clear the caller's per-tenant mail-recipient allowlist (#3499).\n\nTenant-scoped to ``operator.tenant_id`` (no cross-tenant write is\nexpressible -- no tenant id is accepted in the path or body).\n``tenant_admin`` only. Applies the field only when present in the body; an\napplied change is folded into this request's ``audit_log`` row (field / old\n/ new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's\nper-tenant cache so the new value governs the next dispatched ``mail.send``\nwithout a restart.",
+        "operationId": "update_mail_recipient_policy_api_v1_tenants_mail_recipient_policy_patch",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantMailRecipientPolicyUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantMailRecipientPolicy"
                 }
               }
             }
@@ -21218,7 +21272,7 @@
     "/metrics": {
       "get": {
         "summary": "Metrics",
-        "description": "Prometheus exposition endpoint.\n\nReturns the default registry contents (process / GC collectors +\nthe ``http_requests_total`` counter the middleware increments) in\nthe legacy ``text/plain; version=0.0.4`` format that every\nPrometheus scraper understands.",
+        "description": "Prometheus exposition endpoint.\n\nReturns the default registry contents (process / GC collectors +\nthe ``http_requests_total`` counter the middleware increments) in\nthe legacy ``text/plain; version=0.0.4`` format that every\nPrometheus scraper understands.\n\nGuarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`\n(#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the\ncaller must present a matching bearer token or the request is refused\n401 before any registry content is rendered.",
         "operationId": "metrics_metrics_get",
         "responses": {
           "200": {
@@ -33311,6 +33365,40 @@
         "type": "object",
         "title": "TenantFlightRecorderPolicyUpdate",
         "description": "``PATCH /api/v1/tenants/flight-recorder-policy`` body.\n\nAll three fields are optional-partial: only fields the client actually\nsends are applied (``model_dump(exclude_unset=True)`` in the handler keys\noff ``model_fields_set``, so a JSON ``null`` is distinguished from an\nabsent key). ``extra='forbid'`` rejects unknown keys with a 422.\n\n* ``flight_recorder_enabled`` (F1) -- Boolean, ``NOT NULL`` at the DB\n  layer. Absent = leave unchanged; ``true`` / ``false`` flips the\n  per-tenant capture default. An explicit ``null`` is rejected (the column\n  has no inherit state) -- the validator fires only when the key is\n  present, so an absent field never trips it.\n* ``flight_recorder_agent_readable`` (F5) -- **tri-state**. Absent = leave\n  unchanged; ``true`` / ``false`` force the agent-read override on / off;\n  ``null`` clears it back to inherit (follow the capture default). This is\n  the JSON-``null``-vs-absent distinction the tri-state needs.\n* ``flight_recorder_retention_days`` (F4) -- nullable, bounded ``1..365``\n  (the reaper window; matches ``Settings.flight_recorder_retention_days_default``'s\n  ``ge=1, le=365``). Absent = leave unchanged; an int sets the per-tenant\n  window; ``null`` clears it back to the global default. The bound applies\n  only to the int arm -- a ``null`` clear is always legal."
+      },
+      "TenantMailRecipientPolicy": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "mail_recipient_allowlist": {
+            "type": "string",
+            "nullable": true,
+            "title": "Mail Recipient Allowlist"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "mail_recipient_allowlist"
+        ],
+        "title": "TenantMailRecipientPolicy",
+        "description": "Resolved per-tenant mail-recipient policy -- the PATCH read-back shape (#3499).\n\nFrozen; maps 1:1 to the tenant's ``mail_recipient_allowlist`` column plus the\ntenant id. ``mail_recipient_allowlist`` is nullable: ``None`` means\n**inherit** (no per-tenant narrowing; the deployment-level\n``MAIL_RECIPIENT_ALLOWLIST`` instance floor alone governs the send), ``\"\"``\nmeans **deny** (an empty tenant allowlist refuses every dispatched\n``mail.send``), and a comma-separated string is the tenant's own recipient\nspace (still intersected with the instance floor at the transport)."
+      },
+      "TenantMailRecipientPolicyUpdate": {
+        "properties": {
+          "mail_recipient_allowlist": {
+            "type": "string",
+            "nullable": true,
+            "title": "Mail Recipient Allowlist"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TenantMailRecipientPolicyUpdate",
+        "description": "``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).\n\nThe single field is optional-partial (``model_dump(exclude_unset=True)`` in\nthe handler keys off ``model_fields_set``, so a JSON ``null`` is\ndistinguished from an absent key). ``extra='forbid'`` rejects unknown keys\nwith a 422.\n\n* absent = leave the column unchanged.\n* ``null`` = clear back to **inherit** (the instance floor alone governs the\n  tenant's ``mail.send``).\n* ``\"\"`` = **deny** (an empty tenant allowlist refuses every dispatched\n  send) -- the shared-instance containment lever.\n* a comma-separated address/domain string = the tenant's own recipient\n  space. Validated with the same grammar as the instance floor\n  (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),\n  so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at\n  write time rather than a silent inert allowlist at dispatch time."
       },
       "TenantRole": {
         "type": "string",

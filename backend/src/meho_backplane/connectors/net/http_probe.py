@@ -58,6 +58,7 @@ import ssl
 import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 import anyio
 import httpx
@@ -640,6 +641,7 @@ def _advance_or_halt(
     url: str,
     method: str,
     started: float,
+    tenant_id: UUID | str | None,
 ) -> dict[str, Any] | tuple[str, str]:
     """Decide the next step for a ``3xx`` *response* in the redirect walk.
 
@@ -684,7 +686,7 @@ def _advance_or_halt(
         )
     next_host = next_request.url.host
     try:
-        assert_probe_allowed(next_host)
+        assert_probe_allowed(next_host, tenant_id=tenant_id)
     except ProbeNotAllowedError:
         # SSRF re-gate: the redirect target is refused and never dialed.
         # reachable=true (the prior host did answer), but the walk halts.
@@ -714,6 +716,7 @@ async def _walk_redirects(
     method: str,
     started: float,
     first_hop_build_kwargs: dict[str, Any],
+    tenant_id: UUID | str | None,
 ) -> dict[str, Any]:
     """Issue the request and walk redirects manually, re-gating each hop.
 
@@ -743,6 +746,7 @@ async def _walk_redirects(
                     url=url,
                     method=method,
                     started=started,
+                    tenant_id=tenant_id,
                 )
                 if isinstance(outcome, dict):
                     return outcome
@@ -821,7 +825,7 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
     # allowlist. A refusal propagates (#2784): no request was issued, so
     # there is no observation to report — the dispatcher renders it as
     # ``connector_probe_refused``.
-    assert_probe_allowed(parsed.host)
+    assert_probe_allowed(parsed.host, tenant_id=operator.tenant_id)
     first_hop_build_kwargs = _host_header_build_kwargs(
         host_header, is_https=parsed.scheme == "https"
     )
@@ -844,6 +848,7 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
                     method=method,
                     started=started,
                     first_hop_build_kwargs=first_hop_build_kwargs,
+                    tenant_id=operator.tenant_id,
                 ),
                 timeout=timeout,
             )

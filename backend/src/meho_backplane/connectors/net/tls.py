@@ -565,7 +565,7 @@ async def net_tls_inspect(
     server_name = raw_server_name or host
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     try:
         chain, protocol, cipher = await asyncio.to_thread(

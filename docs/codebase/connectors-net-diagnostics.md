@@ -129,6 +129,57 @@ There is no port dimension in v1 (the allowlist scopes hosts; the per-op
 timeout bounds the probe). A port-scoped allowlist is a follow-up only
 if an operator needs one (#1177: one closed-set config, no DSL).
 
+#### Per-tenant bound — `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS` (#3498)
+
+Every `net.*` op is **targetless** (the destination is a param,
+`target=None`) and `safety_level="safe"` + `requires_approval=False`, so
+for an **agent** principal it auto-executes with no grant and **bypasses
+the per-target tenant boundary entirely** — it is the one op family that
+can reach an address no target in the caller's tenant resolves to. The
+instance-wide `MEHO_NETDIAG_PROBE_ALLOWLIST` is a **single** knob: on a
+shared instance it cannot be narrowed for one (untrusted) tenant without
+also removing the probe scope other tenants' production sensors depend
+on. So an untrusted-visitor tenant's agent could port-scan / DNS-
+enumerate / HTTP-fingerprint any host in the instance allowlist.
+
+`TENANT_PROBE_ALLOWLIST_ENV` (`MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`) is a
+per-tenant scope map evaluated **before** the instance allowlist, keyed
+on the caller's `tenant_id` (threaded into `assert_probe_allowed` by
+every handler from its `Operator` — so the bound holds for an agent
+principal exactly as for an operator; it is **tenant-scoped, not
+principal-scoped**):
+
+- a tenant **absent** from the map **inherits** the instance allowlist —
+  the default, so existing deployments are byte-for-byte unchanged;
+- a tenant **present** with a populated scope is bounded to **exactly**
+  that scope, and the instance allowlist is **not consulted** for it (the
+  per-tenant list is that tenant's whole permitted probe space — it can
+  narrow *or* differ from the instance floor, so an operator scoping an
+  untrusted tenant lists only what that tenant may reach);
+- a tenant **present** with an **empty** scope (`<uuid>=`) has **every**
+  targetless `net.*` probe denied.
+
+Format: semicolon-separated `<tenant-uuid>=<tokens>` entries where
+`<tokens>` uses the same comma-separated CIDR / bare-IP / verbatim-
+hostname grammar as the instance allowlist (both share
+`_parse_tokens`). Keys are normalised to the canonical dashed-lowercase
+UUID form so a lookup by an `Operator.tenant_id` matches regardless of
+the casing configured. A malformed entry (missing `=`, a non-UUID key,
+or a bad CIDR in the value) raises at parse time naming the offending
+piece — the same fail-closed-loud posture as the instance parser: a
+broken security config must not silently widen the probe space.
+
+Like the instance allowlist it is a **deployment-config** knob (chart
+value `netdiag.probeAllowlistTenants` → ConfigMap → env), read per call
+with no process-lifetime cache. There is **no** agent-surface, REST, CLI,
+or MCP verb that mutates it (postulate 5); narrowing a tenant is a Helm
+value change, the same operating model as the instance allowlist it
+bounds. A refusal from the per-tenant scope raises the same
+`ProbeNotAllowedError` (so it still surfaces as `connector_probe_refused`
+— see below) but its message names `MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`
+so the operator knows the per-tenant bound, not the instance floor,
+refused.
+
 ### 2. Audit-visible host:port
 
 Unlike `secret.move` (whose refs are secret-adjacent and are only
@@ -655,7 +706,13 @@ connectors' ops.
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
   `ProbeNotAllowedError` (carries the caller's `host` for the
-  dispatcher's `extras`).
+  dispatcher's `extras`), plus the #3498 per-tenant bound:
+  `TENANT_PROBE_ALLOWLIST_ENV`, `parse_tenant_probe_allowlist`, and the
+  `tenant_id` keyword on `assert_probe_allowed` (every handler passes
+  `operator.tenant_id`; `_walk_redirects` / `_advance_or_halt` thread it
+  through so the redirect re-gate is tenant-scoped too). The shared
+  `_parse_tokens` parses one comma-separated scope for both the instance
+  allowlist and each per-tenant entry.
 - `operations/_errors.py` — `is_probe_refused` (the dispatcher's
   narrowing predicate, a deferred import so `operations` keeps no
   module-scope dependency on `connectors.net`) and
@@ -706,6 +763,17 @@ audit row carrying the structured envelope in `payload.error`.
   are explicitly out of scope (#2407). `chain_complete` is a
   "did the server send a self-signed root" signal, not a trust decision.
 - No port-scoped allowlist (v1 scopes hosts only).
+- The #3498 per-tenant bound is a config knob
+  (`MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`), not a DB-backed tenant policy
+  with runtime set/clear verbs — it mirrors the instance allowlist's and
+  `agent_runs_disabled_tenants`' env-config model, so narrowing a tenant
+  is a Helm value change (a redeploy), not a live API call. A populated
+  per-tenant scope **replaces** (does not intersect) the instance
+  allowlist for that tenant, so a per-tenant scope can in principle list
+  a range the instance floor omits; the intended use is narrowing (or
+  emptying) an untrusted tenant, and the scope is operator-authored
+  deployment config. A DB tenant-policy + REST/CLI variant is a follow-up
+  if runtime mutability without a redeploy is needed.
 - A refusal is reported per-dispatch, not per-destination: `net.dns_lookup`
   gates both the queried `name` and a custom `resolver`, and the error's
   `extras.host` names whichever one was refused first, not the full set.

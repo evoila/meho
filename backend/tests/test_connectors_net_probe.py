@@ -42,8 +42,10 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.net import ops as net_ops
 from meho_backplane.connectors.net.allowlist import (
     PROBE_ALLOWLIST_ENV,
+    TENANT_PROBE_ALLOWLIST_ENV,
     ProbeNotAllowedError,
     assert_probe_allowed,
+    parse_tenant_probe_allowlist,
 )
 from meho_backplane.connectors.net.ops import net_tcp_check, register_net_typed_operations
 from meho_backplane.connectors.schemas import OperationResult
@@ -55,6 +57,7 @@ from meho_backplane.settings import get_settings
 
 _CONNECTOR_ID = "net-probe-1.x"
 _OP_ID = "net.tcp_check"
+_DEFAULT_TENANT_ID = UUID(int=0)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +73,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # Default: allowlist unset ⇒ connector inert. Tests that need a
     # permitted host set MEHO_NETDIAG_PROBE_ALLOWLIST explicitly.
     monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
+    # Default: no per-tenant bounds ⇒ every tenant inherits the instance
+    # allowlist. Tests that need a per-tenant scope set it explicitly.
+    monkeypatch.delenv(TENANT_PROBE_ALLOWLIST_ENV, raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
     yield
@@ -96,14 +102,33 @@ async def _registered_net_probe_op(
     yield
 
 
-def _make_operator() -> Operator:
+def _make_operator(tenant_id: UUID = _DEFAULT_TENANT_ID) -> Operator:
     return Operator(
         sub="test-operator",
         name=None,
         email=None,
         raw_jwt="fake.jwt.value",
-        tenant_id=UUID(int=0),
+        tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _dispatch_check_as(params: dict[str, Any], *, tenant_id: UUID) -> OperationResult:
+    """Dispatch ``net.tcp_check`` as an operator in *tenant_id*.
+
+    Same targetless auto-exec path as :func:`_dispatch_check` — the op is
+    ``safe`` + ``requires_approval=False`` so it runs with no approval
+    prompt — but with a chosen tenant so the #3498 per-tenant bound is
+    exercised on the real dispatch path (the bound catches an agent
+    principal's auto-run exactly because it sits in the handler, after the
+    permission verdict).
+    """
+    return await dispatch(
+        operator=_make_operator(tenant_id),
+        connector_id=_CONNECTOR_ID,
+        op_id=_OP_ID,
+        target=None,
+        params=params,
     )
 
 
@@ -409,3 +434,181 @@ def test_net_ops_classify_as_read() -> None:
     # Forward cover for the T2-T4 verbs that reuse this scaffolding.
     assert classify_op("net.dns_lookup") == "read"
     assert classify_op("net.http_probe") == "read"
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant probe bound — MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS (#3498)
+# ---------------------------------------------------------------------------
+
+_TENANT_A = UUID("11111111-1111-1111-1111-111111111111")
+_TENANT_B = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def test_tenant_absent_from_map_inherits_instance_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant with no map entry falls through to the instance allowlist."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=192.168.0.0/16")
+
+    # Tenant B has no entry → instance allowlist governs (10.0.0.0/8).
+    assert_probe_allowed("10.9.9.9", tenant_id=_TENANT_B)
+    with pytest.raises(ProbeNotAllowedError, match=PROBE_ALLOWLIST_ENV):
+        assert_probe_allowed("192.168.1.1", tenant_id=_TENANT_B)
+
+
+def test_tenant_scope_evaluated_before_instance_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded tenant's scope replaces the instance allowlist for it.
+
+    Proves both the evaluation order (per-tenant first) and the
+    replace-not-intersect semantics: a host in the instance allowlist but
+    outside the tenant scope is refused, and a host in the tenant scope but
+    outside the instance allowlist is allowed.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=192.168.5.0/24")
+
+    # In the tenant scope but NOT in the instance allowlist → allowed.
+    assert_probe_allowed("192.168.5.5", tenant_id=_TENANT_A)
+    # In the instance allowlist but NOT in the tenant scope → refused, and
+    # the refusal names the per-tenant knob, not the instance floor.
+    with pytest.raises(ProbeNotAllowedError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        assert_probe_allowed("10.9.9.9", tenant_id=_TENANT_A)
+
+
+def test_empty_tenant_scope_denies_every_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tenant present with an empty scope (``<uuid>=``) is denied everything.
+
+    Even an address the instance allowlist would permit is refused.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=")
+
+    with pytest.raises(ProbeNotAllowedError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        assert_probe_allowed("10.9.9.9", tenant_id=_TENANT_A)
+
+
+def test_tenant_scope_matches_hostname_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A per-tenant scope honours the same verbatim-hostname grammar."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=db.internal, 172.16.0.0/12")
+
+    assert_probe_allowed("db.internal", tenant_id=_TENANT_A)
+    assert_probe_allowed("DB.Internal.", tenant_id=_TENANT_A)  # case + trailing dot
+    assert_probe_allowed("172.16.1.1", tenant_id=_TENANT_A)
+    with pytest.raises(ProbeNotAllowedError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        assert_probe_allowed("other.internal", tenant_id=_TENANT_A)
+
+
+def test_tenant_key_casing_is_normalised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An upper-cased tenant key in the map still matches the operator UUID."""
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{str(_TENANT_A).upper()}=10.1.0.0/16")
+    assert_probe_allowed("10.1.2.3", tenant_id=_TENANT_A)
+    with pytest.raises(ProbeNotAllowedError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        assert_probe_allowed("10.2.2.3", tenant_id=_TENANT_A)
+
+
+def test_no_tenant_id_uses_instance_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call with no ``tenant_id`` is never per-tenant-bounded (back-compat).
+
+    Even with a populated map, a ``tenant_id=None`` call resolves against
+    the instance allowlist exactly as before #3498.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=")
+    assert_probe_allowed("10.9.9.9")  # no tenant_id → instance allowlist
+
+
+def test_parse_tenant_probe_allowlist_rejects_bad_uuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, "not-a-uuid=10.0.0.0/8")
+    with pytest.raises(ValueError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        parse_tenant_probe_allowlist()
+
+
+def test_parse_tenant_probe_allowlist_rejects_missing_equals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}")
+    with pytest.raises(ValueError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        parse_tenant_probe_allowlist()
+
+
+def test_parse_tenant_probe_allowlist_rejects_bad_cidr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=10.0.0.0/999")
+    with pytest.raises(ValueError, match=TENANT_PROBE_ALLOWLIST_ENV):
+        parse_tenant_probe_allowlist()
+
+
+async def test_agent_in_bounded_tenant_cannot_probe_instance_only_address(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_net_probe_op: None,
+) -> None:
+    """The bound holds on the real auto-exec dispatch path (agent principal).
+
+    A ``net.tcp_check`` from a tenant bounded to ``192.168.5.0/24`` against
+    ``127.0.0.1`` — an address the instance allowlist permits but the tenant
+    scope does not — fails the dispatch with ``connector_probe_refused`` and
+    never opens a socket (``open_connection`` is stubbed to fail the test if
+    reached). The op is ``safe`` + ``requires_approval=False``, so this IS
+    the auto-exec path an agent principal takes: the bound sits in the
+    handler, after the permission verdict, so no absent approval prompt can
+    bypass it.
+    """
+
+    async def _boom(*_a: object, **_kw: object) -> object:
+        raise AssertionError("open_connection must not run when the probe is refused")
+
+    monkeypatch.setattr(net_ops.asyncio, "open_connection", _boom)
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=192.168.5.0/24")
+
+    refused = await _dispatch_check_as({"host": "127.0.0.1", "port": 443}, tenant_id=_TENANT_A)
+    assert refused.status == "error"
+    assert refused.result is None
+    assert refused.extras["error_code"] == "connector_probe_refused"
+    assert refused.extras["host"] == "127.0.0.1"
+    assert refused.extras["exception_class"] == "ProbeNotAllowedError"
+    # The refusal names the per-tenant knob and stays address-free.
+    assert refused.error is not None
+    assert TENANT_PROBE_ALLOWLIST_ENV in refused.error
+    assert "127.0.0.1" not in refused.error
+
+
+async def test_unbounded_tenant_still_probes_instance_allowlisted_host(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_net_probe_op: None,
+) -> None:
+    """A tenant with no map entry keeps the instance allowlist's probe scope.
+
+    Same populated per-tenant map as the refusal test, but a *different*
+    tenant (absent from the map) probes an instance-allowlisted loopback
+    host and connects — production sensors in unbounded tenants keep
+    working while one tenant is bounded.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    monkeypatch.setenv(TENANT_PROBE_ALLOWLIST_ENV, f"{_TENANT_A}=192.168.5.0/24")
+
+    server, port = await _serve_once()
+    try:
+        result = await _dispatch_check_as({"host": "127.0.0.1", "port": port}, tenant_id=_TENANT_B)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result.status == "ok", result.error
+    assert result.result["connected"] is True
+    assert result.result["host"] == "127.0.0.1"

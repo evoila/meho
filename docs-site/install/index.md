@@ -227,6 +227,19 @@ networkPolicy:
   keycloakCIDR: "10.0.3.0/24"   # REPLACE
 ```
 
+!!! warning "Baseline: `networkPolicy.enabled: true` for any multi-tenant or production install"
+
+    Staging `networkPolicy.enabled: false` above is a first-install
+    convenience — it keeps a bring-up from failing on a CIDR typo before the
+    backplane is even green. The **secure baseline is default-deny network
+    isolation on** (`enabled: true`), and leaving it off past bring-up is a
+    documented downgrade, not a default. Turning it on makes the schema
+    *require* the three egress CIDRs, so it refuses to ship a wide subnet by
+    accident — replace the placeholder CIDRs above with the real addresses
+    your Postgres / Vault / Keycloak resolve to, set `enabled: true`, and
+    re-run the same `helm upgrade` from Step 7. The broadcast subchart
+    renders its own ingress NetworkPolicy and Valkey auth alongside.
+
 For a **Google Secret Manager** deploy, replace the `vault` block and
 `config.vaultAddr` with the GSM fields — the exact delta is on the
 [credential backends](credential-backends.md#helm-values-per-backend)
@@ -258,6 +271,28 @@ helm upgrade --install meho oci://ghcr.io/evoila/meho-chart \
 Pin `--version <chart-version>` in production (discover versions with
 `helm show chart oci://ghcr.io/evoila/meho-chart`); without it Helm
 uses the latest published chart.
+
+!!! tip "Baseline: deploy by digest and verify the signature"
+
+    Beyond pinning an immutable `image.tag`, the production baseline is to
+    **deploy by digest and verify the signature before rollout**. Set
+    `image.digest` (`sha256:…`) so the Deployment (and the byte-identical
+    migration Job) render `repository@digest` — the exact, content-addressed
+    digest the image pipeline scanned, promoted, and cosign-signed; a digest
+    can never be re-pointed the way a tag can. `cosign verify` that digest
+    against the keyless workflow identity before `helm upgrade`:
+
+    ```bash
+    DIGEST=sha256:<the digest you are pinning>
+    cosign verify "ghcr.io/evoila/meho@${DIGEST}" \
+      --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@.*$' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+    ```
+
+    Ideally the same check is enforced at admission (a Sigstore
+    policy-controller / Kyverno image-verification rule). The full
+    verification recipes — image, chart, and CLI — are in the
+    [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
 
 What happens, in order:
 

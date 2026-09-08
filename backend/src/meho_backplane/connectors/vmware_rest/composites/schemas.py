@@ -4749,3 +4749,204 @@ SUPERVISOR_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
     },
     "required": ["cluster", "config_status", "kubernetes_status", "ready"],
 }
+
+
+# ===========================================================================
+# storage_policy.* — governed NFS tag-based SPBM policy create/delete (#3494)
+# ===========================================================================
+
+#: ``vmware.composite.storage_policy.list`` parameter schema.
+#:
+#: Optional ``policy_ids`` narrows the list; absent, every visible policy is
+#: returned (JSONFlux-reduced by the dispatcher when set-shaped).
+STORAGE_POLICY_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": (
+                "Optional storage-policy identifiers to filter the list by. "
+                "Absent or empty lists every visible policy."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.list`` response schema.
+STORAGE_POLICY_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policies": {
+            "type": "array",
+            "description": "The visible storage policies (Vcenter.Storage.Policies.Summary rows).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "policy": {"type": "string", "description": "Storage-policy identifier."},
+                    "name": {"type": "string", "description": "Storage-policy display name."},
+                    "description": {"type": "string", "description": "Storage-policy description."},
+                },
+                "required": ["policy", "name"],
+                "additionalProperties": True,
+            },
+        },
+    },
+    "required": ["policies"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.storage_policy.create`` parameter schema.
+#:
+#: Mints a tag-based requirement storage policy for NFS-principal datastores
+#: (which have no default policy). Creates the tag category + tag, attaches the
+#: tag to each named datastore, then creates the PBM policy whose one rule
+#: requires that tag. Category / tag / policy names must be new (this is a
+#: create op; use storage_policy.delete for teardown).
+STORAGE_POLICY_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": (
+                "Display name of the storage policy to create (PBM caps the name at 80 characters)."
+            ),
+        },
+        "category_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the tag category to create. The tag rule "
+                "references this category; the property id is "
+                "``com.vmware.storage.tag.<category_name>.property``."
+            ),
+        },
+        "tag_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the tag to create in the category and attach "
+                "to the datastores. The policy's tag rule requires this tag."
+            ),
+        },
+        "datastore_names": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Names of the datastore(s) the tag is attached to (typically "
+                "the NFS datastore(s) the Supervisor / VKS storage binds to). "
+                "Each name must resolve to exactly one datastore."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional description applied to the category, tag, and policy.",
+        },
+    },
+    "required": ["policy_name", "category_name", "tag_name", "datastore_names"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.create`` response schema.
+STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "datastore_not_found",
+                "policy_create_failed",
+            ],
+            "description": (
+                "``created`` — policy minted and visible; "
+                "``datastore_not_found`` — a datastore name resolved to zero / "
+                "many datastores (no tag substrate created); "
+                "``policy_create_failed`` — the tag substrate was created but "
+                "PbmCreate did not return a policy id (created artifacts "
+                "reported for cleanup)."
+            ),
+        },
+        "policy_id": {
+            "type": ["string", "null"],
+            "description": "The created PBM policy id (the vCenter StoragePolicy identifier).",
+        },
+        "policy_name": {"type": "string"},
+        "category_id": {"type": ["string", "null"], "description": "The created tag category id."},
+        "tag_id": {"type": ["string", "null"], "description": "The created tag id."},
+        "tag_name": {"type": "string"},
+        "datastores": {
+            "type": "array",
+            "description": "Resolved datastores the tag was attached to.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "moid": {"type": "string"},
+                },
+                "required": ["name", "moid"],
+                "additionalProperties": False,
+            },
+        },
+        "listed": {
+            "type": "boolean",
+            "description": "Whether the read-back GET saw the new policy in the policies list.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "policy_id", "policy_name"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.storage_policy.delete`` parameter schema.
+STORAGE_POLICY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "The storage-policy id to delete (the PBM profile uniqueId / "
+                "the identifier storage_policy.list returns as ``policy``)."
+            ),
+        },
+        "policy_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional display name, echoed in guidance for the approver.",
+        },
+    },
+    "required": ["policy_id"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.delete`` response schema.
+STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "delete_failed", "still_present"],
+            "description": (
+                "``deleted`` — PbmDelete reported no per-id fault and the "
+                "read-back no longer lists the id; ``delete_failed`` — PbmDelete "
+                "returned a per-id fault (e.g. the policy is in use); "
+                "``still_present`` — PbmDelete reported success but the "
+                "read-back still lists the id."
+            ),
+        },
+        "policy_id": {"type": "string"},
+        "fault": {
+            "type": ["string", "null"],
+            "description": "The per-id PbmDelete fault type, when status='delete_failed'.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "policy_id"],
+    "additionalProperties": True,
+}

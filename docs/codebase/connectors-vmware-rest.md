@@ -8,13 +8,15 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 41 hand-authored composites
-that orchestrate cross-spec workflows: 10 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 44 hand-authored composites
+that orchestrate cross-spec workflows: 11 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
-Supervisor status read `#3281`) and 31 write
+Supervisor status read `#3281` + the storage-policy list read `#3494`) and 33 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
+governed NFS tag-based SPBM `storage_policy.create` (caution) +
+`storage_policy.delete` (destructive) / `#3494`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
 `vm.disk.attach` / `#3256`, the folder-template
@@ -288,7 +290,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
   lifespan startup. Iterates a single `_COMPOSITES` tuple of 41
-  `_CompositeSpec` rows (10 read + 31 write); each row carries its
+  `_CompositeSpec` rows (11 read + 33 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -1223,6 +1225,66 @@ fault yields "no snapshots enumerated", never sinks the park). It declines
 (`None` → the park is refused `blast_radius_required`, fail-closed) when the
 VM cannot be read.
 
+### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
+
+NFS-principal datastores have **no default VM storage policy** (`vSAN Default
+Storage Policy` is vSAN-only), so a tag-based SPBM policy must be minted before
+a vSphere Supervisor can be enabled (its `EnableSpec` requires
+`master_storage_policy` / `ephemeral_storage_policy` / `image_storage`, all
+policy ids) and before a vSphere Namespace / VKS guest cluster can bind
+storage. Creating it out of band (`govc` / PowerCLI `New-SpbmStoragePolicy`) is
+exactly the escape from policy / audit / approval the dogfooding story cannot
+have, so three composites (`group_key="storage"`) close the gap:
+
+- **`storage_policy.list`** — a read (`safe`, no approval) over
+  `GET /vcenter/storage/policies`; the set-shaped `policies` list is
+  JSONFlux-reduced to a result handle by the dispatcher when large.
+- **`storage_policy.create`** (`safety_level="caution"`, `requires_approval=True`)
+  — the first link in the Supervisor-enable chain. Fans out, each child
+  gated through `enforce_subop_policy`: resolve every `datastore_names` entry
+  to a moid (`GET /vcenter/datastore`, fail-closed `datastore_not_found`
+  before any write if one resolves to zero / many) → create the tag
+  **category** (`POST /cis/tagging/category`, MULTIPLE cardinality, associable
+  to `Datastore`) → create the **tag** in it (`POST /cis/tagging/tag`) →
+  **attach** the tag to each datastore
+  (`POST /cis/tagging/tag-association/{tagId}?action=attach`, `object_id` =
+  `{id: <datastore-moid>, type: "Datastore"}`) → create the **PBM policy**
+  whose one rule requires the tag → read-back `GET /vcenter/storage/policies`.
+  Returns the policy id (the vCenter `StoragePolicy` identifier). No implicit
+  rollback: a PBM create that returns no id reports the created category / tag
+  ids for cleanup (`policy_create_failed`).
+- **`storage_policy.delete`** (`safety_level="destructive"`,
+  `requires_approval=True`) — issues PBM `PbmDelete` for the id, then read-backs
+  the policies list; a per-id `PbmDelete` fault (e.g. the policy is in use)
+  returns `delete_failed` with the fault type (an in-use policy must be freed
+  first — no force). Deletes only the policy; the tag / category are left in
+  place (they may be shared).
+
+**Two transports, one op.** The tag substrate rides the generic REST sub-op
+seam (`_write_sub_op` → `connector._post_json`, the tag rows are ingested
+`vcenter.yaml` paths). Policy **creation has no vCenter REST equivalent** — the
+spec exposes only `GET /vcenter/storage/policies` (read) — so it rides the
+**PBM SOAP** API (`PbmProfileProfileManager.PbmCreate` / `PbmDelete` on `/pbm`,
+namespace `urn:pbm`). PBM is a distinct SOAP service from the vim25 `/sdk`
+codec: `soap_pbm.py` carries its envelope builders + parsers (reusing the
+vim25 codec's namespace-agnostic low-level helpers), and the connector's
+`_ensure_pbm` mints a **separate** vim SOAP session — a `SessionManager.Login`
+on `/sdk` for the `vmware_soap_session` cookie, then `PbmRetrieveServiceContent`
+on `/pbm` for the `profileManager` moid — because PBM authenticates with the
+vim SOAP cookie, not the vAPI `vmware-api-session-id` token the REST/VI-JSON
+path uses (`_soap_post` gained a `path` argument so the same span-recording,
+credential-free wire helper serves both `/sdk` and `/pbm`). The tag-rule
+create-spec shape (namespace `http://www.vmware.com/storage/tag`, property id
+`com.vmware.storage.tag.<category>.property`, subprofile "Tag based placement",
+`category=REQUIREMENT`, `resourceType=STORAGE`, with the `xsi:type`
+discriminators vmomi requires on the polymorphic `constraints` / `value` /
+`values` slots) is grounded on govmomi `pbm` + `govc storage.policy.create` +
+the community `vmware_vm_storage_policy` Ansible module. The `storage_policy.*`
+group's REST paths are pinned against the vendor spec by
+`test_connectors_vmware_rest_storage_policy_reconcile.py` (the tag / datastore /
+policies paths must be served; the `/pbm` keys must **not** be — proving they
+have no REST equivalent).
+
 ### Two clone ops: content-library vs folder-template (`vm.clone_from_template`, #2894)
 
 The connector ships **two** clone composites, and they deploy from two
@@ -2068,6 +2130,18 @@ they never park.
   `vcenter-9.0/vcenter.yaml`, vmomi POST legs vs
   `vcenter-9.0/vi-json.yaml` — skipping uniformly without the shelf,
   running for real in CI.
+- **PBM SOAP path (`storage_policy.*`, #3494) is mock-validated only** —
+  the `/pbm` envelope builders + parsers (`soap_pbm.py`) and the
+  `_ensure_pbm` vim-SOAP-session-then-`/pbm` establish are unit-tested
+  against synthetic `urn:pbm` envelopes grounded on the govmomi / govc /
+  Ansible reference shapes, and the REST tag paths are spec-reconciled, but
+  the SOAP wire has **not** been exercised against a live vCenter at build
+  time (no lab access) — the mock-vs-hardware trap the ESXi SOAP codec
+  (#3363) documents. Live-appliance validation (probe → `storage_policy.create`
+  on the NFS WLD → Supervisor-enable consumes the id → `storage_policy.delete`)
+  is deferred; treat the SOAPAction posture (empty, matching the bootstrap
+  posts) and the `xsi:type` discriminators as the first things to re-check if
+  a live PbmCreate faults.
 
 ## References
 

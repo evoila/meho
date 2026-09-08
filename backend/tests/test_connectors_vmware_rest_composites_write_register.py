@@ -118,6 +118,9 @@ _WRITE_OP_IDS: tuple[str, ...] = (
     # Supervisor (WCP) namespace-management writes (#3281).
     "vmware.composite.supervisor.enable",
     "vmware.composite.supervisor.disable",
+    # Governed NFS tag-based SPBM storage-policy writes (#3494).
+    "vmware.composite.storage_policy.create",
+    "vmware.composite.storage_policy.delete",
 )
 
 # 5 reads (T5 / #508) -- carried over so the combined-count assertion
@@ -137,10 +140,12 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.file.read",
     # Supervisor (WCP) status read (#3281).
     "vmware.composite.supervisor.status",
+    # Storage-policy list read (#3494).
+    "vmware.composite.storage_policy.list",
 )
 
-# 41 total -- 10 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281) + 31 write
+# 44 total -- 11 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281 + storage_policy.list / #3494) + 33 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
@@ -150,7 +155,8 @@ _READ_OP_IDS: tuple[str, ...] = (
 # content-library import vm.import_from_library / #3229 + the guest-ops
 # program-exec write vm.guest.program.run / #3255 + the WSFC/FCI shared-attach
 # vm.disk.attach / #3256 + the Supervisor writes supervisor.enable +
-# supervisor.disable / #3281).
+# supervisor.disable / #3281 + the storage-policy writes storage_policy.create
+# + storage_policy.delete / #3494).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -250,6 +256,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.supervisor.disable": (
         "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_disable_composite"
     ),
+    "vmware.composite.storage_policy.create": (
+        "meho_backplane.connectors.vmware_rest.composites._storage_policy."
+        "storage_policy_create_composite"
+    ),
+    "vmware.composite.storage_policy.delete": (
+        "meho_backplane.connectors.vmware_rest.composites._storage_policy."
+        "storage_policy_delete_composite"
+    ),
 }
 
 
@@ -285,6 +299,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.program.run": "guest_ops",
     "vmware.composite.supervisor.enable": "namespace_management",
     "vmware.composite.supervisor.disable": "namespace_management",
+    "vmware.composite.storage_policy.create": "storage",
+    "vmware.composite.storage_policy.delete": "storage",
 }
 
 
@@ -379,7 +395,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 41
+    assert len(rows) == 44
 
 
 @pytest.mark.asyncio
@@ -413,9 +429,12 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
     # otherwise the loop is vacuous when the set is empty / partial.
     assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     for row in rows:
-        expected_level = (
-            "destructive" if row.op_id == "vmware.composite.vm.destroy" else "dangerous"
-        )
+        _non_dangerous_levels = {
+            "vmware.composite.vm.destroy": "destructive",
+            "vmware.composite.storage_policy.create": "caution",
+            "vmware.composite.storage_policy.delete": "destructive",
+        }
+        expected_level = _non_dangerous_levels.get(row.op_id, "dangerous")
         assert row.safety_level == expected_level, (
             f"{row.op_id}: expected {expected_level}, got {row.safety_level!r}"
         )
@@ -660,6 +679,17 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
             "disconnected",
             "invalid_request",
         },
+        # #3494: governed NFS tag-based SPBM storage-policy create/delete.
+        "vmware.composite.storage_policy.create": {
+            "created",
+            "datastore_not_found",
+            "policy_create_failed",
+        },
+        "vmware.composite.storage_policy.delete": {
+            "deleted",
+            "delete_failed",
+            "still_present",
+        },
     }
     for op_id, expected_values in expected_status_values.items():
         schema: dict[str, Any] = dict(by_op[op_id].response_schema)
@@ -709,7 +739,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
     """Running the registrar twice -> 41 rows total, embedding called 41x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 41
+    assert first_count == 44
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
@@ -727,7 +757,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 41
+    assert len(rows) == 44
 
 
 # ---------------------------------------------------------------------------

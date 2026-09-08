@@ -30,8 +30,17 @@ receiving host, but no practical mail system distinguishes
 an operator's capitalization habit into a silent refusal.
 
 There is deliberately no pattern/glob dimension (#1177: one closed-set
-config, no DSL) and no per-tenant allowlist — the SMTP block is
-deployment-level (one MTA, one floor), per task #2717's scope.
+config, no DSL). The SMTP block itself is deployment-level (one MTA, one
+floor). A **per-tenant narrowing** override rides on top of this floor
+(#3499): :mod:`meho_backplane.connectors.mail.tenant_policy` resolves a
+tenant's own allowlist and the ``mail.send`` handler screens recipients
+against it *before* this instance floor, so a tenant can be pinned to no
+mail (or a narrower recipient set) while others keep alert mail. That
+override reuses the parser and matcher here — see
+:func:`parse_recipient_allowlist` (``raw`` argument) and
+:func:`recipient_allowed`. The instance floor stays the hard floor on
+every path either way: the tenant screen can only *narrow*, never widen
+past it.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ __all__ = [
     "RecipientNotAllowedError",
     "assert_recipient_allowed",
     "parse_recipient_allowlist",
+    "recipient_allowed",
 ]
 
 
@@ -64,14 +74,24 @@ def _malformed_entry(entry: str) -> ValueError:
     )
 
 
-def parse_recipient_allowlist() -> tuple[frozenset[str], frozenset[str]]:
-    """Parse ``mail_recipient_allowlist`` into ``(addresses, domains)``.
+def parse_recipient_allowlist(
+    raw: str | None = None,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Parse a recipient allowlist string into ``(addresses, domains)``.
 
     A token containing ``@`` in an interior position is a full address;
     a token without one (or with only a leading ``@``) is a domain. Both
     are lower-cased, and a trailing dot on a domain is stripped, so
     matching is case-insensitive and FQDN-dot-tolerant (mirrors the
     ``net.*`` hostname fold).
+
+    *raw* is the source string. When ``None`` (the default) the live
+    :class:`~meho_backplane.settings.Settings` singleton's
+    ``mail_recipient_allowlist`` (the deployment-level instance floor) is
+    read per call; tests swap that value by mutating the env and clearing
+    ``get_settings``'s cache. Pass an explicit string to parse a
+    **per-tenant** override (#3499) instead — the same grammar, so a
+    malformed tenant entry fails as loudly as a malformed instance entry.
 
     A token that is not a well-formed address or domain raises
     :class:`ValueError` naming it — loud, because silently keeping an
@@ -85,14 +105,11 @@ def parse_recipient_allowlist() -> tuple[frozenset[str], frozenset[str]]:
     look non-empty — suppressing the "connector is inert" refusal
     message that would otherwise tell the operator exactly what is
     wrong.
-
-    Reads the live :class:`~meho_backplane.settings.Settings` singleton
-    per call; tests swap the value by mutating the env and clearing
-    ``get_settings``'s cache, like every other settings-backed surface.
     """
+    source = get_settings().mail_recipient_allowlist if raw is None else raw
     addresses: set[str] = set()
     domains: set[str] = set()
-    for token in get_settings().mail_recipient_allowlist.split(","):
+    for token in source.split(","):
         entry = token.strip()
         if not entry:
             continue
@@ -112,11 +129,59 @@ def parse_recipient_allowlist() -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(addresses), frozenset(domains)
 
 
+def _normalise_recipient(address: str) -> str | None:
+    """Return the folded ``local@domain`` candidate, or ``None`` if unparseable.
+
+    An address is unparseable — and therefore never matches any allowlist —
+    when it is empty, carries whitespace or non-printable characters, or is
+    not exactly one ``local@domain`` pair. Refusing an unparseable recipient
+    (rather than guessing) is what keeps SMTP envelope injection (CR/LF in a
+    recipient) structurally impossible past this gate.
+    """
+    candidate = address.strip().lower()
+    local, sep, domain = candidate.partition("@")
+    if (
+        not local
+        or not sep
+        or not domain
+        or "@" in domain
+        or any(ch.isspace() or not ch.isprintable() for ch in candidate)
+    ):
+        return None
+    return candidate
+
+
+def recipient_allowed(
+    address: str,
+    addresses: frozenset[str],
+    domains: frozenset[str],
+) -> bool:
+    """Return whether *address* is covered by a parsed ``(addresses, domains)`` set.
+
+    The pure membership predicate underneath both floors: an empty set
+    (``not addresses and not domains``) admits nothing (the inverted
+    "empty ⇒ inert / deny" default), an unparseable address matches
+    nothing, and otherwise the folded address must be a listed full
+    address or sit at a listed domain. Used verbatim by the transport's
+    instance-floor :func:`assert_recipient_allowed` and by the
+    per-tenant screen in :mod:`meho_backplane.connectors.mail.ops`
+    (#3499), so both floors decide membership identically.
+    """
+    if not addresses and not domains:
+        return False
+    candidate = _normalise_recipient(address)
+    if candidate is None:
+        return False
+    _, _, domain = candidate.partition("@")
+    return candidate in addresses or domain.rstrip(".") in domains
+
+
 def assert_recipient_allowed(address: str) -> None:
     """Raise :class:`RecipientNotAllowedError` unless *address* is allowlisted.
 
     Called by the transport on **every** recipient of a send, *before*
-    any SMTP connection opens. The decision is absolute membership in
+    any SMTP connection opens, against the **instance floor**
+    (``MAIL_RECIPIENT_ALLOWLIST``). The decision is absolute membership in
     :func:`parse_recipient_allowlist`'s parsed set:
 
     * empty allowlist → always refuse (the connector is inert);
@@ -130,6 +195,10 @@ def assert_recipient_allowed(address: str) -> None:
     recipient) structurally impossible past this gate. The message never
     echoes the parsed set (no recipient-space oracle).
 
+    Membership is decided by :func:`recipient_allowed`; the empty-allowlist
+    and malformed-address arms are split out here only so each raises its
+    own diagnostic message.
+
     Raises:
         RecipientNotAllowedError: *address* is empty, malformed, not
             covered by the allowlist, or the allowlist is empty.
@@ -140,17 +209,9 @@ def assert_recipient_allowed(address: str) -> None:
             "recipient refused: MAIL_RECIPIENT_ALLOWLIST is empty, so the "
             "mail.* connector is inert; add the address or domain to mail"
         )
-    candidate = address.strip().lower()
-    local, sep, domain = candidate.partition("@")
-    if (
-        not local
-        or not sep
-        or not domain
-        or "@" in domain
-        or any(ch.isspace() or not ch.isprintable() for ch in candidate)
-    ):
+    if _normalise_recipient(address) is None:
         raise RecipientNotAllowedError(f"recipient refused: {address!r} is not a valid address")
-    if candidate in addresses or domain.rstrip(".") in domains:
+    if recipient_allowed(address, addresses, domains):
         return
     raise RecipientNotAllowedError(
         "recipient refused: address is not listed in MAIL_RECIPIENT_ALLOWLIST"

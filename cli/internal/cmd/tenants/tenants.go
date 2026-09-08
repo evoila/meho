@@ -4,14 +4,19 @@
 // Package tenants hosts the cobra commands under `meho tenants ...` for the
 // operator-plane per-tenant policy surface (#3272).
 //
-// v0.2 ships one policy family — the flight-recorder capture policy:
+// Two policy families ship here, each tenant-scoped (the caller's own tenant,
+// from the JWT — no tenant id is accepted, so there is no cross-tenant write)
+// and tenant_admin only (operator / read_only land as 403 insufficient_role):
 //
 //   - `meho tenants flight-recorder-policy set [--enabled] [--agent-readable]
 //     [--retention-days N | --clear-retention]` — PATCH
-//     /api/v1/tenants/flight-recorder-policy. Tenant-scoped (the caller's own
-//     tenant, from the JWT — no tenant id is accepted, so there is no
-//     cross-tenant write). tenant_admin only; operator / read_only land as 403
-//     insufficient_role.
+//     /api/v1/tenants/flight-recorder-policy.
+//   - `meho tenants mail-recipient-policy set [--allowlist <value> | --clear]`
+//     — PATCH /api/v1/tenants/mail-recipient-policy (#3499). The tenant
+//     allowlist narrows the deployment-level MAIL_RECIPIENT_ALLOWLIST instance
+//     floor: an empty `--allowlist=""` denies all mail for the tenant, a value
+//     restricts it, `--clear` inherits the floor. It can never widen past the
+//     floor, which the backplane still applies at send time.
 //
 // The verb builds a **sparse** JSON body (only the fields the operator set)
 // rather than the generated `TenantFlightRecorderPolicyUpdate` struct: that
@@ -47,12 +52,14 @@ import (
 // top-level meho command tree by cmd/root.go.
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "tenants",
-		Short:        "Operate per-tenant policy (flight-recorder capture policy)",
-		Long:         "Manage the operator's own tenant policy. v0.2 ships the flight-recorder capture policy.",
+		Use:   "tenants",
+		Short: "Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)",
+		Long: "Manage the operator's own tenant policy — the flight-recorder capture policy " +
+			"and the mail-recipient allowlist.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newFlightRecorderPolicyCmd())
+	cmd.AddCommand(newMailRecipientPolicyCmd())
 	return cmd
 }
 

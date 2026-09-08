@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Operator mutation surface for the per-tenant flight-recorder policy (#3272).
+"""Operator mutation surface for per-tenant policy (#3272, #3499).
+
+Two policy families live here, each its own ``PATCH`` under
+``/api/v1/tenants``: the flight-recorder capture policy (#3272, below) and the
+mail-recipient allowlist (#3499, :func:`update_mail_recipient_policy`). Both
+share the surface posture and scope rules documented next.
+
+Flight-recorder policy (#3272).
 
 The flight-recorder decision (``docs/decisions/dispatch-flight-recorder.md``,
 F1) models capture enablement as an operator action -- "a lab-class tenant is
@@ -51,6 +58,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
+from meho_backplane.connectors.mail.tenant_policy import invalidate_tenant_mail_policy_cache
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
 from meho_backplane.flight_recorder.config import invalidate_tenant_policy_cache
@@ -215,4 +224,119 @@ async def update_flight_recorder_policy(
         flight_recorder_enabled=tenant.flight_recorder_enabled,
         flight_recorder_agent_readable=tenant.flight_recorder_agent_readable,
         flight_recorder_retention_days=tenant.flight_recorder_retention_days,
+    )
+
+
+class TenantMailRecipientPolicy(BaseModel):
+    """Resolved per-tenant mail-recipient policy -- the PATCH read-back shape (#3499).
+
+    Frozen; maps 1:1 to the tenant's ``mail_recipient_allowlist`` column plus the
+    tenant id. ``mail_recipient_allowlist`` is nullable: ``None`` means
+    **inherit** (no per-tenant narrowing; the deployment-level
+    ``MAIL_RECIPIENT_ALLOWLIST`` instance floor alone governs the send), ``""``
+    means **deny** (an empty tenant allowlist refuses every dispatched
+    ``mail.send``), and a comma-separated string is the tenant's own recipient
+    space (still intersected with the instance floor at the transport).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    mail_recipient_allowlist: str | None
+
+
+class TenantMailRecipientPolicyUpdate(BaseModel):
+    """``PATCH /api/v1/tenants/mail-recipient-policy`` body (#3499).
+
+    The single field is optional-partial (``model_dump(exclude_unset=True)`` in
+    the handler keys off ``model_fields_set``, so a JSON ``null`` is
+    distinguished from an absent key). ``extra='forbid'`` rejects unknown keys
+    with a 422.
+
+    * absent = leave the column unchanged.
+    * ``null`` = clear back to **inherit** (the instance floor alone governs the
+      tenant's ``mail.send``).
+    * ``""`` = **deny** (an empty tenant allowlist refuses every dispatched
+      send) -- the shared-instance containment lever.
+    * a comma-separated address/domain string = the tenant's own recipient
+      space. Validated with the same grammar as the instance floor
+      (:func:`~meho_backplane.connectors.mail.allowlist.parse_recipient_allowlist`),
+      so a malformed entry (whitespace, ``foo@``, bare ``@``, ...) is a 422 at
+      write time rather than a silent inert allowlist at dispatch time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mail_recipient_allowlist: str | None = None
+
+    @field_validator("mail_recipient_allowlist")
+    @classmethod
+    def _validate_allowlist_grammar(cls, value: str | None) -> str | None:
+        """Reject a malformed non-null allowlist string at write time.
+
+        ``None`` (clear-to-inherit) and ``""`` (deny) are always legal. A
+        non-empty string must parse under the recipient-allowlist grammar; the
+        parser raises :class:`ValueError` naming the offending token, which
+        Pydantic surfaces as a 422 -- so an operator learns the entry is
+        unusable now instead of discovering later that the tenant silently
+        cannot send. The validator fires only for a *provided* field, so an
+        absent key (leave-unchanged) never reaches it.
+        """
+        if value is None or value == "":
+            return value
+        parse_recipient_allowlist(value)  # raises ValueError -> 422 on a bad entry
+        return value
+
+
+@router.patch("/mail-recipient-policy", response_model=TenantMailRecipientPolicy)
+async def update_mail_recipient_policy(
+    body: TenantMailRecipientPolicyUpdate,
+    operator: Operator = _require_tenant_admin,
+    session: AsyncSession = Depends(get_session),
+) -> TenantMailRecipientPolicy:
+    """Set or clear the caller's per-tenant mail-recipient allowlist (#3499).
+
+    Tenant-scoped to ``operator.tenant_id`` (no cross-tenant write is
+    expressible -- no tenant id is accepted in the path or body).
+    ``tenant_admin`` only. Applies the field only when present in the body; an
+    applied change is folded into this request's ``audit_log`` row (field / old
+    / new, ``None`` -> ``inherit`` sentinel) and evicts the resolver's
+    per-tenant cache so the new value governs the next dispatched ``mail.send``
+    without a restart.
+    """
+    tenant = await session.get(Tenant, operator.tenant_id)
+    if tenant is None:
+        # Defensive depth, mirroring the flight-recorder route: the
+        # ``ensure_tenant`` middleware get-or-creates the row on every
+        # authenticated request, so this only fires if that invariant is ever
+        # bypassed -- surface it structured rather than 500-ing on the setattr.
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+
+    updates = body.model_dump(exclude_unset=True)
+    changed = False
+    if "mail_recipient_allowlist" in updates:
+        new_value = updates["mail_recipient_allowlist"]
+        old_value = tenant.mail_recipient_allowlist
+        if old_value != new_value:
+            tenant.mail_recipient_allowlist = new_value
+            structlog.contextvars.bind_contextvars(
+                audit_mail_recipient_allowlist_before=_audit_value(old_value),
+                audit_mail_recipient_allowlist_after=_audit_value(new_value),
+            )
+            changed = True
+
+    if changed:
+        structlog.contextvars.bind_contextvars(
+            audit_mail_recipient_policy_changed=True,
+            audit_tenant_id=str(operator.tenant_id),
+        )
+        invalidate_tenant_mail_policy_cache(operator.tenant_id)
+        _log.info(
+            "tenant_mail_recipient_policy_updated",
+            tenant_id=str(operator.tenant_id),
+        )
+
+    return TenantMailRecipientPolicy(
+        tenant_id=tenant.id,
+        mail_recipient_allowlist=tenant.mail_recipient_allowlist,
     )

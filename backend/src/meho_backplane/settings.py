@@ -1696,6 +1696,27 @@ class Settings(BaseModel):
     mail_smtp_password: str = Field(default="", repr=False)
     mail_from: str = Field(default="")
     mail_recipient_allowlist: str = Field(default="")
+    # #3499 — opt-in bearer-token guard for the operational exposition
+    # endpoints ``GET /metrics`` (:mod:`meho_backplane.main`) and
+    # ``GET /ready`` (:mod:`meho_backplane.health`). Both are served on the
+    # shared ingress and, unauthenticated, leak operational metrics and the
+    # effective four-eyes / feature-gate posture to anyone who can reach it.
+    # Empty ("", the default) leaves both endpoints **open** — behaviour is
+    # unchanged, so the in-cluster scraper and the kubelet readiness probe
+    # keep working with no config change. Set it to a shared secret to
+    # require ``Authorization: Bearer <token>`` on both endpoints
+    # (constant-time compared in :mod:`meho_backplane.metrics_access`); a
+    # deployment that turns it on must then hand the same token to the
+    # scraper (Prometheus ``bearer_token`` / ServiceMonitor
+    # ``bearerTokenSecret``) and to the readiness probe (``httpHeaders``).
+    # ``/healthz`` (pure liveness, no posture) is deliberately never guarded,
+    # so a bearer-less liveness path always exists. A **source-CIDR** allow
+    # was considered and rejected: behind the shared ingress the app sees the
+    # proxy's IP, not the real client's, so a peer-IP CIDR check cannot
+    # distinguish a booth visitor from the scraper without trusting a
+    # spoofable ``X-Forwarded-For``. ``repr=False`` keeps the token out of
+    # ``Settings`` reprs / structured logs.
+    metrics_auth_token: str = Field(default="", repr=False)
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -2434,6 +2455,7 @@ def get_settings() -> Settings:
         mail_smtp_password=os.environ.get("MAIL_SMTP_PASSWORD", "").strip(),
         mail_from=os.environ.get("MAIL_FROM", "").strip(),
         mail_recipient_allowlist=os.environ.get("MAIL_RECIPIENT_ALLOWLIST", ""),
+        metrics_auth_token=os.environ.get("METRICS_AUTH_TOKEN", "").strip(),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
             "MEHO_AGENT_SECRET_{tenant_id}_{client_id}",

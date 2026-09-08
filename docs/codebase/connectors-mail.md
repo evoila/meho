@@ -167,6 +167,55 @@ non-empty, so a typo that had disabled every send reported as an
 ordinary "not listed" refusal instead of the "connector is inert"
 diagnostic.
 
+## Per-tenant recipient allowlist (#3499)
+
+`MAIL_RECIPIENT_ALLOWLIST` is deployment-level (one MTA, one floor). On a
+**shared** instance that single floor cannot be narrowed per tenant, so an
+approved `mail.send` in one tenant could deliver to the recipients another
+tenant configured — the Envision-stand threat (meho-internal#320): an untrusted
+visitor tenant's approved send reaching real evoila mailboxes / a live Teams
+channel. #3499 adds a **per-tenant narrowing** override on top of the instance
+floor.
+
+**Where it lives.** `tenant.mail_recipient_allowlist` (nullable `Text`,
+migration `0101`) resolved per dispatch by
+`connectors/mail/tenant_policy.py::resolve_tenant_recipient_allowlist` (a
+60s-TTL cache mirroring the flight-recorder resolver). Tri-state on the value:
+
+| column | meaning |
+|---|---|
+| `NULL` (default) | **inherit** — no per-tenant screen; the instance floor alone governs |
+| `""` (empty) | **deny** — the tenant's parsed allowlist is empty, so every dispatched `mail.send` for the tenant is refused |
+| `"a@b.com,example.com"` | the tenant's own recipient space, still intersected with the instance floor |
+
+**Where it is evaluated.** In the **dispatch handler** `ops.mail_send`, *before*
+`transport.send_email`. Each recipient is screened against the tenant's parsed
+set with the shared `allowlist.recipient_allowed` matcher; one refused recipient
+returns `{sent: false, reason: "not_in_recipient_allowlist"}` (the same product
+the instance floor uses, so the dispatch stays `status="ok"` and the denial is
+audited synchronously through the normal path). The transport then applies the
+instance floor as always — so the tenant screen can only **narrow**, never widen
+past the deployment floor.
+
+**Dispatch-only.** The screen is on the `call_operation` / CLI dispatch path,
+which carries an `operator` (hence a `tenant_id`). The checks notifier's
+direct-import `transport.send_email` call (#2719) is **not** tenant-dispatched —
+it has no operator — so it keeps only the instance floor, unchanged. This is
+deliberate: the notifier is a deployment-internal alert path, not an
+agent/operator-initiated send that a tenant boundary should narrow.
+
+**Fail-closed.** Unlike the flight-recorder resolver (fail-open, "capture less
+on doubt"), this resolver fails **closed** — a DB read/parse error resolves to
+deny (empty allowlist), never to inherit. Falling through to the instance floor
+on a read error would defeat the containment the override exists to provide;
+this is a delivery-authorization decision, so doubt reduces exposure. The deny
+is not cached, so a transient error does not pin the tenant to deny for the TTL.
+
+**Operator surface.** Set/clear the override through
+`PATCH /api/v1/tenants/mail-recipient-policy` (tenant_admin) or
+`meho tenants mail-recipient-policy set --allowlist … | --clear`. Full write-path
+detail: [`tenant-mail-policy.md`](tenant-mail-policy.md).
+
 ## Safety posture
 
 `safety_level="caution"` + `requires_approval=False`: human/service
@@ -192,9 +241,11 @@ events carry host/port/reason only, never the password or body.
 - The SMTP session timeout is a module constant
   (`transport._SMTP_TIMEOUT_SECONDS`, 30 s), not a settings knob — no
   consumer has asked to tune it (#1177 substrate minimalism).
-- No HTML, attachments, templating, or per-tenant SMTP — explicitly out
-  of scope for #2717; further transports (Slack/PagerDuty/webhook) are
-  new connectors when a consumer asks.
+- No HTML, attachments, templating, or per-tenant **SMTP block** —
+  explicitly out of scope for #2717; further transports
+  (Slack/PagerDuty/webhook) are new connectors when a consumer asks. (A
+  per-tenant **recipient allowlist** did ship in #3499 — see the section
+  above; that narrows *who* a tenant may mail, not *which MTA* it uses.)
 
 ## References
 

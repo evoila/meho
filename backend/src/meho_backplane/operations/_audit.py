@@ -52,6 +52,7 @@ __all__ = [
     "agent_run_audit_meta_var",
     "agent_session_id_var",
     "audit_and_broadcast_safe",
+    "audit_rejection_safe",
     "parent_audit_id_var",
     "policy_decision_var",
     "publish_broadcast",
@@ -810,6 +811,50 @@ async def audit_and_broadcast_safe(
     except Exception:
         _log.exception(
             "dispatch_broadcast_failed",
+            op_id=descriptor.op_id,
+            result_status=result_status,
+            operator_sub=operator.sub,
+        )
+
+
+async def audit_rejection_safe(
+    *,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    descriptor: EndpointDescriptor,
+    target: Any,
+    params_hash: str,
+    result_status: str,
+    duration_ms: float,
+) -> None:
+    """Write one audit row for a pre-execution rejection; no broadcast (#3500).
+
+    Used for the abuse-control rejections (rate limit / concurrent-op cap):
+    the over-limit event must be audited (spec §6), but -- unlike a policy
+    denial, which is a rare governance event worth broadcasting -- it must
+    NOT publish a broadcast. Under a flood every rejection would otherwise
+    emit one ``XADD`` into the tenant's coordination feed, amplifying the
+    very load the limiter exists to shed and spamming the feed.
+
+    The row is written **fail-open**: an audit-insert failure is logged, not
+    raised, so a Valkey/DB wobble cannot turn a cheap rejection into a 500.
+    The request changed nothing, so a missing audit row for a rejected call
+    is a monitoring gap, not a correctness one -- the opposite of the
+    write-class success path's fail-closed ``require_audit`` contract.
+    """
+    try:
+        await write_audit_row(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params_hash=params_hash,
+            result_status=result_status,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        _log.exception(
+            "dispatch_rejection_audit_failed",
             op_id=descriptor.op_id,
             result_status=result_status,
             operator_sub=operator.sub,

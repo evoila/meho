@@ -54,11 +54,13 @@ def stub_dispatch_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]
     )
     audit = AsyncMock()
     monkeypatch.setattr(dispatcher, "audit_and_broadcast_safe", audit)
+    reject = AsyncMock()
+    monkeypatch.setattr(dispatcher, "audit_rejection_safe", reject)
     gate = AsyncMock()
     monkeypatch.setattr(dispatcher, "policy_gate", gate)
     release = AsyncMock()
     monkeypatch.setattr(dispatcher, "release_dispatch_slot", release)
-    return {"audit": audit, "gate": gate, "release": release}
+    return {"audit": audit, "reject": reject, "gate": gate, "release": release}
 
 
 @pytest.mark.asyncio
@@ -79,9 +81,10 @@ async def test_rate_limit_rejection_is_audited_and_skips_execution(
     assert result.status == "rate_limited"
     assert result.extras["kind"] == "rate"
     assert result.extras["retry_after_seconds"] == 30
-    # Audited with result_status='rate_limited' ...
-    stub_dispatch_seams["audit"].assert_awaited_once()
-    assert stub_dispatch_seams["audit"].await_args.kwargs["result_status"] == "rate_limited"
+    # Audited (row only, no broadcast) with result_status='rate_limited' ...
+    stub_dispatch_seams["reject"].assert_awaited_once()
+    assert stub_dispatch_seams["reject"].await_args.kwargs["result_status"] == "rate_limited"
+    stub_dispatch_seams["audit"].assert_not_awaited()  # no broadcast amplification
     # ... and the policy gate / execution were never reached (no vendor traffic).
     stub_dispatch_seams["gate"].assert_not_awaited()
 
@@ -105,8 +108,9 @@ async def test_concurrency_rejection_is_audited_and_skips_execution(
 
     assert result.status == "rate_limited"
     assert result.extras["kind"] == "concurrency"
-    stub_dispatch_seams["audit"].assert_awaited_once()
-    assert stub_dispatch_seams["audit"].await_args.kwargs["result_status"] == "rate_limited"
+    stub_dispatch_seams["reject"].assert_awaited_once()
+    assert stub_dispatch_seams["reject"].await_args.kwargs["result_status"] == "rate_limited"
+    stub_dispatch_seams["audit"].assert_not_awaited()  # no broadcast amplification
     stub_dispatch_seams["gate"].assert_not_awaited()
 
 

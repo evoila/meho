@@ -64,19 +64,22 @@ validation and before the policy gate, and only for **top-level** requests:
   already counted at park time.
 
 Both are exempt. On a rejection the dispatcher writes a synchronous audit row
-(`audit_and_broadcast_safe(result_status='rate_limited')`) — before any vendor
-traffic — and returns `result_rate_limited(...)`. `status_code_for_result`
+(`audit_rejection_safe(result_status='rate_limited')`) — before any vendor
+traffic — and returns `result_rate_limited(...)`. Unlike a policy denial, a
+rate-limit rejection is audited **row-only, with no broadcast**: emitting one
+broadcast per over-limit request would amplify the very load the limiter sheds
+and spam the tenant feed. The audit write is fail-open (a rejected request
+changed nothing). `status_code_for_result`
 maps `rate_limited` → a synthetic `429` on the audit row. The concurrency slot
 is released in the dispatcher's `finally` (best-effort: a release failure is
 logged, not raised, and the slot's safety `ttl` is the backstop).
 
-The read-path meta-tools that do not go through `dispatch()` —
-`search_operations`, `preview_operation`, and the shared `result_query` cores
-(`read_result_window` / `run_result_query`) — call `rate_limited_read_envelope`
-at entry and return the same structured envelope. They share the one
-per-principal dispatch rate bucket (a caller's total working-surface request
-volume is bounded), and do no vendor traffic, so they carry no concurrency cap
-or dedicated audit row.
+The read-path meta-tools `search_operations` and `preview_operation` (which do
+not go through `dispatch()`) call `rate_limited_read_envelope` at entry and
+return the same structured envelope. They share the one per-principal dispatch
+rate bucket (a caller's total working-surface request volume is bounded), and
+do no vendor traffic, so they carry no concurrency cap or dedicated audit row.
+`result_query` is intentionally **not** gated — see "Known issues / limits".
 
 **Session cap.** MEHO holds **no stateful MCP session store** — a session id
 is issued on `initialize` purely for audit correlation and then forgotten
@@ -126,6 +129,13 @@ leaving production tenants at the unlimited default.
   bypass the cap during a Valkey wobble.
 - The concurrency cap is a counter, not a lease: a slot leaked by a crashed
   worker (release never runs) self-heals only when the safety `ttl` expires.
+- `result_query` (the JSONFlux handle drill-in) is deliberately not
+  separately rate-limited: it is a bounded read over the caller's own
+  already-spilled, tenant+principal-isolated handle (low abuse value), it
+  follows a `call_operation` that already spent a rate token, and gating its
+  pure query cores would couple them to full `Settings` construction. The
+  discovery/execution paths (`call_operation`, `search_operations`,
+  `preview_operation`) carry the limit.
 - The session cap is a **new-sessions-per-window** proxy, not a live
   concurrent-session count — MEHO holds no session registry to count against.
 

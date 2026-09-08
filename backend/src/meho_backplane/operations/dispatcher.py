@@ -269,6 +269,7 @@ from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
     AuditCommitError,
     audit_and_broadcast_safe,
+    audit_rejection_safe,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -2466,12 +2467,11 @@ async def dispatch(
         _rate_retry = await check_dispatch_rate_limit(operator.tenant_id, operator.sub, _rate_limit)
         if _rate_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_and_broadcast_safe(
+            await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
                 target=target,
-                params=params,
                 params_hash=params_hash,
                 result_status="rate_limited",
                 duration_ms=duration_ms,
@@ -2492,12 +2492,11 @@ async def dispatch(
         )
         if _conc_retry is not None:
             duration_ms = _elapsed_ms(started)
-            await audit_and_broadcast_safe(
+            await audit_rejection_safe(
                 audit_id=uuid.uuid4(),
                 operator=operator,
                 descriptor=descriptor,
                 target=target,
-                params=params,
                 params_hash=params_hash,
                 result_status="rate_limited",
                 duration_ms=duration_ms,

@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: connector-class aggregation. This file is the one
+# SddcManagerConnector class — auth + session + fingerprint + probe + dispatch
+# shim + the thin bound-method shims for every typed op. The dispatcher's
+# import_handler walk resolves each typed handler as module.ClassName.method,
+# so the shims MUST be methods on this single class and cannot be split to
+# another module. The #3497 WLD-write shims (task_get / network_pool_create /
+# host_validate / host_commission / domain_validate / domain_create) pushed the
+# pre-existing 688-line file past the 600-line soft limit; the op bodies
+# themselves live in typed_reads.py / typed_writes.py.
 
 """SddcManagerConnector — hand-rolled HttpConnector subclass for SDDC Manager 9.0.
 
@@ -669,6 +678,56 @@ class SddcManagerConnector(HttpConnector):
         from meho_backplane.connectors.sddc_manager.typed_reads import sddc_license_list_impl
 
         return await sddc_license_list_impl(self, operator, target, params)
+
+    async def task_get(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.task.get`` shim (#3497) — the WLD-build task poll."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_task_get_impl
+
+        return await sddc_task_get_impl(self, operator, target, params)
+
+    async def network_pool_create(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.network_pool.create`` shim (#3497)."""
+        from meho_backplane.connectors.sddc_manager.typed_writes import (
+            sddc_network_pool_create_impl,
+        )
+
+        return await sddc_network_pool_create_impl(self, operator, target, params)
+
+    async def host_validate(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.host.validate`` shim (#3497)."""
+        from meho_backplane.connectors.sddc_manager.typed_writes import sddc_host_validate_impl
+
+        return await sddc_host_validate_impl(self, operator, target, params)
+
+    async def host_commission(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.host.commission`` shim (#3497)."""
+        from meho_backplane.connectors.sddc_manager.typed_writes import sddc_host_commission_impl
+
+        return await sddc_host_commission_impl(self, operator, target, params)
+
+    async def domain_validate(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.domain.validate`` shim (#3497)."""
+        from meho_backplane.connectors.sddc_manager.typed_writes import sddc_domain_validate_impl
+
+        return await sddc_domain_validate_impl(self, operator, target, params)
+
+    async def domain_create(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.domain.create`` shim (#3497) — dangerous, approval-gated."""
+        from meho_backplane.connectors.sddc_manager.typed_writes import sddc_domain_create_impl
+
+        return await sddc_domain_create_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool.

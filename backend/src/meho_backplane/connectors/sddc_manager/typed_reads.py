@@ -92,6 +92,7 @@ __all__ = [
     "sddc_network_pool_list_impl",
     "sddc_nsxt_cluster_list_impl",
     "sddc_system_info_impl",
+    "sddc_task_get_impl",
     "sddc_task_list_impl",
     "sddc_vcenter_list_impl",
     "sddc_vcf_service_list_impl",
@@ -111,6 +112,7 @@ _VCENTERS_PATH = "/v1/vcenters"
 _NSXT_CLUSTERS_PATH = "/v1/nsxt-clusters"
 _CREDENTIALS_PATH = "/v1/credentials"
 _TASKS_PATH = "/v1/tasks"
+_TASK_GET_PATH = "/v1/tasks/{id}"
 _SYSTEM_PATH = "/v1/system"
 _VCF_SERVICES_PATH = "/v1/vcf-services"
 _SDDC_MANAGERS_PATH = "/v1/sddc-managers"
@@ -388,6 +390,29 @@ async def sddc_task_list_impl(
     """
     query = _optional_query(params, ("status",))
     return await connector._get_json(target, _TASKS_PATH, operator=operator, params=query)
+
+
+async def sddc_task_get_impl(
+    connector: SddcManagerConnector,
+    operator: Operator,
+    target: SddcTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``sddc.task.get`` -- ``GET /v1/tasks/{id}``.
+
+    Reads one VCF workflow task by id -- the poll a caller runs against the
+    ``Task`` a host-commission or domain-create returned (both are ``202``
+    async). The returned object's top-level ``status`` carries the
+    PENDING / IN_PROGRESS / SUCCESSFUL / FAILED / ... lifecycle state, and its
+    ``subTasks[]`` the per-stage progress; on a live workload-domain build the
+    sub-task list runs to hundreds of rows, so the op's ``result_scalars`` /
+    ``result_digest`` hints keep ``id`` / ``status`` / ``name`` top-level while
+    ``subTasks[]`` reduces to a JSONFlux handle. Requires a task ``id`` from
+    ``sddc.host.commission`` / ``sddc.domain.create``.
+    """
+    task_id = params["id"]
+    path = _TASK_GET_PATH.format(id=task_id)
+    return await connector._get_json(target, path, operator=operator)
 
 
 async def sddc_system_info_impl(

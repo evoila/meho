@@ -10,6 +10,11 @@ shim. G3.5-T5 (#617) added spec ingestion + ingested read enablement. #2290
 rebuilt the auth on the profile-derived `session_login_token` token session
 (`POST /v1/tokens` → Bearer; the appliance rejects HTTP Basic). G3.5-T6 (#618)
 shipped the CLI verb tree (`meho sddc-manager …`) + recorded-fixture E2E test.
+#3497 lands the curated workload-domain **write** surface (network-pool create,
+host validate/commission, domain validate/create, plus a `task.get` poll) as
+approval-gated typed ops — the first writes on this connector; a 9.1 target
+resolves to this same connector (range `>=9.0,<10.0`), and the write paths are
+guarded against a pinned `sddc-manager-9.1` shelf spec.
 
 #2306 converted the audited 12-read lab-audit set to first-class **typed** ops
 (`source_kind="typed"`, `typed_ops.py` / `typed_reads.py`) that dispatch on a
@@ -172,6 +177,7 @@ dispatcher's #2067 recovery arm, which calls the connector's public
 | `sddc.network_pool.get` | `sddc-inventory` | `GET /v1/network-pools/{id}` |
 | `sddc.credential.list` | `sddc-credentials` | `GET /v1/credentials` |
 | `sddc.task.list` | `sddc-tasks-typed` | `GET /v1/tasks` |
+| `sddc.task.get` | `sddc-tasks-typed` | `GET /v1/tasks/{id}` |
 | `sddc.system.info` | `sddc-platform` | `GET /v1/system` |
 | `sddc.vcf_service.list` | `sddc-platform` | `GET /v1/vcf-services` |
 | `sddc.manager.list` | `sddc-platform` | `GET /v1/sddc-managers` |
@@ -226,9 +232,88 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
 `classify_sddc_op` / `apply_sddc_core_curation` helpers) was retired in #2358
 (T7 of #2266); read enablement is now generic, with no per-product curation code.
 
-Lifecycle-write ops (`workflow start`, `domain create`, `cluster expand`,
-`host commission`) remain `staged` (never enabled) per Initiative #368 v0.2
-scope.
+The curated workload-domain **write** ops (`network-pool create`, host
+`validate` / `commission`, domain `validate` / `create`) ship as first-class
+**typed** ops (#3497 — see the write-surface section below), enabled at boot
+and approval-gated, not as staged ingested rows. Other lifecycle-write ops
+(`workflow start`, `cluster expand`, edge-cluster create) remain out of the
+curated surface: they are browsable as profiled-dispatch breadth from a
+full-catalog ingest and enable-able through the generic review flow
+(`ReviewService.edit_op`), never bulk-enabled (writes are default-deny).
+
+## `typed_writes.py` — curated workload-domain write surface (#3497)
+
+#368 shipped the connector read-only and deferred writes; #3497 lands the
+curated **workload-domain (WLD) build** path as first-class typed ops
+(`source_kind="typed"`), so a workload domain can be stood up **through the
+backplane** on the governed dispatch path. The bodies live in
+`typed_writes.py`; the metadata + JSONFlux hints in `typed_ops.py`; thin
+bound-method shims on `SddcManagerConnector` (`network_pool_create`,
+`host_validate`, `host_commission`, `domain_validate`, `domain_create`, plus
+the `task_get` poll in `typed_reads.py`) expose them so the dispatcher's
+`import_handler` walk recovers each callable from its `module.ClassName.method`
+`handler_ref`. Each write issues one `HttpConnector._post_json(...)` on the
+token session (the generic non-idempotent seam that honours the declared verb,
+carries the JSON body, and records the flight-recorder vendor span); a raw
+`401` rides the dispatcher's #2067 session-recovery arm exactly as the reads do.
+
+| op_id | verb + path | safety_level | requires_approval |
+|---|---|---|---|
+| `sddc.network_pool.create` | `POST /v1/network-pools` | `caution` | yes |
+| `sddc.host.validate` | `POST /v1/hosts/validations` | `caution` | no |
+| `sddc.host.commission` | `POST /v1/hosts` | `dangerous` | yes |
+| `sddc.domain.validate` | `POST /v1/domains/validations` | `caution` | no |
+| `sddc.domain.create` | `POST /v1/domains` | `dangerous` | yes |
+| `sddc.task.get` | `GET /v1/tasks/{id}` | `safe` | no |
+
+All six are grouped under `sddc-lifecycle` (the writes) / `sddc-tasks-typed`
+(`task.get`) and dispatch through `call_operation` (MCP) or `meho sddc-manager
+operation call <op_id> --params @spec.json` (CLI) — **no new MCP tool and no new
+CLI verb** (CLAUDE.md postulate 5; the generic `operation call` verb carries the
+body). No `enable_writes` bulk path exists by design; each mutating op is a
+distinct approval-gated typed op that the dispatcher **parks** for approval
+before the handler runs. The park-time reviewer context runs the parked spec
+through the connector-boundary redaction engine, so a `DomainCreationSpec`'s or
+`HostCommissionSpec`'s plaintext passwords never reach the approver.
+
+**The governed WLD build sequence** (the caller's responsibility — runbook or
+the meho-automation add-on — not the dispatcher's): `network_pool.create` →
+`host.validate` → `host.commission` → `domain.validate` → `domain.create`. The
+create calls are `202`-async (they return a `Task` in seconds while the build
+runs for hours on the appliance); poll `sddc.task.get` with the returned task id
+and `sddc.domain.status` once the domain object exists, to a terminal state.
+
+**NFS-principal shape.** For the Envision estate (and any NFS-principal domain)
+the `DomainCreationSpec` uses
+`computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume`
+(`NasVolumeSpec`: `serverName[]` / `path` / `readOnly`) — **not**
+`vsanDatastoreSpec`. The domain ops' parameter schema models this NFS sub-shape
+so a well-formed NFS spec validates while a malformed `nasVolume` (the common
+trap of reusing a vSAN spec and swapping only the datastore) is rejected before
+dispatch; the schema stays permissive elsewhere so the full vendor
+`DomainCreationSpec` reaches the wire verbatim. Host commission and validation
+take a JSON **array** of `HostCommissionSpec` (`storageType="NFS"` for the
+estate).
+
+**JSONFlux.** The `Task` and `Validation` responses are set-shaped (a live
+build's `Task.subTasks[]` runs to hundreds of rows). `task.get` /
+`host.commission` / `domain.create` carry a `result_scalars` hint (keep `id` /
+`name` / `status` top-level) plus a `result_digest` hint naming `subTasks` as
+the collection to reduce (the `Task` carries three list fields — `subTasks` /
+`errors` / `resources` — so without the hint the reducer's multi-list
+detail-object exemption would pass the whole document through unreduced); the
+validation ops keep the `id` / `executionStatus` / `resultStatus` poll keys.
+
+**Spec-reconcile lane (#3497).** The hand-coded write `METHOD:/path` set
+(`typed_writes.TYPED_WRITE_DECLARED_OP_IDS`) is asserted against the pinned
+**`sddc-manager-9.1`** shelf spec by
+[`backend/tests/test_connectors_sddc_manager_91_spec_reconcile.py`](../../backend/tests/test_connectors_sddc_manager_91_spec_reconcile.py).
+A 9.1 target resolves to this same `sddc-rest-9.0` connector (range
+`>=9.0,<10.0`; no path was removed 9.0 → 9.1), so the reads stay guarded against
+`sddc-manager-9.0` (the #2982 lane) and the new writes against `sddc-manager-9.1`
+(the estate version). Provenance + CI wiring:
+[`docs/decisions/vendor-spec-ci-provisioning.md`](../decisions/vendor-spec-ci-provisioning.md)
+(the sddc-manager-9.1 extension).
 
 ## CLI verbs (`cli/internal/cmd/sddc-manager/`)
 
@@ -309,6 +394,8 @@ host-commissioning IP-capacity pre-flight; `--json` emits the full envelope.
   (skeleton); [G3.5-T5 #617](https://github.com/evoila/meho/issues/617)
   (spec ingestion + read ops); [G3.5-T6 #618](https://github.com/evoila/meho/issues/618)
   (CLI verbs + E2E + this doc update).
+  [#3497](https://github.com/evoila/meho/issues/3497) (curated
+  workload-domain write surface + `sddc-manager-9.1` reconcile lane).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
 - Operator onboarding: [`docs/cross-repo/sddc-manager-onboarding.md`](../cross-repo/sddc-manager-onboarding.md) — wrapper-flip recipe.

@@ -16,10 +16,14 @@ The declared set is introspected from the connector's live constants
 (the #2944 pattern — never a hardcoded mirror), across the three
 surfaces that hand-code a path:
 
-* :mod:`~meho_backplane.connectors.sddc_manager.typed_reads` — the 14
-  ``_*_PATH`` module constants. Every typed read dispatches through
+* :mod:`~meho_backplane.connectors.sddc_manager.typed_reads` — the 15
+  ``_*_PATH`` module constants (the audited reads plus the ``sddc.task.get``
+  build poll added in #3497). Every typed read dispatches through
   :meth:`HttpConnector._get_json` (a GET-only seam that delegates to
-  ``_request_json(target, "GET", ...)``), so each declares ``GET:``.
+  ``_request_json(target, "GET", ...)``), so each declares ``GET:``. The
+  curated WLD **write** paths (#3497) are guarded separately against the
+  pinned ``sddc-manager-9.1`` spec by
+  :mod:`tests.test_connectors_sddc_manager_91_spec_reconcile`.
 * :mod:`~meho_backplane.connectors.sddc_manager.connector` — the token
   mint ``_SESSION_CREATE_PATH`` (``POST /v1/tokens``, sourced from the
   ``session_login_token`` scheme spec). The connector's bespoke
@@ -90,6 +94,7 @@ def test_typed_read_path_constants_are_all_discovered() -> None:
         "_SDDC_MANAGERS_PATH",
         "_SYSTEM_PATH",
         "_TASKS_PATH",
+        "_TASK_GET_PATH",
         "_VCENTERS_PATH",
         "_VCF_SERVICES_PATH",
     ]

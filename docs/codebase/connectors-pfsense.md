@@ -284,9 +284,10 @@ fields `null`; a failure of the status command degrades the whole set to
 
 The enabling read op for the management-plane lockdown ratchet's **alert**
 stage (Goal meho-internal#234, Initiative #249, Task #252). It runs `pfctl -ss`
-and classifies every live TCP connection state whose *server* side (the
-endpoint on a management port) sits in a caller-supplied management network
-into **sanctioned** vs **non-sanctioned** by source, and flags **unexpected**
+and classifies every live TCP connection state whose *server* side (resolved
+from the `pfctl -ss` direction arrow, then required to carry a management
+port) sits in a caller-supplied management network into **sanctioned** vs
+**non-sanctioned** by source, and flags **unexpected**
 sources — non-sanctioned AND not in a caller-supplied baseline. It returns a
 compact per-leg summary (open-state counts + coverage %) plus the distinct
 `non_sanctioned_sources` (capped) and `unexpected_sources` (complete) as
@@ -327,6 +328,16 @@ Design notes:
   never classified. A Sensor pins `$.unparsed_lines <= 0` alongside the source
   assertion so an unrecognised state cannot be silently absorbed into a clean
   summary (the second false-all-clear the field-order fix closed for #252).
+- **Server side is resolved from the direction arrow (#3471).** The `pfctl -ss`
+  arrow points from the connection initiator (client) to the listener
+  (server): `->` puts the server on the `dst` endpoint, `<-` on the `src`.
+  `_server_client_split` honours it and tests only the arrow-resolved server
+  side for a management port, so an **outbound** connection whose local client
+  ephemeral source port coincidentally lands in the management-port set is not
+  inverted into a phantom inbound management-port hit (a false `unexpected`
+  source). The port heuristic (server = whichever endpoint carries a management
+  port, `dst` first) survives only as a fallback for the bidirectional `<->` /
+  missing-arrow form, which real `pfctl -ss` TCP states do not emit.
 - **Same-subnet caveat.** A pfSense only sees flows it routes between two of
   its segments; same-subnet flows are invisible. The op echoes this on every
   result's `caveat` field.

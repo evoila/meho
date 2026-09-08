@@ -8,12 +8,14 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 47 hand-authored composites
-that orchestrate cross-spec workflows: 11 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 51 hand-authored composites
+that orchestrate cross-spec workflows: 13 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
-Supervisor status read `#3281` + the storage-policy list read `#3494`) and 36 write
+Supervisor status read `#3281` + the storage-policy list read `#3494` +
+the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
+`content_library.subscribed.items.list` / `#3495`) and 38 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
 governed NFS tag-based SPBM `storage_policy.create` (caution) +
 `storage_policy.delete` (destructive) / `#3494`, the
@@ -39,7 +41,10 @@ guest-operations writes `vm.guest.file.write` / `#3100` +
 `connectors-vmware-rest-guest-ops.md`), plus the two Supervisor (WCP)
 namespace-management writes `supervisor.enable` + `supervisor.disable`
 / `#3281` (see the **Supervisor (WCP) namespace-management composites**
-subsection under Control flow)). The
+subsection under Control flow), and the two SUBSCRIBED content-library
+caution writes `content_library.subscribed.create` +
+`content_library.subscribed.sync` / `#3495` (see the **Content-library
+SUBSCRIBED composites** subsection)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -308,10 +313,51 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (`GET:/vcenter/namespace-management/clusters/{cluster}`). See the
   **Supervisor (WCP) namespace-management composites** subsection under
   Control flow.
+- **Content-library SUBSCRIBED composites** (`composites/_library.py`,
+  `#3495`, group `content_library`) — four
+  `vmware.composite.content_library.subscribed.*` composites that create and
+  drive a **SUBSCRIBED** content library through the backplane: the governed
+  source for a vSphere Supervisor's Tanzu Kubernetes release (TKr / VKr)
+  images. On Supervisor enable, `wcpsvc` otherwise auto-creates a subscribed
+  library pointed at the fleet offline-depot content-gateway, which cannot
+  serve the `VKR` component on a VCF-Installer fleet → activation hangs
+  `CONFIGURING`; the governed path is to **pre-create** a subscribed library
+  subscribed straight to the upstream VMware repo
+  (`https://wp-content.vmware.com/v2/latest/lib.json`) and assign it as the
+  Supervisor's TKr library via `#3281`'s enable spec
+  `default_kubernetes_service_content_library` field. Two writes —
+  `subscribed.create` (`POST:/content/subscribed-library`, resolves the
+  `datastore` name to a `DATASTORE` storage backing, returns the new library
+  id) and `subscribed.sync`
+  (`POST:/content/subscribed-library/{libraryId}?action=sync`, respects
+  `on_demand`, asynchronous) — registered **`caution` + `requires_approval=True`**
+  (the issue's "write" tier: a write that always needs an approval decision,
+  but not the `dangerous` intrinsic-risk of a VM/host mutation, and the first
+  `caution` composites on this connector). Two reads — `subscribed.status`
+  (`GET:/content/subscribed-library/{libraryId}`, surfaces `last_sync_time`,
+  the readiness signal) and `subscribed.items.list`
+  (item ids via `POST:/content/library/item?action=find`, then per-item
+  `GET:/content/library/item/{libraryItemId}`, JSONFlux-reduced) — registered
+  `safe`. Both writes ride the same `_write._write_sub_op` governance seam the
+  other write composites use (`dangerous` / `requires_approval=False` sub-op
+  posture) and both reads use `_write._read_sub_op` /
+  `_find_content_library_ids` (un-gated). **Delivery shape — thin typed
+  composites, not the generic-ingested row:** the subscribe body carries a
+  `subscription_info.password` (BASIC auth) needing credential hygiene the raw
+  ingested row cannot provide (broadcast aggregate-only via the
+  `_CREDENTIAL_WRITE_OPS` pin on `subscribed.create`, a park-time preview that
+  echoes identity fields only — never the password / username, `params_hash`-only
+  audit), and the connector's governed ops must dispatch on a fresh boot with
+  zero catalog ingest (a generic row requires a runtime spec-ingest +
+  `edit_op` enable). The naming nests under the sibling `#3331` LOCAL-library
+  family (`content_library.create`) via the `subscribed` infix, so the two do
+  not collide. `_SUB_OPS_*` manifests are reconciled against the pinned
+  `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 47
-  `_CompositeSpec` rows (11 read + 36 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 51
+  `_CompositeSpec` rows (13 read + 36 dangerous/destructive writes + 2
+  caution content-library subscribed writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -737,7 +783,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 44 composites (10 reads + 34 writes) land as `source_kind="composite"`
+The 51 composites (13 reads + 38 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -804,7 +850,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 38 composites are hand-authored aggregators the connector ships as
+The 42 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the

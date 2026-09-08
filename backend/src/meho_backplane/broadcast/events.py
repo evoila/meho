@@ -278,6 +278,16 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # statically while leaving its generic ``data`` container to the scrub.
         "sddc.host.validate",
         "sddc.host.commission",
+        # #3495 — the SUBSCRIBED content-library create composite. Its
+        # ``password`` param (BASIC-auth to the publisher) IS a secret-named
+        # key the scrub would catch, but ``username`` / ``ssl_thumbprint`` are
+        # not, and pinning the whole op collapses its params to aggregate-only
+        # rather than relying on per-key scrubbing — matching the GOSC-create /
+        # guest-ops precedent. The park-time bespoke preview echoes only the
+        # non-secret identity fields (name / subscription URL / datastore /
+        # auth method / sync mode). The sibling reads (status / items.list) and
+        # the sync write carry no credential and are NOT pinned.
+        "vmware.composite.content_library.subscribed.create",
     }
 )
 

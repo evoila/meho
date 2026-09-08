@@ -105,6 +105,11 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.supervisor.disable",
         "vmware.composite.storage_policy.create",
         "vmware.composite.storage_policy.delete",
+        # Content-library SUBSCRIBED writes (#3495): caution + approval, so
+        # they park and carry a bespoke park-time preview builder (create's is
+        # secret-hygienic — it never echoes the subscription password).
+        "vmware.composite.content_library.subscribed.create",
+        "vmware.composite.content_library.subscribed.sync",
     }
 )
 
@@ -316,14 +321,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 28 preview-carrying write composites register a builder (criterion 4)
+# Wiring — all 35 preview-carrying write composites register a builder (criterion 4)
 # ===========================================================================
 
 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 33
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 35
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 

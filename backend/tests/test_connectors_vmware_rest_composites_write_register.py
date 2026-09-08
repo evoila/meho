@@ -147,10 +147,24 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.supervisor.status",
     # Storage-policy list read (#3494).
     "vmware.composite.storage_policy.list",
+    # Content-library SUBSCRIBED reads (#3495).
+    "vmware.composite.content_library.subscribed.status",
+    "vmware.composite.content_library.subscribed.items.list",
 )
 
-# 47 total -- 11 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281 + storage_policy.list / #3494) + 36 write
+# 2 caution + approval writes (#3495) -- the SUBSCRIBED content-library
+# create / sync. These are ``caution`` (a write that always needs an approval
+# decision, but not the ``dangerous`` intrinsic-risk of a VM/host mutation),
+# so they are deliberately NOT in ``_WRITE_OP_IDS`` (whose rows are asserted
+# ``dangerous``); they land in ``_ALL_OP_IDS`` via this bucket instead.
+_CAUTION_OP_IDS: tuple[str, ...] = (
+    "vmware.composite.content_library.subscribed.create",
+    "vmware.composite.content_library.subscribed.sync",
+)
+
+# 51 total -- 13 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281 + storage_policy.list / #3494 + 2 SUBSCRIBED
+# content-library reads / #3495) + 2 caution content-library writes / #3495 + 36 write
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +
 # vm.clone_from_template / #2894 + vim cluster/inventory writes
 # cluster.drs_rule.create + folder.create / #2895 + #2891 hardware
@@ -163,7 +177,7 @@ _READ_OP_IDS: tuple[str, ...] = (
 # supervisor.disable / #3281 + the storage-policy writes storage_policy.create
 # + storage_policy.delete / #3494 + the #3505 governed-allocation writes
 # resource_pool.create + resource_pool.delete + cluster.drs_vm_host_rule.create).
-_ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
+_ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _CAUTION_OP_IDS + _WRITE_OP_IDS
 
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
@@ -400,7 +414,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
     vm.destroy #3198 + #3091 portgroup writes network.portgroup.create /
     network.portgroup.security.set + content-library import
     vm.import_from_library #3229 + Supervisor writes supervisor.enable /
-    supervisor.disable #3281) = 41 rows. DoD bar."""
+    supervisor.disable #3281 + SUBSCRIBED content-library reads/writes #3495) = 45 rows. DoD bar."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -414,7 +428,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 47
+    assert len(rows) == 51
 
 
 @pytest.mark.asyncio
@@ -771,14 +785,14 @@ async def test_write_composite_tags_include_composite_and_write(
 async def test_register_vmware_composite_operations_is_idempotent_across_thirty_three(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 41 rows total, embedding called 41x once."""
+    """Running the registrar twice -> 45 rows total, embedding called 45x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 47
+    assert first_count == 51
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 41.
+    # pipeline; the row count stays at 45.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -792,7 +806,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 47
+    assert len(rows) == 51
 
 
 # ---------------------------------------------------------------------------

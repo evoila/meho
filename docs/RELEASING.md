@@ -30,6 +30,37 @@ on tags — a tag always publishes). `cli-release.yml` is **tag-only**: a
 main push never cuts a release. Docs versions are cut **per minor** — a
 patch tag republishes its minor's docs in place.
 
+## Supply-chain and CI baseline
+
+A release is only as trustworthy as the pipeline that built it. Two
+supply-chain controls are baselines, not per-release choices — they hold
+across every cut:
+
+- **Build → quarantine → scan → promote → deploy by digest, and verify
+  the signature.** `image.yml` builds to a quarantine digest, runs the
+  required scans, and only then promotes and cosign-signs the **approved
+  digest** — so a failing scan can never leave a publishable release
+  candidate advertised as approved. The deploy side completes the chain:
+  pin the chart's `image.digest` (`sha256:…`, the content-addressed digest
+  the pipeline promoted) rather than deploying a mutable tag, and
+  `cosign verify` that digest against the keyless workflow identity before
+  `helm upgrade` — ideally enforced at admission (a Sigstore
+  policy-controller / Kyverno rule). CLI tarballs carry `SHA256SUMS` plus
+  cosign signatures for the same reason. Full recipes:
+  [`docs/codebase/devops.md` § Image reference / Verifying provenance](codebase/devops.md)
+  and the [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
+
+- **Untrusted PR code never runs on the internal runner pool.** The
+  repository's fork-PR approval policy is **`all_external_contributors`**
+  (a maintainer must "Approve and run" any external fork PR before any
+  workflow runs), and every job that checks out and executes PR-controlled
+  code routes fork PRs to a **disposable GitHub-hosted runner**, never the
+  internal `meho-runners-ci` pool — with signing, deployment, and build-cache
+  identities kept off the PR-triggered path. Org-level runner-group access
+  restricts which workflows may schedule the internal pool as the durable
+  backstop a PR cannot edit. The full enforcement map is in
+  [`docs/codebase/devops.md` § Untrusted pull-request isolation](codebase/devops.md).
+
 ## Versioning
 
 [SemVer](https://semver.org). The version lives **only in the git tag** —

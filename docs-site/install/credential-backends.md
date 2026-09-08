@@ -43,6 +43,20 @@ for MEHO to find — the
 [Vault tenant-scope guide](https://github.com/evoila/meho/blob/main/docs/codebase/connectors-vault-tenant-scope.md)
 has the path shapes.
 
+!!! warning "Baseline: keep `VAULT_KV_TENANT_SCOPE_PREFIX` set on any multi-tenant deploy"
+
+    The per-tenant prefix is the setting `VAULT_KV_TENANT_SCOPE_PREFIX`,
+    which **defaults to `secret/tenants/{tenant_id}/`** — the cross-tenant
+    credential guard is on out of the box, and this is the secure baseline.
+    Emptying it (`VAULT_KV_TENANT_SCOPE_PREFIX=""`) turns the guard off:
+    schemeless references then resolve unscoped and the Vault
+    target-registration guard becomes a no-op. That is a **documented
+    downgrade**, valid only mid-migration (while a tenant's secrets are
+    being relocated under the prefix) or on a genuinely single-tenant
+    install. Never empty it on a multi-tenant deployment. It is a backend
+    env var, so a deploy that must set it does so through the chart's
+    `extraEnv`; the default carries the secure posture with no override.
+
 ### Google Secret Manager
 
 - `config.credentialBackend: gsm`, plus `gsm.enabled: true` and

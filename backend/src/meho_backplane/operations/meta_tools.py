@@ -107,6 +107,7 @@ from meho_backplane.operations.addon_orchestration import (
     bound_parent_linkage,
     resolve_or_open_orchestration_run,
 )
+from meho_backplane.operations.dispatch_limits import rate_limited_read_envelope
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.operations.ingest.list_connectors import next_step_for_registered_connector
 from meho_backplane.targets.resolver import (
@@ -813,7 +814,14 @@ async def search_operations(
     :class:`ConnectorNotIngestedError` with the ingest ``next_step`` hint
     (#1482); a *known* connector with no matching ops still returns an
     empty ``hits`` list (``200 []``).
+
+    #3500: per-principal dispatch rate limit. A burst of searches from one
+    principal over its per-minute cap is rejected with a structured
+    ``rate_limited`` envelope before any embedding / candidate query runs.
     """
+    rate_limited = await rate_limited_read_envelope(operator)
+    if rate_limited is not None:
+        return rate_limited
     connector_id = arguments["connector_id"]
     query = arguments["query"]
     group_key: str | None = arguments.get("group")
@@ -1223,7 +1231,14 @@ async def preview_operation(
     missing / empty / ``name``-less target, ``no_target`` for a
     supplied-but-unresolvable name (see :func:`_resolve_target_or_error`) —
     so ``call`` and ``preview`` behave the same for target resolution.
+
+    #3500: shares ``call_operation``'s per-principal dispatch rate limit —
+    a burst over the per-minute cap is rejected with a structured
+    ``rate_limited`` envelope before any target resolution.
     """
+    rate_limited = await rate_limited_read_envelope(operator)
+    if rate_limited is not None:
+        return rate_limited
     connector_id = arguments["connector_id"]
     op_id = arguments["op_id"]
     params: dict[str, Any] = arguments.get("params") or {}

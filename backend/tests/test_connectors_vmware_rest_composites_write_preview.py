@@ -90,6 +90,9 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
         "vmware.composite.cluster.drs_rule.create",
+        "vmware.composite.cluster.drs_vm_host_rule.create",
+        "vmware.composite.resource_pool.create",
+        "vmware.composite.resource_pool.delete",
         "vmware.composite.folder.create",
         "vmware.composite.guest.customization_spec.create",
         "vmware.composite.vm.customize",
@@ -320,7 +323,7 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 30
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 33
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -375,6 +378,18 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
         (
             _write_preview._vm_device_cdrom_preview,
             {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+        ),
+        (_write_preview._resource_pool_delete_preview, {"resource_pool": "resgroup-9"}),
+        (
+            _write_preview._cluster_drs_vm_host_rule_create_preview,
+            {
+                "cluster": "domain-c1",
+                "rule_name": "pin-nested",
+                "vm_group_name": "nested-esxi",
+                "host_group_name": "gold-hosts",
+                "vms": ["esxi-nested-01"],
+                "hosts": ["esx-dc19-a"],
+            },
         ),
     ):
         assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
@@ -732,6 +747,89 @@ async def test_vm_customize_preview_declines_on_malformed() -> None:
     assert await _write_preview._cluster_patch_preview(_make_preview_ctx({})) is None
     assert await _write_preview._folder_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._cluster_drs_rule_create_preview(_make_preview_ctx({})) is None
+    # #3505: resource_pool.create declines without a name; the two live-read
+    # #3505 builders decline without a resolved connector / required params.
+    assert await _write_preview._resource_pool_create_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._resource_pool_delete_preview(_make_preview_ctx({})) is None
+    assert (
+        await _write_preview._cluster_drs_vm_host_rule_create_preview(_make_preview_ctx({})) is None
+    )
+
+
+async def test_resource_pool_create_preview_echoes_params() -> None:
+    """#3505: resource_pool.create is a param echo (no I/O) naming the pool + parent."""
+    preview = await _write_preview._resource_pool_create_preview(
+        _make_preview_ctx(
+            {
+                "name": "estate-rp",
+                "cluster": "domain-c1",
+                "cpu_allocation": {"reservation": 4000, "shares": {"level": "HIGH"}},
+            }
+        )
+    )
+    assert preview == {
+        "name": "estate-rp",
+        "parent": None,
+        "cluster": "domain-c1",
+        "cpu_allocation": {"reservation": 4000, "shares": {"level": "HIGH"}},
+    }
+
+
+async def test_resource_pool_delete_preview_counts_reparented_children() -> None:
+    """#3505: resource_pool.delete previews the child pool + VM counts the delete reparents."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/resource-pool"] = {
+        "value": [{"resource_pool": "resgroup-child-1"}]
+    }
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": "vm-1", "name": "a"}, {"vm": "vm-2", "name": "b"}]
+    }
+    preview = await _write_preview._resource_pool_delete_preview(
+        _make_preview_ctx(
+            {"resource_pool": "resgroup-9", "force": True}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "resource_pool": "resgroup-9",
+        "force": True,
+        "child_pool_count": 1,
+        "child_vm_count": 2,
+    }
+
+
+async def test_cluster_drs_vm_host_rule_create_preview_resolves_groups() -> None:
+    """#3505: the VM-Host rule preview resolves the VM + host group member sets."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-7", "name": "esxi-nested-01"}]}
+    recorder.responses["/vcenter/host"] = {"value": [{"host": "host-3", "name": "esx-dc19-a"}]}
+    recorder.responses["/vcenter/cluster/domain-c1"] = {"value": {"name": "cluster3"}}
+    preview = await _write_preview._cluster_drs_vm_host_rule_create_preview(
+        _make_preview_ctx(
+            {
+                "cluster": "domain-c1",
+                "rule_name": "pin-nested",
+                "vm_group_name": "nested-esxi",
+                "host_group_name": "gold-hosts",
+                "vms": ["esxi-nested-01"],
+                "hosts": ["esx-dc19-a"],
+                "affine": True,
+                "mandatory": True,
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["cluster"] == "domain-c1"
+    assert preview["cluster_name"] == "cluster3"
+    assert preview["rule_name"] == "pin-nested"
+    assert preview["vm_group_name"] == "nested-esxi"
+    assert preview["host_group_name"] == "gold-hosts"
+    assert preview["affine"] is True
+    assert preview["mandatory"] is True
+    assert preview["resolved_vms"] == [{"vm": "vm-7", "name": "esxi-nested-01"}]
+    assert preview["total_vms"] == 1
+    assert preview["resolved_hosts"] == [{"host": "host-3", "name": "esx-dc19-a"}]
+    assert preview["total_hosts"] == 1
 
 
 # ===========================================================================

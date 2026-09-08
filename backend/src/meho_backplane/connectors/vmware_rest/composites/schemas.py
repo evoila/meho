@@ -53,6 +53,8 @@ __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA",
+    "CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
@@ -88,6 +90,10 @@ __all__ = [
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "RESOURCE_POOL_CREATE_PARAMETER_SCHEMA",
+    "RESOURCE_POOL_CREATE_RESPONSE_SCHEMA",
+    "RESOURCE_POOL_DELETE_PARAMETER_SCHEMA",
+    "RESOURCE_POOL_DELETE_RESPONSE_SCHEMA",
     "SUPERVISOR_DISABLE_PARAMETER_SCHEMA",
     "SUPERVISOR_DISABLE_RESPONSE_SCHEMA",
     "SUPERVISOR_ENABLE_PARAMETER_SCHEMA",
@@ -1478,6 +1484,207 @@ CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.cluster.drs_vm_host_rule.create`` parameter schema.
+#:
+#: A VM-Host affinity rule (``ClusterVmHostRuleInfo``) pins the VMs of a named
+#: VM group onto (``affine=true``) or away from (``affine=false``) the hosts of
+#: a named host group. A **sibling** of ``cluster.drs_rule.create`` (whose
+#: contract stays unchanged), because a VM-Host rule needs a host group + VM
+#: group, not the VM-VM explicit list. VM + host names resolve to MoRefs scoped
+#: to the cluster; rule + group names are the idempotence keys.
+CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ClusterComputeResource moid the rule is added to (e.g. 'domain-c1').",
+        },
+        "rule_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new VM-Host rule. Rule names are an idempotence key — a name "
+                "already present returns ``status='rule_exists'`` before any write."
+            ),
+        },
+        "vm_group_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the ClusterVmGroup to create for the rule's VMs. Group names are "
+                "unique within a cluster — a clash returns ``status='group_exists'``."
+            ),
+        },
+        "host_group_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the ClusterHostGroup to create for the rule's hosts. Group names are "
+                "unique within a cluster — a clash returns ``status='group_exists'``."
+            ),
+        },
+        "vms": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Display names of the VMs in the VM group. Resolved to MoRefs scoped to the "
+                "cluster; none resolving → ``status='insufficient_vms'``."
+            ),
+        },
+        "hosts": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Display names of the hosts in the host group. Resolved to MoRefs scoped to the "
+                "cluster; none resolving → ``status='insufficient_hosts'``."
+            ),
+        },
+        "affine": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "``true`` (default) makes the host group the *affine* group (VMs run on those "
+                "hosts); ``false`` makes it the *anti-affine* group (VMs avoid those hosts)."
+            ),
+        },
+        "mandatory": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "``true`` = a 'must' rule (DRS never violates it, even for HA/maintenance); "
+                "``false`` (default) = a 'should' rule (a soft preference DRS may relax)."
+            ),
+        },
+        "enabled": {
+            "type": "boolean",
+            "default": True,
+            "description": "Whether the rule is enabled on creation. Defaults to true.",
+        },
+    },
+    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name", "vms", "hosts"],
+    "additionalProperties": False,
+}
+
+
+#: Nested ``cpu_allocation`` / ``memory_allocation`` sub-schema for the
+#: resource-pool create (``Vcenter.ResourcePool.ResourceAllocationCreateSpec``).
+#: All optional — an omitted allocation uses vCenter's documented default.
+_RESOURCE_ALLOCATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reservation": {
+            "type": "integer",
+            "description": (
+                "Guaranteed resource (MHz for CPU, MB for memory). Default 0 when omitted."
+            ),
+        },
+        "expandable_reservation": {
+            "type": "boolean",
+            "description": (
+                "Whether the reservation can grow into the parent's unreserved resources. "
+                "Default true when omitted."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Utilisation ceiling (MHz for CPU, MB for memory); -1 = unbounded. Default -1."
+            ),
+        },
+        "shares": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["LOW", "NORMAL", "HIGH", "CUSTOM"],
+                    "description": "Shares level; CUSTOM uses the numeric ``shares`` count.",
+                },
+                "shares": {
+                    "type": "integer",
+                    "description": "Custom shares count; only used when ``level`` is CUSTOM.",
+                },
+            },
+            "required": ["level"],
+            "additionalProperties": False,
+            "description": "Relative-weight shares under contention. Default NORMAL when omitted.",
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.resource_pool.create`` parameter schema.
+#:
+#: Create a resource pool via the REST ``POST:/vcenter/resource-pool``
+#: (``Vcenter.ResourcePool.CreateSpec``). Exactly one parent selector:
+#: ``parent`` (a ResourcePool moid, used verbatim) or ``cluster`` (a
+#: ClusterComputeResource moid whose *root* resource pool is resolved as the
+#: parent — the estate-allocation convenience).
+RESOURCE_POOL_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new resource pool.",
+        },
+        "parent": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Parent ResourcePool moid the new pool nests under (e.g. 'resgroup-42'). "
+                "Mutually exclusive with ``cluster``."
+            ),
+        },
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid (e.g. 'domain-c1') whose root resource pool "
+                "becomes the parent — resolved via ClusterComputeResource.resourcePool. "
+                "Mutually exclusive with ``parent``."
+            ),
+        },
+        "cpu_allocation": _RESOURCE_ALLOCATION_SCHEMA,
+        "memory_allocation": _RESOURCE_ALLOCATION_SCHEMA,
+    },
+    "required": ["name"],
+    "oneOf": [{"required": ["parent"]}, {"required": ["cluster"]}],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.resource_pool.delete`` parameter schema.
+#:
+#: Delete a resource pool via the REST
+#: ``DELETE:/vcenter/resource-pool/{resourcePool}``, which reparents the pool's
+#: child pools + VMs up to its parent (it does not destroy them). A non-empty
+#: pool is refused unless ``force=true``.
+RESOURCE_POOL_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ResourcePool moid to delete (e.g. 'resgroup-42').",
+        },
+        "force": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Delete even when the pool has child pools / VMs (they are reparented up to the "
+                "parent). Without it, a non-empty pool returns ``status='not_empty'``."
+            ),
+        },
+    },
+    "required": ["resource_pool"],
+    "additionalProperties": False,
+}
+
+
 #: ``vmware.composite.folder.create`` parameter schema.
 #:
 #: Create a VM folder under a named parent via the **synchronous** vim
@@ -2367,6 +2574,184 @@ CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "cluster", "rule_name", "rule_type"],
+}
+
+
+#: ``vmware.composite.cluster.drs_vm_host_rule.create`` response schema.
+CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "rule_exists",
+                "group_exists",
+                "insufficient_vms",
+                "insufficient_hosts",
+                "timeout",
+            ],
+            "description": (
+                "``'created'`` — the ReconfigureComputeResource_Task add reached terminal "
+                "success; ``'rule_exists'`` / ``'group_exists'`` — the rule or a group name is "
+                "already present (idempotence keys; refused before any write); "
+                "``'insufficient_vms'`` / ``'insufficient_hosts'`` — none of the requested VM / "
+                "host names resolved in the cluster (refused before any write); ``'timeout'`` — "
+                "the reconfigure task did not reach a terminal state within the poll bound."
+            ),
+        },
+        "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
+        "rule_name": {"type": "string", "description": "Name of the rule."},
+        "vm_group_name": {"type": "string", "description": "Name of the created VM group."},
+        "host_group_name": {"type": "string", "description": "Name of the created host group."},
+        "affine": {
+            "type": "boolean",
+            "description": (
+                "Whether the host group is the affine (true) or anti-affine (false) group."
+            ),
+        },
+        "mandatory": {
+            "type": "boolean",
+            "description": "Whether the rule is a 'must' (true) or 'should' (false) rule.",
+        },
+        "enabled": {"type": "boolean", "description": "Whether the rule was created enabled."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigureComputeResource_Task moid — present once the write was issued "
+                "(``created`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "resolved_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": (
+                "The ``[{vm, name}]`` MoRefs placed in the VM group, resolved from names."
+            ),
+        },
+        "resolved_hosts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": (
+                "The ``[{host, name}]`` MoRefs placed in the host group, resolved from names."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "cluster", "rule_name", "vm_group_name", "host_group_name"],
+}
+
+
+#: ``vmware.composite.resource_pool.create`` response schema.
+RESOURCE_POOL_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "cluster_root_pool_unresolved", "no_parent"],
+            "description": (
+                "``'created'`` — the POST returned the new pool moid; "
+                "``'cluster_root_pool_unresolved'`` — the ``cluster`` convenience could not read "
+                "the cluster's root resource pool (pass an explicit ``parent``); ``'no_parent'`` "
+                "— neither ``parent`` nor ``cluster`` was supplied."
+            ),
+        },
+        "name": {"type": "string", "description": "The requested pool name."},
+        "parent": {
+            "type": ["string", "null"],
+            "description": "Resolved parent ResourcePool moid; ``null`` on a resolution refusal.",
+        },
+        "parent_source": {
+            "type": ["string", "null"],
+            "description": (
+                "Whether the parent came from ``parent`` (verbatim) or ``cluster`` "
+                "(root-pool resolution)."
+            ),
+        },
+        "cluster": {
+            "type": ["string", "null"],
+            "description": (
+                "The cluster moid, when the parent was resolved from a cluster; else ``null``."
+            ),
+        },
+        "resource_pool": {
+            "type": ["string", "null"],
+            "description": "The new pool's moid on success; ``null`` on a refusal.",
+        },
+        "verified_under_parent": {
+            "type": "boolean",
+            "description": (
+                "Read-back result: whether the new pool lists under the resolved parent "
+                "(``filter.parent_resource_pools``)."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "name"],
+}
+
+
+#: ``vmware.composite.resource_pool.delete`` response schema.
+RESOURCE_POOL_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "not_empty", "delete_unverified"],
+            "description": (
+                "``'deleted'`` — the DELETE returned and the read-back confirmed the pool is "
+                "absent; ``'not_empty'`` — the pool has child pools / VMs and ``force`` was not "
+                "set (no write); ``'delete_unverified'`` — the DELETE returned but the pool "
+                "still lists on read-back."
+            ),
+        },
+        "resource_pool": {"type": "string", "description": "The ResourcePool moid targeted."},
+        "forced": {
+            "type": "boolean",
+            "description": "Whether ``force`` was set (i.e. a non-empty pool was deleted).",
+        },
+        "child_pool_count": {
+            "type": "integer",
+            "description": "Number of child resource pools counted before the delete.",
+        },
+        "child_vm_count": {
+            "type": "integer",
+            "description": "Number of child VMs counted before the delete.",
+        },
+        "verified_absent": {
+            "type": "boolean",
+            "description": "Read-back result: whether the pool no longer lists.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``deleted`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "resource_pool"],
 }
 
 

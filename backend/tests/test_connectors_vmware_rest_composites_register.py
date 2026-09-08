@@ -209,9 +209,11 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 41 total: 10 reads
+    # Embedding service called once per composite -- 47 total: 11 reads
     # (T5 #508's 5 + the 4 guest-ops reads #3100 + storage_policy.list
-    # #3494) + 31 writes (T6 #509 +
+    # #3494) + 36 writes (T6 #509 +
+    # the #3505 resource_pool.create / .delete + cluster.drs_vm_host_rule.create +
+    # the #3494 storage_policy.create / .delete +
     # single-VM vm.power #2301 + mutating VI-JSON vm.disk.grow #2893 +
     # WSFC/FCI shared-attach vm.disk.attach #3256 +
     # folder-template vm.clone_from_template #2894 + vim cluster/inventory
@@ -226,7 +228,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # network.portgroup.security.set + the content-library import
     # vm.import_from_library #3229). (The former host.network_uplinks /
     # host.vsan_health reads were re-shipped as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 44
+    assert stub_embedding_service.encode_one.call_count == 47
 
 
 @pytest.mark.asyncio
@@ -477,8 +479,9 @@ async def test_register_vmware_composite_operations_is_idempotent(
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
-    persist after the combined registrar (10 reads incl. the 4 guest-ops
-    reads #3100 + 29 writes / T6 + single-VM vm.power #2301 + mutating
+    persist after the combined registrar (11 reads incl. the 4 guest-ops
+    reads #3100 + 36 writes / T6 + the #3505 governed-allocation writes +
+    the #3494 storage_policy.create / .delete + single-VM vm.power #2301 + mutating
     VI-JSON vm.disk.grow #2893 + WSFC/FCI vm.disk.attach #3256 +
     folder-template vm.clone_from_template
     #2894 + vim cluster/inventory writes cluster.drs_rule.create +
@@ -494,7 +497,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 44
+    assert first_count == 47
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

@@ -56,6 +56,7 @@ from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
+    cluster_drs_vm_host_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
     guest_customization_spec_create_composite,
@@ -63,6 +64,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
+    resource_pool_create_composite,
+    resource_pool_delete_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
@@ -5688,6 +5691,619 @@ async def test_folder_create_body_reaches_the_wire_respx(
         assert body == {"name": "cluster-nodes"}
     finally:
         await connector.aclose()
+
+
+# ===========================================================================
+# resource_pool.create / .delete + cluster.drs_vm_host_rule.create (#3505)
+# ===========================================================================
+
+
+def _host_row(host: str, name: str) -> dict[str, Any]:
+    """A host listing row as ``GET:/vcenter/host`` returns it (moid + display name)."""
+    return {"host": host, "name": name}
+
+
+class _ResourcePoolConnector:
+    """Recording double for resource_pool.create / .delete REST + the cluster vim read.
+
+    ``_get_json`` on ``/vcenter/resource-pool`` discriminates on the bare
+    FilterSpec key (``parent_resource_pools`` → child pools / read-back under
+    parent; ``resource_pools`` → the delete read-back present check); on
+    ``/vcenter/vm`` it serves the child-VM listing. ``_post_json`` serves the
+    ``POST`` create (returns the new moid) and the ``DELETE``. ``_post_vmomi_json``
+    serves the ``ClusterComputeResource.resourcePool`` root-pool read.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(
+        self,
+        *,
+        created_moid: str = "resgroup-new",
+        root_pool: str | None = "resgroup-root",
+        child_vms: list[dict[str, Any]] | None = None,
+        present_after_delete: bool = False,
+        list_under_parent: list[str] | None = None,
+    ) -> None:
+        self.created_moid = created_moid
+        self.root_pool = root_pool
+        self.child_vms = child_vms or []
+        self.present_after_delete = present_after_delete
+        # What a ``parent_resource_pools`` listing returns — the create
+        # read-back (child pools under the new pool's parent, defaults to the
+        # freshly-created pool so verified_under_parent is True) and the delete
+        # emptiness check (child pools under the pool being deleted) share this.
+        self.list_under_parent = [created_moid] if list_under_parent is None else list_under_parent
+        self.rest_calls: list[dict[str, Any]] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append({"method": "GET", "path": path, "params": params})
+        query = params or {}
+        if path.endswith("/vcenter/vm"):
+            return {"value": self.child_vms}
+        if path.endswith("/vcenter/resource-pool"):
+            if "parent_resource_pools" in query:
+                return {"value": [{"resource_pool": rp} for rp in self.list_under_parent]}
+            if "resource_pools" in query:
+                present = self.present_after_delete
+                return {"value": [{"resource_pool": query["resource_pools"][0]}] if present else []}
+        raise AssertionError(f"unexpected GET {path!r} params={params!r}")
+
+    async def _post_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: Any = None,
+        data: Any = None,
+        extra_headers: Any = None,
+        timeout: Any = httpx.USE_CLIENT_DEFAULT,
+    ) -> Any:
+        self.rest_calls.append({"method": verb, "path": path, "body": json})
+        if verb == "POST":
+            return self.created_moid
+        if verb == "DELETE":
+            return None
+        raise AssertionError(f"unexpected {verb} {path!r}")
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        # The only vmomi read: ClusterComputeResource.resourcePool.
+        val = (
+            {"_typeName": "ManagedObjectReference", "type": "ResourcePool", "value": self.root_pool}
+            if self.root_pool is not None
+            else None
+        )
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                    "propSet": [{"name": "resourcePool", "val": val}] if val is not None else [],
+                }
+            ]
+        }
+
+    def _last_create_body(self) -> Any:
+        return next(c["body"] for c in self.rest_calls if c.get("method") == "POST" and "body" in c)
+
+
+class _VmHostRuleConnector:
+    """Recording double for cluster.drs_vm_host_rule.create REST reads + vim writes."""
+
+    _MOUNT = "/api"
+
+    def __init__(
+        self,
+        *,
+        vms: list[dict[str, Any]] | None = None,
+        hosts: list[dict[str, Any]] | None = None,
+        existing_rules: list[dict[str, Any]] | None = None,
+        existing_groups: list[dict[str, Any]] | None = None,
+        task_state: str = "success",
+        task_error: str | None = None,
+        reconfig_task: str = "task-vmhost-1",
+    ) -> None:
+        self.vms = [_vm_row("vm-7", "esxi-nested-01")] if vms is None else vms
+        self.hosts = [_host_row("host-3", "esx-dc19-a")] if hosts is None else hosts
+        self.existing_rules = existing_rules or []
+        self.existing_groups = existing_groups or []
+        self.task_state = task_state
+        self.task_error = task_error
+        self.reconfig_task = reconfig_task
+        self.rest_calls: list[tuple[str, Any]] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append((path, params))
+        if path.endswith("/vcenter/host"):
+            return {"value": self.hosts}
+        if path.endswith("/vcenter/vm"):
+            return {"value": self.vms}
+        raise AssertionError(f"unexpected GET {path!r}")
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ReconfigureComputeResource_Task"):
+            return {"type": "Task", "value": self.reconfig_task}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "ClusterComputeResource":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                        "propSet": [
+                            {
+                                "name": "configurationEx.rule",
+                                "val": {
+                                    "_typeName": "ArrayOfClusterRuleInfo",
+                                    "_value": self.existing_rules,
+                                },
+                            },
+                            {
+                                "name": "configurationEx.group",
+                                "val": {
+                                    "_typeName": "ArrayOfClusterGroupInfo",
+                                    "_value": self.existing_groups,
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        if spec_type == "Task":
+            info: dict[str, Any] = {"state": self.task_state}
+            if self.task_error is not None:
+                info["error"] = {"localizedMessage": self.task_error}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": self.reconfig_task},
+                        "propSet": [{"name": "info", "val": info}],
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def reconfig_bodies(self) -> list[Any]:
+        return [
+            body
+            for path, body in self.vmomi_calls
+            if path.endswith("/ReconfigureComputeResource_Task")
+        ]
+
+
+# --- resource_pool.create ---
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_create_under_cluster_resolves_root_pool(gate: _GateRecorder) -> None:
+    """cluster convenience: resolve root RP -> gated POST -> read-back under parent."""
+    conn = _ResourcePoolConnector()
+    out = await resource_pool_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "name": "estate-rp",
+            "cluster": "domain-c1",
+            "cpu_allocation": {"reservation": 4000, "shares": {"level": "HIGH"}},
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["resource_pool"] == "resgroup-new"
+    assert out["parent"] == "resgroup-root"
+    assert out["parent_source"] == "cluster"
+    assert out["cluster"] == "domain-c1"
+    assert out["verified_under_parent"] is True
+    # The create POST was gated with its REST op_id + the flat CreateSpec body.
+    assert gate.gated_op_ids == ["POST:/vcenter/resource-pool"]
+    assert gate.calls[0]["safety_level"] == "dangerous"
+    assert gate.calls[0]["requires_approval"] is False
+    body = conn._last_create_body()
+    assert body["name"] == "estate-rp"
+    assert body["parent"] == "resgroup-root"
+    assert body["cpu_allocation"] == {"reservation": 4000, "shares": {"level": "HIGH"}}
+    assert "memory_allocation" not in body
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_create_under_explicit_parent_skips_cluster_read(
+    gate: _GateRecorder,
+) -> None:
+    """An explicit parent moid is used verbatim; no cluster vmomi read fires."""
+    conn = _ResourcePoolConnector(list_under_parent=["resgroup-new"])
+    out = await resource_pool_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "child-rp", "parent": "resgroup-42"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["parent"] == "resgroup-42"
+    assert out["parent_source"] == "resource_pool"
+    assert out["cluster"] is None
+    assert conn.vmomi_calls == []
+    assert conn._last_create_body()["parent"] == "resgroup-42"
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_create_no_parent_refused_before_write(gate: _GateRecorder) -> None:
+    """Neither parent nor cluster -> status=no_parent; no gate, no write."""
+    conn = _ResourcePoolConnector()
+    out = await resource_pool_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "orphan"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "no_parent"
+    assert gate.calls == []
+    assert conn.rest_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_create_unresolved_cluster_root_refused(gate: _GateRecorder) -> None:
+    """A cluster whose root pool cannot be read -> status=cluster_root_pool_unresolved."""
+    conn = _ResourcePoolConnector(root_pool=None)
+    out = await resource_pool_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "estate-rp", "cluster": "domain-c1"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "cluster_root_pool_unresolved"
+    assert gate.calls == []
+    # No create POST fired (only the failed vmomi read).
+    assert all(c.get("method") != "POST" for c in conn.rest_calls)
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_create_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the create POST returns the OperationResult verbatim; no write."""
+    op_id = "POST:/vcenter/resource-pool"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _ResourcePoolConnector()
+    out = await resource_pool_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "estate-rp", "parent": "resgroup-42"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert all(c.get("method") != "POST" for c in conn.rest_calls)
+
+
+# --- resource_pool.delete ---
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_delete_empty_pool_deletes_and_verifies_absent(
+    gate: _GateRecorder,
+) -> None:
+    """Empty pool: gated DELETE -> read-back absent -> status=deleted."""
+    conn = _ResourcePoolConnector(present_after_delete=False, list_under_parent=[])
+    out = await resource_pool_delete_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-9"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "deleted"
+    assert out["verified_absent"] is True
+    assert out["child_pool_count"] == 0
+    assert out["child_vm_count"] == 0
+    assert gate.gated_op_ids == ["DELETE:/vcenter/resource-pool/{resourcePool}"]
+    assert gate.calls[0]["params"]["resourcePool"] == "resgroup-9"
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_delete_non_empty_refused_without_force(gate: _GateRecorder) -> None:
+    """A non-empty pool without force -> status=not_empty; no gate, no delete."""
+    conn = _ResourcePoolConnector(
+        list_under_parent=["resgroup-child"], child_vms=[_vm_row("vm-1", "a")]
+    )
+    out = await resource_pool_delete_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-9"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "not_empty"
+    assert out["child_pool_count"] == 1
+    assert out["child_vm_count"] == 1
+    assert gate.calls == []
+    assert all(c.get("method") != "DELETE" for c in conn.rest_calls)
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_delete_non_empty_with_force_deletes(gate: _GateRecorder) -> None:
+    """force=true deletes a non-empty pool (children are reparented) and verifies absent."""
+    conn = _ResourcePoolConnector(
+        list_under_parent=["resgroup-child"], child_vms=[_vm_row("vm-1", "a")]
+    )
+    out = await resource_pool_delete_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-9", "force": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "deleted"
+    assert out["forced"] is True
+    assert out["child_pool_count"] == 1
+    assert out["child_vm_count"] == 1
+    assert gate.gated_op_ids == ["DELETE:/vcenter/resource-pool/{resourcePool}"]
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_delete_unverified_when_still_present(gate: _GateRecorder) -> None:
+    """DELETE returns but the pool still lists -> status=delete_unverified."""
+    conn = _ResourcePoolConnector(present_after_delete=True, list_under_parent=[])
+    out = await resource_pool_delete_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-9"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "delete_unverified"
+    assert out["verified_absent"] is False
+
+
+@pytest.mark.asyncio
+async def test_resource_pool_delete_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the DELETE returns the OperationResult verbatim; no delete."""
+    op_id = "DELETE:/vcenter/resource-pool/{resourcePool}"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _ResourcePoolConnector(list_under_parent=[])
+    out = await resource_pool_delete_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"resource_pool": "resgroup-9"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert all(c.get("method") != "DELETE" for c in conn.rest_calls)
+
+
+# --- cluster.drs_vm_host_rule.create ---
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_happy_path_adds_groups_and_rule(gate: _GateRecorder) -> None:
+    """Resolve VMs+hosts -> gated reconfigure (groupSpec + rulesSpec) -> poll -> created."""
+    conn = _VmHostRuleConnector()
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "nested-esxi",
+            "host_group_name": "gold-hosts",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["esx-dc19-a"],
+            "affine": True,
+            "mandatory": True,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["task"] == "task-vmhost-1"
+    assert out["resolved_vms"] == [{"vm": "vm-7", "name": "esxi-nested-01"}]
+    assert out["resolved_hosts"] == [{"host": "host-3", "name": "esx-dc19-a"}]
+    assert gate.gated_op_ids == [
+        "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+    ]
+    body = conn.reconfig_bodies[0]
+    assert body["modify"] is True
+    assert body["spec"]["_typeName"] == "ClusterConfigSpecEx"
+    group_spec = body["spec"]["groupSpec"]
+    assert [g["info"]["_typeName"] for g in group_spec] == ["ClusterVmGroup", "ClusterHostGroup"]
+    assert group_spec[0]["operation"] == "add"
+    assert group_spec[0]["info"]["name"] == "nested-esxi"
+    assert group_spec[0]["info"]["vm"] == [
+        {"_typeName": "ManagedObjectReference", "type": "VirtualMachine", "value": "vm-7"}
+    ]
+    assert group_spec[1]["info"]["name"] == "gold-hosts"
+    assert group_spec[1]["info"]["host"] == [
+        {"_typeName": "ManagedObjectReference", "type": "HostSystem", "value": "host-3"}
+    ]
+    rule_info = body["spec"]["rulesSpec"][0]["info"]
+    assert rule_info["_typeName"] == "ClusterVmHostRuleInfo"
+    assert rule_info["name"] == "pin-nested"
+    assert rule_info["mandatory"] is True
+    assert rule_info["vmGroupName"] == "nested-esxi"
+    assert rule_info["affineHostGroupName"] == "gold-hosts"
+    assert "antiAffineHostGroupName" not in rule_info
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_anti_affine_uses_anti_affine_group(
+    gate: _GateRecorder,
+) -> None:
+    """affine=false routes the host group into ``antiAffineHostGroupName``."""
+    conn = _VmHostRuleConnector()
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-off",
+            "vm_group_name": "vg",
+            "host_group_name": "hg",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["esx-dc19-a"],
+            "affine": False,
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    rule_info = conn.reconfig_bodies[0]["spec"]["rulesSpec"][0]["info"]
+    assert rule_info["antiAffineHostGroupName"] == "hg"
+    assert "affineHostGroupName" not in rule_info
+    # mandatory defaults to False (a 'should' rule).
+    assert rule_info["mandatory"] is False
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_rule_name_collision_refused(gate: _GateRecorder) -> None:
+    """An existing rule of the same name -> status=rule_exists; no write, no gate."""
+    conn = _VmHostRuleConnector(existing_rules=[{"name": "pin-nested", "key": 1}])
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "vg",
+            "host_group_name": "hg",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["esx-dc19-a"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "rule_exists"
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_group_name_collision_refused(gate: _GateRecorder) -> None:
+    """An existing group of the same name -> status=group_exists; no write, no gate."""
+    conn = _VmHostRuleConnector(existing_groups=[{"name": "gold-hosts", "userCreated": True}])
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "nested-esxi",
+            "host_group_name": "gold-hosts",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["esx-dc19-a"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "group_exists"
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_insufficient_vms_refused(gate: _GateRecorder) -> None:
+    """No VM name resolves -> status=insufficient_vms; no write, no gate."""
+    conn = _VmHostRuleConnector(vms=[])
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "vg",
+            "host_group_name": "hg",
+            "vms": ["missing"],
+            "hosts": ["esx-dc19-a"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "insufficient_vms"
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_insufficient_hosts_refused(gate: _GateRecorder) -> None:
+    """No host name resolves -> status=insufficient_hosts; no write, no gate."""
+    conn = _VmHostRuleConnector(hosts=[])
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "vg",
+            "host_group_name": "hg",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["missing"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "insufficient_hosts"
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_host_rule_create_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the reconfigure returns the OperationResult verbatim; no write."""
+    op_id = "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _VmHostRuleConnector()
+    out = await cluster_drs_vm_host_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "pin-nested",
+            "vm_group_name": "vg",
+            "host_group_name": "hg",
+            "vms": ["esxi-nested-01"],
+            "hosts": ["esx-dc19-a"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert conn.reconfig_bodies == []
 
 
 # ===========================================================================

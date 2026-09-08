@@ -85,6 +85,11 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    storage_policy_create_composite,
+    storage_policy_delete_composite,
+    storage_policy_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
@@ -161,6 +166,12 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
+    STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
+    STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
+    STORAGE_POLICY_DELETE_RESPONSE_SCHEMA,
+    STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
+    STORAGE_POLICY_LIST_RESPONSE_SCHEMA,
     SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
     SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
     SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
@@ -1535,6 +1546,77 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "read-only", "namespace-management", "supervisor", "wcp"],
         safety_level="safe",
         requires_approval=False,
+    ),
+    # storage_policy.* — governed NFS tag-based SPBM policy (#3494)
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.list",
+        handler=storage_policy_list_composite,
+        summary="List the visible vCenter storage policies (JSONFlux-reduced).",
+        description=(
+            "Reads GET /vcenter/storage/policies and returns the visible "
+            "storage policies; the set-shaped list is JSONFlux-reduced to a "
+            "result handle by the dispatcher when large (drill in via "
+            "result_query). Optional policy_ids narrows the scan. The "
+            "companion read for storage_policy.create/delete — confirms a "
+            "minted policy is visible or a deleted one is gone. Read-only."
+        ),
+        parameter_schema=STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_LIST_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "policy", "spbm"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.create",
+        handler=storage_policy_create_composite,
+        summary="Create a tag-based NFS VM storage policy (tag substrate + PBM SOAP).",
+        description=(
+            "Mints a tag-based requirement storage policy for NFS-principal "
+            "datastores (which have no default policy — vSAN Default Storage "
+            "Policy is vSAN-only), the first link in the Supervisor-enable "
+            "chain (#3494). Creates the tag category + tag over vCenter REST "
+            "(POST /cis/tagging/category / /tag), attaches the tag to each "
+            "named datastore (/tag-association?action=attach), then creates "
+            "the policy over the PBM SOAP API (PbmProfileProfileManager."
+            "PbmCreate on /pbm — there is no vCenter REST for policy creation) "
+            "whose one rule requires the tag, and returns the new policy id. "
+            "safety_level='caution' + requires_approval=True: parked for human "
+            "approval before any write; each child write flows through the "
+            "governed sub-op seam (its own audit row + grant point). "
+            "Fail-closed if a datastore name resolves to zero / many. "
+            "Equivalent of the out-of-band 'New-SpbmStoragePolicy' / "
+            "'govc storage.policy.create -category -tag', governed."
+        ),
+        parameter_schema=STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "write", "storage", "policy", "spbm", "tagging", "nfs"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.delete",
+        handler=storage_policy_delete_composite,
+        summary="Delete a storage policy by id (PBM SOAP) and read-back verify absent.",
+        description=(
+            "The teardown counterpart of storage_policy.create (#3494). Issues "
+            "PbmProfileProfileManager.PbmDelete for the policy id over the PBM "
+            "SOAP API, then read-backs GET /vcenter/storage/policies to confirm "
+            "the id is gone. safety_level='destructive' + requires_approval="
+            "True. A per-id PbmDelete fault (e.g. the policy is still in use by "
+            "a VM / Supervisor) returns status='delete_failed' with the fault "
+            "type — an in-use policy must be freed first (no force). Deletes "
+            "only the policy; the tag / category are left in place (may be "
+            "shared). Equivalent of 'govc storage.policy.rm', governed."
+        ),
+        parameter_schema=STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_DELETE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "write", "storage", "policy", "spbm", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
     ),
 )
 

@@ -156,10 +156,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import httpx
+
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    _OP_STORAGE_POLICIES_LIST,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _read_cdrom,
     _read_ethernet_nic,
+    _read_sub_op,
     _read_vm_info,
     _read_vm_snapshots_best_effort,
     _resolve_cluster_hosts,
@@ -1176,6 +1182,67 @@ async def _supervisor_disable_preview(ctx: PreviewContext) -> dict[str, Any] | N
     return {"cluster": cluster, "irreversibility": "kubernetes-instance-destroyed"}
 
 
+async def _storage_policy_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``storage_policy.create`` — echo what the caution-tier write builds.
+
+    Not destructive, so no mandatory blast_radius: a plain ``preview`` block
+    naming the policy / category / tag / datastores the approver is authorising
+    to be created. Params here are non-secret, so the echo is safe.
+    """
+    params = ctx.params
+    return {
+        "preview": {
+            "action": "create_tag_storage_policy",
+            "policy_name": params.get("policy_name"),
+            "category_name": params.get("category_name"),
+            "tag_name": params.get("tag_name"),
+            "datastore_names": params.get("datastore_names"),
+        }
+    }
+
+
+async def _storage_policy_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``storage_policy.delete`` — the mandatory destructive blast radius (#3494).
+
+    Populates the ``blast_radius`` block the destructive-tier park gate requires
+    (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`):
+    the policy identity (name best-effort read from
+    ``GET /vcenter/storage/policies``), an empty ``children`` list (deleting the
+    policy removes no child objects — the tag / category are left in place), and
+    the ``permanent`` irreversibility class. Declines (``None``) only when no
+    ``policy_id`` was supplied; the name read degrades to the params echo /
+    ``None`` on a transport fault so the block is always well-formed.
+    """
+    policy_id = ctx.params.get("policy_id")
+    if not isinstance(policy_id, str) or not policy_id:
+        return None
+    name = ctx.params.get("policy_name")
+    if not name and ctx.connector_instance is not None:
+        try:
+            rows = await _read_sub_op(
+                ctx.connector_instance,  # type: ignore[arg-type]
+                ctx.target,
+                ctx.operator,
+                _OP_STORAGE_POLICIES_LIST,
+                {},
+            )
+            match = next(
+                (r for r in (rows or []) if isinstance(r, dict) and r.get("policy") == policy_id),
+                None,
+            )
+            if match is not None:
+                name = match.get("name")
+        except httpx.HTTPError:
+            name = ctx.params.get("policy_name")
+    return {
+        "blast_radius": {
+            "object": {"kind": "storage_policy", "id": policy_id, "name": name},
+            "children": [],
+            "irreversibility": "permanent",
+        },
+    }
+
+
 #: op_id → builder for the write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
@@ -1207,6 +1274,8 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.host.datastore_mount_nfs": _host_datastore_mount_nfs_preview,
     "vmware.composite.host.disk_mark_flash": _host_disk_mark_flash_preview,
     "vmware.composite.host.service_control": _host_service_control_preview,
+    "vmware.composite.storage_policy.create": _storage_policy_create_preview,
+    "vmware.composite.storage_policy.delete": _storage_policy_delete_preview,
 }
 
 

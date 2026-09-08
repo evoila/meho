@@ -90,6 +90,11 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    storage_policy_create_composite,
+    storage_policy_delete_composite,
+    storage_policy_list_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._supervisor import (
     supervisor_disable_composite,
     supervisor_enable_composite,
@@ -159,6 +164,9 @@ __all__ = [
     "performance_summary_composite",
     "register_vmware_composite_operations",
     "service_control_composite",
+    "storage_policy_create_composite",
+    "storage_policy_delete_composite",
+    "storage_policy_list_composite",
     "supervisor_disable_composite",
     "supervisor_enable_composite",
     "supervisor_status_composite",

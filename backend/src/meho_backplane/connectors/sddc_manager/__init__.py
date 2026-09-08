@@ -26,10 +26,16 @@ because this module has already registered the hand-rolled class. Until then,
 this module is the only registration path.
 
 Operations span two surfaces. The audited 12-read lab-audit set (#2306),
-extended with the network-pool pre-flight reads (#2837), ships as
-first-class **typed** ops in :mod:`.typed_ops` / :mod:`.typed_reads`
-(``source_kind="typed"``), dispatchable on a fresh boot with zero catalog
-ingest. The three non-audited reads (release, domain detail, bundles) and
+extended with the network-pool pre-flight reads (#2837) and the curated
+workload-domain **write** path (#3497 — network-pool create, host
+validate/commission, domain validate/create, plus the ``sddc.task.get``
+build poll), ships as first-class **typed** ops in :mod:`.typed_ops` /
+:mod:`.typed_reads` / :mod:`.typed_writes` (``source_kind="typed"``),
+dispatchable on a fresh boot with zero catalog ingest. The write ops carry
+``requires_approval=True`` at the ``caution`` / ``dangerous`` tier so the
+dispatcher parks each for approval; the create calls are ``202``-async and
+the caller polls ``sddc.task.get`` / ``sddc.domain.status`` to a terminal
+state. The three non-audited reads (release, domain detail, bundles) and
 the wider VCF API catalog arrive via G0.7 spec ingestion
 against the ``endpoint_descriptor`` table and stay browsable as
 profiled-dispatch breadth, enable-able through the generic review flow
@@ -52,6 +58,14 @@ from meho_backplane.connectors.sddc_manager.typed_ops import (
     SDDC_TYPED_OPS,
     SddcTypedOp,
     register_sddc_typed_operations,
+)
+from meho_backplane.connectors.sddc_manager.typed_writes import (
+    SDDC_DOMAIN_CREATE_OP_ID,
+    SDDC_DOMAIN_VALIDATE_OP_ID,
+    SDDC_HOST_COMMISSION_OP_ID,
+    SDDC_HOST_VALIDATE_OP_ID,
+    SDDC_NETWORK_POOL_CREATE_OP_ID,
+    TYPED_WRITE_DECLARED_OP_IDS,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
@@ -95,11 +109,17 @@ register_typed_op_registrar(register_sddc_typed_operations)
 
 __all__ = [
     "SDDC_CONNECTOR_ID",
+    "SDDC_DOMAIN_CREATE_OP_ID",
+    "SDDC_DOMAIN_VALIDATE_OP_ID",
     "SDDC_EXECUTION_PROFILE",
+    "SDDC_HOST_COMMISSION_OP_ID",
+    "SDDC_HOST_VALIDATE_OP_ID",
     "SDDC_IMPL_ID",
+    "SDDC_NETWORK_POOL_CREATE_OP_ID",
     "SDDC_PRODUCT",
     "SDDC_TYPED_OPS",
     "SDDC_VERSION",
+    "TYPED_WRITE_DECLARED_OP_IDS",
     "SddcCredentialsLoader",
     "SddcManagerConnector",
     "SddcTargetLike",

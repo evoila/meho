@@ -326,6 +326,7 @@ real operator through the same loader.
 | `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+| `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 
@@ -465,6 +466,75 @@ apply. Note: the dispatcher / approval-queue substrate has **no per-op
 auto-populated into the approval row at queue time today; the dry-run is
 expressible + returned by the op, and queue-time auto-population is a
 follow-up that needs a dispatcher hook.
+
+### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
+
+The `ops_secret_read.py` op closes the one gap the write surface left:
+there was `k8s.secret.create` but **no data-returning Secret read**
+(Secret `data` is clamped on broadcast). Extracting a credential from a
+Secret therefore meant an out-of-band `kubectl get secret … -o
+jsonpath`, escaping audit / policy / approval. The motivating case is
+registering a **VKS guest cluster** as a second `product=k8s` target: the
+shipped WCP SSO auth mode (#2905) reaches only the Supervisor, so a guest
+cluster is registered from its Cluster-API-generated
+`<cluster>-kubeconfig` Secret (the admin client-cert kubeconfig, stored
+under the `value` data key) in the Supervisor namespace.
+
+**No-transit shape (not the issue's `read_data` sketch).** The op does
+**not** return the decoded kubeconfig to the caller. Borrowing the secret
+broker's core invariant (`connectors/secret`, #1577), it reads the value
+inside the backplane and writes it straight to a Vault `secret_ref`,
+returning only `{secret_ref, field, registered_as, name, namespace,
+data_key, value_sha256, length}`. So the kubeconfig never reaches the
+`call_operation` result / the agent transcript at all -- not merely the
+audit row. This is a deliberate hardening of #3496's `read_data` sketch
+(which returned the value to the approval-gated caller); the round-trip
+the issue asks for is served directly, because the op **is** the staging
+step.
+
+**Round-trip.** The destination path is derived with
+`tenant_secret_ref(operator.tenant_id, register_as)`
+(`connectors/vault/tenant_paths.py`) -- the same helper `POST
+/api/v1/targets` uses to default an omitted `secret_ref` (#1723) -- and
+the value is written under the `field` name the kubeconfig loader reads
+(`kubeconfig` by default, see `load_kubeconfig_from_vault`). So the demo
+flow is: `call_operation k8s.secret.read_to_ref … register_as=<guest>`
+-> `meho targets create --name <guest> --product k8s --host <guest-VIP>
+--port 6443` (secret_ref omitted; it defaults to the returned path) ->
+`k8s.node.list` against the guest works.
+
+**Governance (mirrors `sddc.credential.list`).** Three layers: (1)
+`safety_level="caution"` + `requires_approval=True` (the policy gate
+parks an unapproved dispatch); (2) the op-id is pinned in
+`broadcast.events._CREDENTIAL_READ_OPS`, so `classify_op` returns
+`credential_read` and audit + broadcast rows collapse to aggregate-only;
+(3) the result is value-free **by construction** (only the ref + a
+SHA-256 + byte length), so the connector-boundary `credential_read`
+response scrub (#2467) and the defensive Tier-1 engine have no secret to
+strip.
+
+**Tenant scope, not duplicated.** The write rides the `vault.kv.put`
+handler, which runs `enforce_tenant_scope`
+(`connectors/vault/tenant_scope.py`) under the operator's own Vault
+identity before any round-trip -- the same default-on guard the
+`api/v1/targets.py` write-time `secret_ref` gate mirrors, enforced here
+without re-implementing it (that gate raises `HTTPException` and is
+FastAPI-coupled, so the connector-appropriate reuse is the shared guard
+it wraps). The derived path is inside the operator's tenant subtree by
+construction.
+
+**Supervisor case: no server rewrite (corpus-verified).** A VKS guest
+kubeconfig's `clusters[].cluster.server` already points at the guest
+cluster's own LoadBalancer API-server VIP and is used as-is, so **no**
+server-address rewrite is performed -- the op stages the kubeconfig
+verbatim (corpus:
+`vsphere-supervisor-services-and-standalone-components.pdf`,
+`VCFB1443LV-kubernetes-101-and-the-iaas-control-plane-on-vmware-cloud-fo.pdf`).
+
+A missing `data_key`, or a value that is not valid base64 / UTF-8, raises
+`KubernetesSecretDataError` naming the Secret + key (never the value);
+the error surfaces through the dispatcher's `connector_error` envelope,
+and nothing is written to Vault on failure.
 
 ### Shared list-op request shape (`ops_listparams.py`)
 

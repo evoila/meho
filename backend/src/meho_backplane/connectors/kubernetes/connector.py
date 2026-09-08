@@ -1479,6 +1479,19 @@ class KubernetesConnector(Connector):
 
         return await k8s_job_create(self, target, operator, params)
 
+    async def k8s_secret_read_to_ref(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``k8s.secret.read_to_ref`` (#3496)."""
+        from meho_backplane.connectors.kubernetes.ops_secret_read import (
+            k8s_secret_read_to_ref,
+        )
+
+        return await k8s_secret_read_to_ref(self, target, operator, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`KUBERNETES_OPS` into ``endpoint_descriptor``.

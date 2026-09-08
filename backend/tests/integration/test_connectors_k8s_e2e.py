@@ -170,6 +170,10 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.job.create",
     # G3.14-T2 exec op (websocket pod-exec, approval-gated).
     "k8s.exec",
+    # #3496 governed guest-cluster kubeconfig read (credential_read,
+    # approval-gated): reads a Secret's data value and stages it to a
+    # tenant-scoped Vault secret_ref.
+    "k8s.secret.read_to_ref",
 )
 
 

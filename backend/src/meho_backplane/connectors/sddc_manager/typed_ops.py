@@ -1197,8 +1197,9 @@ _DOMAIN_CREATE = SddcTypedOp(
         "governed workload-domain build. The build runs for hours on the "
         "appliance; poll sddc.task.get (and sddc.domain.status once the domain "
         "object exists) to ACTIVE. safety_level=dangerous + requires_approval "
-        "-- the dispatcher parks for approval first and the park-time preview "
-        "scrubs the spec's plaintext passwords."
+        "-- the dispatcher parks for approval first, and the reviewer context "
+        "shows op/target/subject identity only (never the spec body), so the "
+        "spec's plaintext passwords never reach the approver."
     ),
     parameter_schema=_domain_spec_parameter_schema("/v1/domains"),
     response_schema={"type": "object", "additionalProperties": True},

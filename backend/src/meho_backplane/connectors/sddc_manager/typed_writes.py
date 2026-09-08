@@ -213,7 +213,9 @@ async def sddc_domain_create_impl(
     (and ``sddc.domain.status`` once the domain object exists) to ``ACTIVE``.
     The estate mutation — ``safety_level="dangerous"`` + ``requires_approval``,
     so the dispatcher has already parked and an approver already resumed by
-    the time this handler runs; the park-time preview scrubs the spec's
-    plaintext passwords at the connector-boundary redaction layer.
+    the time this handler runs. The reviewer context surfaces the op + target
+    + subject identity only, never the hidden ``params`` body
+    (:func:`~meho_backplane.operations.approval_context.resolve_reviewer_context`),
+    so the spec's plaintext passwords never reach the approver.
     """
     return await connector._post_json(target, _DOMAINS_PATH, operator=operator, json=params["spec"])

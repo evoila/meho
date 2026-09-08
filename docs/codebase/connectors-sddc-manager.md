@@ -272,9 +272,14 @@ operation call <op_id> --params @spec.json` (CLI) — **no new MCP tool and no n
 CLI verb** (CLAUDE.md postulate 5; the generic `operation call` verb carries the
 body). No `enable_writes` bulk path exists by design; each mutating op is a
 distinct approval-gated typed op that the dispatcher **parks** for approval
-before the handler runs. The park-time reviewer context runs the parked spec
-through the connector-boundary redaction engine, so a `DomainCreationSpec`'s or
-`HostCommissionSpec`'s plaintext passwords never reach the approver.
+before the handler runs. The reviewer context
+(`resolve_reviewer_context`) surfaces the op + target + subject identity only —
+never the hidden `params` body — so a `DomainCreationSpec`'s or
+`HostCommissionSpec`'s plaintext passwords never reach the approver (the
+connector-boundary redaction engine is the backstop on any identity field that
+resolves). A custom park-time blast-radius preview builder (the vcf-installer
+`bringup` shape) is a possible future enhancement, not required at the
+`dangerous` tier.
 
 **The governed WLD build sequence** (the caller's responsibility — runbook or
 the meho-automation add-on — not the dispatcher's): `network_pool.create` →

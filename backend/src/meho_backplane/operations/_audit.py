@@ -527,6 +527,19 @@ def _resolve_target_id(target: Any) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else None
 
 
+class AuditCommitError(RuntimeError):
+    """The DISPATCH audit row could not be committed.
+
+    Raised by :func:`audit_and_broadcast_safe` when ``require_audit`` is
+    set (the write-class / post-approval success path) and
+    :func:`write_audit_row` fails. Per CLAUDE.md postulate 7 / v0.1-spec
+    §6 the durable audit row is a hard precondition of a successful
+    return, so the dispatcher converts this into a ``connector_error``
+    result rather than reporting ``status='ok'`` for a mutation that
+    left no governance-grade record.
+    """
+
+
 async def write_audit_row(
     *,
     audit_id: uuid.UUID,
@@ -710,23 +723,27 @@ async def audit_and_broadcast_safe(
     redaction_policy_id: str | None = None,
     handle_metadata: dict[str, Any] | None = None,
     error_extras: dict[str, Any] | None = None,
+    require_audit: bool = False,
 ) -> None:
     """Write the audit row + publish broadcast; swallow internal failures.
 
-    Audit/broadcast failures are recorded at error level but do **not**
-    flip the :class:`OperationResult` status -- the caller has already
-    decided the outcome. Two reasons:
+    Broadcast failures are always fail-open (per :func:`publish_event`'s
+    contract): they are recorded at error level and never flip the
+    :class:`OperationResult` status.
 
-    * Audit-insert failures are rare and operationally distinct from
-      "the operation succeeded but we couldn't record it". The on-call
-      receives a ``dispatch_audit_failed`` log line; the operator sees
-      the original outcome.
-    * Broadcast failures are already fail-open by
-      :func:`publish_event`'s contract.
+    Audit-row failures are gated by *require_audit* (S07, #295):
 
-    A future tightening of the audit-failure handling (e.g. failing the
-    operation when audit cannot land) is a v0.2.next consideration and
-    would land in this helper.
+    * ``require_audit=False`` (the default; the deny / error / announce
+      callers and read-class success) -- an audit-insert failure is
+      recorded via ``dispatch_audit_failed`` and swallowed. The caller
+      keeps the outcome it already decided; the broadcast is skipped.
+    * ``require_audit=True`` (the write-class / post-approval success
+      path) -- the durable DISPATCH row is a hard precondition of a
+      successful return (CLAUDE.md postulate 7 / v0.1-spec §6). An
+      audit-insert failure is still logged, the broadcast is still
+      skipped, and then :exc:`AuditCommitError` is raised so the caller
+      fails the operation instead of reporting ``status='ok'`` for a
+      mutation with no governance-grade record.
 
     *raw_payload* / *redaction_manifest* / *redaction_policy_id* are
     the connector-boundary redaction artefacts (G11.4-T2 #1071);
@@ -760,7 +777,7 @@ async def audit_and_broadcast_safe(
             handle_metadata=handle_metadata,
             error_extras=error_extras,
         )
-    except Exception:
+    except Exception as audit_exc:
         _log.exception(
             "dispatch_audit_failed",
             op_id=descriptor.op_id,
@@ -769,7 +786,17 @@ async def audit_and_broadcast_safe(
         )
         # Skip the broadcast when audit failed -- the broadcast event
         # references the audit_id by FK contract, so a phantom event
-        # would mislead subscribers about a row that doesn't exist.
+        # would mislead subscribers about a row that doesn't exist. This
+        # holds whether we swallow or re-raise below, so no phantom event
+        # is emitted on either branch.
+        if require_audit:
+            # Write-class / post-approval success path: the DISPATCH row
+            # is a hard precondition of a successful return. Fail the
+            # operation so the caller never sees status=ok for a mutation
+            # that left no durable audit record.
+            raise AuditCommitError(
+                f"DISPATCH audit row could not be committed for {descriptor.op_id}"
+            ) from audit_exc
         return
     try:
         await publish_broadcast(

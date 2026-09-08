@@ -251,7 +251,7 @@ import hvac.exceptions
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
-from meho_backplane.broadcast.history import build_target_activity_advisory
+from meho_backplane.broadcast.history import WRITE_OP_CLASSES, build_target_activity_advisory
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
@@ -267,6 +267,7 @@ from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
+    AuditCommitError,
     audit_and_broadcast_safe,
     parent_audit_id_var,
     policy_decision_var,
@@ -835,6 +836,22 @@ async def _execute_and_audit_inner(
     )
 
 
+def _requires_durable_audit(descriptor: EndpointDescriptor) -> bool:
+    """Whether a failed DISPATCH audit commit must fail the operation.
+
+    True for write-class ops (:data:`WRITE_OP_CLASSES` via
+    :func:`classify_op`) and for any op above the ``safe`` tier -- the
+    superset that also covers every post-approval / needs-approval-resumed
+    dispatch (approval is gated on ``caution`` or higher). For these the
+    durable audit row is a hard precondition of a successful return
+    (CLAUDE.md postulate 7 / v0.1-spec §6), so the success path fails
+    closed into a ``connector_error`` when the row cannot commit. Safe
+    read-class ops keep the historical fail-open posture -- S07 (#295)
+    scopes this pass to the write / post-approval path.
+    """
+    return classify_op(descriptor.op_id) in WRITE_OP_CLASSES or descriptor.safety_level != "safe"
+
+
 async def _reduce_and_audit_success(
     *,
     op_id: str,
@@ -886,20 +903,32 @@ async def _reduce_and_audit_success(
         return reduced
     summary, handle = reduced
     duration_ms = _elapsed_ms(started)
-    await audit_and_broadcast_safe(
-        audit_id=audit_id,
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-        params_hash=params_hash,
-        result_status="ok",
-        duration_ms=duration_ms,
-        raw_payload=redaction.raw,
-        redaction_manifest=serialised_manifest,
-        redaction_policy_id=redaction.policy_id,
-        handle_metadata=_handle_metadata_for_audit(handle),
-    )
+    try:
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="ok",
+            duration_ms=duration_ms,
+            raw_payload=redaction.raw,
+            redaction_manifest=serialised_manifest,
+            redaction_policy_id=redaction.policy_id,
+            handle_metadata=_handle_metadata_for_audit(handle),
+            require_audit=_requires_durable_audit(descriptor),
+        )
+    except AuditCommitError as exc:
+        # The mutation already ran against the vendor, but the durable
+        # DISPATCH row -- the only record carrying raw_payload,
+        # redaction_manifest, policy_decision, target_id and
+        # agent_session_id -- did not commit. For a write-class /
+        # post-approval op that row is a precondition of a successful
+        # return (postulate 7 / v0.1-spec §6), so surface a distinct
+        # connector_error instead of status=ok. No broadcast was emitted
+        # (audit_and_broadcast_safe skips it when the audit fails).
+        return result_connector_error(op_id, exc, duration_ms)
     activity_advisory = await build_target_activity_advisory(
         operator,
         op_id=descriptor.op_id,

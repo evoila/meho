@@ -35,7 +35,13 @@ def _repository() -> dict[str, object]:
 
 def test_redacts_all_named_credential_fields() -> None:
     out = redact_argocd_credentials(_repository())
-    for field in ("password", "sshPrivateKey", "tlsClientCertKey", "bearerToken", "githubAppPrivateKey"):
+    for field in (
+        "password",
+        "sshPrivateKey",
+        "tlsClientCertKey",
+        "bearerToken",
+        "githubAppPrivateKey",
+    ):
         assert out[field] == REDACTED
 
 

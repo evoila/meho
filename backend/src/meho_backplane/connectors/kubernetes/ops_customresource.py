@@ -187,7 +187,11 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     digest, never the bytes. A non-Secret CR gets neither field and is
     otherwise untouched by the walk.
     """
-    obj = redact_kubernetes_payload(obj)
+    is_secret = obj.get("kind") == SECRET_KIND
+    if is_secret:
+        # Only a Secret object carries values to scrub; redacting a copy
+        # (never the caller's dict) keeps the walk off every other CR.
+        obj = redact_kubernetes_payload(obj)
     metadata = obj.get("metadata") or {}
     excerpt, truncated = _bounded_spec_excerpt(obj.get("spec"))
     row: dict[str, Any] = {
@@ -200,7 +204,7 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
         "spec_excerpt": excerpt,
         "spec_truncated": truncated,
     }
-    if obj.get("kind") == SECRET_KIND:
+    if is_secret:
         row["data"] = obj.get("data") or {}
         row["string_data"] = obj.get("stringData") or {}
     return row

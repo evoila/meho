@@ -580,6 +580,45 @@ map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
 `k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
 `unknown_op` envelope.
 
+### Read-side Secret redaction (#3501, `redaction.py`)
+
+Response redaction is otherwise pattern-based (the Tier-1 named-pattern
+engine + optional Presidio), which keys on **labelled** secret shapes in
+string leaves. A Kubernetes `Secret`'s `data` map is the opposite shape:
+arbitrary, operator-chosen keys whose base64 values carry no in-leaf
+label, so they would pass through unless a value happened to match a
+named pattern.
+[`connectors/kubernetes/redaction.py`](../../backend/src/meho_backplane/connectors/kubernetes/redaction.py)
+closes that read-side gap with a pure, **structural** redactor
+(`redact_kubernetes_payload`): it recognises any `kind: Secret` object
+and replaces every `data` / `stringData` value with a fixed placeholder
+carrying a `sha256:` digest — key names kept — regardless of whether the
+value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
+per-connector redactors (see [`redaction.md`](redaction.md)).
+
+The redactor is wired into `custom_resource_row`
+(`ops_customresource.py`), the projection both `k8s.cr.list` and
+`k8s.cr.info` share, so a dynamic read pointed at core Secrets
+(`group=""` / `version="v1"` / `plural="secrets"`) — the one shipped read
+path that can surface a raw Secret object — is scrubbed before JSONFlux /
+audit / broadcast.
+
+**Projection note.** `custom_resource_row` otherwise keeps only
+`metadata` + a bounded `.spec` excerpt and drops every other top-level
+field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+returned no `data` at all (safe, but uninformative). The redactor lets
+the projection surface a `data` / `string_data` **key inventory** (values
+redacted, digests attached) for a `kind: Secret` object instead — safe
+*and* useful. Non-Secret CR rows gain neither field. The op remains
+`safe` / no-approval — the redaction, not a gate, is what makes a Secret
+read leak-free.
+
+**Carve-out.** `k8s.secret.read_to_ref` (#3496) is untouched by this
+pass: it reads the value inside the backplane and stages it to a Vault
+`secret_ref`, returning only the ref + a SHA-256 + byte length — no
+`data` map and no `kind: Secret` object, so the structural walk finds
+nothing to redact and the op's no-transit contract is preserved.
+
 ## Control flow
 
 ### Connector init (lifespan)

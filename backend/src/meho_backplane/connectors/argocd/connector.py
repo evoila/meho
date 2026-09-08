@@ -89,6 +89,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import is_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.argocd.redaction import redact_argocd_credentials
 from meho_backplane.connectors.argocd.routes import (
     APP_GET_ROUTE,
     APP_LIST_ROUTE,
@@ -532,9 +533,19 @@ class ArgoCdConnector(HttpConnector):
         Returns the ``RepositoryList`` (``{"items": [...], "metadata": {...}}``);
         each item carries the repo URL/type plus ``connectionState`` (whether
         ArgoCD can currently reach and authenticate to the repo).
+
+        Read-side redaction (#3501): a ``Repository`` object can echo the
+        credentials configured for the repo (``password`` / ``sshPrivateKey``
+        / ``tlsClientCertKey`` / ``bearerToken`` / ``githubAppPrivateKey``).
+        The payload is passed through
+        :func:`~meho_backplane.connectors.argocd.redaction.redact_argocd_credentials`
+        before it leaves the handler, so no repo secret rides back in the
+        envelope / audit row / broadcast feed even for a broad-RBAC token.
         """
         del params  # schema declares the param object empty
-        return await self._get_json(target, route_path(REPO_LIST_ROUTE), operator=operator)
+        payload = await self._get_json(target, route_path(REPO_LIST_ROUTE), operator=operator)
+        redacted: dict[str, Any] = redact_argocd_credentials(payload)
+        return redacted
 
     async def cluster_list(
         self,

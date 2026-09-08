@@ -182,6 +182,20 @@ AWS/exec provider); the handler strips the whole `config` object from every
 item before returning — defense in depth, so no destination credential leaks
 even if a broad-RBAC token makes argocd-server include it.
 
+`argocd.repo.list` (#3501) gets the complementary treatment for **repository**
+credentials. A `Repository` object can echo the credentials configured for a
+repo (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` /
+`githubAppPrivateKey`), which argocd-server returns inline for a broad-RBAC
+token. The handler passes the payload through
+[`redact_argocd_credentials`](../../backend/src/meho_backplane/connectors/argocd/redaction.py)
+— a pure, structural walk that blanks those credential field names wherever
+they appear — before it leaves the handler, so no repo secret rides back in
+the response envelope / audit row / broadcast feed. Non-credential fields
+(`repo` / `username` / `type` / `connectionState` / the public
+`tlsClientCertData`) survive. It is the argocd sibling of the keycloak /
+rabbitmq / kubernetes per-connector redactors (see
+[`redaction.md`](redaction.md)).
+
 ### Approval-gated write ops (G3.12-T4)
 
 Seven mutating ops layer onto the same registrar walk (`register_operations`

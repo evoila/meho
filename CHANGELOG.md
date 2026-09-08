@@ -90,6 +90,10 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `pfsense.mgmt_flow.summary` honours the `pfctl -ss` direction arrow when splitting server/client, so operator-initiated flows are no longer reported as unexpected sources (#3471).
+
 ### Security — unknown-`kid` forced JWKS re-fetch bounded by a negative-kid cache and a refresh cooldown (evoila-bosnia/meho-internal#310 / #3484)
 
 - Because authlib resolves a token's `kid` to a signing key **before** it verifies the signature, a stream of well-formed but unsigned bearer tokens carrying random `kid` headers reached the `force_refresh=True` path and could drive one Keycloak discovery + JWKS round-trip per request, with no negative cache, cooldown, or auth-path rate limiter. `_decode_with_kid_rotation` now gates that forced refresh behind two internal floors: a forced-refresh cooldown (`_FORCE_REFRESH_COOLDOWN_SECONDS`, default 30 s, timed from the last *permitted* forced refresh) so a burst of distinct unknown kids costs at most one round-trip, and a size- and TTL-bounded negative-`kid` cache (max 128 entries, `_NEGATIVE_KID_TTL_SECONDS` 300 s) that short-circuits a `kid` already confirmed absent. Both the chassis (`verify_jwt`) and MCP (`verify_mcp_jwt`) chains inherit the bound through the shared helper. Genuine key rotation is intact — the first forced refresh is always allowed and negative entries expire within the JWKS staleness envelope — and these are internal security floors (module constants), not operator-tunable settings, so no new configuration knob is introduced.

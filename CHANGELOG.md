@@ -90,6 +90,31 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-09-09
+
+### Fixed
+
+- Compressed (`gzip`/`deflate`) vendor responses no longer fail with `httpx.DecodingError` ("incorrect header check") — a v0.34.0 regression that broke every `HttpConnector` read against a vendor that compressed its response (vmware-rest, vcf-fleet, gcloud, vcd, vra8, loki, harbor, the argocd HTTP path). The dispatch body-size cap (#3459) collected already-decompressed bytes while keeping the upstream `Content-Encoding` header, so httpx decoded the body a second time on access; the cap now buffers the raw wire bytes so the response decodes exactly once, restoring the pre-cap behaviour. (#3521 / #3524)
+
+### Security
+
+- Read-side redaction of Kubernetes `Secret` `data`/`stringData` values and ArgoCD repository credential fields. A safe read that surfaces a `kind: Secret` object (the `k8s.cr.list`/`k8s.cr.info` projection pointed at core `v1/secrets`) now replaces every `data`/`stringData` value with a fixed placeholder plus a `sha256:` digest (key names kept), and `argocd.repo.list` blanks the repository credential fields (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` / `githubAppPrivateKey`). Both structural redactors run in the connector read path before JSONFlux/audit/broadcast, closing an exfiltration path that pattern-based redaction missed on a shared instance. (#3501 / #3513)
+
+### Added
+
+- vmware-rest governed resource-pool lifecycle and a DRS VM-Host affinity rule: `vmware.composite.resource_pool.create` (caution, approval-gated; parent resolves from an explicit moid or a cluster's root resource pool), `vmware.composite.resource_pool.delete` (dangerous, approval-gated; reparents children, refuse-then-`force` for a non-empty pool), and `vmware.composite.cluster.drs_vm_host_rule.create` (caution, approval-gated). Thin composites over the existing REST/vim seams — enabled with no catalog ingest; no new MCP tools. (#3505 / #3510)
+- vmware-rest governed NFS tag-based SPBM storage policy (typed PBM SOAP): `storage_policy.create` (caution, approval-gated) resolves the datastore names, creates a tag category + tag, attaches the tag to each datastore and mints the PBM policy that requires it; `storage_policy.delete` (destructive, approval-gated; surfaces an in-use fault) and `storage_policy.list` (safe read). The PBM SOAP path is mock-validated at build time; live-appliance validation is deferred. (#3494 / #3509)
+- vmware-rest governed vSphere Supervisor (WCP) lifecycle in a new `namespace_management` operation group: `vmware.composite.supervisor.enable` and `.disable` (dangerous, approval-gated) and `.status` (safe). Enable/disable are asynchronous, so readiness is polled through the status op rather than blocking the dispatcher. (#3281 / #3504)
+- SDDC Manager 9.1 shelf plus curated workload-domain write ops (typed): `sddc.network_pool.create` and `sddc.domain.validate` / `sddc.host.validate` (caution), `sddc.host.commission` and `sddc.domain.create` (dangerous, approval-gated), and the `sddc.task.get` poll (safe). A workload domain can now be built end-to-end on the governed dispatch path; a 9.1 target resolves to the existing `sddc-rest-9.0` connector (no impl fork). (#3497 / #3506)
+- Kubernetes `k8s.secret.read_to_ref` (caution, approval-gated, classified `credential_read`): reads one Secret data value, stages the decoded value to a tenant-scoped Vault `secret_ref`, and returns only the ref + provenance — the value never enters the op result. This lets a VKS guest cluster's kubeconfig Secret be extracted from the Supervisor namespace and the guest registered as a second `product=k8s` target without the kubeconfig landing in an agent transcript. (#3496 / #3507)
+- Per-principal / per-tenant MCP dispatch rate limits (off by default, every limit `0` = unlimited): a per-principal dispatch rate limit and concurrent-op cap enforced in the shared `dispatch()` seam (CLI, MCP and the REST dispatch route), plus a per-tenant cap on new MCP sessions per window at `initialize`. Over-limit dispatches return a structured `rate_limited` (429-shaped) envelope and are audited synchronously with no broadcast. (#3500 / #3514)
+- Per-tenant mail-recipient allowlist and opt-in `/metrics`+`/ready` auth for shared-instance isolation: a nullable `tenant.mail_recipient_allowlist` override (migration `0101`) that can only narrow the instance `MAIL_RECIPIENT_ALLOWLIST` floor (`tenant_admin` REST + `meho tenants mail-recipient-policy set`, no MCP tool), and an opt-in `METRICS_AUTH_TOKEN` bearer guard on `/metrics` and `/ready` (default empty = unchanged; `/healthz` is never guarded). (#3499 / #3512)
+- Per-tenant bound for targetless `net.*` probes (`MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS`): a per-tenant probe scope evaluated before the instance allowlist, so an untrusted tenant can be bounded to a narrower probe scope (or denied every targetless probe) without shrinking the scope other tenants' sensors depend on. (#3498 / #3508)
+
+### Changed
+
+- Consumer-onboarding routing skills and the Layer-2 template are now rendered from one authoritative contract (`docs/examples/consumer-onboarding/contract/meho-first-routing.md`) via `scripts/ci/gen_consumer_routing.py`, with a pinned drift test that fails CI on a hand-edit. The rendering carries the evidence-first routing the hand-maintained copies lacked (memory / knowledge / docs-RAG / live-state with `result_query` / topology / audit / broadcast / runbooks / automation), close-the-loop write-back, and the break-glass protocol. (#3491 / #3503)
+
 ## [0.34.0] - 2026-09-08
 
 ### Fixed

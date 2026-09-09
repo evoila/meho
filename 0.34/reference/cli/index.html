@@ -6349,6 +6349,34 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#meho-tenants-mail-recipient-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho tenants mail-recipient-policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho tenants mail-recipient-policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-tenants-mail-recipient-policy-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho tenants mail-recipient-policy set
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -12639,6 +12667,34 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#meho-tenants-mail-recipient-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho tenants mail-recipient-policy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="meho tenants mail-recipient-policy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#meho-tenants-mail-recipient-policy-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        meho tenants mail-recipient-policy set
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -17230,7 +17286,7 @@
 <li><code>--json</code> — emit machine-readable JSON to stdout instead of the human summary</li>
 </ul>
 <h2 id="meho-tenants"><code>meho tenants</code><a class="headerlink" href="#meho-tenants" title="Permanent link">&para;</a></h2>
-<p>Operate per-tenant policy (flight-recorder capture policy)</p>
+<p>Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)</p>
 <div class="highlight"><pre><span></span><code>meho tenants
 </code></pre></div>
 <h3 id="meho-tenants-flight-recorder-policy"><code>meho tenants flight-recorder-policy</code><a class="headerlink" href="#meho-tenants-flight-recorder-policy" title="Permanent link">&para;</a></h3>
@@ -17248,6 +17304,20 @@
 <li><code>--enabled</code> — per-tenant capture default (F1); send true or false</li>
 <li><code>--json</code> — emit the resolved policy as JSON instead of the human summary</li>
 <li><code>--retention-days</code> — per-tenant trace retention window in days (F4; 1..365)</li>
+</ul>
+<h3 id="meho-tenants-mail-recipient-policy"><code>meho tenants mail-recipient-policy</code><a class="headerlink" href="#meho-tenants-mail-recipient-policy" title="Permanent link">&para;</a></h3>
+<p>Manage the tenant's mail-recipient allowlist (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho tenants mail-recipient-policy
+</code></pre></div>
+<h4 id="meho-tenants-mail-recipient-policy-set"><code>meho tenants mail-recipient-policy set</code><a class="headerlink" href="#meho-tenants-mail-recipient-policy-set" title="Permanent link">&para;</a></h4>
+<p>Set or clear the tenant mail-recipient allowlist (tenant_admin)</p>
+<div class="highlight"><pre><span></span><code>meho tenants mail-recipient-policy set [flags]
+</code></pre></div>
+<ul>
+<li><code>--allowlist</code> — the tenant's permitted recipient space (comma-separated addresses/domains); empty string denies all mail for the tenant</li>
+<li><code>--backplane</code> — backplane URL (defaults to the URL recorded by the most recent <code>meho login</code>)</li>
+<li><code>--clear</code> — clear the per-tenant override back to inheriting the instance floor</li>
+<li><code>--json</code> — emit the resolved policy as JSON instead of the human summary</li>
 </ul>
 <h2 id="meho-topology"><code>meho topology</code><a class="headerlink" href="#meho-topology" title="Permanent link">&para;</a></h2>
 <p>Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / diff / history / annotate / unannotate / list-edges)</p>

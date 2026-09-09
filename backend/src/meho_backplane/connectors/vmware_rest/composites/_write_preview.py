@@ -1377,6 +1377,56 @@ async def _storage_policy_delete_preview(ctx: PreviewContext) -> dict[str, Any] 
 
 #: op_id → builder for the write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
+async def _content_library_subscribed_create_preview(
+    ctx: PreviewContext,
+) -> dict[str, Any] | None:
+    """Preview ``content_library.subscribed.create`` — non-secret fields only (no I/O).
+
+    Secret hygiene (#3495): echoes the library identity + subscription shape
+    the reviewer needs to decide (name, publisher URL, backing datastore,
+    auth method, sync mode, whether an SSL thumbprint was pinned) but **never**
+    the ``password`` / ``username`` — so no credential can reach the durable
+    ``proposed_effect`` row through this path by construction. The broadcast
+    ``_CREDENTIAL_WRITE_OPS`` pin and the ``params_hash``-only audit are the
+    other two surfaces; this builder is the park-time one.
+    """
+    name = ctx.params.get("name")
+    subscription_url = ctx.params.get("subscription_url")
+    datastore = ctx.params.get("datastore")
+    if not isinstance(name, str) or not isinstance(subscription_url, str):
+        return None
+    return {
+        "name": name,
+        "subscription_url": subscription_url,
+        "datastore": datastore if isinstance(datastore, str) else None,
+        "authentication_method": ctx.params.get("authentication_method") or "NONE",
+        "automatic_sync_enabled": bool(ctx.params.get("automatic_sync_enabled", False)),
+        "on_demand": bool(ctx.params.get("on_demand", True)),
+        "ssl_thumbprint_pinned": bool(ctx.params.get("ssl_thumbprint")),
+    }
+
+
+async def _content_library_subscribed_sync_preview(
+    ctx: PreviewContext,
+) -> dict[str, Any] | None:
+    """Preview ``content_library.subscribed.sync`` — the library reference only.
+
+    Echoes whichever reference the caller supplied (``library_id`` or
+    ``library_name``) so the reviewer sees which library the forced sync
+    targets. No I/O, no secret (the sync op carries no credential).
+    """
+    library_id = ctx.params.get("library_id")
+    library_name = ctx.params.get("library_name")
+    if not (isinstance(library_id, str) and library_id) and not (
+        isinstance(library_name, str) and library_name
+    ):
+        return None
+    return {
+        "library_id": library_id if isinstance(library_id, str) else None,
+        "library_name": library_name if isinstance(library_name, str) else None,
+    }
+
+
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.supervisor.enable": _supervisor_enable_preview,
     "vmware.composite.supervisor.disable": _supervisor_disable_preview,
@@ -1411,13 +1461,17 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.host.service_control": _host_service_control_preview,
     "vmware.composite.storage_policy.create": _storage_policy_create_preview,
     "vmware.composite.storage_policy.delete": _storage_policy_delete_preview,
+    "vmware.composite.content_library.subscribed.create": (
+        _content_library_subscribed_create_preview
+    ),
+    "vmware.composite.content_library.subscribed.sync": _content_library_subscribed_sync_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 33 write-composite park-time preview builders. Import-time.
+    """Wire the 35 write-composite park-time preview builders. Import-time.
 
-    The 11 read composites register no builder — they are
+    The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be
     dead code.
     """

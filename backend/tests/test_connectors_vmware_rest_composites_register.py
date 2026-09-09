@@ -75,6 +75,9 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "vmware.composite.supervisor.status",
     # Storage-policy list read (#3494).
     "vmware.composite.storage_policy.list",
+    # Content-library SUBSCRIBED reads (#3495).
+    "vmware.composite.content_library.subscribed.status",
+    "vmware.composite.content_library.subscribed.items.list",
 )
 
 
@@ -114,6 +117,14 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
         "meho_backplane.connectors.vmware_rest.composites._storage_policy."
         "storage_policy_list_composite"
     ),
+    "vmware.composite.content_library.subscribed.status": (
+        "meho_backplane.connectors.vmware_rest.composites._library."
+        "content_library_subscribed_status_composite"
+    ),
+    "vmware.composite.content_library.subscribed.items.list": (
+        "meho_backplane.connectors.vmware_rest.composites._library."
+        "content_library_subscribed_items_list_composite"
+    ),
 }
 
 
@@ -129,6 +140,8 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.file.read": "guest_ops",
     "vmware.composite.supervisor.status": "namespace_management",
     "vmware.composite.storage_policy.list": "storage",
+    "vmware.composite.content_library.subscribed.status": "content_library",
+    "vmware.composite.content_library.subscribed.items.list": "content_library",
 }
 
 
@@ -228,7 +241,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # network.portgroup.security.set + the content-library import
     # vm.import_from_library #3229). (The former host.network_uplinks /
     # host.vsan_health reads were re-shipped as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 47
+    assert stub_embedding_service.encode_one.call_count == 51
 
 
 @pytest.mark.asyncio
@@ -497,7 +510,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 47
+    assert first_count == 51
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding
@@ -515,7 +528,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
             .scalars()
             .all()
         )
-    assert len(rows) == 11
+    assert len(rows) == 13
 
 
 # ---------------------------------------------------------------------------

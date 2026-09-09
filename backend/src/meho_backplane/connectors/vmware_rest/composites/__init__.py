@@ -80,6 +80,12 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library import (
+    content_library_subscribed_create_composite,
+    content_library_subscribed_items_list_composite,
+    content_library_subscribed_status_composite,
+    content_library_subscribed_sync_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -144,6 +150,10 @@ __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
+    "content_library_subscribed_create_composite",
+    "content_library_subscribed_items_list_composite",
+    "content_library_subscribed_status_composite",
+    "content_library_subscribed_sync_composite",
     "datastore_mount_nfs_composite",
     "datastore_usage_composite",
     "disk_mark_flash_composite",

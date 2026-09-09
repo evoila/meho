@@ -83,6 +83,12 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library import (
+    content_library_subscribed_create_composite,
+    content_library_subscribed_items_list_composite,
+    content_library_subscribed_status_composite,
+    content_library_subscribed_sync_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -138,6 +144,14 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
     CLUSTER_PATCH_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
@@ -402,6 +416,24 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Supervisor down', or 'has the Supervisor come up yet?'. Pair with "
         "'storage' for the SPBM policy id the enable spec needs and 'networking' "
         "for the workload / management network context."
+    ),
+    "content_library": (
+        "Use for the governed SUBSCRIBED content-library surface -- create a "
+        "content library subscribed to a remote publisher, force / confirm its "
+        "synchronisation, and list its items. The right group for standing up "
+        "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
+        "Supervisor needs: pre-create a SUBSCRIBED library pointed at the "
+        "upstream VMware repo (subscribed.create, approval-gated, returns the "
+        "library id #3281's Supervisor enable spec consumes as "
+        "default_kubernetes_service_content_library), trigger a sync "
+        "(subscribed.sync, approval-gated, asynchronous), and read readiness "
+        "back -- subscribed.status (last_sync_time) and subscribed.items.list "
+        "(the synchronised TKr versions, JSONFlux-reduced). The right group for "
+        "'create the TKr content library', 'sync the Kubernetes release "
+        "library', or 'which TKr images are available?'. Distinct from the "
+        "content-library *item* deploy/import (the 'vm' group's "
+        "deploy_from_library / import_from_library) -- this group is the "
+        "library-container lifecycle, not the VM deploy."
     ),
 }
 
@@ -1709,6 +1741,95 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         tags=["composite", "write", "storage", "policy", "spbm", "destroy", "destructive"],
         safety_level="destructive",
         requires_approval=True,
+    ),
+    # Content-library SUBSCRIBED-library composites (#3495) -- the
+    # governed TKr/VKr image source for a vSphere Supervisor. Two
+    # caution + approval writes (create / sync) and two safe reads
+    # (status / items.list). Naming nests under the sibling #3331
+    # LOCAL-library family via the ``subscribed`` infix.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.create",
+        handler=content_library_subscribed_create_composite,
+        summary="Create a SUBSCRIBED content library (e.g. the Supervisor TKr/VKr image source).",
+        description=(
+            "Resolves the ``datastore`` name to a moid, then POSTs a "
+            "``Content.LibraryModel`` to POST:/content/subscribed-library with a "
+            "DATASTORE storage backing and a subscription to the given publisher "
+            "URL (e.g. https://wp-content.vmware.com/v2/latest/lib.json for the "
+            "upstream VMware Tanzu Kubernetes release repo). Returns the new "
+            "library id — the value #3281's Supervisor enable spec consumes as "
+            "``default_kubernetes_service_content_library``. The create is "
+            "asynchronous vCenter-side (metadata syncs in the background; item "
+            "content lazily when ``on_demand``). The optional BASIC-auth "
+            "``password`` is kept off every preview / broadcast / audit-hash "
+            "surface. Approval-gated (caution)."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "content-library", "subscribed", "tkr", "vks"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.sync",
+        handler=content_library_subscribed_sync_composite,
+        summary="Force synchronisation of a SUBSCRIBED content library.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, then forces a sync via "
+            "POST:/content/subscribed-library/{libraryId}?action=sync. "
+            "Asynchronous: returns as soon as the sync is accepted (a no-op if "
+            "one is already running); it respects the library's ``on_demand`` "
+            "setting. Confirm completion with content_library.subscribed.status "
+            "(last_sync_time) / .items.list. Approval-gated (caution)."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "content-library", "subscribed", "sync"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.status",
+        handler=content_library_subscribed_status_composite,
+        summary="Read a SUBSCRIBED content library's model + subscription state.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, then reads the "
+            "Content.LibraryModel via GET:/content/subscribed-library/{libraryId}. "
+            "Surfaces name / type / subscription URL / sync mode and "
+            "``last_sync_time`` — the readiness signal, populated once the first "
+            "metadata sync completes. The API omits the subscription password "
+            "from the GET response, so this read carries no secret. Read-only."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "read-only", "content-library", "subscribed"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.items.list",
+        handler=content_library_subscribed_items_list_composite,
+        summary="List the items (synchronised TKr images) in a SUBSCRIBED library.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, finds every item id "
+            "scoped to the library via POST:/content/library/item?action=find, "
+            "then reads each item's metadata. Each row carries the TKr-triage "
+            "fields — ``name`` (the TKr version), ``type``, ``version``, "
+            "``cached`` (whether the multi-GB image content is downloaded), "
+            "``size``, ``last_sync_time``. The set-shaped ``items`` list is "
+            "JSONFlux-reduced automatically once it crosses the dispatcher's "
+            "50-row / 4 KB threshold (drill in with result_query). Read-only."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "read-only", "content-library", "subscribed", "tkr"],
+        safety_level="safe",
+        requires_approval=False,
     ),
 )
 

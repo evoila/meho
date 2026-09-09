@@ -32,6 +32,7 @@ from typing import Final
 
 from meho_backplane.connectors.vmware_rest.composites import (
     _host,
+    _library,
     _storage_policy,
     _supervisor,
     _write,
@@ -96,6 +97,14 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.supervisor.disable": _supervisor._SUB_OPS_SUPERVISOR_DISABLE,
     "vmware.composite.storage_policy.create": _storage_policy._SUB_OPS_STORAGE_POLICY_CREATE,
     "vmware.composite.storage_policy.delete": _storage_policy._SUB_OPS_STORAGE_POLICY_DELETE,
+    # #3495 content-library SUBSCRIBED writes (the two reads auto-execute for
+    # a service principal and need no grant, so they are not listed here).
+    "vmware.composite.content_library.subscribed.create": (
+        _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_CREATE
+    ),
+    "vmware.composite.content_library.subscribed.sync": (
+        _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC
+    ),
 }
 
 

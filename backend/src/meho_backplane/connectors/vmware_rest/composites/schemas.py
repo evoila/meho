@@ -5335,3 +5335,464 @@ STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
     "required": ["status", "policy_id"],
     "additionalProperties": True,
 }
+
+
+# ===========================================================================
+# Content-library SUBSCRIBED-library composites (#3495)
+# ===========================================================================
+
+
+#: ``vmware.composite.content_library.subscribed.create`` parameter schema.
+#:
+#: Create a SUBSCRIBED content library subscribed to a remote publisher (the
+#: TKr/VKr image source for a vSphere Supervisor). The subscription
+#: ``password`` may be secret; it rides the request body but never a preview /
+#: broadcast / audit-hash surface (the op is pinned into
+#: ``_CREDENTIAL_WRITE_OPS`` and carries a bespoke identity-only preview).
+CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name for the new subscribed library "
+                "(``Content.LibraryModel.name``). Names need not be unique."
+            ),
+        },
+        "subscription_url": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Publisher endpoint URL serving the library metadata "
+                "(``Content.Library.SubscriptionInfo.subscription_url``), e.g. "
+                "``https://wp-content.vmware.com/v2/latest/lib.json`` for the "
+                "upstream VMware Tanzu Kubernetes release (TKr/VKr) repo."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the datastore backing the library "
+                "(``Content.Library.StorageBacking`` of type ``DATASTORE``), "
+                "resolved to a moid via ``GET:/vcenter/datastore`` "
+                "(``filter.names``, exact match). A name matching no datastore "
+                "returns ``status='datastore_not_found'``, more than one "
+                "``status='ambiguous_datastore'`` — no library is created. A "
+                "storage backing is required even for an on-demand subscribed "
+                "library (only item metadata syncs, but the backing is still "
+                "mandatory)."
+            ),
+        },
+        "on_demand": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "When true (default), only item **metadata** synchronises; each "
+                "item's content (files) is pulled on first use. Recommended for "
+                "a TKr library — the ~3 GB-per-release image content then pulls "
+                "lazily at guest-cluster-create time rather than all up front. "
+                "When false, all content synchronises in advance."
+            ),
+        },
+        "automatic_sync_enabled": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Whether the library participates in automatic (periodic) "
+                "synchronisation. The subscription stays active either way; "
+                "with this false, sync happens only via an explicit "
+                "``content_library.subscribed.sync``. Automatic sync also "
+                "requires the global content-library automatic-sync option to "
+                "be enabled."
+            ),
+        },
+        "authentication_method": {
+            "type": "string",
+            "enum": ["NONE", "BASIC"],
+            "default": "NONE",
+            "description": (
+                "How the subscribed library authenticates to the publisher. "
+                "``NONE`` for a public endpoint (the VMware TKr repo); ``BASIC`` "
+                "for HTTP Basic, in which case ``username`` / ``password`` are "
+                "sent."
+            ),
+        },
+        "username": {
+            "type": "string",
+            "description": (
+                "Username for ``BASIC`` authentication "
+                "(``Content.Library.SubscriptionInfo.user_name``). Ignored when "
+                "``authentication_method`` is ``NONE``."
+            ),
+        },
+        "password": {
+            "type": "string",
+            "description": (
+                "Password for ``BASIC`` authentication "
+                "(``Content.Library.SubscriptionInfo.password``). Secret: kept "
+                "off every preview / broadcast / audit-hash surface. Ignored "
+                "when ``authentication_method`` is ``NONE``."
+            ),
+        },
+        "ssl_thumbprint": {
+            "type": "string",
+            "description": (
+                "Optional SHA-1 thumbprint of the publisher's SSL certificate "
+                "(``Content.Library.SubscriptionInfo.ssl_thumbprint``). When "
+                "set, the certificate is pinned to this thumbprint instead of "
+                "the normal chain validation."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional human-readable library description.",
+        },
+    },
+    "required": ["name", "subscription_url", "datastore"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.create`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "datastore_not_found",
+                "ambiguous_datastore",
+                "create_error",
+            ],
+            "description": (
+                "``'created'`` — the subscribed library was created and its id "
+                "returned (the background sync to the publisher has begun); "
+                "``'datastore_not_found'`` / ``'ambiguous_datastore'`` — the "
+                "``datastore`` name matched zero / many datastores (no library "
+                "created); ``'create_error'`` — the create call itself faulted, "
+                "surfaced as a structured message under ``issues`` rather than a "
+                "raw vendor error."
+            ),
+        },
+        "library_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Identifier of the newly created subscribed library "
+                "(``com.vmware.content.Library``) — the id #3281's enable spec "
+                "consumes as ``default_kubernetes_service_content_library``. "
+                "``null`` unless ``status='created'``."
+            ),
+        },
+        "name": {"type": ["string", "null"], "description": "Echo of the library name."},
+        "subscription_url": {
+            "type": ["string", "null"],
+            "description": "Echo of the publisher subscription URL.",
+        },
+        "datastore_id": {
+            "type": ["string", "null"],
+            "description": "Resolved datastore moid used for the storage backing.",
+        },
+        "on_demand": {
+            "type": ["boolean", "null"],
+            "description": "Echo of the effective on-demand sync mode.",
+        },
+        "automatic_sync_enabled": {
+            "type": ["boolean", "null"],
+            "description": "Echo of the effective automatic-sync setting.",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Datastore moids that matched on ``ambiguous_datastore``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``created`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.sync`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id to synchronise. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find``. A name matching no "
+                "library returns ``status='library_not_found'``, more than one "
+                "``status='ambiguous_library'``. Ignored when ``library_id`` is "
+                "given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.sync`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "sync_triggered",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "sync_error",
+            ],
+            "description": (
+                "``'sync_triggered'`` — the forced synchronisation was accepted "
+                "(asynchronous: it does not wait for content to land, and is a "
+                "no-op if a sync is already in progress); ``'invalid_reference'`` "
+                "— neither ``library_id`` nor ``library_name`` was supplied; "
+                "``'library_not_found'`` / ``'ambiguous_library'`` — the "
+                "``library_name`` lookup matched zero / many libraries; "
+                "``'sync_error'`` — the sync call itself faulted."
+            ),
+        },
+        "library_id": {
+            "type": ["string", "null"],
+            "description": "The resolved library id the sync targeted.",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``sync_triggered`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.status`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id to read. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find`` (see the sync op's "
+                "``library_name`` for the not-found / ambiguous semantics). "
+                "Ignored when ``library_id`` is given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.status`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ok",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "read_error",
+            ],
+            "description": (
+                "``'ok'`` — the library model was read; ``'invalid_reference'`` / "
+                "``'library_not_found'`` / ``'ambiguous_library'`` — reference "
+                "resolution failures (see the sync op); ``'read_error'`` — the "
+                "GET returned a non-object payload."
+            ),
+        },
+        "library_id": {"type": ["string", "null"], "description": "The resolved library id."},
+        "name": {"type": ["string", "null"], "description": "Library display name."},
+        "type": {
+            "type": ["string", "null"],
+            "description": "Library type (``SUBSCRIBED`` for a subscribed library).",
+        },
+        "subscription_url": {
+            "type": ["string", "null"],
+            "description": "Publisher subscription URL (no secret in the GET response).",
+        },
+        "authentication_method": {
+            "type": ["string", "null"],
+            "description": "Subscription authentication method (``NONE`` / ``BASIC``).",
+        },
+        "automatic_sync_enabled": {
+            "type": ["boolean", "null"],
+            "description": "Whether automatic synchronisation is enabled.",
+        },
+        "on_demand": {
+            "type": ["boolean", "null"],
+            "description": "Whether the library synchronises item content on demand.",
+        },
+        "last_sync_time": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 timestamp of the last successful synchronisation — the "
+                "readiness signal: populated once the first metadata sync "
+                "completes. ``null`` before the first sync."
+            ),
+        },
+        "description": {
+            "type": ["string", "null"],
+            "description": "Library description, if any.",
+        },
+        "storage_backings": {
+            "type": ["array", "null"],
+            "items": {"type": "object"},
+            "description": "The library's storage backings (as returned by vCenter).",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``ok`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.items.list`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id whose items to list. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find`` (see the sync op for the "
+                "not-found / ambiguous semantics). Ignored when ``library_id`` "
+                "is given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.items.list`` response schema.
+#:
+#: The ``items`` collection is JSONFlux-reduced automatically once it crosses
+#: the dispatcher's 50-row / 4 KB threshold (drill in with ``result_query``).
+CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+            ],
+            "description": (
+                "Present only on a reference-resolution failure; a successful "
+                "listing omits ``status`` and returns ``library_id`` + "
+                "``item_count`` + ``items``."
+            ),
+        },
+        "library_id": {"type": ["string", "null"], "description": "The resolved library id."},
+        "item_count": {
+            "type": "integer",
+            "description": "Number of items read from the library.",
+        },
+        "items": {
+            "type": "array",
+            "description": (
+                "One row per library item. For a TKr library each row's "
+                "``name`` is a Tanzu Kubernetes release version and ``cached`` "
+                "indicates whether the (multi-GB) image content is downloaded."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Library item id."},
+                    "name": {
+                        "type": ["string", "null"],
+                        "description": "Item name (the TKr version for a TKr item).",
+                    },
+                    "type": {
+                        "type": ["string", "null"],
+                        "description": "Item type (e.g. ``ovf``, ``vm-template``).",
+                    },
+                    "version": {
+                        "type": ["string", "null"],
+                        "description": "Item metadata version.",
+                    },
+                    "cached": {
+                        "type": ["boolean", "null"],
+                        "description": "Whether the item's content is synchronised locally.",
+                    },
+                    "size": {
+                        "type": ["integer", "null"],
+                        "description": "Aggregate size of the item's files in bytes, if reported.",
+                    },
+                    "last_sync_time": {
+                        "type": ["string", "null"],
+                        "description": "ISO-8601 timestamp of the item's last sync.",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a reference-resolution failure.",
+        },
+    },
+    "required": ["library_id"],
+}

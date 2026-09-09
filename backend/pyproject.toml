@@ -166,6 +166,27 @@ docs = [
     "mike>=2.2.0",
 ]
 
+[tool.uv]
+# Transitive-version floors the resolver MUST honour without promoting the
+# packages to first-class runtime dependencies. ``constraint-dependencies``
+# bounds a version wherever it appears in the graph but — unlike a
+# ``[project] dependencies`` entry — never *adds* a package that nothing
+# else pulls in (uv docs: "Constraints … used to restrict the versions of
+# a requirement, without adding it as a dependency").
+#
+# httpx2 / httpcore2 arrive only transitively —
+# ``genai-prices`` -> ``httpx2`` -> ``httpcore2`` — via
+# ``pydantic-ai-slim[anthropic,bedrock,openai]``; neither is (nor should
+# become) a direct dependency. CVE-2026-84382 (httpx2) and CVE-2026-84381
+# (httpcore2) were published against the 2.3.0 releases the parent pinned,
+# turning the trivy image gate red on every main build from 2026-09-09.
+# A plain ``uv lock --upgrade-package`` is a no-op here (the parent's
+# resolution holds them at 2.3.0), so a floor is the surgical fix: bump
+# httpx2 to the first fixed release (>=2.12.0) and httpcore2 to its first
+# fixed release (>=2.10.0). Revisit / drop once the parent's own pins move
+# past the fixed versions.
+constraint-dependencies = ["httpx2>=2.12.0", "httpcore2>=2.10.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

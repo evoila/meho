@@ -416,11 +416,22 @@ async def _read_capped_json_response(
     same-origin redirect and destination-pinning transport behaviour is
     unchanged) and enforces a two-part cap: a ``Content-Length`` fast-reject
     up front, then a running byte total across
-    :meth:`~httpx.Response.aiter_bytes` chunks that aborts the moment the
+    :meth:`~httpx.Response.aiter_raw` chunks that aborts the moment the
     body would exceed :data:`_MAX_RESPONSE_BYTES`. At most the cap (plus one
     trailing chunk) is ever held in memory, and an over-cap body raises
     :exc:`ResponseTooLargeError` before :func:`json_payload_or_empty` can
     parse it.
+
+    The cap iterates :meth:`~httpx.Response.aiter_raw` — the raw wire bytes,
+    still carrying whatever ``Content-Encoding`` the vendor applied — rather
+    than :meth:`~httpx.Response.aiter_bytes`, which yields already-decoded
+    bytes. Buffering the raw bytes keeps them consistent with the retained
+    ``Content-Encoding`` header, so the re-materialised response decodes
+    exactly once on first access (a plaintext body under a ``gzip`` header
+    would otherwise make httpx attempt a second decode and raise
+    :exc:`httpx.DecodingError`). The running total therefore counts
+    compressed transfer bytes, matching the ``Content-Length`` fast-reject
+    above, which measures that same compressed length.
 
     An under-cap body is joined and re-materialised into a fully-read
     :class:`httpx.Response` carrying the original status, headers, request,
@@ -441,7 +452,7 @@ async def _read_capped_json_response(
         _reject_oversize_content_length(resp)
         chunks: list[bytes] = []
         total = 0
-        async for chunk in resp.aiter_bytes():
+        async for chunk in resp.aiter_raw():
             total += len(chunk)
             if total > _MAX_RESPONSE_BYTES:
                 raise ResponseTooLargeError(

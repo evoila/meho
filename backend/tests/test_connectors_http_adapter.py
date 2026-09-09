@@ -53,11 +53,14 @@ Per-target base URL (evoila/meho#2873):
 from __future__ import annotations
 
 import datetime as _dt
+import gzip
+import json
 import socket as _socket
 import ssl
 import tempfile as _tempfile
 import threading as _threading
 import types
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from unittest.mock import patch
@@ -695,10 +698,9 @@ async def test_request_json_rejects_oversize_response_without_content_length(
 ) -> None:
     """An oversize body with no ``Content-Length`` is caught by the streamed total.
 
-    An absent (or understated / content-encoded) length header cannot smuggle
-    an oversize body past the guard: the running byte total across
-    ``aiter_bytes`` chunks aborts once the cap is exceeded, before the whole
-    body is buffered.
+    An absent (or understated) length header cannot smuggle an oversize body
+    past the guard: the running byte total across ``aiter_raw`` chunks aborts
+    once the cap is exceeded, before the whole body is buffered.
     """
     monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 1024)
     conn = _ConcreteHttpConnector()
@@ -814,6 +816,132 @@ async def test_post_json_under_cap_returns_parsed_payload(
         )
 
     assert result == {"value": "vm-42"}
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Content-encoded bodies decode exactly once through the byte cap
+# (regression guard for #3459 / fix #3521)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_json_gzip_encoded_response_decodes_once_regression_3459() -> None:
+    """A ``Content-Encoding: gzip`` GET body decodes once and parses (#3459 guard).
+
+    #3459 (the S09 body-size cap) buffered the cap loop's chunks from
+    :meth:`httpx.Response.aiter_bytes`, which yields **already-decoded** bytes,
+    then re-materialised the response with the plaintext body still under the
+    upstream ``Content-Encoding: gzip`` header — so httpx decoded a second time
+    on first content access and raised
+    ``httpx.DecodingError: Error -3 while decompressing data: incorrect header
+    check``. Every ingested/typed HTTP read of a compressing vendor broke.
+    This models a vCenter 8.x target behind an ingested ``vmware-rest``
+    connector that gzips its response; buffering the raw wire bytes
+    (:meth:`~httpx.Response.aiter_raw`) keeps them consistent with the retained
+    header, so the body decodes exactly once and parses.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    payload = {"value": [{"vm": "vm-101", "name": "web-01"}, {"vm": "vm-102"}]}
+    compressed = gzip.compress(json.dumps(payload).encode())
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/inventory").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        result = await conn._request_json(
+            target, "GET", "/api/inventory", operator=_make_operator("tok")
+        )
+
+    assert result == payload
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_json_gzip_encoded_response_decodes_once() -> None:
+    """The non-idempotent path also decodes a gzip body exactly once (#3459 guard)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    payload = {"value": "session-token-shape"}
+    compressed = gzip.compress(json.dumps(payload).encode())
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.post("/api/sessions").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        result = await conn._post_json(
+            target,
+            "/api/sessions",
+            operator=_make_operator("tok"),
+            json={"provider": "Local"},
+        )
+
+    assert result == payload
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_deflate_encoded_response_decodes_once() -> None:
+    """A ``Content-Encoding: deflate`` body decodes once and parses (#3459 guard)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    payload = {"value": [{"id": "obj-1"}, {"id": "obj-2"}]}
+    compressed = zlib.compress(json.dumps(payload).encode())
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        mock.get("/api/items").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "deflate"},
+        )
+        result = await conn._request_json(
+            target, "GET", "/api/items", operator=_make_operator("tok")
+        )
+
+    assert result == payload
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_json_rejects_oversize_compressed_body_by_content_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap measures the compressed transfer length, not the decoded size.
+
+    The cap loop now counts raw wire bytes, matching the ``Content-Length``
+    fast-reject — both measure the compressed length the vendor actually put on
+    the wire. A gzip body whose *compressed* ``Content-Length`` exceeds the cap
+    is refused up front, and the rejection quotes that compressed length.
+    """
+    monkeypatch.setattr(http_adapter, "_MAX_RESPONSE_BYTES", 8)
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    compressed = gzip.compress(json.dumps({"value": [1, 2, 3]}).encode())
+    assert len(compressed) > 8  # compressed length is what must trip the cap
+
+    async with respx.mock(base_url="https://vcenter.example.com") as mock:
+        route = mock.get("/api/inventory").respond(
+            200,
+            content=compressed,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+        with pytest.raises(ResponseTooLargeError) as exc_info:
+            await conn._request_json(
+                target, "GET", "/api/inventory", operator=_make_operator("tok")
+            )
+
+    assert "Content-Length" in str(exc_info.value)
+    assert str(len(compressed)) in str(exc_info.value)
+    assert route.called
     await conn.aclose()
 
 

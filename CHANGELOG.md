@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.34.2] - 2026-09-10
+
 ### Fixed
 
 - `pfsense.gateway.delete` now retries its `pfSsh.php` apply once and re-verifies before failing closed. A transient pfSense-runtime persistence race could leave `write_config()` uncommitted even though the playback exited `0`, so an unreferenced gateway that would otherwise delete cleanly was left in place and the teardown hard-failed with no recovery. The idempotent delete fragment (it re-matches the gateway by name) is now re-applied once to recover the transient non-persist; only a still-failing read-back raises, and the diagnostic distinguishes a non-persisting write from a reference-guard refusal. Distinct from the reference-guard completeness gap tracked separately in #3315. (#3529 / #3530)

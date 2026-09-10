@@ -485,18 +485,59 @@ async def test_gateway_delete_ambiguous_refuses_fail_closed() -> None:
     assert mock_cmd.await_count == 1
 
 
-async def test_gateway_delete_verification_failure_raises() -> None:
+async def test_gateway_delete_verification_failure_raises_after_retry() -> None:
+    """Both the first apply AND the retry fail to persist -> the op raises the
+    verification diagnostic, having attempted the playback twice (#3529)."""
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.side_effect = [
             _proc(_CONFIG_ROUTING),  # guard read
-            _proc("", 0),  # stage
-            _proc("", 0),  # playback
-            _proc("", 0),  # rm
-            _proc(_CONFIG_ROUTING),  # read-back: gateway still present
+            _proc("", 0),  # attempt 1: stage
+            _proc("", 0),  # attempt 1: playback
+            _proc("", 0),  # attempt 1: rm
+            _proc(_CONFIG_ROUTING),  # attempt 1 read-back: gateway still present
+            _proc("", 0),  # attempt 2 (retry): stage
+            _proc("", 0),  # attempt 2 (retry): playback
+            _proc("", 0),  # attempt 2 (retry): rm
+            _proc(_CONFIG_ROUTING),  # attempt 2 read-back: STILL present -> fail closed
         ]
-        with pytest.raises(RuntimeError, match="verification failed"):
+        with pytest.raises(RuntimeError, match="did not persist a clean single-gateway delete"):
             await connector.gateway_delete(None, {"name": "RETIRING_GW"})
+    # The retry was attempted: the playback ran exactly twice before raising.
+    playbacks = [c for c in _cmds(mock_cmd) if c.startswith("pfSsh.php playback")]
+    assert len(playbacks) == 2
+
+
+async def test_gateway_delete_retries_once_then_persists() -> None:
+    """A first playback that did not persist (read-back still shows the gateway)
+    is retried once; the retry persists and the op succeeds (#3529).
+
+    Models the observed pfSense-runtime persistence race: ``pfSsh.php playback``
+    exits 0 but ``write_config()`` did not commit, so the first read-back still
+    carries the gateway; the idempotent retry then removes it cleanly.
+    """
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_ROUTING),  # guard read (2 gateways)
+            _proc("", 0),  # attempt 1: stage
+            _proc("", 0),  # attempt 1: playback (exit 0 but did not persist)
+            _proc("", 0),  # attempt 1: rm
+            _proc(_CONFIG_ROUTING),  # attempt 1 read-back: gateway STILL present
+            _proc("", 0),  # attempt 2 (retry): stage
+            _proc("", 0),  # attempt 2 (retry): playback
+            _proc("", 0),  # attempt 2 (retry): rm
+            _proc(_CONFIG_ROUTING_NO_RETIRING_GW),  # attempt 2 read-back: gone
+        ]
+        result = await connector.gateway_delete(None, {"name": "RETIRING_GW"})
+    assert result["status"] == "deleted"
+    assert result["verified"] is True
+    assert result["gateways_before"] == 2
+    assert result["gateways_after"] == 1
+    assert result["removed"]["name"] == "RETIRING_GW"
+    # The apply/playback was invoked TWICE: once (non-persisting) then the retry.
+    playbacks = [c for c in _cmds(mock_cmd) if c.startswith("pfSsh.php playback")]
+    assert len(playbacks) == 2
 
 
 # ===========================================================================

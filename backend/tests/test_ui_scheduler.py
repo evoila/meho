@@ -587,6 +587,18 @@ def test_create_modal_renders_for_tenant_admin() -> None:
     # disinherited so the descendant validate-cron POST does not inherit it
     # and log `... returned no matches!` on every debounced keystroke.
     assert 'hx-disinherit="hx-disabled-elt"' in body
+    # #335: daisyUI v5 removed `form-control` / `label-text` /
+    # `label-text-alt` (zero compiled rules) — the modal must use the
+    # migrated flex-column label pattern instead.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # #335: a timezone edit must re-validate the cron preview. htmx's
+    # `from:find` searches descendants of the element the trigger sits on,
+    # so the old `change from:find input[name=timezone]` clause on the
+    # (childless) cron input never bound; the timezone input now carries
+    # its own validate-cron wiring.
+    assert "from:find" not in body
+    assert body.count('hx-post="/ui/scheduler/validate-cron"') == 2
 
 
 def test_create_modal_carries_fire_at_utc_conversion() -> None:

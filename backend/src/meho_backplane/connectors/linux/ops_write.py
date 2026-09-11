@@ -26,7 +26,12 @@ Tier table:
   ``umask 077`` temp path and execute it (optionally under sudo), capturing
   stdout / stderr / exit. Its ``arguments`` / ``env`` may carry secrets, so it
   is pinned ``credential_write`` and previews only at park time via its
-  bespoke builder (never the body / argument values / env values).
+  bespoke builder (never the body / argument values / env values). A credential
+  the script needs is instead passed by reference via ``secret_env``
+  (``ENV_NAME -> "<vault-path>#<field>"``), resolved from Vault server-side at
+  execution time (the same ``_resolve_secret`` seam the sudo password uses) and
+  injected as an env var -- only the mapping, never the value, is persisted on
+  the approval row / audit params.
 * ``linux.sysctl.write`` -- ``dangerous`` + approval (group ``system``). Set a
   kernel parameter (runtime ``sysctl -w`` + a persistent drop-in). Non-secret,
   so it previews via ``preview_operation`` on the generic params-echo default.
@@ -56,9 +61,14 @@ from __future__ import annotations
 
 import base64
 import shlex
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.auth.vault import VaultClientError
+from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
+    strip_credential_value,
+)
 from meho_backplane.connectors.linux._sudo import run_remote_bash_with_sudo
 from meho_backplane.connectors.linux.ops import (
     SSH_TRANSPORT_NOTE,
@@ -177,6 +187,18 @@ _SYSCTL_VALUE_CHARSET: frozenset[str] = frozenset(
 _ENV_NAME_CHARSET: frozenset[str] = frozenset(
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
 )
+
+#: Upper bound on the number of ``secret_env`` entries one ``script.run`` may
+#: declare -- a bounded fan-out of per-call Vault reads, not an open-ended loop.
+_MAX_SECRET_ENV: int = 32
+
+#: env-var names ``secret_env`` must NOT bind: the ``script.run`` wrapper's own
+#: shell variables (:func:`build_script_run_wrapper` sets ``tmp`` and, when
+#: arguments are present, ``args``; the sudo primitive uses ``f``). Binding one
+#: from a resolved secret would clobber the wrapper's control state -- the temp
+#: path it executes and then removes -- so a collision is refused *before* any
+#: Vault read. ``env`` is left unchanged; this guard is ``secret_env``-only.
+_RESERVED_ENV_NAMES: frozenset[str] = frozenset({"tmp", "args", "f"})
 
 #: Hard cap + default for ``linux.script.run``'s wall-clock timeout.
 _DEFAULT_TIMEOUT_S: int = 120
@@ -501,6 +523,130 @@ def _bounded_timeout(raw: Any) -> int:
     return min(value, _MAX_TIMEOUT_S)
 
 
+@dataclass(frozen=True)
+class _VaultRefTarget:
+    """Minimal target shape for a one-off ``secret_env`` Vault read.
+
+    :meth:`SshConnector._resolve_secret` reads ``secret_ref`` under the
+    operator's identity via ``load_vault_secret_data``; that read needs only
+    ``name`` / ``host`` (non-secret log attribution) and ``secret_ref`` (the
+    logical KV-v2 path). This stub carries the operator-supplied vault path as
+    ``secret_ref`` while borrowing the real target's ``name`` / ``host`` for
+    attribution, so a ``secret_env`` read is scoped, logged, and fail-closed
+    exactly like the sudo-password read -- one Vault client path, not a fork.
+    """
+
+    name: str
+    host: str
+    secret_ref: str
+
+
+def _validate_secret_env(raw: Any, *, env_names: set[str]) -> dict[str, tuple[str, str]]:
+    """Validate the ``secret_env`` mapping into ``{ENV_NAME: (vault_path, field)}``.
+
+    Each key is a POSIX env-var name (the ``env`` charset, not starting with a
+    digit) that must not collide with a reserved wrapper variable
+    (:data:`_RESERVED_ENV_NAMES`) or with a name already declared in ``env`` --
+    a name resolved from Vault and a name set literally must be unambiguous.
+    Each value is a ``"<vault-path>#<field>"`` reference: exactly one ``#``, a
+    non-empty logical KV-v2 path (same convention ``load_vault_secret_data``
+    accepts -- relative to the ``secret`` mount, never an API-path-shaped
+    ``secret/data/...``), a non-empty field, and no control characters. The
+    *reference* is validated here (fail-closed, before any SSH / Vault I/O);
+    the *value* is resolved later, at execution time, and never stored. Raises
+    :class:`LinuxWriteSafetyError` on any malformed entry, naming the ENV / the
+    reference -- never a resolved value (none exists yet).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise LinuxWriteSafetyError(
+            "secret_env must be an object of ENV_NAME -> '<vault-path>#<field>'"
+        )
+    if len(raw) > _MAX_SECRET_ENV:
+        raise LinuxWriteSafetyError(
+            f"secret_env declares {len(raw)} entries; the maximum is {_MAX_SECRET_ENV}"
+        )
+    refs: dict[str, tuple[str, str]] = {}
+    for name, ref in raw.items():
+        if not isinstance(name, str) or not name or not set(name) <= _ENV_NAME_CHARSET:
+            raise LinuxWriteSafetyError(f"secret_env var name {name!r} is not a valid POSIX name")
+        if name[0].isdigit():
+            raise LinuxWriteSafetyError(f"secret_env var name {name!r} must not start with a digit")
+        if name in _RESERVED_ENV_NAMES:
+            raise LinuxWriteSafetyError(
+                f"secret_env var name {name!r} collides with a reserved wrapper variable"
+            )
+        if name in env_names:
+            raise LinuxWriteSafetyError(
+                f"secret_env var name {name!r} is also declared in env; a name must not "
+                "appear in both"
+            )
+        if not isinstance(ref, str) or ref.count("#") != 1:
+            raise LinuxWriteSafetyError(
+                f"secret_env[{name!r}] must be a single '<vault-path>#<field>' reference"
+            )
+        if any(ch in ref for ch in ("\x00", "\n", "\r")):
+            raise LinuxWriteSafetyError(f"secret_env[{name!r}] contains a control character")
+        path, _, field = ref.partition("#")
+        path, field = path.strip(), field.strip()
+        if not path or not field:
+            raise LinuxWriteSafetyError(
+                f"secret_env[{name!r}] must give a non-empty vault path and field "
+                "('<vault-path>#<field>')"
+            )
+        refs[name] = (path, field)
+    return refs
+
+
+async def _resolve_secret_env(
+    connector: LinuxSshConnector,
+    target: Any,
+    operator: Operator | None,
+    refs: dict[str, tuple[str, str]],
+) -> dict[str, str]:
+    """Resolve every validated ``secret_env`` reference to its value at run time.
+
+    For each ``ENV_NAME -> (vault_path, field)`` this reads the KV-v2 secret at
+    ``vault_path`` through the connector's single Vault seam
+    (:meth:`SshConnector._resolve_secret`, the same one the sudo password uses)
+    under the dispatching operator's identity, and pulls ``field`` out. Reads
+    are de-duplicated per path so several fields of one secret cost a single
+    Vault round-trip. A missing field, an unresolvable / forbidden path, or any
+    Vault error raises :class:`LinuxWriteError` naming the ENV and the reference
+    -- never a value -- so the caller fails closed *before* any remote
+    execution. The returned ``{name: value}`` dict is ephemeral: it is merged
+    into the wrapper env and never enters ``params`` / audit / the result / a
+    log line.
+    """
+    if not refs:
+        return {}
+    label = _target_label(target)
+    host_raw = getattr(target, "host", None)
+    host = host_raw if isinstance(host_raw, str) and host_raw else "unknown"
+    resolved: dict[str, str] = {}
+    cache: dict[str, dict[str, Any]] = {}
+    for name, (path, field) in refs.items():
+        secret_data = cache.get(path)
+        if secret_data is None:
+            stub = _VaultRefTarget(name=label, host=host, secret_ref=path)
+            try:
+                secret_data = await connector._resolve_secret(stub, operator)
+            except (VaultClientError, CredentialsReadError) as exc:
+                # The underlying errors name the target / field / secret_ref
+                # path, never a credential value; add the ENV for the operator.
+                raise LinuxWriteError(
+                    f"secret_env[{name!r}] could not resolve vault reference {path}#{field}: {exc}"
+                ) from exc
+            cache[path] = secret_data
+        if not isinstance(secret_data, dict) or field not in secret_data:
+            raise LinuxWriteError(
+                f"secret_env[{name!r}] vault path {path!r} has no field {field!r}"
+            )
+        resolved[name] = strip_credential_value(secret_data[field])
+    return resolved
+
+
 def build_script_run_wrapper(
     interpreter: str,
     script: str,
@@ -563,6 +709,13 @@ async def linux_script_run(
     ``stdout`` is a list of lines that spills to a ``result_query`` handle when
     large. The intentional arbitrary-code surface -- a typed verb governed by
     approval, not an interactive shell.
+
+    ``secret_env`` (optional) maps ``ENV_NAME -> "<vault-path>#<field>"``; each
+    reference is resolved server-side from Vault at this point -- execution time
+    -- under the dispatching operator, and injected as an env var alongside
+    ``env``. Only the mapping (never a resolved value) is persisted on the
+    approval row / audit params, so a script can receive a credential without a
+    bare secret ever landing on the durable park.
     """
     script = params["script"]
     if not isinstance(script, str):
@@ -577,15 +730,28 @@ async def linux_script_run(
     if working_directory is not None:
         working_directory = _validate_abspath(working_directory, "working_directory")
     env = _validate_env(params.get("env"))
+    secret_env_refs = _validate_secret_env(params.get("secret_env"), env_names=set(env))
     timeout = _bounded_timeout(params.get("timeout_seconds"))
     use_sudo = bool(params.get("use_sudo", False))
+
+    # Resolve secret_env at EXECUTION time only. This handler runs on the
+    # ``_approved=True`` resume path (or a non-parking dispatch), never at park
+    # time, so a resolved value never lands on ``ApprovalRequest.params`` -- the
+    # row keeps only the ENV -> path#field mapping. Resolution happens *before*
+    # any remote command is built or run, so a bad reference fails closed with
+    # no partial execution. The resolved values are merged into the wrapper env
+    # exactly like the literal ``env`` (base64-carried, umask-077 temp) and are
+    # never persisted. A collision between ``env`` and ``secret_env`` names was
+    # already refused in validation, so this merge overwrites nothing.
+    resolved_secret_env = await _resolve_secret_env(connector, target, operator, secret_env_refs)
+    combined_env = {**env, **resolved_secret_env}
 
     wrapper = build_script_run_wrapper(
         interpreter,
         script,
         arguments=arguments,
         working_directory=working_directory,
-        env=env,
+        env=combined_env,
     )
 
     if use_sudo:
@@ -807,10 +973,11 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     ``env`` may carry secrets), so ``preview_operation`` returns
     ``preview_unavailable`` for it; this bespoke builder runs *at park time* and
     echoes only the *shape*: the target, the interpreter, the script byte size,
-    the argument byte size, the env-var NAMES, the working directory, the sudo
-    intent, and the timeout -- never the script body, the argument values, or
-    the env values (mirrors the guest program-run precedent). Declines
-    (``None``) on malformed params.
+    the argument byte size, the env-var NAMES, the ``secret_env`` reference
+    mapping (non-secret ``ENV -> path#field`` Vault pointers), the working
+    directory, the sudo intent, and the timeout -- never the script body, the
+    argument values, or the env values (mirrors the guest program-run
+    precedent). Declines (``None``) on malformed params.
     """
     script = ctx.params.get("script")
     if not isinstance(script, str):
@@ -828,6 +995,14 @@ async def _linux_script_run_preview(ctx: PreviewContext) -> dict[str, Any] | Non
     env = ctx.params.get("env")
     if isinstance(env, dict) and env:
         preview["env_var_names"] = sorted(str(name) for name in env)
+    secret_env = ctx.params.get("secret_env")
+    if isinstance(secret_env, dict) and secret_env:
+        # The references are non-secret Vault pointers (``path#field``) -- the
+        # only thing ``secret_env`` ever persists -- so echoing the full
+        # mapping shows the reviewer WHICH credential each env var will receive
+        # at run time. No value exists at park time, so nothing here can leak
+        # one (the values are resolved only when the approved call executes).
+        preview["secret_env"] = {str(name): str(ref) for name, ref in secret_env.items()}
     working_directory = ctx.params.get("working_directory")
     if isinstance(working_directory, str) and working_directory:
         preview["working_directory"] = working_directory
@@ -1020,7 +1195,11 @@ _SCRIPT_RUN_OP = LinuxOp(
         "Uploads an operator-declared script to a umask 077 temp path and runs "
         "it under interpreter (default /bin/bash), optionally under sudo, with "
         "an argument string, working directory, env map, and a wall-clock "
-        "timeout; the temp file is removed afterwards. This is the intentional "
+        "timeout; the temp file is removed afterwards. A credential the script "
+        "needs is passed by reference via secret_env (ENV_NAME -> "
+        "'<vault-path>#<field>'), resolved server-side from Vault at run time "
+        "and injected as an env var -- the resolved value is never stored on the "
+        "approval row, in audit params, or the result. This is the intentional "
         "arbitrary-code surface -- a typed verb governed by approval, NOT an "
         "interactive shell. safety_level=dangerous, requires_approval=true: it "
         "parks for a human. Returns {stdout, stderr, exit_code, ...}; stdout is "
@@ -1049,7 +1228,27 @@ _SCRIPT_RUN_OP = LinuxOp(
             "env": {
                 "type": "object",
                 "additionalProperties": {"type": "string"},
-                "description": "Optional env map. Do NOT put bare secrets in values.",
+                "description": (
+                    "Optional env map. Do NOT put bare secrets in values -- use "
+                    "secret_env for credentials."
+                ),
+            },
+            "secret_env": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Optional map of ENV_NAME -> '<vault-path>#<field>'. Each "
+                    "value is resolved server-side at execution time from the "
+                    "Vault KV-v2 secret at <vault-path> (a logical path under the "
+                    "'secret' mount -- same convention as a target's secret_ref, "
+                    "NOT an API-path-shaped 'secret/data/...') and injected as the "
+                    "environment variable ENV_NAME for the script. The resolved "
+                    "secret value is NEVER stored on the approval row, in audit "
+                    "params, the result, or a log -- only this ENV_NAME -> "
+                    "reference mapping is persisted. Use this instead of putting a "
+                    "bare secret in arguments/env. A name must not repeat an env "
+                    "name or a reserved wrapper variable."
+                ),
             },
             "timeout_seconds": {
                 "type": "integer",
@@ -1086,15 +1285,21 @@ _SCRIPT_RUN_OP = LinuxOp(
         "when_to_use": (
             "Call to run an operator-declared remediation script on a Linux host "
             "-- re-run the aborted first-boot script, apply a multi-step fix. "
-            "Approval-gated arbitrary code: it parks for a human. Do NOT put "
-            "bare secrets in arguments/env (they are stored verbatim for the "
-            "approval re-dispatch). " + SSH_TRANSPORT_NOTE
+            "Approval-gated arbitrary code: it parks for a human. NEVER put bare "
+            "secrets in arguments/env -- they are stored verbatim for the approval "
+            "re-dispatch. When the script needs a credential, pass it via "
+            "secret_env (ENV_NAME -> '<vault-path>#<field>'): it is resolved from "
+            "Vault server-side at run time and never persisted. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {
             "script": "The script body; no bare secrets.",
             "interpreter": "Absolute path; defaults to /bin/bash.",
             "arguments": "Optional command line; word-split.",
             "env": "Optional; no bare secrets in values.",
+            "secret_env": (
+                "Optional; ENV_NAME -> '<vault-path>#<field>' resolved from Vault "
+                "at run time (never persisted). Use for credentials."
+            ),
             "use_sudo": "Optional; run as root.",
         },
         "output_shape": (

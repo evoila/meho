@@ -49,11 +49,15 @@ from meho_backplane.connectors.linux import LinuxSshConnector
 from meho_backplane.connectors.linux._sudo import build_sudo_bash_remote_cmd
 from meho_backplane.connectors.linux.ops import PathConfinementError
 from meho_backplane.connectors.linux.ops_write import (
+    _MAX_SECRET_ENV,
+    _RESERVED_ENV_NAMES,
     WRITE_OPS,
     LinuxWriteError,
     LinuxWriteSafetyError,
     _linux_file_write_preview,
     _linux_script_run_preview,
+    _resolve_secret_env,
+    _validate_secret_env,
     bound_firewall_backend,
     bound_service_action,
     build_file_write_script,
@@ -83,6 +87,13 @@ _CONTENT_CANARY = "MEHO_FILE_BODY_CANARY_DO_NOT_LEAK_zzq"  # gitleaks:allow -- s
 _SCRIPT_CANARY = "MEHO_SCRIPT_BODY_CANARY_DO_NOT_LEAK_zzq"  # gitleaks:allow -- synthetic
 _ARG_CANARY = "--flag MEHO_ARG_CANARY_zzq"
 _ENV_VALUE_CANARY = "MEHO_ENV_VALUE_CANARY_zzq"
+# The resolved-from-Vault secret_env value: must never surface in the wrapper
+# in the clear, in params, in the result, or in a preview.
+_SECRET_ENV_VALUE_CANARY = "MEHO_SECRETENV_VALUE_CANARY_zzq"  # gitleaks:allow -- synthetic
+# The non-secret Vault reference (logical KV-v2 path # field) secret_env carries.
+_SECRET_ENV_PATH = "kv/app/db"
+_SECRET_ENV_FIELD = "cred"
+_SECRET_ENV_REF = f"{_SECRET_ENV_PATH}#{_SECRET_ENV_FIELD}"
 
 
 # ---------------------------------------------------------------------------
@@ -789,3 +800,302 @@ async def test_service_control_caution_does_not_park(linux_write_registered: Non
     assert dumped["status"] == "ok", dumped
     assert dumped["status"] != "awaiting_approval"
     handler.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# secret_env: server-side Vault-ref injection for linux.script.run
+#
+# secret_env maps ENV_NAME -> "<vault-path>#<field>"; the value is resolved
+# server-side from Vault at execution time and injected into the wrapper env.
+# Only the (non-secret) mapping is ever persisted -- the resolved value never
+# lands on ApprovalRequest.params, audit params, the broadcast payload, the
+# result, or a log line. These tests pin that contract.
+# ---------------------------------------------------------------------------
+
+
+def _connector_with_vault(vault: dict[str, dict[str, Any]]) -> Any:
+    """A connector whose ``_resolve_secret`` returns per-secret_ref secret data.
+
+    The sudo password resolves from the real target's own secret (the default
+    branch); a ``secret_env`` read resolves from *vault* keyed on the stub
+    target's ``secret_ref`` (the operator-supplied Vault path). This mirrors the
+    single ``_resolve_secret`` Vault seam the production code funnels both reads
+    through.
+    """
+    connector = LinuxSshConnector()
+
+    def _resolve(target: Any, operator: Any = None) -> dict[str, Any]:
+        ref = getattr(target, "secret_ref", None)
+        if ref in vault:
+            return vault[ref]
+        return {"username": "root", "sudo_password": _SUDO_CANARY}
+
+    connector._resolve_secret = AsyncMock(side_effect=_resolve)  # type: ignore[method-assign]
+    return connector
+
+
+# -- parameter validation (good / bad names, syntax, count) -----------------
+
+
+def test_validate_secret_env_parses_good_refs_and_strips() -> None:
+    refs = _validate_secret_env(
+        {"APP_DB_CRED": f"  {_SECRET_ENV_PATH} # {_SECRET_ENV_FIELD} "},
+        env_names=set(),
+    )
+    assert refs == {"APP_DB_CRED": (_SECRET_ENV_PATH, _SECRET_ENV_FIELD)}
+    assert _validate_secret_env(None, env_names=set()) == {}
+
+
+def test_validate_secret_env_rejects_bad_names() -> None:
+    for bad in ("1LEADING_DIGIT", "has-dash", "has space", "", "PA;TH"):
+        with pytest.raises(LinuxWriteSafetyError):
+            _validate_secret_env({bad: _SECRET_ENV_REF}, env_names=set())
+
+
+def test_validate_secret_env_rejects_reserved_and_env_collision() -> None:
+    for reserved in _RESERVED_ENV_NAMES:
+        with pytest.raises(LinuxWriteSafetyError, match="reserved"):
+            _validate_secret_env({reserved: _SECRET_ENV_REF}, env_names=set())
+    with pytest.raises(LinuxWriteSafetyError, match="also declared in env"):
+        _validate_secret_env({"DUP": _SECRET_ENV_REF}, env_names={"DUP"})
+
+
+def test_validate_secret_env_rejects_bad_ref_syntax() -> None:
+    for bad_ref in ("no-hash", "two#hash#es", "#emptyPath", "kv/app/db#", "kv/app/db#\n"):
+        with pytest.raises(LinuxWriteSafetyError):
+            _validate_secret_env({"OK_NAME": bad_ref}, env_names=set())
+    with pytest.raises(LinuxWriteSafetyError):
+        _validate_secret_env({"OK_NAME": 123}, env_names=set())  # non-string ref
+    with pytest.raises(LinuxWriteSafetyError):
+        _validate_secret_env(["not", "a", "dict"], env_names=set())  # non-dict raw
+
+
+def test_validate_secret_env_enforces_count_cap() -> None:
+    too_many = {f"V{i}": _SECRET_ENV_REF for i in range(_MAX_SECRET_ENV + 1)}
+    with pytest.raises(LinuxWriteSafetyError, match="maximum"):
+        _validate_secret_env(too_many, env_names=set())
+
+
+# -- resolution + injection (mocked Vault): value reaches the wrapper, not params
+
+
+@pytest.mark.asyncio
+async def test_secret_env_value_reaches_wrapper_env_not_params_or_result() -> None:
+    """AC: the resolved secret reaches the remote wrapper env (base64-carried),
+    never the params dict, never the returned result."""
+    connector = _connector_with_vault(
+        {_SECRET_ENV_PATH: {_SECRET_ENV_FIELD: _SECRET_ENV_VALUE_CANARY}}
+    )
+    params = {
+        "script": "echo hi",
+        "use_sudo": True,
+        "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF},
+    }
+    sudo_mock = AsyncMock(return_value=_proc(stdout="hi\n", exit_status=0))
+    with patch("meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo", sudo_mock):
+        result = await linux_script_run(connector, _TARGET, params)
+    # The wrapper (3rd positional arg) exports the env var and carries the value
+    # base64-encoded -- never in the clear.
+    wrapper = sudo_mock.await_args.args[2]
+    assert _SECRET_ENV_VALUE_CANARY not in wrapper
+    assert "export APP_DB_CRED=" in wrapper
+    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(wrapper)
+    # The value is never written back into params (only the mapping) nor the result.
+    assert params["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}
+    assert _SECRET_ENV_VALUE_CANARY not in repr(params)
+    assert _SECRET_ENV_VALUE_CANARY not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_secret_env_resolves_on_non_sudo_path_too() -> None:
+    """AC: secret_env is resolved + injected on the non-sudo dispatch path too."""
+    connector = _connector_with_vault(
+        {_SECRET_ENV_PATH: {_SECRET_ENV_FIELD: _SECRET_ENV_VALUE_CANARY}}
+    )
+    run_command = AsyncMock(return_value=_proc(stdout="ok\n", exit_status=0))
+    connector._run_command = run_command  # type: ignore[method-assign]
+    with patch("meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo", AsyncMock()):
+        await linux_script_run(
+            connector,
+            _TARGET,
+            {
+                "script": "echo ok",
+                "use_sudo": False,
+                "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF},
+            },
+        )
+    cmd = run_command.await_args.args[1]  # bash -c '<wrapper>'
+    assert _SECRET_ENV_VALUE_CANARY not in cmd
+    assert _SECRET_ENV_VALUE_CANARY in _decode_b64_tokens(cmd)
+
+
+@pytest.mark.asyncio
+async def test_secret_env_multiple_fields_one_secret_dedup_read() -> None:
+    """Several fields of one Vault path cost a single _resolve_secret read."""
+    connector = _connector_with_vault(
+        {_SECRET_ENV_PATH: {"user": "svc", "pass_ref": _SECRET_ENV_VALUE_CANARY}}
+    )
+    refs = _validate_secret_env(
+        {"U": f"{_SECRET_ENV_PATH}#user", "P": f"{_SECRET_ENV_PATH}#pass_ref"},
+        env_names=set(),
+    )
+    resolved = await _resolve_secret_env(connector, _TARGET, _OPERATOR, refs)
+    assert resolved == {"U": "svc", "P": _SECRET_ENV_VALUE_CANARY}
+    # One path -> one Vault read, even for two fields.
+    assert connector._resolve_secret.await_count == 1
+
+
+# -- resume-path re-resolution: resolved at execution time, not at park time
+
+
+@pytest.mark.asyncio
+async def test_secret_env_resolved_at_execution_reading_the_operator_supplied_path() -> None:
+    """AC: resolution runs when the handler executes (the approval-execution /
+    resume point), reading the operator-supplied Vault path at that time."""
+    connector = _connector_with_vault(
+        {_SECRET_ENV_PATH: {_SECRET_ENV_FIELD: _SECRET_ENV_VALUE_CANARY}}
+    )
+    with patch(
+        "meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo",
+        AsyncMock(return_value=_proc(stdout="", exit_status=0)),
+    ):
+        await linux_script_run(
+            connector,
+            _TARGET,
+            {"script": "x", "use_sudo": True, "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF}},
+        )
+    resolved_refs = [c.args[0].secret_ref for c in connector._resolve_secret.await_args_list]
+    assert _SECRET_ENV_PATH in resolved_refs  # the secret_env path was read at execution
+
+
+# -- fail-closed: missing field / forbidden path -> structured error, no run
+
+
+@pytest.mark.asyncio
+async def test_secret_env_missing_field_fails_closed_no_ssh() -> None:
+    """AC: a missing field errors before any remote execution, naming ENV+field."""
+    connector = _connector_with_vault({_SECRET_ENV_PATH: {"other_field": "x"}})
+    sudo_mock = AsyncMock()
+    with (
+        patch("meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo", sudo_mock),
+        pytest.raises(LinuxWriteError) as exc,
+    ):
+        await linux_script_run(
+            connector,
+            _TARGET,
+            {"script": "x", "use_sudo": True, "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF}},
+        )
+    sudo_mock.assert_not_awaited()
+    assert "APP_DB_CRED" in str(exc.value)
+    assert _SECRET_ENV_FIELD in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_secret_env_forbidden_path_fails_closed_no_ssh() -> None:
+    """AC: an unresolvable / forbidden (API-path-shaped) vault path fails closed."""
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+
+    connector = LinuxSshConnector()
+
+    def _resolve(target: Any, operator: Any = None) -> dict[str, Any]:
+        if getattr(target, "secret_ref", None) == "secret/data/forbidden":
+            raise VaultCredentialsReadError(
+                "target has a KV-v2 API-path-shaped secret_ref 'secret/data/forbidden'"
+            )
+        return {"username": "root", "sudo_password": _SUDO_CANARY}
+
+    connector._resolve_secret = AsyncMock(side_effect=_resolve)  # type: ignore[method-assign]
+    sudo_mock = AsyncMock()
+    with (
+        patch("meho_backplane.connectors.linux.ops_write.run_remote_bash_with_sudo", sudo_mock),
+        pytest.raises(LinuxWriteError) as exc,
+    ):
+        await linux_script_run(
+            connector,
+            _TARGET,
+            {
+                "script": "x",
+                "use_sudo": True,
+                "secret_env": {"APP_DB_CRED": "secret/data/forbidden#cred"},
+            },
+        )
+    sudo_mock.assert_not_awaited()
+    assert "APP_DB_CRED" in str(exc.value)
+
+
+# -- op schema + preview echo (reference mapping, never a value)
+
+
+def test_script_run_op_declares_secret_env_param() -> None:
+    op = _op("linux.script.run")
+    props = op.parameter_schema["properties"]
+    assert "secret_env" in props
+    assert props["secret_env"]["type"] == "object"
+    assert op.parameter_schema["additionalProperties"] is False
+    assert "secret_env" in op.llm_instructions["parameter_hints"]
+
+
+@pytest.mark.asyncio
+async def test_script_run_preview_echoes_secret_env_refs_never_values() -> None:
+    ctx = types.SimpleNamespace(
+        params={"script": _SCRIPT_CANARY, "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF}},
+        target=types.SimpleNamespace(name="linux-1"),
+    )
+    preview = await _linux_script_run_preview(ctx)  # type: ignore[arg-type]
+    # The non-secret reference (path#field) is shown to the reviewer; no resolved
+    # value exists at park time, so none can leak here.
+    assert preview["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}
+    assert _SECRET_ENV_VALUE_CANARY not in repr(preview)
+
+
+# -- approval-row + audit + broadcast redaction (DB-backed park)
+
+
+@pytest.mark.asyncio
+async def test_park_persists_secret_env_mapping_only_never_value(
+    linux_write_registered: None,
+) -> None:
+    """AC: a parked script.run stores only the ENV -> path#field mapping on the
+    approval row (and its proposed_effect); the resolved value appears nowhere
+    -- at park time it is not even resolved. Broadcast is aggregate-clamped for
+    this credential_write op (see test_credential_bearing_writes_are_pinned_*)."""
+    from sqlalchemy import select
+
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations import dispatch
+    from meho_backplane.targets.resolver import resolve_target
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    params = {"script": _SCRIPT_CANARY, "secret_env": {"APP_DB_CRED": _SECRET_ENV_REF}}
+    result = await dispatch(
+        operator=_OPERATOR,
+        connector_id=_CONNECTOR_ID,
+        op_id="linux.script.run",
+        target=target,
+        params=params,
+        _approved=False,
+    )
+    dumped = result.model_dump(mode="json")
+    assert dumped["status"] == "awaiting_approval", dumped
+    request_id = dumped["extras"]["approval_request_id"]
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(ApprovalRequest).where(ApprovalRequest.id == uuid.UUID(request_id))
+            )
+        ).scalar_one()
+
+    # The mapping is persisted verbatim so the approved call can re-resolve it.
+    assert row.params["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}
+    # The resolved value is absent everywhere durable (it is never resolved at park).
+    assert _SECRET_ENV_VALUE_CANARY not in str(row.params)
+    assert _SECRET_ENV_VALUE_CANARY not in str(row.proposed_effect)
+    assert _SECRET_ENV_VALUE_CANARY not in str(dumped)
+    # The park-time bespoke preview (nested under "preview") echoes the
+    # (non-secret) reference mapping so the reviewer sees the credential source.
+    assert row.proposed_effect is not None
+    assert row.proposed_effect["preview"]["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}

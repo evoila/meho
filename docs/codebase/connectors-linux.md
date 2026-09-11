@@ -199,7 +199,7 @@ in `ops_write.py`; the root-elevation primitive lives in `_sudo.py`.
 |---|---|---|---|---|
 | `linux.file.write` | `file` | `dangerous` + approval | `path`, `content`, `validate_command?`, `backup?` | `{written, path, backup_path, validated, rolled_back}` |
 | `linux.service.control` | `service` | `caution` (no approval) | `action`, `unit`, `daemon_reload?` | `{unit, action, daemon_reload, ok}` |
-| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `timeout_seconds?`, `use_sudo?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
+| `linux.script.run` | `exec` | `dangerous` + approval | `script`, `interpreter?`, `arguments?`, `working_directory?`, `env?`, `secret_env?`, `timeout_seconds?`, `use_sudo?` | `{stdout, total, stderr, exit_code, interpreter, used_sudo}` |
 | `linux.sysctl.write` | `system` | `dangerous` + approval | `key`, `value` | `{key, value, applied, dropin_path}` |
 | `linux.firewall.load` | `firewall` | `dangerous` + approval | `ruleset`, `backend?` | `{applied, backend, validated}` |
 
@@ -257,8 +257,10 @@ differently, by design:
   (`register_preview_builder`, fail-soft) that echoes only shape — path +
   content byte size + backup path + validate command for `file.write`;
   interpreter + script byte size + argument byte size + env-var **names** +
-  working directory + sudo intent + timeout for `script.run` — and **never**
-  the `content` / script body / argument values / env values.
+  the `secret_env` **reference mapping** (`ENV → <vault-path>#<field>`, the
+  non-secret Vault pointers) + working directory + sudo intent + timeout for
+  `script.run` — and **never** the `content` / script body / argument values /
+  env values / resolved `secret_env` values.
 - `linux.sysctl.write` and `linux.firewall.load` carry no secret, so they
   register **no** bespoke builder and stay previewable via
   `preview_operation` on the generic params-echo default. For
@@ -281,8 +283,59 @@ op's job) and `/var/log` are deliberately not writable here.
 `content` / `arguments` / `env`. `ApprovalRequest.params` stores the params
 verbatim so the approved call can be re-dispatched, so a secret placed
 there is durable on the approval row (the same rule as the guest
-`program.run` / `file.write` verbs). Pass a Vault reference the script
-resolves at run time instead.
+`program.run` / `file.write` verbs). For `script.run`, pass the credential by
+reference via `secret_env` (below) — the backplane resolves it server-side at
+run time, so the value never touches the params.
+
+### Server-side secret injection (`secret_env`)
+
+`script.run` is `safety_level=dangerous`, `requires_approval=True`, and pinned
+`credential_write`: its `script` / `arguments` / `env` are base64-carried on
+the wire but stored **verbatim** in `ApprovalRequest.params` (needed to
+re-dispatch the exact call on approval) and in the audit params. That is the
+right design for re-dispatch, but it means a script cannot safely *receive* a
+credential through `arguments` / `env` — any secret placed there is durable on
+the approval row and in audit. The only server-side secret resolution the
+connector otherwise performs is the sudo password (`_resolve_sudo_password`,
+read from the target's own Vault secret) and the SSH auth material.
+
+The anti-pattern this replaces: passing a non-secret Vault *path* as an
+argument and resolving it **on the host** — which requires a Vault CLI and a
+Vault token to be present on the target (a live credential parked on a third
+host), exactly the un-governed footgun this connector exists to retire.
+
+`secret_env` closes that gap. It is an optional object mapping
+`ENV_NAME → "<vault-path>#<field>"`:
+
+- **Reference shape.** `<vault-path>` is a logical KV-v2 path under the
+  `secret` mount — the same convention `load_vault_secret_data` accepts for the
+  connector (a `targets/<id>`-style path, **not** an API-path-shaped
+  `secret/data/…`). `#<field>` names the field within that secret. Each
+  `ENV_NAME` must be a valid POSIX identifier, must not start with a digit,
+  must not collide with a reserved wrapper variable (`tmp` / `args` / `f`) or
+  with a name already declared in `env`, and the mapping is bounded (≤ 32
+  entries).
+- **Resolution at execution time only.** The value is resolved when the handler
+  runs — the `_approved=True` resume path (or a non-parking dispatch) — never at
+  park time. Each field is read through the connector's single Vault seam
+  (`_resolve_secret` → `load_vault_secret_data`, reused, not forked) under the
+  **dispatching operator's** identity / tenant scope — the same scoping the
+  sudo-password resolution uses — then injected into the remote wrapper as an
+  env var exactly like `env` (base64-carried, `umask 077` temp handling).
+  Reads are de-duplicated per path.
+- **Never persisted.** `ApprovalRequest.params`, the audit params, and the
+  broadcast payload carry only the `ENV → <vault-path>#<field>` mapping; the
+  resolved value never enters params, the `OperationResult`, the park-time
+  preview, or a log line. The park-time bespoke preview echoes the reference
+  mapping (a non-secret pointer) so the reviewer can see *which* credential each
+  env var will receive, but no value exists at park to leak.
+- **Fail closed.** A missing field, a forbidden / API-path-shaped path, or any
+  Vault resolution error raises a structured error **before** any remote
+  command is built or run (no partial execution). The error names the `ENV`
+  and the `<vault-path>#<field>` reference — never a resolved value.
+
+`env` behaviour is unchanged. `secret_env` is `script.run`-scoped; the
+connector has no `command.run` verb to extend it to.
 
 ## Key types
 

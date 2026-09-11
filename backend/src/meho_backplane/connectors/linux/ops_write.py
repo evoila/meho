@@ -636,8 +636,7 @@ async def _resolve_secret_env(
                 # The underlying errors name the target / field / secret_ref
                 # path, never a credential value; add the ENV for the operator.
                 raise LinuxWriteError(
-                    f"secret_env[{name!r}] could not resolve vault reference "
-                    f"{path}#{field}: {exc}"
+                    f"secret_env[{name!r}] could not resolve vault reference {path}#{field}: {exc}"
                 ) from exc
             cache[path] = secret_data
         if not isinstance(secret_data, dict) or field not in secret_data:

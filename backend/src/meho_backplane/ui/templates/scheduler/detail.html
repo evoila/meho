@@ -11,6 +11,14 @@
 
   The cancel button (tenant_admin-only, hidden on a terminal trigger)
   HTMX-loads the terminal-confirm dialog into the modal container.
+
+  Timestamps follow the console-wide ``<time>`` convention (precedent
+  ``topology/_drawer.html``): the machine-readable ISO instant lives in
+  the ``datetime`` attribute, the visible text is
+  ``YYYY-MM-DD HH:MM UTC`` (#336). Every instant reaching this template
+  has already passed through ``coerce_utc_aware`` in the handler, so the
+  "UTC" suffix is accurate on both the PostgreSQL (tz-aware) and SQLite
+  (naive round-trip) paths.
 -#}
 {% extends "base.html" %}
 
@@ -66,7 +74,7 @@
             <dd>{{ trigger.timezone }}</dd>
           {% elif trigger.kind == "one_off" %}
             <dt class="opacity-60">Fire at</dt>
-            <dd class="font-mono">{% if trigger.fire_at %}{{ trigger.fire_at.isoformat() }}{% else %}—{% endif %}</dd>
+            <dd>{% if trigger.fire_at %}<time datetime="{{ trigger.fire_at.isoformat() }}">{{ trigger.fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}—{% endif %}</dd>
           {% else %}
             <dt class="opacity-60">Event filter</dt>
             <dd>
@@ -79,10 +87,10 @@
           {% endif %}
 
           <dt class="opacity-60">Next fire</dt>
-          <dd class="font-mono">{% if trigger.next_fire_at %}{{ trigger.next_fire_at.isoformat() }}{% else %}<span class="opacity-40">— (no future fire)</span>{% endif %}</dd>
+          <dd>{% if trigger.next_fire_at %}<time datetime="{{ trigger.next_fire_at.isoformat() }}">{{ trigger.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">— (no future fire)</span>{% endif %}</dd>
 
           <dt class="opacity-60">Last fired</dt>
-          <dd class="font-mono">{% if trigger.last_fired_at %}{{ trigger.last_fired_at.isoformat() }}{% else %}<span class="opacity-40">— (never)</span>{% endif %}</dd>
+          <dd>{% if trigger.last_fired_at %}<time datetime="{{ trigger.last_fired_at.isoformat() }}">{{ trigger.last_fired_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">— (never)</span>{% endif %}</dd>
 
           {# Skip state (#2327): a non-zero skip_count means the scheduler
              is skipping this trigger every tick without firing it. Shown
@@ -97,7 +105,7 @@
             <dt class="opacity-60">Skip reason</dt>
             <dd class="font-mono text-xs">{{ trigger.last_skip_reason or "—" }}</dd>
             <dt class="opacity-60">Last skipped</dt>
-            <dd class="font-mono text-xs">{% if trigger.last_skipped_at %}{{ trigger.last_skipped_at.isoformat() }}{% else %}<span class="opacity-40">—</span>{% endif %}</dd>
+            <dd class="text-xs">{% if trigger.last_skipped_at %}<time datetime="{{ trigger.last_skipped_at.isoformat() }}">{{ trigger.last_skipped_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% else %}<span class="opacity-40">—</span>{% endif %}</dd>
           {% elif trigger.last_skip_reason %}
             {# skip_count reset to 0 by a later fire, but the last cause is
                retained on a parked row -- keep the reason visible. #}
@@ -144,9 +152,9 @@
           </dd>
 
           <dt class="opacity-60">Created</dt>
-          <dd class="font-mono text-xs">{% if trigger.created_at %}{{ trigger.created_at.isoformat() }}{% endif %}</dd>
+          <dd class="text-xs">{% if trigger.created_at %}<time datetime="{{ trigger.created_at.isoformat() }}">{{ trigger.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% endif %}</dd>
           <dt class="opacity-60">Updated</dt>
-          <dd class="font-mono text-xs">{% if trigger.updated_at %}{{ trigger.updated_at.isoformat() }}{% endif %}</dd>
+          <dd class="text-xs">{% if trigger.updated_at %}<time datetime="{{ trigger.updated_at.isoformat() }}">{{ trigger.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>{% endif %}</dd>
         </dl>
       </div>
     </div>

@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.34.3] - 2026-09-12
+
 ### Added
 
 - `linux.script.run` gains an optional `secret_env` map (`ENV_NAME -> "<vault-path>#<field>"`): the referenced Vault secret is resolved server-side under the dispatching operator's tenant scope at execution time and injected into the remote script's environment, so a governed bootstrap/build script can receive a credential without it ever persisting. `ApprovalRequest.params`, the audit params, the broadcast payload and the park preview carry only the `ENV -> path#field` reference mapping — the resolved value never enters `params`, the `OperationResult`, the preview or a log line. Fail-closed name/reference validation (POSIX env names, no reserved-wrapper/`env` collisions, bounded to 32 entries, rejects API-path-shaped refs) runs before any SSH/Vault I/O, and resolution reuses the connector's existing `_resolve_secret` seam under the same scoping as the sudo password. Retires the prior on-host Vault-CLI workaround that parked a live token on the target. (#3536 / #3539)

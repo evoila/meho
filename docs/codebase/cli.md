@@ -1025,7 +1025,7 @@ narrow-waist contract.
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
   with `fused_score`. `--limit` is clamped by the API at 50.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--preview-hash <hash>]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
@@ -1069,6 +1069,10 @@ narrow-waist contract.
   `api.CallOperationBody.PreviewHash`; left nil when unset so a bare
   call is byte-identical to the pre-#3197 wire shape. Ignored by the
   dispatcher for every non-destructive op.
+- `--work-ref gh:<owner>/<repo>#<n>` (call only) — an external change-ticket
+  reference for this dispatch. The CLI rejects malformed values before issuing
+  the request, then threads a valid reference into `CallOperationBody.WorkRef`
+  so the dispatch's approval and audit rows retain their change-ticket linkage.
 
 ### HTTP shape
 

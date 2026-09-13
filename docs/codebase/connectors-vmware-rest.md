@@ -57,10 +57,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on `vmware.vm.info` (`#3481`)** — vCenter reports
+- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
   an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. `vmware.vm.info` explicitly opts into promotion
-  on its `PropertyCollector.RetrievePropertiesEx` call, so the connector
+  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+  `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
+  into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
   parses that fault on either the VI-JSON or ESXi SOAP transport and raises
   `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
   returns `status="not_found"` with `extras.error_code="not_found"`,

@@ -169,6 +169,7 @@ async def object_collect_impl(
         _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
         json=build_object_collect_retrieve_params(mo_type, moid, properties),
+        promote_managed_object_not_found=True,
     )
     read_props, missing = _extract_object_content(result)
     _log.info(

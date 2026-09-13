@@ -69,6 +69,7 @@ __all__ = [
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
+    "result_unqualified_target_version",
     "status_code_for_result",
     "wrap_ok_result",
 ]
@@ -375,6 +376,29 @@ def result_no_connector(
         error=f"no_connector: no implementation for product={product!r} version={version!r}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_unqualified_target_version(
+    op_id: str,
+    *,
+    reason: str,
+    target_product: str | None,
+    target_version: str | None,
+    duration_ms: float,
+) -> OperationResult:
+    """A connector-owned catalog guard rejected the target before policy."""
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"unqualified_target_version: {reason}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "unqualified_target_version",
+            "reason": reason,
+            "target_product": target_product,
+            "target_version": target_version,
+        },
     )
 
 

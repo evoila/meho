@@ -667,6 +667,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -701,7 +702,11 @@ class VmwareRestConnector(HttpConnector):
         /sdk/vim25/8.0.3.0/... and /api/... both 404 on vCenter 8.0.3``)
         rather than a bare 404. Non-404 failures (401 / 403 / 5xx /
         transport) propagate unchanged — those are not "this mount isn't
-        served".
+        served". ``promote_managed_object_not_found`` is intentionally opt-in
+        for a typed single-resource read that can safely render a missing MoID
+        as ``not_found``. It defaults to ``False`` so shared task polling and
+        destructive-composite preflight reads retain their existing transport
+        failure semantics (#3479).
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -712,24 +717,47 @@ class VmwareRestConnector(HttpConnector):
         # unreached on ESXi and unchanged for vCenter (no vCenter target ever
         # carries the esxi flavor).
         if self._session_flavors.get(target_cache_key(target)) == HOST_FLAVOR_ESXI:
-            return await self._post_soap(target, vmomi_path, operator=operator, json=json)
+            return await self._post_soap(
+                target,
+                vmomi_path,
+                operator=operator,
+                json=json,
+                promote_managed_object_not_found=promote_managed_object_not_found,
+            )
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
             legacy_path = mounted_path(session_path, vmomi_path)
             return await self._post_vmomi_json_at_path(
-                target, legacy_path, vmomi_path, operator, json
+                target,
+                legacy_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
             )
 
         api_path = mounted_path(session_path, vmomi_path)
         version = await self._about_version(target, operator)
         release = vmomi_release_from_version(version)
         if release is None:
-            return await self._post_vmomi_json_at_path(target, api_path, vmomi_path, operator, json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
         try:
             return await self._post_vmomi_json_at_path(
-                target, vijson_path, vmomi_path, operator, json
+                target,
+                vijson_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -737,7 +765,14 @@ class VmwareRestConnector(HttpConnector):
         # Single fallback to the /api-mounted vmomi form (the observed 9.x
         # accommodation); if that also 404s, surface both attempts.
         try:
-            return await self._post_vmomi_json_at_path(target, api_path, vmomi_path, operator, json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(
@@ -753,12 +788,14 @@ class VmwareRestConnector(HttpConnector):
         vmomi_path: str,
         operator: Operator,
         body: dict[str, Any] | None,
+        promote_managed_object_not_found: bool,
     ) -> dict[str, Any]:
-        """POST one VI-JSON path and promote its explicit missing-object fault."""
+        """POST one VI-JSON path, optionally promoting an explicit missing object."""
         try:
             return await self._post_json(target, path, operator=operator, json=body)
         except httpx.HTTPStatusError as exc:
-            self._raise_managed_object_not_found(exc, vmomi_path, body)
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found(exc, vmomi_path, body)
             raise
 
     @staticmethod
@@ -1236,6 +1273,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """The ESXi twin of the VI-JSON transport: one vmomi method as SOAP over ``/sdk``.
 
@@ -1278,7 +1316,8 @@ class VmwareRestConnector(HttpConnector):
         resp = await self._soap_post(client, envelope, extensions, soap_action=soap_action)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
-            self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
             raise self._soap_fault_error(fault, target, message=message)
         resp.raise_for_status()

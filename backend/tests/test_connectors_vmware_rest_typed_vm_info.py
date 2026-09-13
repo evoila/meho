@@ -123,11 +123,12 @@ class _FakeConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         # vmomi RetrievePropertiesEx read via the vmomi seam; the handler
         # passes the spec-relative path (the /sdk/vim25 mount is the
         # connector's job, #2466).
-        del target, operator
+        del target, operator, promote_managed_object_not_found
         assert json is not None
         self.post_calls.append((path, json))
         if self._post_error is not None:

@@ -57,19 +57,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
-- **Missing managed objects on shared reads (`#3481`)** — vCenter reports an
-  addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
-  fault inside an HTTP 500. On the shared
-  `PropertyCollector.RetrievePropertiesEx` seam only, the connector parses
-  that explicit fault and raises `ConnectorResourceNotFoundError` with the
-  requested MoID(s). The dispatcher returns `status="not_found"` with
-  `extras.error_code="not_found"`, `extras.resource_ids`, and the singular
-  `extras.resource_id` when one object was addressed. Therefore
-  `vmware.vm.info` and sibling PropertyCollector reads receive the same
-  result shape. A different fault, a non-PropertyCollector vmomi method, or
+- **Missing managed objects on `vmware.vm.info` (`#3481`)** — vCenter reports
+  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
+  fault inside an HTTP 500. `vmware.vm.info` explicitly opts into promotion
+  on its `PropertyCollector.RetrievePropertiesEx` call, so the connector
+  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  returns `status="not_found"` with `extras.error_code="not_found"`,
+  `extras.resource_ids`, and the singular `extras.resource_id` when one object
+  was addressed. A different fault, a non-PropertyCollector vmomi method, or
   a transport-only 5xx remains `connector_error`; the mapping never infers
-  absence from the status code. The `vm.destroy` execute/preview paths are
-  deliberately outside this read-path mapping and remain tracked by #3479.
+  absence from the status code. Promotion defaults off on the shared seam, so
+  task polls and destructive-composite preflight/execute reads retain their
+  existing failure semantics; #3479 owns those paths.
 - **Read composites** (`composites/_read.py`) — seven module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
   `event_tail_composite`, `performance_summary_composite`,

@@ -466,12 +466,12 @@ async def test_dispatch_tls_verify_failure_to_connector_tls_verify_failed(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_non_ssl_connect_error_falls_through_to_connector_error(
+async def test_dispatch_non_ssl_connect_error_maps_to_connector_timeout(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A non-SSL ``ConnectError`` (connection refused) stays ``connector_error``.
+    """A non-SSL ``ConnectError`` has structured transport diagnostics.
 
     Narrowing boundary (#1782 AC): only TLS-verify failures are siphoned
     into ``connector_tls_verify_failed``; DNS / refused / timeout
@@ -503,9 +503,11 @@ async def test_dispatch_non_ssl_connect_error_falls_through_to_connector_error(
 
     assert result.status == "error"
     assert result.error is not None
-    assert result.error.startswith("connector_error:")
-    assert result.extras["error_code"] == "connector_error"
+    assert result.error.startswith("connector_timeout:")
+    assert result.extras["error_code"] == "connector_timeout"
     assert result.extras["exception_class"] == "ConnectError"
+    assert result.extras["phase"] == "transport"
+    assert result.extras["configured_timeout"] is None
     # Did NOT get reclassified as the TLS shape.
     assert "connector_tls_verify_failed" not in result.error
     assert "host" not in result.extras

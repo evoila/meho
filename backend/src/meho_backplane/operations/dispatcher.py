@@ -292,6 +292,7 @@ from meho_backplane.operations._errors import (
     result_connector_http_403,
     result_connector_http_422,
     result_connector_probe_refused,
+    result_connector_timeout,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
@@ -1181,10 +1182,34 @@ async def _run_branch_with_error_handling(
         conn_result = (
             result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
             if is_tls_verify_failure
-            else result_connector_error(op_id, conn_exc, duration_ms)
+            else result_connector_timeout(op_id, conn_exc, duration_ms)
         )
         return await _audit_error_and_return(
             conn_result,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except httpx.TimeoutException as timeout_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, timeout_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except httpx.TransportError as transport_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, transport_exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,

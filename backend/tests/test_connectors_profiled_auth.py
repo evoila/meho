@@ -30,6 +30,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -909,6 +910,153 @@ async def test_oauth2_mint_caches_within_ttl() -> None:
         await connector.auth_headers(target, operator=_operator())
 
     assert route.call_count == 1
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# oauth2_mint external token issuer (#3571) — issuer host != target host
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_ISSUER_URL = "https://idp.example.test/realms/example/protocol/openid-connect/token"
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_mints_and_forwards_scope_audience() -> None:
+    """An external ``token_url`` is dialed for the mint; scope+audience forwarded.
+
+    The issuer host (idp.example.test) differs from the target host
+    (addon.invalid). The mint POSTs to the absolute ``token_url``, and the
+    resulting Bearer is what ``auth_headers`` returns for the target call.
+    ``scope`` / ``audience`` ride the form body as extra grant params.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+        scope="svc",
+        audience="downstream-api",
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-ext", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-ext"}
+    request = route.calls[0].request
+    # Minted at the external issuer, not target-relative.
+    assert str(request.url) == _EXTERNAL_ISSUER_URL
+    assert request.url.host == "idp.example.test"
+    body = request.read().decode()
+    assert "grant_type=client_credentials" in body
+    assert "client_id=cid" in body
+    assert "scope=svc" in body
+    assert "audience=downstream-api" in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_omits_scope_audience_when_unset() -> None:
+    """token_url without scope/audience mints without those form params."""
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-ext", "expires_in": 300}
+        )
+        await connector.auth_headers(target, operator=_operator())
+
+    body = route.calls[0].request.read().decode()
+    assert "scope=" not in body
+    assert "audience=" not in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_remints_after_invalidation() -> None:
+    """A 401-driven session invalidation forces a fresh mint at the issuer.
+
+    Mirrors the dispatcher's re-login-once recovery (the seam #2067 calls on
+    an auth-class status): after ``invalidate_session`` drops the cached
+    token, the next ``auth_headers`` re-mints against the external issuer
+    rather than serving the evicted token.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL)
+        route.side_effect = [
+            httpx.Response(200, json={"access_token": "tok-1", "expires_in": 3600}),
+            httpx.Response(200, json={"access_token": "tok-2", "expires_in": 3600}),
+        ]
+        h1 = await connector.auth_headers(target, operator=_operator())
+        await connector.invalidate_session(target)
+        h2 = await connector.auth_headers(target, operator=_operator())
+
+    assert h1 == {"Authorization": "Bearer tok-1"}
+    assert h2 == {"Authorization": "Bearer tok-2"}
+    assert route.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_does_not_log_secret_or_token() -> None:
+    """The client secret and minted access token appear in no log line.
+
+    The login POST bypasses the recorded ``_post_json`` flight-recorder span
+    (it goes through the pooled client directly), so no vendor-call span
+    carries the grant body or the token. The only emitted event
+    (``profiled_session_established``) carries the login path, never the
+    secret or the token. This pins that redaction over the external-issuer
+    path too.
+    """
+    secret_value = "csec-" + "z" * 40
+    token_value = "tok-" + "y" * 40
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": secret_value}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    with capture_logs() as logs:
+        async with respx.mock() as mock:
+            mock.post(_EXTERNAL_ISSUER_URL).respond(
+                200, json={"access_token": token_value, "expires_in": 300}
+            )
+            headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": f"Bearer {token_value}"}
+    rendered = repr(logs)
+    assert secret_value not in rendered
+    assert token_value not in rendered
+    # The session-established event fired and names the login path (not a secret).
+    established = [e for e in logs if e.get("event") == "profiled_session_established"]
+    assert established and established[0].get("login_path") == _EXTERNAL_ISSUER_URL
     await connector.aclose()
 
 

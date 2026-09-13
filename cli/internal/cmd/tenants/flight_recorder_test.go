@@ -4,8 +4,14 @@
 package tenants
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/evoila/meho/cli/internal/api"
 )
 
 // TestBuildBodySparseTriState is the load-bearing CLI test: the PATCH body must
@@ -69,6 +75,33 @@ func TestBuildBodySparseTriState(t *testing.T) {
 				t.Fatalf("body JSON = %s, want %s", got, tc.wantJSON)
 			}
 		})
+	}
+}
+
+func TestPrintPolicyReadSummaryShowsEffectiveAndRawValues(t *testing.T) {
+	retention := 14
+	var buf bytes.Buffer
+	printPolicyReadSummary(&buf, &api.TenantFlightRecorderPolicyRead{
+		Effective: api.EffectiveTenantFlightRecorderPolicy{
+			TenantId:                    uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			FlightRecorderEnabled:       true,
+			FlightRecorderAgentReadable: true,
+			FlightRecorderRetentionDays: 7,
+		},
+		Raw: api.TenantFlightRecorderPolicy{
+			TenantId:                    uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			FlightRecorderEnabled:       true,
+			FlightRecorderRetentionDays: &retention,
+		},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"effective flight-recorder policy", "agent-readable:  true", "retention:       7 days",
+		"raw tenant values", "inherit (follows capture default)", "14 days",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("policy read summary missing %q in %q", want, out)
+		}
 	}
 }
 

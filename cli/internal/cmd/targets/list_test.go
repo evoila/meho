@@ -81,14 +81,15 @@ func TestPrintTargetsTableEmpty(t *testing.T) {
 // TestPrintTargetsTableRendersColumns — happy-path render with two
 // rows: header line + each target's name / aliases / product / host.
 func TestPrintTargetsTableRendersColumns(t *testing.T) {
+	captureOn := true
 	rows := []api.TargetSummary{
-		{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
+		{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example", FlightRecorderCapture: &captureOn},
 		{Id: mustUUID(t, "22222222-2222-2222-2222-222222222222"), Name: "rke2-meho", Aliases: nil, Product: "k8s", Host: "k.example"},
 	}
 	var buf bytes.Buffer
 	printTargetsTable(&buf, rows)
 	out := buf.String()
-	for _, want := range []string{"NAME", "ALIASES", "PRODUCT", "HOST", "rdc-vcenter", "vc-prod", "vcenter", "vc.example", "rke2-meho", "k8s"} {
+	for _, want := range []string{"NAME", "ALIASES", "PRODUCT", "HOST", "CAPTURE", "rdc-vcenter", "vc-prod", "vcenter", "vc.example", "true", "rke2-meho", "k8s", "inherit"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printTargetsTable missing %q in %q", want, out)
 		}

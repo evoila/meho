@@ -4464,6 +4464,14 @@ type EffectAuditRecord struct {
 //     runner-level result status.
 type EffectPhase string
 
+// EffectiveTenantFlightRecorderPolicy Flight-recorder policy after global and tenant defaults are resolved.
+type EffectiveTenantFlightRecorderPolicy struct {
+	FlightRecorderAgentReadable bool               `json:"flight_recorder_agent_readable"`
+	FlightRecorderEnabled       bool               `json:"flight_recorder_enabled"`
+	FlightRecorderRetentionDays int                `json:"flight_recorder_retention_days"`
+	TenantId                    openapi_types.UUID `json:"tenant_id"`
+}
+
 // EnableReadsResponse Response body for “POST /api/v1/connectors/{id}/enable-reads“ (G0.25-T7 #1749).
 //
 // The bulk read-class enable path returns “200“ with a count
@@ -8353,6 +8361,20 @@ type TenantFlightRecorderPolicy struct {
 	TenantId                    openapi_types.UUID `json:"tenant_id"`
 }
 
+// TenantFlightRecorderPolicyRead Tenant policy read response with resolved and stored values (#3447).
+type TenantFlightRecorderPolicyRead struct {
+	// Effective Flight-recorder policy after global and tenant defaults are resolved.
+	Effective EffectiveTenantFlightRecorderPolicy `json:"effective"`
+
+	// Raw Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.
+	//
+	// Frozen; maps 1:1 to the three ``tenant`` policy columns plus the tenant id.
+	// ``flight_recorder_agent_readable`` and ``flight_recorder_retention_days``
+	// are nullable: ``None`` means "inherit" (agent-read follows the capture
+	// default) / "use the global default" (retention) respectively.
+	Raw TenantFlightRecorderPolicy `json:"raw"`
+}
+
 // TenantFlightRecorderPolicyUpdate “PATCH /api/v1/tenants/flight-recorder-policy“ body.
 //
 // All three fields are optional-partial: only fields the client actually
@@ -10063,6 +10085,11 @@ type UpdateTargetApiV1TargetsNamePatchParams struct {
 
 // ProbeTargetApiV1TargetsNameProbePostParams defines parameters for ProbeTargetApiV1TargetsNameProbePost.
 type ProbeTargetApiV1TargetsNameProbePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams defines parameters for GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet.
+type GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -12892,6 +12919,9 @@ type ClientInterface interface {
 
 	// ProbeTargetApiV1TargetsNameProbePost request
 	ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet request
+	GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet(ctx context.Context, params *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody request with any body
 	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBody(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -16280,6 +16310,18 @@ func (c *Client) UpdateTargetApiV1TargetsNamePatch(ctx context.Context, name str
 
 func (c *Client) ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProbeTargetApiV1TargetsNameProbePostRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet(ctx context.Context, params *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -30325,6 +30367,48 @@ func NewProbeTargetApiV1TargetsNameProbePostRequest(server string, name string, 
 	return req, nil
 }
 
+// NewGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetRequest generates requests for GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet
+func NewGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetRequest(server string, params *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/tenants/flight-recorder-policy")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest calls the generic UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatch builder with application/json body
 func NewUpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchRequest(server string, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, body UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -42677,6 +42761,9 @@ type ClientWithResponsesInterface interface {
 	// ProbeTargetApiV1TargetsNameProbePostWithResponse request
 	ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*ProbeTargetApiV1TargetsNameProbePostResponse, error)
 
+	// GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetWithResponse request
+	GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetWithResponse(ctx context.Context, params *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams, reqEditors ...RequestEditorFn) (*GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse, error)
+
 	// UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse request with any body
 	UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse(ctx context.Context, params *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse, error)
 
@@ -47086,6 +47173,29 @@ func (r ProbeTargetApiV1TargetsNameProbePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProbeTargetApiV1TargetsNameProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TenantFlightRecorderPolicyRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -53927,6 +54037,15 @@ func (c *ClientWithResponses) ProbeTargetApiV1TargetsNameProbePostWithResponse(c
 		return nil, err
 	}
 	return ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp)
+}
+
+// GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetWithResponse request returning *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse
+func (c *ClientWithResponses) GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetWithResponse(ctx context.Context, params *GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams, reqEditors ...RequestEditorFn) (*GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse, error) {
+	rsp, err := c.GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse(rsp)
 }
 
 // UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchWithBodyWithResponse request with arbitrary body returning *UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchResponse
@@ -61838,6 +61957,39 @@ func ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp *http.Response) (*Pro
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FingerprintResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse parses an HTTP response from a GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetWithResponse call
+func ParseGetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse(rsp *http.Response) (*GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TenantFlightRecorderPolicyRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

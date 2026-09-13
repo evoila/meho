@@ -1,4 +1,4 @@
-# Flight-recorder capture policy — operator mutation surface
+# Flight-recorder capture policy — operator read/write surface
 
 ## Overview
 
@@ -8,7 +8,8 @@ a per-target override that the resolver
 (`meho_backplane/flight_recorder/config.py`) reads on the hot path. The policy
 columns (#3212/#3216) and the resolver shipped, but there was **no writable
 path** — capture could not be enabled on a deployment without direct DB writes.
-This surface (#3272) is the operator-plane mutation path that closes that gap.
+This surface (#3272, #3447) is the operator-plane read/write path for the
+capture policy.
 
 It is an **operator-plane** surface: REST + CLI only, gated at the
 `tenant_admin` tier. It is deliberately **not** on the 25-tool agent working
@@ -17,6 +18,15 @@ operator action, not an agent one. (Simplest correct answer per postulate 5:
 REST + CLI, no MCP tool at all.)
 
 ## Routes
+
+- `GET /api/v1/tenants/flight-recorder-policy` — tenant-admin-only read for
+  the caller's own tenant. Its `effective` object uses the same resolver as
+  dispatch, so `flight_recorder_enabled`, `flight_recorder_agent_readable`, and
+  `flight_recorder_retention_days` include the global kill switch and inherited
+  defaults. Its `raw` object exposes the stored tenant values, preserving
+  nullable `agent_readable` and `retention_days` as `null`. The effective
+  tenant policy intentionally has no target id: a target's explicit capture
+  override takes precedence only for that target and is listed separately.
 
 - `PATCH /api/v1/tenants/flight-recorder-policy`
   (`meho_backplane/api/v1/tenants.py`) — the three per-tenant policy fields.
@@ -72,8 +82,14 @@ and `test_flight_recorder_config.py`).
 
 ## CLI
 
+- `meho tenants flight-recorder-policy show [--json]` — reads the same
+  effective and raw values as the GET route. The human output labels the two
+  sections; `--json` preserves the route's `{effective, raw}` envelope.
 - `meho tenants flight-recorder-policy set [--enabled] [--agent-readable
   true|false|inherit] [--retention-days N | --clear-retention]`
   (`cli/internal/cmd/tenants/`) — the tenant policy PATCH.
 - `meho targets import --update` maps a YAML `flight_recorder_capture` key onto
   the target PATCH (`cli/internal/cmd/targets/import.go`, `knownTopLevel`).
+- `meho targets list` includes a `CAPTURE` column for the per-target
+  `flight_recorder_capture` tri-state (`true`, `false`, or `inherit`), so an
+  operator can find explicit target overrides without N+1 detail requests.

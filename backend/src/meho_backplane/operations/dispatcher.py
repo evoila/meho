@@ -258,6 +258,7 @@ from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
     ResultHandle,
+    get_connector_v2,
     resolve_connector_or_label,
     resolve_target_version,
 )
@@ -305,6 +306,7 @@ from meho_backplane.operations._errors import (
     result_rate_limited,
     result_target_required,
     result_unknown_op,
+    result_unqualified_target_version,
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
@@ -2447,6 +2449,50 @@ async def dispatch(
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
+    # A connector may opt an ingested catalog into a target-compatibility
+    # guard. The owner lookup is exact: it names the catalog the caller
+    # selected, while the resolver answers which connector class the target
+    # would use. Resolve only for an advertised guard so existing descriptor
+    # kinds retain their policy and targetless dispatch behaviour.
+    pre_resolved_connector_class: type[Connector] | None = None
+    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
+    if (
+        descriptor.source_kind == "ingested"
+        and owner_class is not None
+        and owner_class.enforces_catalog_target_compatibility
+    ):
+        pre_resolved_connector_class, _resolution_label, _resolution_message = (
+            resolve_connector_or_label(target)
+        )
+        target_product = getattr(target, "product", None)
+        if not isinstance(target_product, str) or not target_product:
+            target_product = None
+        target_version = resolve_target_version(target)
+        incompatibility = owner_class.catalog_target_incompatibility(
+            descriptor_source_kind=descriptor.source_kind,
+            target_product=target_product,
+            target_version=target_version,
+            selected_target_connector=pre_resolved_connector_class,
+        )
+        if incompatibility is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="unqualified_target_version",
+                duration_ms=duration_ms,
+            )
+            return result_unqualified_target_version(
+                op_id,
+                reason=incompatibility,
+                target_product=target_product,
+                target_version=target_version,
+                duration_ms=duration_ms,
+            )
+
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced
     # here so CLI, MCP and the REST dispatch route are all covered by one
@@ -2631,9 +2677,21 @@ async def dispatch(
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
 
         # --- Step 5: connector resolution ---------------------------------
-        connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
-            descriptor, target
-        )
+        connector_instance: Connector | None
+        resolution_error: ResolutionLabel | None
+        exception_message: str | None
+        if pre_resolved_connector_class is not None:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
+        else:
+            (
+                connector_instance,
+                resolution_error,
+                exception_message,
+            ) = await _resolve_connector_instance(descriptor, target)
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before

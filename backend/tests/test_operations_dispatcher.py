@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -54,11 +55,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
-from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors import OperationResult, resolve_connector
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import Connector
-from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector,
+    register_connector_v2,
+)
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
@@ -1421,6 +1427,191 @@ async def test_vmware_ingested_hardware_write_parks_before_http_execution(
     assert isinstance(instance, _VmwareFakeHttpConnector)
     assert instance.calls == []
     assert captured_events == []
+
+
+class _VmwareGuardHttpConnector(VmwareRestConnector):
+    """Production compatibility predicate with a transport-free test seam."""
+
+    async def _request_json(  # type: ignore[override]
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, method, path, operator, params, json, extra_headers
+        return {"ok": True}
+
+
+async def _vmware_guard_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    del operator, target, params
+    return {"ok": True}
+
+
+async def _add_vmware_guard_descriptor(
+    session: AsyncSession,
+    *,
+    source_kind: str = "ingested",
+    requires_approval: bool = True,
+) -> None:
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="POST:/api/vcenter/vm/example",
+        source_kind=source_kind,
+        method="POST",
+        path="/api/vcenter/vm/example",
+        handler_ref=(
+            None
+            if source_kind == "ingested"
+            else "tests.test_operations_dispatcher._vmware_guard_handler"
+        ),
+        summary="VMware guard test",
+        description="VMware guard test.",
+        tags=[],
+        parameter_schema={"type": "object", "properties": {}},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="dangerous",
+        requires_approval=requires_approval,
+        is_enabled=True,
+        embedding=[0.1] * 384,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("product", "version", "reason"),
+    [
+        ("nsx", "4.2", "target product is not vmware"),
+        ("vmware", "8.0", "outside the supported 9.x catalog boundary"),
+        ("vmware", "8.0.3", "outside the supported 9.x catalog boundary"),
+        ("vmware", None, "target version is missing"),
+        ("vmware", "not-a-version", "target version is invalid"),
+        ("vmware", "10.0", "outside the supported 9.x catalog boundary"),
+    ],
+)
+async def test_vmware_ingested_catalog_guard_rejects_before_policy_and_transport(
+    product: str,
+    version: str | None,
+    reason: str,
+    session: AsyncSession,
+) -> None:
+    """An unqualified target gets one audited error, never an approval park."""
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareGuardHttpConnector,
+    )
+    # Production registers this v1-shaped fallback beside the 9.0 entry.
+    # It deliberately resolves a known 8.x target after the versioned range
+    # excludes it; the catalog guard must still reject before construction.
+    register_connector("vmware", _VmwareGuardHttpConnector)
+    await _add_vmware_guard_descriptor(session)
+
+    target = _FakeTarget(product=product, version=version)
+    if product == "vmware" and version in {"8.0", "8.0.3"}:
+        assert resolve_connector(target) is _VmwareGuardHttpConnector
+
+    result = await dispatch(
+        operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "unqualified_target_version"
+    assert reason in result.error
+    assert _CONNECTOR_INSTANCE_CACHE == {}
+    async with get_sessionmaker()() as fresh:
+        audits = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(AuditLog.path == "POST:/api/vcenter/vm/example")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(audits) == 1
+        assert audits[0].payload["result_status"] == "unqualified_target_version"
+        approvals = (await fresh.execute(select(ApprovalRequest))).scalars().all()
+        assert approvals == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["9.1", "9.1.1"])
+async def test_vmware_ingested_catalog_guard_allows_9x_target(
+    version: str,
+    session: AsyncSession,
+) -> None:
+    """Allowing a 9.x target only avoids this guard; it is not catalog qualification."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareGuardHttpConnector,
+    )
+    register_connector("vmware", _VmwareGuardHttpConnector)
+    await _add_vmware_guard_descriptor(session, requires_approval=False)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version=version),
+        params={},
+    )
+
+    assert result.extras.get("error_code") != "unqualified_target_version"
+
+
+@pytest.mark.asyncio
+async def test_vmware_typed_descriptor_does_not_use_catalog_guard_on_8x(
+    session: AsyncSession,
+) -> None:
+    """The catalog label guard leaves typed and composite dispatch untouched."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareGuardHttpConnector,
+    )
+    register_connector("vmware", _VmwareGuardHttpConnector)
+    await _add_vmware_guard_descriptor(session, source_kind="typed", requires_approval=False)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=_FakeTarget(product="vmware", version="8.0"),
+        params={},
+    )
+
+    assert result.extras.get("error_code") != "unqualified_target_version"
 
 
 @pytest.mark.asyncio

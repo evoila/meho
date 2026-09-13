@@ -15,6 +15,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -55,6 +56,7 @@ EXPOSURE_STATES = {
     "not-yet-integrated",
 }
 REQUIRED_DELTA_KEYS = {"endpoint", "schema", "auth", "feature_state"}
+REQUIRED_SUBSET_KEYS = {"advertised_range", "auth", "typed_source", "typed_op_ids", "feature_gate"}
 
 
 class ManifestError(ValueError):
@@ -76,7 +78,10 @@ def _require_text(value: object, label: str) -> str:
 def _validate_artifacts(artifacts: dict[str, Any]) -> None:
     for artifact_id, artifact in artifacts.items():
         record = _require_mapping(artifact, f"artifact {artifact_id}")
-        _require_text(record.get("source_url"), f"artifact {artifact_id}.source_url")
+        source_url = _require_text(record.get("source_url"), f"artifact {artifact_id}.source_url")
+        parsed_url = urlparse(source_url)
+        if parsed_url.scheme != "https" or not parsed_url.netloc:
+            raise ManifestError(f"artifact {artifact_id}.source_url must be an HTTPS URL")
         _require_text(record.get("source_revision"), f"artifact {artifact_id}.source_revision")
         if record.get("availability") not in AVAILABILITY:
             raise ManifestError(f"artifact {artifact_id}.availability is invalid")
@@ -116,6 +121,8 @@ def _validate_profiles(profiles: dict[str, Any], artifacts: dict[str, Any]) -> N
             raise ManifestError(
                 f"catalog profile {profile_id} misses delta fields: {sorted(missing_delta)}"
             )
+        for key in REQUIRED_DELTA_KEYS:
+            _require_text(delta.get(key), f"catalog profile {profile_id}.contract_delta.{key}")
         exposure = _require_mapping(
             record.get("meho_exposure"), f"catalog profile {profile_id}.meho_exposure"
         )
@@ -212,6 +219,81 @@ def _validate_releases(
     return len(releases), component_rows
 
 
+def _validate_offline_comparisons(comparisons: object, artifacts: dict[str, Any]) -> None:
+    records = _require_mapping(comparisons, "offline_comparisons")
+    _require_text(records.get("method"), "offline_comparisons.method")
+    comparison_records = {key: value for key, value in records.items() if key != "method"}
+    if not comparison_records:
+        raise ManifestError("offline_comparisons must contain comparison records")
+    for comparison_id, comparison in comparison_records.items():
+        record = _require_mapping(comparison, f"offline comparison {comparison_id}")
+        for key in ("before", "after"):
+            artifact = _require_text(record.get(key), f"offline comparison {comparison_id}.{key}")
+            if artifact not in artifacts:
+                raise ManifestError(
+                    f"offline comparison {comparison_id}.{key} must name an artifact"
+                )
+        lineage = record.get("lineage")
+        if lineage not in {"same", "unknown"}:
+            raise ManifestError(f"offline comparison {comparison_id}.lineage is invalid")
+        if lineage == "unknown":
+            if record.get("result") != "artifact-lineage-unknown":
+                raise ManifestError(
+                    f"offline comparison {comparison_id} must preserve unknown lineage"
+                )
+            continue
+        for key in ("added", "removed", "changed_closures", "description_only"):
+            if not isinstance(record.get(key), int) or record[key] < 0:
+                raise ManifestError(
+                    f"offline comparison {comparison_id}.{key} must be non-negative"
+                )
+        if not isinstance(record.get("named_schemas_changed"), bool):
+            raise ManifestError(
+                f"offline comparison {comparison_id}.named_schemas_changed is required"
+            )
+
+
+def _validate_regression_subsets(subsets: object) -> None:
+    records = _require_mapping(subsets, "meho_regression_subsets")
+    _require_text(records.get("note"), "meho_regression_subsets.note")
+    subset_records = {key: value for key, value in records.items() if key != "note"}
+    if not subset_records:
+        raise ManifestError("meho_regression_subsets must contain connector records")
+    for subset_id, subset in subset_records.items():
+        record = _require_mapping(subset, f"MEHO regression subset {subset_id}")
+        missing = REQUIRED_SUBSET_KEYS - set(record)
+        if missing:
+            raise ManifestError(
+                f"MEHO regression subset {subset_id} misses fields: {sorted(missing)}"
+            )
+        for key in REQUIRED_SUBSET_KEYS - {"typed_op_ids"}:
+            _require_text(record.get(key), f"MEHO regression subset {subset_id}.{key}")
+        op_ids = record["typed_op_ids"]
+        if (
+            not isinstance(op_ids, list)
+            or not op_ids
+            or not all(isinstance(op_id, str) and op_id for op_id in op_ids)
+        ):
+            raise ManifestError(
+                f"MEHO regression subset {subset_id}.typed_op_ids must be non-empty"
+            )
+        for field in ("typed_composite_ops", "typed_op_safety"):
+            safety_groups = record.get(field)
+            if safety_groups is None:
+                continue
+            if (
+                not isinstance(safety_groups, dict)
+                or not safety_groups
+                or not all(
+                    isinstance(op_ids, list)
+                    and op_ids
+                    and all(isinstance(op_id, str) and op_id for op_id in op_ids)
+                    for op_ids in safety_groups.values()
+                )
+            ):
+                raise ManifestError(f"MEHO regression subset {subset_id}.{field} is invalid")
+
+
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, int]:
     """Validate schema, release coverage, provenance, and exposure separation."""
     if manifest.get("schema_version") != 1:
@@ -225,6 +307,8 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, int]:
     _validate_artifacts(artifacts)
     profiles = _require_mapping(manifest.get("catalog_profiles"), "catalog_profiles")
     _validate_profiles(profiles, artifacts)
+    _validate_offline_comparisons(manifest.get("offline_comparisons"), artifacts)
+    _validate_regression_subsets(manifest.get("meho_regression_subsets"))
     component_builds = _require_mapping(
         manifest.get("bom_component_builds"), "bom_component_builds"
     )

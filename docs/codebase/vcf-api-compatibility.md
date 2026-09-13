@@ -126,31 +126,47 @@ Microsoft CA integration requires a SAN certificate (KB 454242).
 ## Sequenced implementation packages
 
 1. **Catalog acquisition and diff artifacts.** Pin exact 8.x and NSX 4.x
-   documents on the private shelf, run the comparator for each same-lineage
-   pair, and record the generated output beside shelf manifests. Depend on no
-   runtime task. Verify with the comparator and
-   `uv run python scripts/validate_vcf_api_contract_manifest.py --manifest ../docs/compatibility/vcf-api-contract-manifest.yaml`.
-2. **Descriptor-to-target contract check.** Add catalog profile metadata and
-   pre-dispatch compatibility tests for a caller descriptor and target class.
+   documents under the private shelf's `docs/vcenter-8.0/` and `docs/nsx-4.x/`
+   directories, with per-pair output at `comparisons/<service>-<from>-to-<to>.json`.
+   The public index remains
+   `docs/compatibility/vcf-api-contract-manifest.yaml`. Depend on no runtime
+   task. Verify with `cd backend && uv run python
+   scripts/diff_vcf_api_contract_catalogs.py --before <pinned-before> --after
+   <pinned-after> --same-lineage --output <shelf>/comparisons/<pair>.json` and
+   `uv run python scripts/validate_vcf_api_contract_manifest.py --manifest
+   ../docs/compatibility/vcf-api-contract-manifest.yaml`.
+2. **Descriptor-to-target contract check.** Add catalog profile metadata in
+   `backend/src/meho_backplane/operations/dispatcher.py` and target matching in
+   `backend/src/meho_backplane/targets/resolver.py`, with pre-dispatch
+   compatibility tests in `backend/tests/test_operations_dispatcher.py` and
+   `backend/tests/test_connectors_resolver.py` for a caller descriptor and target class.
    Prove 8.0.1/2/3 versus 9.x accepts compatible shared handlers and rejects
    incompatible descriptor paths. This is independent of #3047 and #3518.
    Verify with `uv run pytest tests/test_connectors_resolver.py -q` and focused
    dispatcher tests.
 3. **Versioned catalog profiles and operation gates.** Implement vSphere
-   REST/VI JSON 8.x/9.x and NSX 4.x/9 profiles, then add operation/parameter/
-   capability gates from the comparator output. Keep shared transport and
-   handlers unless a proved auth, transport, or semantic boundary requires a
-   class fork. Verify focused profile, ingest, and dispatcher suites.
+   REST/VI JSON 8.x/9.x and NSX 4.x/9 profiles in
+   `backend/src/meho_backplane/connectors/vmware_rest/` and
+   `backend/src/meho_backplane/connectors/nsx/`; persist generated generic
+   rows through `backend/src/meho_backplane/operations/ingest/`. Keep shared
+   transport and handlers unless a proved auth, transport, or semantic boundary
+   requires a class fork. Verify with `cd backend && uv run pytest
+   tests/test_connectors_resolver.py tests/test_operations_dispatcher.py -q`.
 4. **Management-service evidence and narrow deltas.** Add per-service 9.0,
-   9.1, and matched 9.1.1 profiles for SDDC, Automation, Fleet, Operations,
-   Logs, and Installer. Coordinate SDDC 9.1 reads with #3518 and modern Fleet
-   authentication/ingest with #3047; neither task is reopened. Verify with
+   9.1, and matched 9.1.1 profiles under
+   `backend/src/meho_backplane/connectors/{sddc_manager,vcf_automation,fleet_lcm,vcf_operations,vcf_logs,vcf_installer}/`
+   from shelf directories `docs/{sddc-manager,vcf-automation,fleet-lcm,vcf-operations,vcf-logs,vcf-installer}-<release>/`.
+   Coordinate SDDC 9.1 reads with #3518 and modern Fleet authentication/ingest
+   with #3047; neither task is reopened. Verify with
    `uv run pytest tests/test_connectors_fleet_dual_impl_resolution.py tests/test_connectors_sddc_vcf5_dual_impl_resolution.py -q` plus service-specific suites.
 5. **Estate packaging hand-off.** Place estate catalog fixtures and generated
-   artifacts according to #3345 and the connector placement rubric. Keep this
-   public manifest technical and free of customer, commercial, or raw licensed
-   material. Verify public/private package boundaries and the corresponding
-   shelf reconcile lanes.
+   artifacts under the #3345 placement-rubric estate location; keep the public
+   inputs at `docs/compatibility/vcf-api-contract-manifest.yaml` and private
+   raw documents under the shelf's `docs/<service>-<release>/`. Keep this
+   manifest technical and free of customer, commercial, or raw licensed
+   material. Verify with `git ls-files docs/compatibility/vcf-api-contract-manifest.yaml`
+   plus the shelf reconcile command for its `docs/<service>-<release>/MANIFEST.md`
+   records.
 
 ## References
 

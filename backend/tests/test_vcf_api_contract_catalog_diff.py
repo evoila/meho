@@ -117,3 +117,17 @@ def test_comparator_inherits_path_level_servers() -> None:
     result = catalog_diff.compare_catalogs(before, after, same_lineage=True)
 
     assert result["changed"] == [{"operation_id": "POST:/things/{id}", "fields": ["servers"]}]
+
+
+def test_comparator_classifies_openapi_content_media_type_changes() -> None:
+    before = _document()
+    after = _document()
+    after["paths"]["/things/{id}"]["post"]["requestBody"]["content"] = {
+        "application/xml": {"schema": {"$ref": "#/components/schemas/Request"}}
+    }
+
+    result = catalog_diff.compare_catalogs(before, after, same_lineage=True)
+
+    assert result["changed"] == [
+        {"operation_id": "POST:/things/{id}", "fields": ["request", "media_types"]}
+    ]

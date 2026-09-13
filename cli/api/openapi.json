@@ -1362,6 +1362,48 @@
       }
     },
     "/api/v1/tenants/flight-recorder-policy": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Get Flight Recorder Policy",
+        "description": "Read the caller's effective and raw flight-recorder policy (#3447).\n\nThe raw section is the tenant row's stored tri-state values. The effective\nsection deliberately calls the dispatch resolver so global defaults and the\nglobal capture kill switch use exactly the same precedence as the hot path.\nNo target is supplied: this is the tenant default before a per-target\noverride is considered.",
+        "operationId": "get_flight_recorder_policy_api_v1_tenants_flight_recorder_policy_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantFlightRecorderPolicyRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "tenants"
@@ -27164,6 +27206,36 @@
         "title": "EffectPhase",
         "description": "The two records the runner writes per executed write item.\n\n* :attr:`INTENT` \u2014 written **before** the mutation is attempted (the runner\n  is about to execute a centrally-authorised write). Its presence without a\n  matching :attr:`OUTCOME` is itself evidence (the runner crashed or was\n  cut off mid-write).\n* :attr:`OUTCOME` \u2014 written **after** the handler returns, carrying the\n  runner-level result status."
       },
+      "EffectiveTenantFlightRecorderPolicy": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "flight_recorder_enabled": {
+            "type": "boolean",
+            "title": "Flight Recorder Enabled"
+          },
+          "flight_recorder_agent_readable": {
+            "type": "boolean",
+            "title": "Flight Recorder Agent Readable"
+          },
+          "flight_recorder_retention_days": {
+            "type": "integer",
+            "title": "Flight Recorder Retention Days"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "flight_recorder_enabled",
+          "flight_recorder_agent_readable",
+          "flight_recorder_retention_days"
+        ],
+        "title": "EffectiveTenantFlightRecorderPolicy",
+        "description": "Flight-recorder policy after global and tenant defaults are resolved."
+      },
       "EnableReadsResponse": {
         "properties": {
           "connector_id": {
@@ -33340,6 +33412,23 @@
         ],
         "title": "TenantFlightRecorderPolicy",
         "description": "Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.\n\nFrozen; maps 1:1 to the three ``tenant`` policy columns plus the tenant id.\n``flight_recorder_agent_readable`` and ``flight_recorder_retention_days``\nare nullable: ``None`` means \"inherit\" (agent-read follows the capture\ndefault) / \"use the global default\" (retention) respectively."
+      },
+      "TenantFlightRecorderPolicyRead": {
+        "properties": {
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveTenantFlightRecorderPolicy"
+          },
+          "raw": {
+            "$ref": "#/components/schemas/TenantFlightRecorderPolicy"
+          }
+        },
+        "type": "object",
+        "required": [
+          "effective",
+          "raw"
+        ],
+        "title": "TenantFlightRecorderPolicyRead",
+        "description": "Tenant policy read response with resolved and stored values (#3447)."
       },
       "TenantFlightRecorderPolicyUpdate": {
         "properties": {

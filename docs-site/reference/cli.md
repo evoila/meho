@@ -4182,6 +4182,17 @@ meho tenants flight-recorder-policy set [flags]
 - `--json` — emit the resolved policy as JSON instead of the human summary
 - `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
 
+#### `meho tenants flight-recorder-policy show`
+
+Show effective and raw flight-recorder capture policy (tenant_admin)
+
+```
+meho tenants flight-recorder-policy show [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the effective and raw policy as JSON instead of the human summary
+
 ### `meho tenants mail-recipient-policy`
 
 Manage the tenant's mail-recipient allowlist (tenant_admin)

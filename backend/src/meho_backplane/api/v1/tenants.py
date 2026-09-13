@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Operator mutation surface for per-tenant policy (#3272, #3499).
+"""Operator policy surface for per-tenant configuration (#3272, #3447, #3499).
 
-Two policy families live here, each its own ``PATCH`` under
-``/api/v1/tenants``: the flight-recorder capture policy (#3272, below) and the
-mail-recipient allowlist (#3499, :func:`update_mail_recipient_policy`). Both
-share the surface posture and scope rules documented next.
+Two policy families live here: the flight-recorder capture policy (#3272,
+#3447) and the mail-recipient allowlist (#3499,
+:func:`update_mail_recipient_policy`). Both share the surface posture and scope
+rules documented next.
 
-Flight-recorder policy (#3272).
+Flight-recorder policy (#3272, #3447).
 
 The flight-recorder decision (``docs/decisions/dispatch-flight-recorder.md``,
 F1) models capture enablement as an operator action -- "a lab-class tenant is
@@ -16,8 +16,9 @@ one an operator flips ON". The policy columns shipped (#3212/#3216) and the
 resolver (:mod:`meho_backplane.flight_recorder.config`) reads them per dispatch,
 but there was **no writable path**: no ``/api/v1/tenants`` CRUD, so capture
 could not be enabled on a deployment without direct DB writes (which the
-governance model forbids). This route closes that gap for the three per-tenant
-policy fields; the per-target tri-state override
+governance model forbids). The PATCH route closes that gap for the three
+per-tenant policy fields, while the GET route exposes both their raw stored
+values and the resolver's effective policy. The per-target tri-state override
 (``targets.flight_recorder_capture``) rides the existing
 ``PATCH /api/v1/targets/{name}`` route (see :mod:`meho_backplane.api.v1.targets`).
 
@@ -62,7 +63,12 @@ from meho_backplane.connectors.mail.allowlist import parse_recipient_allowlist
 from meho_backplane.connectors.mail.tenant_policy import invalidate_tenant_mail_policy_cache
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Tenant
-from meho_backplane.flight_recorder.config import invalidate_tenant_policy_cache
+from meho_backplane.flight_recorder.config import (
+    invalidate_tenant_policy_cache,
+    resolve_retention_days,
+    should_capture,
+    should_expose_to_agent,
+)
 
 __all__ = ["router"]
 
@@ -110,6 +116,58 @@ class TenantFlightRecorderPolicy(BaseModel):
     flight_recorder_enabled: bool
     flight_recorder_agent_readable: bool | None
     flight_recorder_retention_days: int | None
+
+
+class EffectiveTenantFlightRecorderPolicy(BaseModel):
+    """Flight-recorder policy after global and tenant defaults are resolved."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: UUID
+    flight_recorder_enabled: bool
+    flight_recorder_agent_readable: bool
+    flight_recorder_retention_days: int
+
+
+class TenantFlightRecorderPolicyRead(BaseModel):
+    """Tenant policy read response with resolved and stored values (#3447)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    effective: EffectiveTenantFlightRecorderPolicy
+    raw: TenantFlightRecorderPolicy
+
+
+@router.get("/flight-recorder-policy", response_model=TenantFlightRecorderPolicyRead)
+async def get_flight_recorder_policy(
+    operator: Operator = _require_tenant_admin,
+    session: AsyncSession = Depends(get_session),
+) -> TenantFlightRecorderPolicyRead:
+    """Read the caller's effective and raw flight-recorder policy (#3447).
+
+    The raw section is the tenant row's stored tri-state values. The effective
+    section deliberately calls the dispatch resolver so global defaults and the
+    global capture kill switch use exactly the same precedence as the hot path.
+    No target is supplied: this is the tenant default before a per-target
+    override is considered.
+    """
+    tenant = await session.get(Tenant, operator.tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+
+    raw = TenantFlightRecorderPolicy(
+        tenant_id=tenant.id,
+        flight_recorder_enabled=tenant.flight_recorder_enabled,
+        flight_recorder_agent_readable=tenant.flight_recorder_agent_readable,
+        flight_recorder_retention_days=tenant.flight_recorder_retention_days,
+    )
+    effective = EffectiveTenantFlightRecorderPolicy(
+        tenant_id=tenant.id,
+        flight_recorder_enabled=await should_capture(tenant_id=tenant.id),
+        flight_recorder_agent_readable=await should_expose_to_agent(tenant_id=tenant.id),
+        flight_recorder_retention_days=await resolve_retention_days(tenant.id),
+    )
+    return TenantFlightRecorderPolicyRead(effective=effective, raw=raw)
 
 
 class TenantFlightRecorderPolicyUpdate(BaseModel):

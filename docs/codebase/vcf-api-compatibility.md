@@ -47,8 +47,11 @@ uv run python scripts/diff_vcf_api_contract_catalogs.py \
 
 It resolves transitive local `$ref` values, path-level inherited parameters,
 inherited security, request/response closures, deprecated/vendor feature
-markers, and service base paths. It separates description-only churn from
-contract change. Without `--same-lineage`, it returns
+markers, and service base paths. It separates changes found only in
+description/summary locations from contract change. This is a location
+classification: vendor prose can still state a deprecation or version
+prerequisite, so it needs human review before an operation is treated as safe.
+Without `--same-lineage`, it returns
 `artifact-lineage-unknown` and does not call a route removed. That distinction
 is required for the 9.0 Logs API v2 versus 9.1 log-management artifact.
 

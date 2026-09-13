@@ -62,6 +62,12 @@ def _manifest() -> dict[str, object]:
             ),
             "must not invent catalog counts",
         ),
+        (
+            lambda data: data["release_rows"][11]["components"]["sddc_manager"].__setitem__(
+                "qualification_artifacts", ["sddc-5.x"]
+            ),
+            "has no qualifying artifact",
+        ),
     ],
 )
 def test_vcf_api_contract_manifest_rejects_missing_or_fictitious_evidence(

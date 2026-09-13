@@ -149,9 +149,19 @@ def _validate_component(
             item.get("qualification_basis"),
             f"release {release}.{component_name}.qualification_basis",
         )
+        qualifying_artifacts = item.get("qualification_artifacts")
+        if (
+            not isinstance(qualifying_artifacts, list)
+            or not qualifying_artifacts
+            or any(artifact not in artifacts for artifact in qualifying_artifacts)
+        ):
+            raise ManifestError(
+                f"release {release}.{component_name}.qualification_artifacts must name artifacts"
+            )
         profile_artifacts = profiles[item["catalog_profile"]]["artifact_refs"]
-        if not any(
-            artifacts[artifact]["availability"] != "unavailable" for artifact in profile_artifacts
+        if any(artifact not in profile_artifacts for artifact in qualifying_artifacts) or any(
+            artifacts[artifact]["availability"] == "unavailable"
+            for artifact in qualifying_artifacts
         ):
             raise ManifestError(f"release {release}.{component_name} has no qualifying artifact")
     if item["evidence_level"] == "live-verified":
@@ -161,7 +171,10 @@ def _validate_component(
 
 
 def _validate_releases(
-    releases: object, profiles: dict[str, Any], artifacts: dict[str, Any]
+    releases: object,
+    profiles: dict[str, Any],
+    artifacts: dict[str, Any],
+    component_builds: dict[str, Any],
 ) -> tuple[int, int]:
     if not isinstance(releases, list):
         raise ManifestError("release_rows must be a list")
@@ -175,6 +188,14 @@ def _validate_releases(
         _require_text(
             record.get("bom_evidence"), f"release {record.get('vcf_release')}.bom_evidence"
         )
+        bom_reference = _require_text(
+            record.get("bom_component_build_ref"),
+            f"release {record.get('vcf_release')}.bom_component_build_ref",
+        )
+        if bom_reference != record["vcf_release"] or bom_reference not in component_builds:
+            raise ManifestError(
+                f"release {record.get('vcf_release')} has an invalid BOM component reference"
+            )
         components = _require_mapping(
             record.get("components"), f"release {record.get('vcf_release')}.components"
         )
@@ -204,8 +225,11 @@ def validate_manifest(manifest: dict[str, Any]) -> dict[str, int]:
     _validate_artifacts(artifacts)
     profiles = _require_mapping(manifest.get("catalog_profiles"), "catalog_profiles")
     _validate_profiles(profiles, artifacts)
+    component_builds = _require_mapping(
+        manifest.get("bom_component_builds"), "bom_component_builds"
+    )
     release_rows, component_rows = _validate_releases(
-        manifest.get("release_rows"), profiles, artifacts
+        manifest.get("release_rows"), profiles, artifacts, component_builds
     )
     return {
         "artifacts": len(artifacts),

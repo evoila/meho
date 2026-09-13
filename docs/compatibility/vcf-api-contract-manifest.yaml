@@ -31,15 +31,20 @@ artifacts:
     source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
     availability: private-shelf-pinned
     sha256: 2b14f7348d3bd71ec75343d37fb496d7dafea74c9055ca7a7e6cbef92f56533d
-    catalog: {paths: 961, operations: 1275, schemas: null}
-    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+    catalog: {paths: 961, operations: 1275, schemas: 2352}
   vsphere-vi-json-9.0:
-    source_url: https://github.com/vmware/vcf-api-specs/tree/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vsphere/openapi/vi-json
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vsphere/openapi/vi-json/vi-json.yaml
     source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
     availability: private-shelf-pinned
     sha256: fd42c341018a14b40f7aed5da465176f45ac005a1a8d3d3909b07819472f16b2
-    catalog: {paths: 2195, operations: 2195, schemas: null}
-    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+    catalog: {paths: 2195, operations: 2195, schemas: 9738}
+  vim-wsdl-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vsphere/wsdl/vim/vim.wsdl
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: private-shelf-pinned
+    sha256: 54660f9afe50acd10a1fab4d1cfff31d80449d3d76baaa7d61e76e6757637e6e
+    catalog: {paths: null, operations: null, schemas: null}
+    catalog_gap: "WSDL imports/XSD closure is not yet pinned or compared; OpenAPI output does not qualify SOAP/SDK operations."
   vsphere-9.1:
     source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/openapi/automation/vcenter.yaml
     source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
@@ -47,25 +52,37 @@ artifacts:
     sha256: 35de8570f0b0694460f5205ab3e21480ebc930558c661c139973d46e934c474b
     catalog: {paths: 1022, operations: 1367, schemas: 2660}
   vsphere-vi-json-9.1:
-    source_url: https://github.com/vmware/vcf-api-specs/tree/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/openapi/vi-json
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/openapi/vi-json/vi-json.yaml
     source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
     availability: private-shelf-pinned
     sha256: 8070ebbd85fc875e74c4b5b93bd1100308a6bbabb057766850b4abdcbb495ff7
     catalog: {paths: 2243, operations: 2243, schemas: 9967}
+  vim-wsdl-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/wsdl/vim/vim.wsdl
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: private-shelf-pinned
+    sha256: 97d719e1d3b5e5fd1a25245631474cce9006d0cc7ab695cb9bf5585b538cd8a5
+    catalog: {paths: null, operations: null, schemas: null}
+    catalog_gap: "WSDL imports/XSD closure is not yet pinned or compared; OpenAPI output does not qualify SOAP/SDK operations."
   vsphere-9.1.1-upstream:
     source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/openapi/automation/vcenter.yaml
     source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
     availability: official-untagged
     sha256: 779d100716c808a6062fd5249257c0ecc48f25a84d46c9d0f77ee55d12f908a9
-    catalog: {paths: 1014, operations: 1346, schemas: null}
-    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+    catalog: {paths: 1010, operations: 1354, schemas: 2662}
   vsphere-vi-json-9.1.1-upstream:
-    source_url: https://github.com/vmware/vcf-api-specs/tree/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/openapi/vi-json
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/openapi/vi-json/vi-json.yaml
     source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
     availability: official-untagged
     sha256: 30612e4e0b651c1fb01664021cd0aedd3dc8139294c88dbadf17ef03e8355888
-    catalog: {paths: 2243, operations: 2243, schemas: null}
-    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+    catalog: {paths: 2243, operations: 2243, schemas: 9967}
+  vim-wsdl-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/wsdl/vim/vim.wsdl
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 23a4300b6638bc4cb91edd1925c1cdccd8fe2cf0c0da15f841d376e449a1c814
+    catalog: {paths: null, operations: null, schemas: null}
+    catalog_gap: "Official untagged WSDL snapshot; imports/XSD closure and appliance match remain unqualified."
   nsx-4.x:
     source_url: https://knowledge.broadcom.com/external/article/377083
     source_revision: "No exact 4.1/4.2 manager-served or static artifact pin"
@@ -85,11 +102,17 @@ artifacts:
     sha256: e9283a1222fcb284c7b606178ec87c447b4d0c49010aada600a72cae3b8eba67
     catalog: {paths: 2317, operations: 3729, schemas: 2548}
   nsx-9.1.1-upstream:
-    source_url: https://github.com/vmware/vcf-api-specs/tree/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/nsx/openapi-2.0
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/nsx/openapi-2.0/nsx_api.yaml
     source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
     availability: official-untagged
     sha256: c503c8a9dddaee28032b01c42bd5d802da6af8d286880b77288f77cf11767bc9
-    catalog: {paths: 1193, operations: 1453, schemas: 0}
+    catalog: {paths: 1195, operations: 1455, schemas: 1846}
+  nsx-policy-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/nsx/openapi-2.0/nsx_policy_api.yaml
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 0350431466261b2961f9b28941ecace20fa01ee229dcf02fdb5cce511cc722d4
+    catalog: {paths: 2114, operations: 3435, schemas: 2554}
   sddc-5.x:
     source_url: https://knowledge.broadcom.com/external/article/314608
     source_revision: "VCF 5.x Swagger 2.0 is an evidenced ingest exclusion; no full pinned catalog"
@@ -215,15 +238,15 @@ catalog_profiles:
     contract_delta: {endpoint: "8.0 U1/U2/U3 versus 9.x full diff unavailable", schema: "unavailable", auth: "session and capability evidence required", feature_state: "VI JSON exists from 8.0 U1 at /sdk/vim25/<release>; MEHO /api construction is separately incompatible"}
     meho_exposure: {typed: "existing composites and vmomi reads require per-op gating", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
   vsphere-9.0:
-    artifact_refs: [vsphere-9.0, vsphere-vi-json-9.0]
-    contract_delta: {endpoint: "REST 1275; VI JSON 2195", schema: "full private-shelf comparison input", auth: "vSphere session", feature_state: "baseline"}
-    meho_exposure: {typed: "existing composites and vmomi reads", generic-enabled: "curated ingress only", catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+    artifact_refs: [vsphere-9.0, vsphere-vi-json-9.0, vim-wsdl-9.0]
+    contract_delta: {endpoint: "REST 1275; VI JSON 2195; VIM SOAP WSDL pinned", schema: "WSDL imported XSD closure remains unqualified", auth: "vSphere session", feature_state: "baseline"}
+    meho_exposure: {typed: "existing composites and vmomi reads", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   vsphere-9.1:
-    artifact_refs: [vsphere-9.1, vsphere-vi-json-9.1]
+    artifact_refs: [vsphere-9.1, vsphere-vi-json-9.1, vim-wsdl-9.1]
     contract_delta: {endpoint: "REST +101/-9; VI JSON +48/-0 versus 9.0", schema: "run offline comparator for transitive closure", auth: "same session family pending comparator", feature_state: "additive/removal gates per operation"}
-    meho_exposure: {typed: "same current subset; no blanket claim", generic-enabled: "curated ingress only", catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+    meho_exposure: {typed: "same current subset; no blanket claim", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   vsphere-9.1.1:
-    artifact_refs: [vsphere-9.1.1-upstream, vsphere-vi-json-9.1.1-upstream]
+    artifact_refs: [vsphere-9.1.1-upstream, vsphere-vi-json-9.1.1-upstream, vim-wsdl-9.1.1-upstream]
     contract_delta: {endpoint: "REST +6/-19; VI JSON unchanged versus 9.1", schema: "official untagged snapshot; compare closure before release claim", auth: "not appliance-verified", feature_state: "not matched to release ZIP/live appliance"}
     meho_exposure: {typed: "no additional production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all upstream operations pending qualification"}
   nsx-4.x:
@@ -231,17 +254,17 @@ catalog_profiles:
     contract_delta: {endpoint: "full Manager plus Policy baseline missing", schema: "missing", auth: "session behavior requires artifact/probe", feature_state: "MP Logical removals cannot be enumerated yet"}
     meho_exposure: {typed: "current ten GET reads are separately reconciled", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
   nsx-9.x:
-    artifact_refs: [nsx-9.1, nsx-policy-9.1]
-    contract_delta: {endpoint: "Manager 1453 + Policy 3729 operations", schema: "private-shelf Manager/Policy closure input", auth: "JSESSIONID plus X-XSRF-TOKEN", feature_state: "KB 377083 MP Logical removals; exact 4.x diff pending"}
-    meho_exposure: {typed: "current ten GET reads do not establish full-catalog coverage", generic-enabled: [], catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+    artifact_refs: [nsx-9.1, nsx-policy-9.1, nsx-9.1.1-upstream, nsx-policy-9.1.1-upstream]
+    contract_delta: {endpoint: "Manager 1453 + Policy 3729 operations; Policy 9.1.1 snapshot pinned", schema: "private-shelf Manager/Policy closure input", auth: "JSESSIONID plus X-XSRF-TOKEN", feature_state: "KB 377083 MP Logical removals; exact 4.x diff pending"}
+    meho_exposure: {typed: "current ten GET reads do not establish full-catalog coverage", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   sddc-9.0:
     artifact_refs: [sddc-9.0]
     contract_delta: {endpoint: "375 baseline operations", schema: "592 schemas", auth: "POST /v1/tokens then Bearer despite absent securitySchemes", feature_state: "baseline"}
-    meho_exposure: {typed: "current SDDC typed reads/writes", generic-enabled: "ingest profile", catalogued-not-enabled: "operator review queue", not-yet-integrated: "all unlisted upstream operations"}
+    meho_exposure: {typed: "current SDDC typed reads/writes", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   sddc-9.1:
     artifact_refs: [sddc-9.0, sddc-9.1]
     contract_delta: {endpoint: "+48/-0 operations", schema: "+110/-2 schemas", auth: "same token flow evidence; verify parameters", feature_state: "9.1 additions require operation gates"}
-    meho_exposure: {typed: "current subset plus #3518 coordination", generic-enabled: "ingest profile", catalogued-not-enabled: "operator review queue", not-yet-integrated: "all unlisted upstream operations"}
+    meho_exposure: {typed: "current subset plus #3518 coordination", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   sddc-9.1.1:
     artifact_refs: [sddc-9.1, sddc-9.1.1-upstream]
     contract_delta: {endpoint: "+6/-0 operations", schema: "+10 schemas; raw named changes require closure comparison", auth: "per-resource API version is independent of product version", feature_state: "KB 454242 adds SAN-certificate validation for Microsoft CA integration"}
@@ -253,11 +276,11 @@ catalog_profiles:
   fleet-8-9:
     artifact_refs: [fleet-8.x, fleet-9.1]
     contract_delta: {endpoint: "legacy /lcm unknown; modern /v1 has 51", schema: "modern 187 schemas", auth: "8 legacy versus 9 Basic/Bearer boundary", feature_state: "9 overlap resolves by specificity before preference"}
-    meho_exposure: {typed: "legacy Fleet and modern Fleet LCM typed reads", generic-enabled: [], catalogued-not-enabled: "modern ingest candidates", not-yet-integrated: "all unlisted upstream operations"}
+    meho_exposure: {typed: "legacy Fleet and modern Fleet LCM typed reads", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   operations-9.0-9.1:
     artifact_refs: [operations-9.0, operations-9.1]
     contract_delta: {endpoint: "+134/-0 operations", schema: "386 to 587; compare transitive closure", auth: "vRealizeOpsToken (8) versus OpsToken (9)", feature_state: "9.1.1 changes need operation gates"}
-    meho_exposure: {typed: "existing vROps8/Operations classes", generic-enabled: [], catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+    meho_exposure: {typed: "existing vROps8/Operations classes", generic-enabled: "unknown (deployment-dependent)", catalogued-not-enabled: "unknown (deployment-dependent)", not-yet-integrated: "all unlisted upstream operations"}
   operations-9.1.1:
     artifact_refs: [operations-9.1, operations-9.1.1-upstream]
     contract_delta: {endpoint: "+31/-0 operations", schema: "+53 schemas; raw named changes are not closure proof", auth: "OpsToken boundary remains 9.x", feature_state: "KB 452461 password-policy operations require Salt infrastructure, licence, and integration state"}
@@ -316,8 +339,11 @@ offline_comparisons:
   operations-9.1-to-9.1.1: {before: operations-9.1, after: operations-9.1.1-upstream, lineage: same, added: 31, removed: 0, changed_closures: 33, description_only: 5, named_schemas_changed: true}
   logs-9.0-to-9.1: {before: logs-9.0, after: logs-9.1, lineage: unknown, result: artifact-lineage-unknown, added: null, removed: null, changed_closures: null, description_only: null, named_schemas_changed: null}
   nsx-manager-9.1-to-9.1.1: {before: nsx-9.1, after: nsx-9.1.1-upstream, lineage: same, added: 2, removed: 0, changed_closures: 384, description_only: 11, named_schemas_changed: true}
+  nsx-policy-9.1-to-9.1.1: {before: nsx-policy-9.1, after: nsx-policy-9.1.1-upstream, lineage: same, added: 11, removed: 0, changed_closures: 997, description_only: 1537, named_schemas_changed: true}
   vsphere-rest-9.0-to-9.1: {before: vsphere-9.0, after: vsphere-9.1, lineage: same, added: 101, removed: 9, changed_closures: 716, description_only: 98, named_schemas_changed: true}
+  vsphere-rest-9.1-to-9.1.1: {before: vsphere-9.1, after: vsphere-9.1.1-upstream, lineage: same, added: 6, removed: 19, changed_closures: 11, description_only: 28, named_schemas_changed: true}
   vi-json-9.0-to-9.1: {before: vsphere-vi-json-9.0, after: vsphere-vi-json-9.1, lineage: same, added: 48, removed: 0, changed_closures: 2195, description_only: 0, named_schemas_changed: true}
+  vi-json-9.1-to-9.1.1: {before: vsphere-vi-json-9.1, after: vsphere-vi-json-9.1.1-upstream, lineage: same, added: 0, removed: 0, changed_closures: 2243, description_only: 0, named_schemas_changed: true}
 
 release_defaults: &unknown_components
   sddc_manager: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcf5-sddc, evidence_note: "No exact per-row management-service BOM/catalog pin."}
@@ -331,50 +357,63 @@ release_defaults: &unknown_components
 
 release_rows:
   - vcf_release: "5.0"
+    bom_component_build_ref: "5.0"
     bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.1", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.0 maps to vSphere 8.0 U1; static contract absent."}, nsx: {version: "4.1.0.2", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.0", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.0.0.1"
+    bom_component_build_ref: "5.0.0.1"
     bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.1", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.0.0.1 maps to vSphere 8.0 U1; static contract absent."}, nsx: {version: "4.1.0.2", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.0", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.1"
+    bom_component_build_ref: "5.1"
     bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.2", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.1 maps to vSphere 8.0 U2; static contract absent."}, nsx: {version: "4.1.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.1.1"
+    bom_component_build_ref: "5.1.1"
     bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.2", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.1.1 maps to vSphere 8.0 U2; static contract absent."}, nsx: {version: "4.1.2.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.1.1.0", build: "23480823", evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2"
+    bom_component_build_ref: "5.2"
     bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.0", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.1"
+    bom_component_build_ref: "5.2.1"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.1.1"
+    bom_component_build_ref: "5.2.1.1"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1.1 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.1.2"
+    bom_component_build_ref: "5.2.1.2"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.2"
+    bom_component_build_ref: "5.2.2"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.2", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.3"
+    bom_component_build_ref: "5.2.3"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.3 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.3.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.3", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "5.2.4"
+    bom_component_build_ref: "5.2.4"
     bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
     components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.4 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.4", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.4", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
   - vcf_release: "9.0"
-    bom_evidence: "Pinned official 9.0.0.0 tag; component build still requires target fingerprint."
+    bom_component_build_ref: "9.0"
+    bom_evidence: "The BOM component map records exact release values; catalog pins separately qualify API shape, not a live target fingerprint."
     components: &vcf90_components
-      sddc_manager: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.0", catalog_profile: sddc-9.0, evidence_note: "Exact tagged catalog; no live target claim."}
-      vcenter_esxi: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.0 + vi-json", catalog_profile: vsphere-9.0, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
+      sddc_manager: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.0", qualification_artifacts: [sddc-9.0], catalog_profile: sddc-9.0, evidence_note: "Exact tagged catalog; no live target claim."}
+      vcenter_esxi: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.0 + vi-json", qualification_artifacts: [vsphere-9.0, vsphere-vi-json-9.0], catalog_profile: vsphere-9.0, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
       nsx: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: nsx-9.x, evidence_note: "No exact NSX 9.0 Manager/Policy artifact pin."}
       vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "SDK evidence is not a frozen product catalog."}
       fleet: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: fleet-8-9, evidence_note: "Modern artifact self-reports 9.1.0.0, not 9.0."}
-      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.0", catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance/version mapping remains unknown."}
-      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.0", catalog_profile: logs-9.0-9.1, evidence_note: "Exact tagged Logs API v2 catalog."}
-      installer: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "installer-9.0", catalog_profile: installer-9.0-9.1, evidence_note: "Artifact exists; current connector does not advertise 9.0."}
+      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.0", qualification_artifacts: [operations-9.0], catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance/version mapping remains unknown."}
+      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.0", qualification_artifacts: [logs-9.0], catalog_profile: logs-9.0-9.1, evidence_note: "Exact tagged Logs API v2 catalog."}
+      installer: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "installer-9.0", qualification_artifacts: [installer-9.0], catalog_profile: installer-9.0-9.1, evidence_note: "Artifact exists; current connector does not advertise 9.0."}
   - vcf_release: "9.0.1"
+    bom_component_build_ref: "9.0.1"
     bom_evidence: "No exact tagged management-service catalog pin."
     components: &vcf90_patch_components
       sddc_manager: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: sddc-9.0, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
@@ -386,22 +425,25 @@ release_rows:
       vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: logs-9.0-9.1, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
       installer: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: installer-9.0-9.1, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
   - vcf_release: "9.0.2"
+    bom_component_build_ref: "9.0.2"
     bom_evidence: "No exact tagged management-service catalog pin."
     components: *vcf90_patch_components
   - vcf_release: "9.1"
-    bom_evidence: "Pinned official 9.1.0.0 tag; component build still requires target fingerprint."
+    bom_component_build_ref: "9.1"
+    bom_evidence: "The BOM component map records exact release values; catalog pins separately qualify API shape, not a live target fingerprint."
     components: &vcf91_components
-      sddc_manager: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.1", catalog_profile: sddc-9.1, evidence_note: "Exact tagged catalog."}
-      vcenter_esxi: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.1 + vi-json", catalog_profile: vsphere-9.1, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
-      nsx: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "manager-served 9.1 shelf", catalog_profile: nsx-9.x, evidence_note: "Manager/Policy catalog was acquired from a 9.1 manager."}
+      sddc_manager: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.1", qualification_artifacts: [sddc-9.1], catalog_profile: sddc-9.1, evidence_note: "Exact tagged catalog."}
+      vcenter_esxi: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.1 + vi-json", qualification_artifacts: [vsphere-9.1, vsphere-vi-json-9.1], catalog_profile: vsphere-9.1, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
+      nsx: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "manager-served 9.1 shelf", qualification_artifacts: [nsx-9.1, nsx-policy-9.1], catalog_profile: nsx-9.x, evidence_note: "Manager/Policy catalog was acquired from a 9.1 manager."}
       vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "No exact tagged VCFA catalog."}
-      fleet: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "fleet-9.1", catalog_profile: fleet-8-9, evidence_note: "Artifact self-reports 9.1.0.0; folder label is not used as evidence."}
-      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.1", catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance mapping remains unknown."}
-      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.1", catalog_profile: logs-9.0-9.1, evidence_note: "Different service artifact; lineage is unknown."}
+      fleet: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "fleet-9.1", qualification_artifacts: [fleet-9.1], catalog_profile: fleet-8-9, evidence_note: "Artifact self-reports 9.1.0.0; folder label is not used as evidence."}
+      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.1", qualification_artifacts: [operations-9.1], catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance mapping remains unknown."}
+      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.1", qualification_artifacts: [logs-9.1], catalog_profile: logs-9.0-9.1, evidence_note: "Different service artifact; lineage is unknown."}
       installer: {version: "9.1.0.0", build: unknown, evidence_level: registered, advertised_range: ">=9.1,<10.0", catalog_profile: installer-9.0-9.1, evidence_note: "Registered range plus exact tagged catalog; no live target claim."}
   - vcf_release: "9.1.1"
+    bom_component_build_ref: "9.1.1"
     bom_evidence: "Official untagged 9.1.1 upstream snapshot 31b01a6; not matched to a release ZIP or live appliance."
-    components: {<<: *vcf91_components, sddc_manager: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: sddc-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcenter_esxi: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: vsphere-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, nsx: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: nsx-9.x, evidence_note: "Exact 9.1.1 profile awaits converted full catalog diff."}, vcf_operations: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: operations-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcf_operations_for_logs: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: logs-9.1.1, evidence_note: "Artifact lineage remains explicit until comparator confirms it."}, installer: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: installer-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}}
+    components: {<<: *vcf91_components, sddc_manager: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [sddc-9.1.1-upstream], catalog_profile: sddc-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcenter_esxi: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [vsphere-9.1.1-upstream, vsphere-vi-json-9.1.1-upstream], catalog_profile: vsphere-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, nsx: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [nsx-9.1.1-upstream, nsx-policy-9.1.1-upstream], catalog_profile: nsx-9.x, evidence_note: "Catalog-only snapshot; not a release ZIP/live-appliance claim."}, fleet: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: fleet-8-9, evidence_note: "No 9.1.1 BOM/catalog association is proved."}, vcf_operations: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [operations-9.1.1-upstream], catalog_profile: operations-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcf_operations_for_logs: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [logs-9.1.1-upstream], catalog_profile: logs-9.1.1, evidence_note: "Artifact lineage remains explicit until comparator confirms it."}, installer: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", qualification_artifacts: [installer-9.1.1-upstream], catalog_profile: installer-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}}
 
 meho_regression_subsets:
   note: "These are current MEHO regression subsets, not vendor-catalog coverage. generic-enabled and catalogued-not-enabled remain deployment-dependent until an operator/database observation records them."

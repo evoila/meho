@@ -160,7 +160,7 @@ def _operation_record(
         "request": _request_shape(document, operation),
         "responses": operation.get("responses", {}),
         "security": _security_contract(document, operation),
-        "servers": operation.get("servers", document.get("servers", [])),
+        "servers": operation.get("servers", path_item.get("servers", document.get("servers", []))),
         "media_types": {
             "consumes": operation.get("consumes", document.get("consumes", [])),
             "produces": operation.get("produces", document.get("produces", [])),

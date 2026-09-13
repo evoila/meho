@@ -106,3 +106,14 @@ def test_comparator_expands_effective_security_scheme_and_fails_closed_on_extern
     ] = {"$ref": "other.yaml#/Request"}
     unresolved = catalog_diff.compare_catalogs(before, after, same_lineage=True)
     assert unresolved["comparison_status"] == "external-reference-unresolved"
+
+
+def test_comparator_inherits_path_level_servers() -> None:
+    before = _document()
+    after = _document()
+    before["paths"]["/things/{id}"]["servers"] = [{"url": "https://one.example"}]
+    after["paths"]["/things/{id}"]["servers"] = [{"url": "https://two.example"}]
+
+    result = catalog_diff.compare_catalogs(before, after, same_lineage=True)
+
+    assert result["changed"] == [{"operation_id": "POST:/things/{id}", "fields": ["servers"]}]

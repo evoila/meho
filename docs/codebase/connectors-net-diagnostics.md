@@ -16,16 +16,17 @@ module-level functions the dispatcher routes to with
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op reuses, and
 the sibling ops `net.tls_inspect` (#2407, T2), `net.http_probe` (#2408,
-T3), `net.dns_lookup` (#2409, T4), `net.ntp_check` (#2410, T5), and the
-ICMP cohort `net.ping` / `net.trace` / `net.path_mtu` (#2411, T6) built on
-that mold — all described below.
+T3), `net.dns_lookup` (#2409, T4), `net.ntp_check` (#2410, T5), the
+ICMP cohort `net.ping` / `net.trace` / `net.path_mtu` (#2411, T6), and
+`net.ssh_keyscan` (#3556) built on that mold — all described below.
 
 Each op queues a registrar in `__init__.py` via
 `register_typed_op_registrar` (`net.tcp_check` and `net.dns_lookup` share
 `ops.register_net_typed_operations`; `net.tls_inspect` →
 `tls.register_net_tls_inspect_operation`; `net.http_probe` →
 `http_probe.register_net_http_probe_operations`; `net.ntp_check` →
-`ntp.register_net_ntp_check_operation`). Siblings therefore extend the
+`ntp.register_net_ntp_check_operation`; `net.ssh_keyscan` →
+`ssh_keyscan.register_net_ssh_keyscan_operation`). Siblings therefore extend the
 package by adding (at most) a module and one registrar-queue line rather
 than contending for a single registrar function — which also keeps
 parallel task branches from colliding on one shared file.
@@ -433,6 +434,93 @@ also surfaces the 4-char `kiss_code` (e.g. `RATE`, `DENY`). None are
 raised as `connector_*` errors; the `host`/`port` in the return dict are
 audit-visible via `raw_payload`.
 
+## `net.ssh_keyscan` — SSH host-key pin, ssh-keyscan parity (#3556)
+
+`net.ssh_keyscan(host, port=22, timeout_seconds?, key_types?)` opens the
+SSH transport **handshake** to `host:port` — key exchange only, **no
+authentication**, **no credentials offered**, and **no application bytes
+sent** — reads the server's presented host key(s), and returns each key's
+type, base64 blob, SHA256 (and legacy MD5) fingerprint, and a
+ready-to-paste OpenSSH `known_hosts` line, plus the joined `known_hosts`
+block. `ssh-keyscan` parity.
+
+**Why it exists.** `SshConnector` verifies host keys **fail-closed**
+(#3467 / F08): an SSH-transport target (`linux-ssh`, bind9, pfSense, …)
+whose Vault secret pins no `known_hosts` value refuses to connect at all
+(see `docs/codebase/connectors-linux.md` and `adapters/ssh.py`). Before
+this op the only way to obtain that pin was to run `ssh-keyscan` on an
+operator shell with direct reach to the target — an out-of-band,
+ungoverned step, and the operator-helper gap #3532 tracks. This op mints
+the pin **through the backplane**, on the same policy / audit / broadcast
+dispatch path every operation uses, so bootstrapping a target's host-key
+trust never leaves the governed path.
+
+Lives in `connectors/net/ssh_keyscan.py` with its own registrar
+(`register_net_ssh_keyscan_operation`), queued alongside `net.tcp_check`'s
+in the package `__init__`. It reuses the same three foundations and the
+shared timeout bounds/clamp from `ops.py`.
+
+**Why asyncssh, not a second SSH library.** asyncssh is already the
+backplane's SSH transport (every SSH connector inherits `SshConnector`),
+and it exposes `asyncssh.get_server_host_key(host, port, *,
+server_host_key_algs=...)` — a coroutine that connects, completes the SSH
+handshake, and returns the server host key it presented **without
+authenticating and without verifying** it. That is exactly the keyscan
+primitive: native-async, no new dependency, and no credential ever
+offered. (paramiko's `Transport.get_remote_server_key()` would do the
+same, but it is a second SSH library and is LGPL — outside the Apache-2.0
+outbound license allow-list the dependency-license gate enforces, whereas
+asyncssh is already a vetted dependency.) Restricting
+`server_host_key_algs` to one key type per call yields that type's host
+key (the transport negotiates a single host key per connection), so
+**one handshake per requested key type** collects the full set — the same
+shape `ssh-keyscan` uses. asyncssh normalises the returned key's
+`get_algorithm()` to the base `known_hosts` type (`ssh-rsa` even when
+negotiated via `rsa-sha2-256`/`-512`), so the RSA request maps the whole
+SHA-2 signature family and robustly collects the RSA host key from a
+modern server that has disabled the SHA-1 `ssh-rsa` signature algorithm.
+
+Control flow (`connectors/net/ssh_keyscan.py`):
+
+1. `assert_probe_allowed(host)` — the T1 allowlist floor, before any
+   socket opens.
+2. For each requested key type (default: `ssh-ed25519`,
+   `ecdsa-sha2-nistp256/384/521`, `ssh-rsa`), `asyncssh.get_server_host_key`
+   under `asyncio.wait_for(timeout)`. A type the server does not present
+   raises `asyncssh.KeyExchangeFailed`, caught **per type** and skipped
+   (the next type is still tried). A connect-level failure (refused / DNS /
+   timeout / unreachable) short-circuits the remaining types so the whole
+   op stays bounded.
+3. Each presented key is flattened to `{type, base64, sha256_fingerprint,
+   md5_fingerprint, known_hosts_line}` — type + base64 from the key's
+   OpenSSH export, fingerprints from asyncssh's `get_fingerprint` (already
+   in the exact `SHA256:<base64>` / `MD5:aa:bb:..` OpenSSH form).
+   `known_hosts_line` is `<host> <type> <base64>`, with the OpenSSH
+   `[host]:port` form for a non-22 port.
+
+Result shape: `{scanned, reason, host, port, keys: [...], known_hosts,
+note}`. `known_hosts` is the joined ready-to-pin block; `note` explains
+the pin flow (`vault kv patch <secret_ref> known_hosts=<known_hosts>`,
+which `SshConnector` then enforces fail-closed) and the caveat that — like
+`ssh-keyscan` — the op trusts whoever answers on the wire, so each
+`sha256_fingerprint` must be verified against an out-of-band source before
+the pin is trusted. The presented host key is **public** handshake
+material (never a private key), safe to log, audit, and hand to an agent.
+
+**Return-failures:** a refused, timed-out, DNS-failed, or unreachable
+endpoint returns `{scanned: false, reason}` with `status="ok"` — reason
+codes `timeout` / `refused` / `dns_failure` / `unreachable`, plus
+`no_host_key` when the handshake succeeded but the server offered none of
+the requested key types (or the endpoint is not SSH). None are raised as
+`connector_*` errors. An allowlist refusal is the exception: nothing was
+dialed, so it fails the dispatch with `connector_probe_refused` — the same
+shape as `net.tls_inspect`. `host`/`port` in the return dict are
+audit-visible via `raw_payload`.
+
+It shares the `net-probe-1.x` identity, and is `safety_level="safe"` +
+`requires_approval=False`: a read-only handshake that offers no credential
+and sends no application data, so the probe allowlist is the sole floor.
+
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
 `net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
@@ -698,6 +786,12 @@ connectors' ops.
   48-byte packet build/parse (`_build_request` / `_parse_reply`), the
   NTP-timestamp codec, the one-shot `_NtpClientProtocol`, and the
   registrar.
+- `connectors/net/ssh_keyscan.py` — `net_ssh_keyscan` handler, its
+  schemas, the key-type → `server_host_key_algs` map (`_KEY_TYPE_ALGOS`),
+  the per-key flatten (`_key_entry`) and `known_hosts`-line builder
+  (`_known_hosts_line`), and the registrar. Uses
+  `asyncssh.get_server_host_key` (the house SSH transport) for a no-auth
+  handshake per requested key type.
 - `connectors/net/icmp.py` — the `net_ping` / `net_trace` /
   `net_path_mtu` handlers, their schemas, the low-level errqueue / ICMP
   primitives (`_checksum`, `_build_echo_request`, `_parse_extended_err`,
@@ -755,6 +849,13 @@ audit row carrying the structured envelope in `payload.error`.
   (`asyncio`, `socket`, `select`, `struct`, `errno`, `os`, `time`) — no
   new runtime dependency. The Linux socket ABI constants the stdlib does
   not surface are pinned as module-level integers.
+- `net.ssh_keyscan`: **asyncssh** (already the backplane's SSH transport
+  dependency, used by every SSH connector via `SshConnector`) — used via
+  `asyncssh.get_server_host_key` for the no-auth handshake and the
+  `SSHKey` export / fingerprint accessors. No new runtime dependency, and
+  no second SSH library: paramiko (whose `Transport.get_remote_server_key`
+  would do the same) is LGPL and outside the Apache-2.0 outbound
+  dependency-license allow-list, whereas asyncssh is already vetted.
 
 ## Known issues / deferred
 
@@ -804,7 +905,9 @@ audit row carrying the structured envelope in `payload.error`.
 - Parent: Initiative #2405, Tasks #2406 (T1 `tcp_check`) + #2407 (T2
   `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`) +
   #2410 (T5 `ntp_check`) + #2411 (T6 ICMP cohort
-  `ping`/`trace`/`path_mtu`). RFC 5905 (NTPv4) for the `ntp_check` packet
+  `ping`/`trace`/`path_mtu`). Later sibling: #3556 (`ssh_keyscan`) — the
+  governed host-key pin for #3467's fail-closed SSH host-key verification
+  (the #3532 operator-helper ask). RFC 5905 (NTPv4) for the `ntp_check` packet
   and offset/delay math. Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:

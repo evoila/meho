@@ -721,7 +721,12 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         },
         "vmware.composite.cluster.patch": {"completed", "stopped"},
         "vmware.composite.vm.resize": {"resized", "requires_power_off", "no_change", "partial"},
-        "vmware.composite.vm.nic.repoint": {"repointed", "not_found", "ambiguous"},
+        "vmware.composite.vm.nic.repoint": {
+            "repointed",
+            "not_found",
+            "ambiguous",
+            "invalid_request",
+        },
         "vmware.composite.vm.device.cdrom": {
             "removed",
             "updated",

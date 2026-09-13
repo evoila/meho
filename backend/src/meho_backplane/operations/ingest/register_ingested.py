@@ -134,6 +134,7 @@ from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.exceptions import OpIdCollision
+from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -257,6 +258,44 @@ def _detect_op_id_collisions(
         )
 
 
+def _prepare_ingested_operations(
+    operations: Sequence[EndpointDescriptorProto],
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> tuple[EndpointDescriptorProto, ...]:
+    """Apply connector floors and reject duplicate natural keys before writes."""
+    floored_operations = tuple(
+        apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=operation)
+        for operation in operations
+    )
+    _detect_op_id_collisions(
+        floored_operations,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
+    return floored_operations
+
+
+def _build_ingestion_result(
+    counts: dict[str, int],
+    *,
+    connector_registered: bool,
+    safety_changes: tuple[SafetyChange, ...],
+) -> IngestionResult:
+    """Project batch counters into the public registration result."""
+    return IngestionResult(
+        inserted_count=counts["inserted"],
+        updated_count=counts["updated"],
+        skipped_count=counts["skipped"],
+        connector_registered=connector_registered,
+        operations_grouped=False,
+        safety_changes=safety_changes,
+    )
+
+
 # Per-op upsert helpers live in
 # :mod:`meho_backplane.operations.ingest._upsert`; this module owns
 # the batch-level orchestration only.
@@ -375,7 +414,7 @@ async def register_ingested_operations(
             per-row in :func:`_upsert.upsert_one_operation`); the
             exception names both colliding specs.
     """
-    _detect_op_id_collisions(
+    floored_operations = _prepare_ingested_operations(
         operations,
         product=product,
         version=version,
@@ -398,15 +437,12 @@ async def register_ingested_operations(
     counts, safety_changes = await _run_upsert_loop(
         session=session,
         coords=coords,
-        operations=operations,
+        operations=floored_operations,
         embedding_service=embedding_service,
     )
-    return IngestionResult(
-        inserted_count=counts["inserted"],
-        updated_count=counts["updated"],
-        skipped_count=counts["skipped"],
+    return _build_ingestion_result(
+        counts,
         connector_registered=connector_registered,
-        operations_grouped=False,
         safety_changes=safety_changes,
     )
 

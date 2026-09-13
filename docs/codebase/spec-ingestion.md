@@ -460,8 +460,32 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, operator-overridable at review |
-| `requires_approval` | `requires_approval` | Always `False` at parse time |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, then any connector-owned minimum safety floor |
+| `requires_approval` | `requires_approval` | `False` at parse time, then any connector-owned minimum safety floor |
+
+#### Connector safety floors
+
+The parser is vendor-neutral and assigns only its HTTP-verb baseline. Before
+registration, `ingest/safety_floors.py` loads a connector advertisement and
+applies it to the matching triple. VMware's rules live in
+`connectors/vmware_rest/ingest_safety.py`, not in the generic parser. Floors
+are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
+an already stricter safety tier and an existing approval requirement. Existing
+enablement, review state, and other operator metadata are unchanged by this
+promotion. The dry-run path applies the same floor before reporting its result.
+
+`vmware-rest-9.0` has the following `dangerous` +
+`requires_approval=True` floor. It accepts every mutating HTTP verb so a future
+vendor spelling cannot bypass the contract; its current vCenter routes use the
+listed methods.
+
+| Family | Disposition |
+|---|---|
+| `POST` / `PUT` / `PATCH` / `DELETE` `/vcenter/vm/{vm}/hardware/**` | Promoted: device, boot, CPU, memory, and adapter changes alter a VM's hardware or L2 attachment. |
+| `POST` `/vcenter/vm` | Promoted: matches the governed `vmware.composite.vm.create` posture. |
+| `DELETE` `/vcenter/vm/{vm}` | Promoted: matches the governed VM-destroy posture. |
+| mutating `/vcenter/vm/{vm}/power` and `/power/**` | Promoted: matches the governed VM-power posture. |
+| VM reads and non-VMware connectors | Unchanged: no connector floor applies. |
 
 T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 (always `'ingested'`), `product`, `version`, `impl_id`, `embedding`,

@@ -70,7 +70,11 @@ from meho_backplane.operations import (
 )
 from meho_backplane.operations._validate import validate_params
 from meho_backplane.operations.dispatcher import _handler_requires_target
-from meho_backplane.operations.ingest import parse_openapi, register_ingested_operations
+from meho_backplane.operations.ingest import (
+    EndpointDescriptorProto,
+    parse_openapi,
+    register_ingested_operations,
+)
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -1351,6 +1355,72 @@ class _FakeHttpConnector(HttpConnector):
             }
         )
         return {"ok": True, "method": method, "path": path}
+
+
+class _VmwareFakeHttpConnector(_FakeHttpConnector):
+    """VMware-shaped fixture that makes an unexpected hardware call visible."""
+
+    product = "vmware"
+    version = "9.0"
+    impl_id = "vmware-rest"
+    supported_version_range = ">=9.0,<10.0"
+
+
+@pytest.mark.asyncio
+async def test_vmware_ingested_hardware_write_parks_before_http_execution(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """The connector floor parks a raw NIC create before its HTTP branch runs."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareFakeHttpConnector,
+    )
+    op_id = "POST:/vcenter/vm/{vm}/hardware/ethernet"
+    await register_ingested_operations(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[
+            EndpointDescriptorProto(
+                op_id=op_id,
+                method="POST",
+                path="/vcenter/vm/{vm}/hardware/ethernet",
+                parameter_schema={
+                    "type": "object",
+                    "properties": {"vm": {"type": "string", "x-meho-param-loc": "path"}},
+                    "required": ["vm"],
+                    "additionalProperties": False,
+                },
+            )
+        ],
+        embedding_service=stub_embedding_service,
+    )
+    descriptor = (
+        await session.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id))
+    ).scalar_one()
+    descriptor.is_enabled = True
+    await session.commit()
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-9.0",
+        op_id=op_id,
+        target=_FakeTarget(product="vmware", version="9.0"),
+        params={"vm": "vm-42"},
+    )
+
+    assert result.status == "awaiting_approval", result.error
+    from meho_backplane.operations._handler_resolve import _CONNECTOR_INSTANCE_CACHE
+
+    instance = _CONNECTOR_INSTANCE_CACHE[_VmwareFakeHttpConnector]
+    assert isinstance(instance, _VmwareFakeHttpConnector)
+    assert instance.calls == []
+    assert captured_events == []
 
 
 @pytest.mark.asyncio

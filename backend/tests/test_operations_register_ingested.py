@@ -80,6 +80,7 @@ from meho_backplane.operations.ingest import (
     parse_openapi,
     register_ingested_operations,
 )
+from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.settings import get_settings
 
 
@@ -247,6 +248,139 @@ async def test_first_call_persists_method_and_path(
     assert row.method == "GET"
     assert row.path == "/api/vcenter/cluster"
     assert row.handler_ref is None
+
+
+@pytest.mark.asyncio
+async def test_vmware_hardware_writes_receive_connector_safety_floor(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """VMware hardware writes are dangerous and approval-gated at registration."""
+    paths = (
+        "/vcenter/vm/{vm}/hardware/ethernet",
+        "/vcenter/vm/{vm}/hardware/disk/{disk}",
+        "/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
+        "/vcenter/vm/{vm}/hardware/boot",
+        "/vcenter/vm/{vm}/hardware/serial",
+        "/vcenter/vm/{vm}/hardware/parallel",
+        "/vcenter/vm/{vm}/hardware/floppy",
+        "/vcenter/vm/{vm}/hardware/cpu",
+        "/vcenter/vm/{vm}/hardware/memory",
+    )
+    operations = [
+        _proto(f"{method}:{path}", method=method, path=path)
+        for method in ("POST", "PUT", "PATCH", "DELETE")
+        for path in paths
+    ]
+
+    await register_ingested_operations(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=operations,
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.product == "vmware")
+            )
+        ).scalars()
+        assert {(row.safety_level, row.requires_approval) for row in rows} == {("dangerous", True)}
+
+
+@pytest.mark.asyncio
+async def test_vmware_floor_corrects_existing_row_without_weakening_review_state(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Re-ingest upgrades a legacy row but retains stricter review metadata."""
+    operation = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    kwargs: dict[str, Any] = {
+        "product": "vmware",
+        "version": "9.0",
+        "impl_id": "vmware-rest",
+        "spec_source": "vcenter.yaml",
+        "operations": [operation],
+        "embedding_service": stub_embedding_service,
+    }
+    await register_ingested_operations(**kwargs)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == operation.op_id)
+            )
+        ).scalar_one()
+        row.safety_level = "destructive"
+        row.requires_approval = False
+        row.is_enabled = True
+        await session.commit()
+
+    await register_ingested_operations(**kwargs)
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == operation.op_id)
+            )
+        ).scalar_one()
+        assert row.safety_level == "destructive"
+        assert row.requires_approval is True
+        assert row.is_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/vcenter/vm"),
+        ("DELETE", "/vcenter/vm/{vm}"),
+        ("POST", "/vcenter/vm/{vm}/power"),
+        ("POST", "/vcenter/vm/{vm}/power/start"),
+        ("PUT", "/vcenter/vm/{vm}/hardware/ethernet"),
+    ],
+)
+def test_vmware_sibling_write_floors_cover_api_aliases(
+    method: str,
+    path: str,
+) -> None:
+    """Adjacent governed VM write families and the API-prefix alias are covered."""
+    proto = _proto(f"{method}:{path}", method=method, path=path)
+    floored = apply_safety_floor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        proto=proto,
+    )
+    assert floored.safety_level == "dangerous"
+    assert floored.requires_approval is True
+
+
+def test_vmware_floor_leaves_reads_and_non_vmware_connectors_unchanged() -> None:
+    """The connector contract cannot promote reads or another vendor's operation."""
+    read = _proto(
+        "GET:/vcenter/vm/{vm}/hardware/ethernet",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    assert (
+        apply_safety_floor(product="vmware", version="9.0", impl_id="vmware-rest", proto=read)
+        is read
+    )
+    write = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    assert (
+        apply_safety_floor(product="other", version="9.0", impl_id="other-rest", proto=write)
+        is write
+    )
 
 
 # ---------------------------------------------------------------------------

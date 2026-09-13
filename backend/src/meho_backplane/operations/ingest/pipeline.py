@@ -126,6 +126,7 @@ from meho_backplane.operations.ingest.register_ingested import (
     SafetyChange,
     register_ingested_operations,
 )
+from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.service import ReviewService
 from meho_backplane.operations.ingest.spec_provenance import upsert_spec_provenance
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -900,7 +901,11 @@ class IngestionPipelineService:
             parsed = await asyncio.to_thread(
                 parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
             )
-            total_ops += len(parsed)
+            floored = tuple(
+                apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
+                for proto in parsed
+            )
+            total_ops += len(floored)
         ingestion = IngestionResult(
             inserted_count=total_ops,
             updated_count=0,

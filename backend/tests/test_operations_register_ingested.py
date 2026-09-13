@@ -44,6 +44,7 @@ skip-re-embed branch is being exercised on idempotent re-calls.
 
 from __future__ import annotations
 
+import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
@@ -60,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
+    _eager_import_connectors,
     all_connectors_v2,
     clear_registry,
     register_connector_v2,
@@ -381,6 +383,53 @@ def test_vmware_floor_leaves_reads_and_non_vmware_connectors_unchanged() -> None
         apply_safety_floor(product="other", version="9.0", impl_id="other-rest", proto=write)
         is write
     )
+
+
+@pytest.mark.parametrize("requires_approval", [False, True])
+def test_vmware_floor_keeps_an_incoming_destructive_tier(
+    requires_approval: bool,
+) -> None:
+    """A floor adds approval without weakening a stricter parser classification."""
+    proto = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+        safety_level="destructive",
+        requires_approval=requires_approval,
+    )
+    floored = apply_safety_floor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        proto=proto,
+    )
+    assert floored.safety_level == "destructive"
+    assert floored.requires_approval is True
+
+
+def test_eager_connector_import_registers_vmware_safety_floor() -> None:
+    """The normal connector lifecycle advertises VMware's floor from cold start."""
+    from meho_backplane.operations.ingest import safety_floors
+
+    safety_floors._FLOORS.clear()
+    sys.modules.pop("meho_backplane.connectors.vmware_rest.ingest_safety", None)
+    sys.modules.pop("meho_backplane.connectors.vmware_rest", None)
+
+    _eager_import_connectors()
+
+    proto = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    floored = apply_safety_floor(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        proto=proto,
+    )
+    assert floored.safety_level == "dangerous"
+    assert floored.requires_approval is True
 
 
 # ---------------------------------------------------------------------------

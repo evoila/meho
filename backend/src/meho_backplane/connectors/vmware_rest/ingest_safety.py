@@ -35,7 +35,8 @@ def vmware_rest_safety_floor(
     """Promote VM hardware, lifecycle, and power writes for VMware REST 9.0."""
     if version != "9.0" or not _requires_vmware_safety_floor(proto.method.upper(), proto.path):
         return proto
-    return proto.model_copy(update={"safety_level": "dangerous", "requires_approval": True})
+    safety_level = proto.safety_level if proto.safety_level == "destructive" else "dangerous"
+    return proto.model_copy(update={"safety_level": safety_level, "requires_approval": True})
 
 
 register_ingest_safety_floor(

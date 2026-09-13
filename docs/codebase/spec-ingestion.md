@@ -466,8 +466,8 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 #### Connector safety floors
 
 The parser is vendor-neutral and assigns only its HTTP-verb baseline. Before
-registration, `ingest/safety_floors.py` loads a connector advertisement and
-applies it to the matching triple. VMware's rules live in
+registration, `ingest/safety_floors.py` applies the matching connector
+advertisement registered during connector startup. VMware's rules live in
 `connectors/vmware_rest/ingest_safety.py`, not in the generic parser. Floors
 are monotonic: they only raise the parsed tier and set approval; re-ingest keeps
 an already stricter safety tier and an existing approval requirement. Existing

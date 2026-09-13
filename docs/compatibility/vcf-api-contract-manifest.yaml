@@ -1,0 +1,426 @@
+# SPDX-License-Identifier: Apache-2.0
+# Full vendor documents are intentionally not copied here.  This is the public,
+# machine-readable evidence index; the private spec shelf holds restricted raw
+# artifacts and the offline comparator emits reproducible per-operation diffs.
+schema_version: 1
+generated_for: "evoila/meho#3555"
+publication_boundary:
+  raw_vendor_artifacts: private-spec-shelf-only
+  public_record: "pins, hashes, counts, deltas, and explicit evidence gaps only"
+  comparator: backend/scripts/diff_vcf_api_contract_catalogs.py
+evidence_levels:
+  unqualified: "No registered range or pinned artifact supports this row."
+  registered: "A current MEHO class advertises a range; this is not API coverage or live proof."
+  spec-fixture-qualified: "Pinned artifact or fixture supports the named catalog contract only."
+  live-verified: "A safe representative call was observed; it does not certify the full catalog."
+artifacts:
+  vcf-5x-bom:
+    source_url: https://knowledge.broadcom.com/external/article/314608
+    source_revision: "Broadcom KB 314608; reconcile with KB 327207 before recording disputed BOM values"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "The public record has no pinned, per-patch management-service BOM/spec archive."
+  vsphere-8.x:
+    source_url: https://vdc-download.vmware.com/vmwb-repository/dcr-public/f6932c47-5212-4866-b3e7-e29d81a68e51/9b5473f2-3c7f-4ab8-b374-827c8c89388e/vi_json_openapi_spec_v8_0_1_0.zip
+    source_revision: "Published 8.0.1 VI JSON URL identified; unauthenticated retrieval returned HTTP 401"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "No raw bytes were acquired or pinned, so the published 8.0.1 URL cannot establish an offline 8.x-to-9.x complete catalog diff."
+  vsphere-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vsphere/openapi/automation/vcenter.yaml
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: private-shelf-pinned
+    sha256: 2b14f7348d3bd71ec75343d37fb496d7dafea74c9055ca7a7e6cbef92f56533d
+    catalog: {paths: 961, operations: 1275, schemas: null}
+    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+  vsphere-vi-json-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/tree/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vsphere/openapi/vi-json
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: private-shelf-pinned
+    sha256: fd42c341018a14b40f7aed5da465176f45ac005a1a8d3d3909b07819472f16b2
+    catalog: {paths: 2195, operations: 2195, schemas: null}
+    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+  vsphere-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/openapi/automation/vcenter.yaml
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: private-shelf-pinned
+    sha256: 35de8570f0b0694460f5205ab3e21480ebc930558c661c139973d46e934c474b
+    catalog: {paths: 1022, operations: 1367, schemas: 2660}
+  vsphere-vi-json-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/tree/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vsphere/openapi/vi-json
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: private-shelf-pinned
+    sha256: 8070ebbd85fc875e74c4b5b93bd1100308a6bbabb057766850b4abdcbb495ff7
+    catalog: {paths: 2243, operations: 2243, schemas: 9967}
+  vsphere-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/openapi/automation/vcenter.yaml
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 779d100716c808a6062fd5249257c0ecc48f25a84d46c9d0f77ee55d12f908a9
+    catalog: {paths: 1014, operations: 1346, schemas: null}
+    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+  vsphere-vi-json-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/tree/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vsphere/openapi/vi-json
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 30612e4e0b651c1fb01664021cd0aedd3dc8139294c88dbadf17ef03e8355888
+    catalog: {paths: 2243, operations: 2243, schemas: null}
+    catalog_gap: "Schema cardinality is emitted by the comparator from exact private-shelf bytes; do not use a guessed count."
+  nsx-4.x:
+    source_url: https://knowledge.broadcom.com/external/article/377083
+    source_revision: "No exact 4.1/4.2 manager-served or static artifact pin"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "Acquire authenticated Manager and Policy documents for 4.1 and 4.2 before declaring removals."
+  nsx-9.1:
+    source_url: https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/
+    source_revision: "Manager-served NSX 9.1.0.0 artifact; provenance and conversion recipe on private shelf"
+    availability: private-shelf-pinned
+    sha256: 3a46c577b89a4388f8338f4c055ea90465d22541340915eb26fd9984883847cd
+    catalog: {paths: 1193, operations: 1453, schemas: 1846}
+  nsx-policy-9.1:
+    source_url: https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/
+    source_revision: "Manager-served NSX 9.1.0.0 Policy artifact; provenance and conversion recipe on private shelf"
+    availability: private-shelf-pinned
+    sha256: e9283a1222fcb284c7b606178ec87c447b4d0c49010aada600a72cae3b8eba67
+    catalog: {paths: 2317, operations: 3729, schemas: 2548}
+  nsx-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/tree/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/nsx/openapi-2.0
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: c503c8a9dddaee28032b01c42bd5d802da6af8d286880b77288f77cf11767bc9
+    catalog: {paths: 1193, operations: 1453, schemas: 0}
+  sddc-5.x:
+    source_url: https://knowledge.broadcom.com/external/article/314608
+    source_revision: "VCF 5.x Swagger 2.0 is an evidenced ingest exclusion; no full pinned catalog"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "Acquire the release-specific Swagger documents or SDK evidence; OA3-only generic ingest cannot consume Swagger 2.0 directly."
+  sddc-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/sddc-manager/sddc-manager-openapi.json
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: public-pinned
+    sha256: 81f315f23b7c172f3893189de21d9f6ff59ca07cc3ee35c6dd89787730aa1fe3
+    catalog: {paths: 280, operations: 375, schemas: 592}
+  sddc-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/sddc-manager/sddc-manager-openapi.json
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: public-pinned
+    sha256: f1fd7019242631921750afc949c23db01a54882fd5ddc35dcb609cd80f41b53c
+    catalog: {paths: 320, operations: 423, schemas: 700}
+  sddc-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/sddc-manager/sddc-manager-openapi.json
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 825f20ee92ca442aa4116ec8c20c395053a8a81130683bd3d1f314f75064e663
+    catalog: {paths: 324, operations: 429, schemas: 710}
+  management-9.x-patch-gap:
+    source_url: https://github.com/vmware/vcf-api-specs
+    source_revision: "No exact tagged 9.0.1 or 9.0.2 management-service catalog pin"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "Do not assign a 9.0 artifact wholesale to an unpinned 9.0.x BOM row."
+  vcfa-sdk-evidence:
+    source_url: https://github.com/vmware/vra-sdk-go/tree/a886fc673ecb32bdb4402146281fe9f5fe7ff2fd
+    source_revision: a886fc673ecb32bdb4402146281fe9f5fe7ff2fd
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "Eight Swagger 2.0 SaaS-oriented SDK specs have no product-version proof; provider API is SDK-only evidence."
+  fleet-8.x:
+    source_url: https://docs.vmware.com/en/vRealize-Suite-Lifecycle-Manager/
+    source_revision: "No pinned legacy /lcm catalog"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "The legacy API is appliance-served; it is not the modern /fleet-lcm catalog."
+  fleet-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/c3f3b52c845dd967cabbc21680e893292077d5ba/specifications/fleet-lcm/fleet-lcm-openapi.yaml
+    source_revision: c3f3b52c845dd967cabbc21680e893292077d5ba
+    availability: public-pinned
+    sha256: b565666a223628f7c244a40972706dff1eefa9809ee80206421e6e80819d41d7
+    catalog: {paths: 38, operations: 51, schemas: 187}
+  operations-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vcf-operations/vcf-operations-openapi.json
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: public-pinned
+    sha256: 30fe921a6e773c4d664481cdbc7f59cdecd010afd87b905ac0dec741dd2ea179
+    catalog: {paths: 250, operations: 370, schemas: 386}
+  operations-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vcf-operations/vcf-operations-openapi.json
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: public-pinned
+    sha256: 8179d8c128d9b3a81ed89d12ab958dc3c43eb664d4ca999e3b19d3e70efc14af
+    catalog: {paths: 343, operations: 504, schemas: 587}
+  operations-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vcf-operations/vcf-operations-openapi.json
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 39c3145f11cf83c57e0cb4f54572ea9dba88ca2461b5b020570e05bb8aa88f3e
+    catalog: {paths: 369, operations: 535, schemas: 640}
+  logs-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vcf-operations/vcf-operations-for-logs-openapi.json
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: public-pinned
+    sha256: 9e239bdb683b1b409ee4568640fcb4dfe4bdb554c24a23003ec07065ee1fc197
+    catalog: {paths: 78, operations: 136, schemas: 99}
+  logs-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vcf-operations/log-management-openapi.json
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: public-pinned
+    sha256: 7fa207a72f4a4f8013838fa7151ac462920b8a118b70fb1022fd345d9dab7c5d
+    catalog: {paths: 15, operations: 23, schemas: 67}
+  logs-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vcf-operations/log-management-openapi.json
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: c900adcded50c610a62ba186101cc1bfe0d64f4f8011fe7cabf0b8e5885d368d
+    catalog: {paths: 15, operations: 23, schemas: 68}
+  installer-9.0:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/85151f6b1bb58f13b6ac0304bfec53904bea085f/specifications/vcf-installer/vcf-installer-openapi.json
+    source_revision: 85151f6b1bb58f13b6ac0304bfec53904bea085f
+    availability: public-pinned
+    sha256: a2084a65aab0ac0a5a1625d1a2fdf20b55fc8895ca43fd4389da901d07a4aaef
+    catalog: {paths: 37, operations: 52, schemas: 120}
+  installer-9.1:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/vcf-installer/vcf-installer-openapi.json
+    source_revision: 3949fc33339fc5ea1b77eadb258f1cf49aa88e26
+    availability: public-pinned
+    sha256: 29be24ab4d779edc58167e4d572782ae6718317fa8e659b154aec28cf9de263d
+    catalog: {paths: 42, operations: 57, schemas: 162}
+  installer-9.1.1-upstream:
+    source_url: https://github.com/vmware/vcf-api-specs/blob/31b01a6d5c47e489808ccb634d0304860ac4452d/specifications/vcf-installer/vcf-installer-openapi.json
+    source_revision: 31b01a6d5c47e489808ccb634d0304860ac4452d
+    availability: official-untagged
+    sha256: 6531b8a8c086e90b3188a0465404cc7a94a93dcdd4018e168a00539e586a7a7a
+    catalog: {paths: 43, operations: 58, schemas: 166}
+  vcd-10.x:
+    source_url: https://developer.broadcom.com/xapis/vmware-cloud-director-openapi/latest/
+    source_revision: "API 38.0 fixture evidence applies only to VCD 10.5/10.6"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "No VCF-wide VCD association or broad 10.x API 38.0 qualification."
+  holodeck:
+    source_url: https://github.com/evoila/meho/tree/main/backend/src/meho_backplane/connectors/holodeck
+    source_revision: "Typed SSH/PowerShell connector; no advertised VCF range or vendor API catalog"
+    availability: unavailable
+    catalog: {paths: null, operations: null, schemas: null}
+    evidence_gap: "Qualify Holodeck independently of VCF BOM releases."
+
+catalog_profiles:
+  vcf5-sddc:
+    artifact_refs: [sddc-5.x]
+    contract_delta: {endpoint: "Swagger 2.0 catalog unavailable", schema: "unavailable", auth: "token flow separately evidenced", feature_state: "unavailable"}
+    meho_exposure: {typed: "legacy SDDC typed subset", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  vsphere-8.x:
+    artifact_refs: [vsphere-8.x]
+    contract_delta: {endpoint: "8.0 U1/U2/U3 versus 9.x full diff unavailable", schema: "unavailable", auth: "session and capability evidence required", feature_state: "VI JSON exists from 8.0 U1 at /sdk/vim25/<release>; MEHO /api construction is separately incompatible"}
+    meho_exposure: {typed: "existing composites and vmomi reads require per-op gating", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  vsphere-9.0:
+    artifact_refs: [vsphere-9.0, vsphere-vi-json-9.0]
+    contract_delta: {endpoint: "REST 1275; VI JSON 2195", schema: "full private-shelf comparison input", auth: "vSphere session", feature_state: "baseline"}
+    meho_exposure: {typed: "existing composites and vmomi reads", generic-enabled: "curated ingress only", catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+  vsphere-9.1:
+    artifact_refs: [vsphere-9.1, vsphere-vi-json-9.1]
+    contract_delta: {endpoint: "REST +101/-9; VI JSON +48/-0 versus 9.0", schema: "run offline comparator for transitive closure", auth: "same session family pending comparator", feature_state: "additive/removal gates per operation"}
+    meho_exposure: {typed: "same current subset; no blanket claim", generic-enabled: "curated ingress only", catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+  vsphere-9.1.1:
+    artifact_refs: [vsphere-9.1.1-upstream, vsphere-vi-json-9.1.1-upstream]
+    contract_delta: {endpoint: "REST +6/-19; VI JSON unchanged versus 9.1", schema: "official untagged snapshot; compare closure before release claim", auth: "not appliance-verified", feature_state: "not matched to release ZIP/live appliance"}
+    meho_exposure: {typed: "no additional production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all upstream operations pending qualification"}
+  nsx-4.x:
+    artifact_refs: [nsx-4.x]
+    contract_delta: {endpoint: "full Manager plus Policy baseline missing", schema: "missing", auth: "session behavior requires artifact/probe", feature_state: "MP Logical removals cannot be enumerated yet"}
+    meho_exposure: {typed: "current ten GET reads are separately reconciled", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  nsx-9.x:
+    artifact_refs: [nsx-9.1, nsx-policy-9.1]
+    contract_delta: {endpoint: "Manager 1453 + Policy 3729 operations", schema: "private-shelf Manager/Policy closure input", auth: "JSESSIONID plus X-XSRF-TOKEN", feature_state: "KB 377083 MP Logical removals; exact 4.x diff pending"}
+    meho_exposure: {typed: "current ten GET reads do not establish full-catalog coverage", generic-enabled: [], catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+  sddc-9.0:
+    artifact_refs: [sddc-9.0]
+    contract_delta: {endpoint: "375 baseline operations", schema: "592 schemas", auth: "POST /v1/tokens then Bearer despite absent securitySchemes", feature_state: "baseline"}
+    meho_exposure: {typed: "current SDDC typed reads/writes", generic-enabled: "ingest profile", catalogued-not-enabled: "operator review queue", not-yet-integrated: "all unlisted upstream operations"}
+  sddc-9.1:
+    artifact_refs: [sddc-9.0, sddc-9.1]
+    contract_delta: {endpoint: "+48/-0 operations", schema: "+110/-2 schemas", auth: "same token flow evidence; verify parameters", feature_state: "9.1 additions require operation gates"}
+    meho_exposure: {typed: "current subset plus #3518 coordination", generic-enabled: "ingest profile", catalogued-not-enabled: "operator review queue", not-yet-integrated: "all unlisted upstream operations"}
+  sddc-9.1.1:
+    artifact_refs: [sddc-9.1, sddc-9.1.1-upstream]
+    contract_delta: {endpoint: "+6/-0 operations", schema: "+10 schemas; raw named changes require closure comparison", auth: "per-resource API version is independent of product version", feature_state: "KB 454242 adds SAN-certificate validation for Microsoft CA integration"}
+    meho_exposure: {typed: "no extra production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  vcfa-8-9:
+    artifact_refs: [vcfa-sdk-evidence]
+    contract_delta: {endpoint: "SDK evidence only", schema: "Swagger 2.0 conversion and product association missing", auth: "8 and 9 are distinct provider/tenant planes", feature_state: "9.1.1 Native Public Cloud endpoints disabled by default"}
+    meho_exposure: {typed: "existing vRA8 and VCFA classes", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  fleet-8-9:
+    artifact_refs: [fleet-8.x, fleet-9.1]
+    contract_delta: {endpoint: "legacy /lcm unknown; modern /v1 has 51", schema: "modern 187 schemas", auth: "8 legacy versus 9 Basic/Bearer boundary", feature_state: "9 overlap resolves by specificity before preference"}
+    meho_exposure: {typed: "legacy Fleet and modern Fleet LCM typed reads", generic-enabled: [], catalogued-not-enabled: "modern ingest candidates", not-yet-integrated: "all unlisted upstream operations"}
+  operations-9.0-9.1:
+    artifact_refs: [operations-9.0, operations-9.1]
+    contract_delta: {endpoint: "+134/-0 operations", schema: "386 to 587; compare transitive closure", auth: "vRealizeOpsToken (8) versus OpsToken (9)", feature_state: "9.1.1 changes need operation gates"}
+    meho_exposure: {typed: "existing vROps8/Operations classes", generic-enabled: [], catalogued-not-enabled: "operator-ingested rows", not-yet-integrated: "all unlisted upstream operations"}
+  operations-9.1.1:
+    artifact_refs: [operations-9.1, operations-9.1.1-upstream]
+    contract_delta: {endpoint: "+31/-0 operations", schema: "+53 schemas; raw named changes are not closure proof", auth: "OpsToken boundary remains 9.x", feature_state: "KB 452461 password-policy operations require Salt infrastructure, licence, and integration state"}
+    meho_exposure: {typed: "no extra production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  logs-9.0-9.1:
+    artifact_refs: [logs-9.0, logs-9.1]
+    contract_delta: {endpoint: "136 Logs API v2 versus 23 log-management operations", schema: "99 versus 67", auth: "same Bearer family is not artifact lineage", feature_state: "different service artifact; do not infer removals"}
+    meho_exposure: {typed: "existing vRLI8/Logs classes", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  logs-9.1.1:
+    artifact_refs: [logs-9.1, logs-9.1.1-upstream]
+    contract_delta: {endpoint: "+0/-0 operations", schema: "+1 schema; raw changes require closure comparison", auth: "Bearer family", feature_state: "same artifact lineage only after comparator confirms it"}
+    meho_exposure: {typed: "no extra production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  installer-9.0-9.1:
+    artifact_refs: [installer-9.0, installer-9.1]
+    contract_delta: {endpoint: "+5/-0 operations", schema: "120 to 162", auth: "POST /v1/tokens then Bearer despite absent securitySchemes", feature_state: "existing advertised floor remains >=9.1 pending 9.0 contract test"}
+    meho_exposure: {typed: "current installer primitives/composite", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  installer-9.1.1:
+    artifact_refs: [installer-9.1, installer-9.1.1-upstream]
+    contract_delta: {endpoint: "+1/-0: DELETE /v1/tasks/history", schema: "+4 schemas", auth: "token then Bearer", feature_state: "snapshot only; release ZIP/live appliance match pending"}
+    meho_exposure: {typed: "no extra production claim", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  vcd-10.x:
+    artifact_refs: [vcd-10.x]
+    contract_delta: {endpoint: "API 38 evidence only for 10.5/10.6", schema: "unavailable", auth: "provider Basic-to-Bearer", feature_state: "version negotiation deferred"}
+    meho_exposure: {typed: "current VCD reads", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all unlisted upstream operations"}
+  holodeck-independent:
+    artifact_refs: [holodeck]
+    contract_delta: {endpoint: "typed SSH/PowerShell, no REST catalog", schema: "n/a", auth: "SSH credential contract", feature_state: "independent toolkit/appliance"}
+    meho_exposure: {typed: "current Holodeck operations", generic-enabled: [], catalogued-not-enabled: [], not-yet-integrated: "all future operations"}
+
+bom_component_builds:
+  source: "KB 314608 for 5.x; KB 327207 only for the 5.1.1 correction; cited 9.x TechDocs BOM pages. A value is a BOM fact, not a catalog qualification."
+  "5.0": {sddc_manager: {version: "5.0", build: "21822418"}, vcenter: {version: "8.0.1.00100", build: "21815093"}, esxi: {version: "8.0.1", build: "21813344"}, nsx: {version: "4.1.0.2.0", build: "21761691"}, aria_suite_lifecycle: {version: "8.10", build: "21331275"}}
+  "5.0.0.1": {sddc_manager: {version: "5.0.0.1", build: "22485660"}, vcenter: {version: "8.0.1.00100", build: "21815093"}, esxi: {version: "8.0.1", build: "21813344"}, nsx: {version: "4.1.0.2.0", build: "21761691"}, aria_suite_lifecycle: {version: "8.10", build: "21331275"}}
+  "5.1": {sddc_manager: {version: "5.1", build: "22688368"}, vcenter: {version: "8.0.2.00100", build: "22617221"}, esxi: {version: "8.0.2", build: "22380479"}, nsx: {version: "4.1.2.1.0", build: "22667789"}, aria_suite_lifecycle: {version: "8.14", build: "22630473"}}
+  "5.1.1": {sddc_manager: {version: "5.1.1.0", build: "23480823"}, vcenter: {version: "8.0.2.00200", build: "23319993"}, esxi: {version: "8.0.2", build: "23305546"}, nsx: {version: "4.1.2.3.0", build: "23382408"}, aria_suite_lifecycle: {version: unknown, build: unknown}}
+  "5.2": {sddc_manager: {version: "5.2", build: "24108943"}, vcenter: {version: "8.0.3.00100", build: "24091160"}, esxi: {version: "8.0.3", build: "24022510"}, nsx: {version: "4.2.0.0.0", build: "24105817"}, aria_suite_lifecycle: {version: "8.18", build: "24029603"}}
+  "5.2.1": {sddc_manager: {version: "5.2.1", build: "24307856"}, vcenter: {version: "8.0.3.00100", build: "24091160"}, esxi: {version: "8.0.3", build: "24280767"}, nsx: {version: "4.2.1.0.0", build: "24304122"}, aria_suite_lifecycle: {version: "8.18", build: "24029603"}}
+  "5.2.1.1": {sddc_manager: {version: "5.2.1.1", build: "24397777"}, vcenter: {version: "8.0.3.00100", build: "24091160"}, esxi: {version: "8.0.3", build: "24280767"}, nsx: {version: "4.2.1.0.0", build: "24304122"}, aria_suite_lifecycle: {version: "8.18", build: "24029603"}}
+  "5.2.1.2": {sddc_manager: {version: "5.2.1.2", build: "24690695"}, vcenter: {version: "8.0.3.00100", build: "24091160"}, esxi: {version: "8.0.3", build: "24280767"}, nsx: {version: "4.2.1.0.0", build: "24304122"}, aria_suite_lifecycle: {version: "8.18", build: "24029603"}}
+  "5.2.2": {sddc_manager: {version: "5.2.2", build: "24936865"}, vcenter: {version: "8.0.3.00600", build: "24853646"}, esxi: {version: "8.0.3", build: "24859861"}, nsx: {version: "4.2.3", build: "24866349"}, aria_suite_lifecycle: {version: "8.18", build: "24866916"}}
+  "5.2.3": {sddc_manager: {version: "5.2.3", build: "25219033"}, vcenter: {version: "8.0.3.00700", build: "25197330"}, esxi: {version: "8.0.3", build: "25205845"}, nsx: {version: "4.2.3.3", build: "25171318"}, aria_suite_lifecycle: {version: "8.18", build: "25212352"}}
+  "5.2.4": {sddc_manager: {version: "5.2.4", build: "25437063"}, vcenter: {version: "8.0.3.00900", build: "25413364"}, esxi: {version: "8.0.3", build: "25429389"}, nsx: {version: "4.2.4", build: "25410638"}, aria_suite_lifecycle: {version: "8.18", build: "25425132"}}
+  "9.0": {sddc_manager: {version: "9.0.0.0", build: "24703748"}, vcenter: {version: "9.0.0.0", build: "24755230"}, esxi: {version: "9.0.0.0", build: "24755229"}, nsx: {version: "9.0.0.0", build: "24733065"}, vcf_operations: {version: "9.0.0.0", build: "24695812"}, vcf_operations_for_logs: {version: "9.0.0.0", build: "24695810"}, fleet_management: {version: "9.0.0.0", build: "24695816"}, vcf_automation: {version: "9.0.0.0", build: "24701403"}, installer: {version: "9.0.2.0", build: "25151285"}}
+  "9.0.1": {sddc_manager: {version: "9.0.1.0", build: "24962180"}, vcenter: {version: "9.0.1.0", build: "24957454"}, esxi: {version: "9.0.1.0", build: "24957456"}, nsx: {version: "9.0.1.0", build: "24952111"}, vcf_operations: {version: "9.0.1.0", build: "24960351"}, vcf_operations_for_logs: {version: "9.0.1.0", build: "24960345"}, fleet_management: {version: "9.0.1.0", build: "24960371"}, vcf_automation: {version: unknown, build: unknown}, installer: {version: unknown, build: unknown}}
+  "9.0.2": {sddc_manager: {version: "9.0.2.0", build: "25151285"}, vcenter: {version: "9.0.2.0", build: "25148086"}, esxi: {version: "9.0.2.0", build: "25148076"}, nsx: {version: "9.0.2.0", build: "25150386"}, vcf_operations: {version: "9.0.2.0", build: "25137838"}, vcf_operations_for_logs: {version: "9.0.2.0", build: "25137850"}, fleet_management: {version: "9.0.2.0", build: "25137839"}, vcf_automation: {version: "9.0.2.0", build: "25145732"}, installer: {version: "9.0.2.0", build: "25151285"}}
+  "9.1": {sddc_manager: {version: "9.1.0.0", build: "25371088"}, vcenter: {version: "9.1.0.0", build: "25370922"}, esxi: {version: "9.1.0.0", build: "25370933"}, nsx: {version: "9.1.0.0", build: "25318225"}, vcf_operations: {version: "9.1.0.0", build: "25346025"}, vcf_operations_for_logs: {version: "9.1.0.0", build: "25346055"}, fleet_lifecycle: {version: "9.1.0.0", build: "25371109"}, vcf_automation: {version: "9.1.0.0", build: "25370929"}, installer: {version: "9.1.0.0", build: "25371088"}}
+  "9.1.1": {sddc_manager: {version: unknown, build: unknown}, vcenter: {version: unknown, build: unknown}, esxi: {version: unknown, build: unknown}, nsx: {version: unknown, build: unknown}, vcf_operations: {version: unknown, build: unknown}, vcf_operations_for_logs: {version: unknown, build: unknown}, fleet_lifecycle: {version: unknown, build: unknown}, vcf_automation: {version: unknown, build: unknown}, installer: {version: unknown, build: unknown}}
+
+offline_comparisons:
+  method: "backend/scripts/diff_vcf_api_contract_catalogs.py; local refs, inherited parameters/security, servers, Swagger media types, request/response closures, feature markers, and named schemas"
+  sddc-9.0-to-9.1: {before: sddc-9.0, after: sddc-9.1, lineage: same, added: 48, removed: 0, changed_closures: 366, description_only: 0, named_schemas_changed: true}
+  sddc-9.1-to-9.1.1: {before: sddc-9.1, after: sddc-9.1.1-upstream, lineage: same, added: 6, removed: 0, changed_closures: 222, description_only: 0, named_schemas_changed: true}
+  installer-9.0-to-9.1: {before: installer-9.0, after: installer-9.1, lineage: same, added: 5, removed: 0, changed_closures: 51, description_only: 0, named_schemas_changed: true}
+  installer-9.1-to-9.1.1: {before: installer-9.1, after: installer-9.1.1-upstream, lineage: same, added: 1, removed: 0, changed_closures: 35, description_only: 0, named_schemas_changed: true}
+  operations-9.0-to-9.1: {before: operations-9.0, after: operations-9.1, lineage: same, added: 134, removed: 0, changed_closures: 165, description_only: 4, named_schemas_changed: true}
+  operations-9.1-to-9.1.1: {before: operations-9.1, after: operations-9.1.1-upstream, lineage: same, added: 31, removed: 0, changed_closures: 33, description_only: 5, named_schemas_changed: true}
+  logs-9.0-to-9.1: {before: logs-9.0, after: logs-9.1, lineage: unknown, result: artifact-lineage-unknown, added: null, removed: null, changed_closures: null, description_only: null, named_schemas_changed: null}
+  nsx-manager-9.1-to-9.1.1: {before: nsx-9.1, after: nsx-9.1.1-upstream, lineage: same, added: 2, removed: 0, changed_closures: 384, description_only: 11, named_schemas_changed: true}
+  vsphere-rest-9.0-to-9.1: {before: vsphere-9.0, after: vsphere-9.1, lineage: same, added: 101, removed: 9, changed_closures: 716, description_only: 98, named_schemas_changed: true}
+  vi-json-9.0-to-9.1: {before: vsphere-vi-json-9.0, after: vsphere-vi-json-9.1, lineage: same, added: 48, removed: 0, changed_closures: 2195, description_only: 0, named_schemas_changed: true}
+
+release_defaults: &unknown_components
+  sddc_manager: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcf5-sddc, evidence_note: "No exact per-row management-service BOM/catalog pin."}
+  vcenter_esxi: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "No static artifact means no complete 8.x contract qualification."}
+  nsx: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: nsx-4.x, evidence_note: "No exact Manager/Policy artifact pin."}
+  vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "SDK directory is not product-version proof."}
+  fleet: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: fleet-8-9, evidence_note: "No per-row legacy/modern service BOM evidence."}
+  vcf_operations: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: operations-9.0-9.1, evidence_note: "No per-row component catalog pin."}
+  vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: logs-9.0-9.1, evidence_note: "No per-row component catalog pin."}
+  installer: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: installer-9.0-9.1, evidence_note: "No installer presence/version is inferred for VCF 5.x."}
+
+release_rows:
+  - vcf_release: "5.0"
+    bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.1", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.0 maps to vSphere 8.0 U1; static contract absent."}, nsx: {version: "4.1.0.2", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.0", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.0.0.1"
+    bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.1", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.0.0.1 maps to vSphere 8.0 U1; static contract absent."}, nsx: {version: "4.1.0.2", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.0", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.1"
+    bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.2", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.1 maps to vSphere 8.0 U2; static contract absent."}, nsx: {version: "4.1.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.1.1"
+    bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.2", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.1.1 maps to vSphere 8.0 U2; static contract absent."}, nsx: {version: "4.1.2.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.1.1.0", build: "23480823", evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2"
+    bom_evidence: "KB 314608; preserve disagreement with KB 327207 if values differ."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.0", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.1"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.1.1"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1.1 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.1.2"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.1.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.1", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.1", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.2"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.2 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.2", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.3"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.3 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.3.3", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.3", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "5.2.4"
+    bom_evidence: "KB 327207; source values may disagree with KB 314608 and remain provenance, not normalization."
+    components: {<<: *unknown_components, vcenter_esxi: {version: "8.0.3", build: unknown, evidence_level: unqualified, catalog_profile: vsphere-8.x, evidence_note: "VCF 5.2.4 maps to vSphere 8.0 U3; static contract absent."}, nsx: {version: "4.2.4", build: unknown, evidence_level: registered, advertised_range: ">=4.0,<10.0", catalog_profile: nsx-4.x, evidence_note: "Version map is BOM evidence; full catalog absent."}, sddc_manager: {version: "5.2.4", build: unknown, evidence_level: registered, advertised_range: ">=5.0,<9.0", catalog_profile: vcf5-sddc, evidence_note: "Registered class; no full Swagger catalog pin."}}
+  - vcf_release: "9.0"
+    bom_evidence: "Pinned official 9.0.0.0 tag; component build still requires target fingerprint."
+    components: &vcf90_components
+      sddc_manager: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.0", catalog_profile: sddc-9.0, evidence_note: "Exact tagged catalog; no live target claim."}
+      vcenter_esxi: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.0 + vi-json", catalog_profile: vsphere-9.0, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
+      nsx: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: nsx-9.x, evidence_note: "No exact NSX 9.0 Manager/Policy artifact pin."}
+      vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "SDK evidence is not a frozen product catalog."}
+      fleet: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: fleet-8-9, evidence_note: "Modern artifact self-reports 9.1.0.0, not 9.0."}
+      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.0", catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance/version mapping remains unknown."}
+      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.0", catalog_profile: logs-9.0-9.1, evidence_note: "Exact tagged Logs API v2 catalog."}
+      installer: {version: "9.0.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "installer-9.0", catalog_profile: installer-9.0-9.1, evidence_note: "Artifact exists; current connector does not advertise 9.0."}
+  - vcf_release: "9.0.1"
+    bom_evidence: "No exact tagged management-service catalog pin."
+    components: &vcf90_patch_components
+      sddc_manager: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: sddc-9.0, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
+      vcenter_esxi: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vsphere-9.0, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
+      nsx: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: nsx-9.x, evidence_note: "No exact patch Manager/Policy artifact."}
+      vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "No exact patch catalog."}
+      fleet: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: fleet-8-9, evidence_note: "No exact patch catalog."}
+      vcf_operations: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: operations-9.0-9.1, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
+      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: logs-9.0-9.1, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
+      installer: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: installer-9.0-9.1, evidence_note: "Do not reuse 9.0 catalog for this patch row."}
+  - vcf_release: "9.0.2"
+    bom_evidence: "No exact tagged management-service catalog pin."
+    components: *vcf90_patch_components
+  - vcf_release: "9.1"
+    bom_evidence: "Pinned official 9.1.0.0 tag; component build still requires target fingerprint."
+    components: &vcf91_components
+      sddc_manager: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "sddc-9.1", catalog_profile: sddc-9.1, evidence_note: "Exact tagged catalog."}
+      vcenter_esxi: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "vsphere-9.1 + vi-json", catalog_profile: vsphere-9.1, evidence_note: "Exact tagged catalog; VIM gaps remain typed."}
+      nsx: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "manager-served 9.1 shelf", catalog_profile: nsx-9.x, evidence_note: "Manager/Policy catalog was acquired from a 9.1 manager."}
+      vcf_automation: {version: unknown, build: unknown, evidence_level: unqualified, catalog_profile: vcfa-8-9, evidence_note: "No exact tagged VCFA catalog."}
+      fleet: {version: "9.1.0.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "fleet-9.1", catalog_profile: fleet-8-9, evidence_note: "Artifact self-reports 9.1.0.0; folder label is not used as evidence."}
+      vcf_operations: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "operations-9.1", catalog_profile: operations-9.0-9.1, evidence_note: "Exact tagged catalog; appliance mapping remains unknown."}
+      vcf_operations_for_logs: {version: unknown, build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "logs-9.1", catalog_profile: logs-9.0-9.1, evidence_note: "Different service artifact; lineage is unknown."}
+      installer: {version: "9.1.0.0", build: unknown, evidence_level: registered, advertised_range: ">=9.1,<10.0", catalog_profile: installer-9.0-9.1, evidence_note: "Registered range plus exact tagged catalog; no live target claim."}
+  - vcf_release: "9.1.1"
+    bom_evidence: "Official untagged 9.1.1 upstream snapshot 31b01a6; not matched to a release ZIP or live appliance."
+    components: {<<: *vcf91_components, sddc_manager: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: sddc-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcenter_esxi: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: vsphere-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, nsx: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: nsx-9.x, evidence_note: "Exact 9.1.1 profile awaits converted full catalog diff."}, vcf_operations: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: operations-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}, vcf_operations_for_logs: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: logs-9.1.1, evidence_note: "Artifact lineage remains explicit until comparator confirms it."}, installer: {version: "9.1.1.0", build: unknown, evidence_level: spec-fixture-qualified, qualification_basis: "official untagged upstream snapshot", catalog_profile: installer-9.1.1, evidence_note: "Not a release ZIP/live-appliance claim."}}
+
+meho_regression_subsets:
+  note: "These are current MEHO regression subsets, not vendor-catalog coverage. generic-enabled and catalogued-not-enabled remain deployment-dependent until an operator/database observation records them."
+  vmware-rest: {advertised_range: ">=8.5,<10.0", auth: "vSphere session", typed_source: "connectors/vmware_rest/composites/_register.py and connector.py", typed_op_ids: "registrar-derived composites plus vmomi reads; inspect registrar before diff", feature_gate: "VI JSON is supported from 8.0 U1 at /sdk/vim25/<release>; MEHO /api construction needs a service-base gate"}
+  nsx-rest: {advertised_range: ">=4.0,<10.0", auth: "JSESSIONID + X-XSRF-TOKEN", typed_source: "connectors/nsx/typed_reads.py", typed_op_ids: [nsx.alarm.list, nsx.backup.config, nsx.backup.status, nsx.cluster.status, nsx.node.status, nsx.segment.list, nsx.tier1.list, nsx.transport_node.list, nsx.transport_node.state, nsx.transport_zone.list], feature_gate: "current reads do not cover MP Logical removal boundary"}
+  sddc-vcf5: {advertised_range: ">=5.0,<9.0", auth: "POST /v1/tokens then Bearer", typed_source: "connectors/sddc_vcf5/connector.py", typed_op_ids: [sddc.vcf5.cluster.list, sddc.vcf5.domain.list, sddc.vcf5.host.list, sddc.vcf5.manager.list, sddc.vcf5.nsxt_cluster.list, sddc.vcf5.task.list, sddc.vcf5.vcenter.list], feature_gate: "Swagger/path alias evidence required"}
+  sddc-rest: {advertised_range: ">=9.0,<10.0", auth: "POST /v1/tokens then Bearer", typed_source: "connectors/sddc_manager/typed_ops.py", typed_op_ids: [sddc.cluster.list, sddc.credential.list, sddc.domain.list, sddc.domain.status, sddc.host.list, sddc.license.list, sddc.manager.list, sddc.network_pool.get, sddc.network_pool.list, sddc.nsxt_cluster.list, sddc.system.info, sddc.task.get, sddc.task.list, sddc.vcenter.list, sddc.vcf_service.list], feature_gate: "per-resource API version and feature prerequisites"}
+  vcfa-vra8: {advertised_range: ">=8.0,<9.0", auth: "provider and tenant tokens", typed_source: "connectors/vra8/connector.py", typed_op_ids: [vcfa.vra8.about, vcfa.vra8.blueprint.list, vcfa.vra8.catalog-item.list, vcfa.vra8.deployment.get, vcfa.vra8.deployment.list, vcfa.vra8.project.list], feature_gate: "SDK catalog association unqualified"}
+  vcfa-rest: {advertised_range: ">=9.0,<10.0", auth: "provider and tenant tokens", typed_source: "connectors/vcf_automation/connector.py", typed_op_ids: [vcfa.provider.health, vcfa.provider.org.list, vcfa.provider.region.list, vcfa.tenant.about, vcfa.tenant.deployment.get, vcfa.tenant.deployment.list, vcfa.tenant.project.list], feature_gate: "Native Public Cloud 9.1.1 endpoints disabled by default"}
+  fleet-rest: {advertised_range: ">=8.0,<10.0", auth: "legacy service session", typed_source: "connectors/vcf_fleet/connector.py", typed_op_ids: [fleet.about, fleet.environment.list], feature_gate: "overlaps modern Fleet; specificity resolves first"}
+  fleet-lcm: {advertised_range: ">=9.0,<10.0", auth: "Bearer primary, Basic fallback", typed_source: "connectors/fleet_lcm/typed_ops.py", typed_op_ids: [fleet-lcm.health, fleet-lcm.system.info, fleet-lcm.component.list, fleet-lcm.component.info, fleet-lcm.component.status, fleet-lcm.config.info, fleet-lcm.release-version.list, fleet-lcm.sddc-lcm.info, fleet-lcm.sddc-lcm.list, fleet-lcm.task.info, fleet-lcm.task.list, fleet-lcm.upgrade-plan.info, fleet-lcm.upgrade-plan.list], feature_gate: "#3047 live token verification pending"}
+  vrops-vrops8: {advertised_range: ">=8.0,<9.0", auth: "vRealizeOpsToken", typed_source: "connectors/vrops8/connector.py", typed_op_ids: [vrops.alert.list, vrops.liveness, vrops.resource.query, vrops.resource.stats], feature_gate: "must not fall through to 9.x OpsToken"}
+  vrops-rest: {advertised_range: ">=9.0,<10.0", auth: "OpsToken", typed_source: "connectors/vcf_operations/typed_ops.py", typed_op_ids: [vrops.alert.list, vrops.liveness, vrops.resource.query, vrops.resource.stats], feature_gate: "9.1.1 password-policy prerequisite gate"}
+  vrli-vrli8: {advertised_range: ">=8.0,<9.0", auth: "Bearer", typed_source: "connectors/vrli8/connector.py", typed_op_ids: [vrli.event.query], feature_gate: "legacy artifact missing"}
+  vrli-rest: {advertised_range: ">=9.0,<10.0", auth: "Bearer", typed_source: "connectors/vcf_logs/connector.py", typed_op_ids: [vrli.event.query], feature_gate: "9.0/9.1 artifact lineage unknown"}
+  installer-rest: {advertised_range: ">=9.1,<10.0", auth: "POST /v1/tokens then Bearer", typed_source: "connectors/vcf_installer/{typed_reads,typed_writes,bringup}.py", typed_op_ids: [installer.sddc.spec.validate, installer.sddc.validation.status, installer.sddc.bringup.start, installer.sddc.bringup.retry, installer.sddc.bringup.status, installer.bundles.list, installer.bundles.download, installer.system.depot.get, installer.system.depot.set, installer.system.trusted-certificates.list, installer.system.trusted-certificates.add], feature_gate: "9.0 artifact does not lower advertised floor"}
+  vcd-rest: {advertised_range: ">=10.0,<11.0", auth: "provider Basic-to-Bearer", typed_source: "connectors/vcd/connector.py", typed_op_ids: [vcd.catalog.list, vcd.edge-gateway.list, vcd.org.list, vcd.task.list, vcd.vapp.list, vcd.vdc.list, vcd.vm.list], feature_gate: "API 38 only evidenced for 10.5/10.6"}
+  holodeck-ssh: {advertised_range: "none", auth: "SSH", typed_source: "connectors/holodeck/ops_*.py", typed_op_ids: [holodeck.about, holodeck.backups.list, holodeck.backups.prune, holodeck.config.apply, holodeck.config.show, holodeck.disk.usage, holodeck.images.import, holodeck.instance.start, holodeck.instance.status, holodeck.k8s.exec, holodeck.k8s.pods.gc, holodeck.logs.tail, holodeck.networking.show, holodeck.pod.info, holodeck.pod.list, holodeck.router.patch, holodeck.service.list], feature_gate: "independent of VCF BOM"}
+
+adjacent_products:
+  vcd: {catalog_profile: vcd-10.x, independent_of_vcf_bom: true}
+  holodeck: {catalog_profile: holodeck-independent, independent_of_vcf_bom: true}

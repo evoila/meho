@@ -20,8 +20,12 @@ covered by the respx integration test in
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
@@ -40,6 +44,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (
     build_vm_info_retrieve_params,
     vm_info_impl,
 )
+from meho_backplane.operations import dispatcher as dispatcher_module
 from meho_backplane.operations._errors import result_connector_not_found, status_code_for_result
 from meho_backplane.operations._validate import validate_params
 
@@ -365,6 +370,75 @@ def test_retrieve_properties_non_fault_500_stays_http_error() -> None:
         "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
         build_vm_info_retrieve_params("vm-42"),
     )
+
+
+def test_retrieve_properties_sibling_read_inherits_managed_object_not_found() -> None:
+    """The shared PropertyCollector seam preserves the addressed sibling MoID."""
+    response = httpx.Response(
+        500,
+        text=_MANAGED_OBJECT_NOT_FOUND_FAULT,
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.0"),
+    )
+    error = httpx.HTTPStatusError("upstream fault", request=response.request, response=response)
+    sibling_body = {
+        "specSet": [{"objectSet": [{"obj": {"type": "HostSystem", "value": "host-73"}}]}]
+    }
+
+    with pytest.raises(ConnectorResourceNotFoundError) as raised:
+        VmwareRestConnector._raise_managed_object_not_found(
+            error,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            sibling_body,
+        )
+
+    assert raised.value.resource_ids == ["host-73"]
+
+
+async def _raise_missing_resource(
+    operator: Operator,
+    target: object,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Typed handler fixture for the dispatcher's dedicated error arm."""
+    del operator, target, params
+    raise ConnectorResourceNotFoundError(["vm-42"], "vSphere resource 'vm-42' was not found")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_maps_connector_missing_resource_to_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dispatcher emits the structured result instead of connector_error."""
+    audit = AsyncMock()
+    monkeypatch.setattr(dispatcher_module, "audit_and_broadcast_safe", audit)
+    descriptor = SimpleNamespace(
+        source_kind="typed",
+        handler_ref=f"{__name__}._raise_missing_resource",
+        op_id="vmware.vm.info",
+    )
+
+    result = await dispatcher_module._run_branch_with_error_handling(
+        op_id="vmware.vm.info",
+        descriptor=descriptor,
+        connector_instance=None,
+        operator=_make_operator(),
+        target=_Target(),
+        params={"vm": "vm-42"},
+        params_hash="test-hash",
+        audit_id=uuid.uuid4(),
+        started=time.monotonic(),
+    )
+
+    assert result.status == "not_found", result.extras
+    assert result.error is not None
+    assert result.error.startswith("not_found:")
+    assert result.extras == {
+        "error_code": "not_found",
+        "resource_ids": ["vm-42"],
+        "resource_id": "vm-42",
+    }
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["error_extras"] == result.extras
 
 
 @pytest.mark.asyncio

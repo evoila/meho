@@ -360,6 +360,20 @@ _VERBS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", 
 _CAUTION_VERBS = frozenset({"POST", "PUT", "PATCH"})
 _DANGEROUS_VERBS = frozenset({"DELETE"})
 
+# VIM-over-JSON represents managed-object methods as POST requests such as
+# ``/VirtualMachine/{moId}/Destroy_Task``. Its HTTP verb therefore cannot
+# distinguish an object destroy from an ordinary mutation. These action-name
+# prefixes are deliberately small and auditable; connector-owned safety floors
+# cover vendor-specific additions after this generic parser hint.
+_DESTRUCTIVE_ACTION_PREFIXES = ("Destroy", "Delete", "Remove", "Unregister")
+_ACTION_NAME_SPLIT_RE = re.compile(r"[._/-]")
+_SAFETY_LEVEL_RANK: dict[SafetyLevel, int] = {
+    "safe": 0,
+    "caution": 1,
+    "dangerous": 2,
+    "destructive": 3,
+}
+
 # Default HTTP timeouts for spec fetches. Specs sit behind CDN URLs
 # and rarely take more than a couple of seconds; a 30 s ceiling keeps
 # pathological cases from hanging an ingest.
@@ -1149,6 +1163,14 @@ def _build_proto(
         _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
     _assert_parameter_schema_standalone(op_id=op_id, parameter_schema=parameter_schema)
 
+    safety_level = _safety_level_for(method)
+    requires_approval = _has_destructive_action_hint(
+        operation_id=_optional_string(operation.get("operationId")),
+        path=path,
+    )
+    if requires_approval:
+        safety_level = _raise_safety_level(safety_level, "dangerous")
+
     return EndpointDescriptorProto(
         op_id=op_id,
         method=method,
@@ -1158,8 +1180,8 @@ def _build_proto(
         tags=tags,
         parameter_schema=parameter_schema,
         response_schema=response_schema,
-        safety_level=_safety_level_for(method),
-        requires_approval=False,
+        safety_level=safety_level,
+        requires_approval=requires_approval,
     )
 
 
@@ -1179,6 +1201,42 @@ def _safety_level_for(method: str) -> SafetyLevel:
     if method in _CAUTION_VERBS:
         return "caution"
     return "safe"
+
+
+def _has_destructive_action_hint(*, operation_id: str | None, path: str) -> bool:
+    """Return whether an operation name denotes a destructive VIM-style action.
+
+    OpenAPI's ``operationId`` is the author-provided semantic identifier. A
+    VI-JSON path also ends with the managed-object method, so inspect both: a
+    vendor can omit ``operationId`` without bypassing the safety posture.
+    """
+    candidates = (operation_id, path.rsplit("/", maxsplit=1)[-1])
+    return any(
+        candidate is not None and _is_destructive_action_name(candidate) for candidate in candidates
+    )
+
+
+def _is_destructive_action_name(value: str) -> bool:
+    """Recognise the constrained destructive action-name vocabulary.
+
+    Splitting preserves ``VirtualMachine.Destroy_Task`` while accepting the
+    compound VIM spelling ``DeleteDatastoreFile_Task``. A prefix must end at
+    a separator, an upper-case word boundary, or the end of the segment so a
+    noun such as ``Destroyer`` is not promoted accidentally.
+    """
+    for segment in _ACTION_NAME_SPLIT_RE.split(value):
+        for prefix in _DESTRUCTIVE_ACTION_PREFIXES:
+            if not segment.startswith(prefix):
+                continue
+            suffix = segment[len(prefix) :]
+            if not suffix or suffix.startswith("_") or suffix[:1].isupper():
+                return True
+    return False
+
+
+def _raise_safety_level(current: SafetyLevel, floor: SafetyLevel) -> SafetyLevel:
+    """Return the stricter tier; semantic hints must never weaken a tier."""
+    return floor if _SAFETY_LEVEL_RANK[floor] > _SAFETY_LEVEL_RANK[current] else current
 
 
 # code-quality-allow: function-size - pre-existing spec builder; #293 adds one key

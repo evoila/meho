@@ -460,8 +460,17 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, then any connector-owned minimum safety floor |
-| `requires_approval` | `requires_approval` | `False` at parse time, then any connector-owned minimum safety floor |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints or a connector-owned minimum safety floor |
+
+The parser treats a VIM-style operation whose `operationId` or final path
+method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
+`dangerous` and `requires_approval=True`. VI-JSON exposes managed-object
+methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
+otherwise classify an object destroy as `caution`. This is a raise-only rule:
+it never weakens a stricter existing classification. The vocabulary is narrow
+by design; connector-owned safety floors remain the explicit scoped overlay
+for vendor- and version-specific rules.
 
 #### Connector safety floors
 

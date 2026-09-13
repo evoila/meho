@@ -608,6 +608,37 @@ values are preserved (shape stability across poll states). The hint is
 purely additive: an op without it keeps the bookkeeping-only summary,
 byte-identical to the pre-#3084 shape.
 
+### Bounded object identity — `result_objects` (#3425)
+
+Some set-shaped responses carry one useful nested identity object beside the
+collection. `net.tls_inspect`, for example, returns a leaf alias beside its
+presented `chain[]`: a multi-certificate response can exceed the 4 KiB JSONFlux
+threshold because of public PEM material even though it contains only a few
+certificates. Reducing the chain must keep the operator's handshake verdict
+and enough leaf identity to decide whether to retrieve the PEM, without
+silently inlining the PEM again.
+
+An operation can opt into a direct, bounded projection:
+
+```python
+llm_instructions={
+    "result_objects": {
+        "objects": {
+            "leaf": ["subject", "san", "fingerprint_sha256"],
+        },
+    },
+}
+```
+
+The dispatcher forwards the raw hint to the reducer. The reducer copies only
+the named direct fields from named top-level objects; scalar values and short
+scalar lists are eligible, nested objects are not. It accepts at most eight
+objects with eight fields each and a 1024-byte aggregate projection budget.
+Fields that do not fit stay only in the full handle spill. This is an
+additive generic facility: a descriptor without `result_objects` retains the
+existing bookkeeping-only reduced summary, and the full collection remains
+retrievable through `result_query`.
+
 For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 

@@ -221,6 +221,14 @@ _SAMPLE_TAIL = "tail"
 #: submit → poll loop of #3084).
 _RESULT_SCALARS_CONTEXT_KEY = "result_scalars"
 
+#: ``context`` key carrying bounded top-level object projections. An op may
+#: register ``llm_instructions["result_objects"] = {"objects": {"leaf":
+#: ["subject", "san"]}}`` when a reduced collection has one small identity
+#: object a caller still needs inline. Unlike ``result_scalars``, this is
+#: deliberately narrow: only named direct children are copied and a fixed
+#: byte budget prevents an op hint from reintroducing a large envelope.
+_RESULT_OBJECTS_CONTEXT_KEY = "result_objects"
+
 #: ``context`` key carrying the op's row-digest hint (#3122). Extends the
 #: ``result_scalars`` pattern to the *collection* the reduction spills: the
 #: connector author registers ``llm_instructions["result_digest"] =
@@ -252,6 +260,13 @@ _RESERVED_SUMMARY_KEYS = frozenset(
 #: the hint is named *scalars* because copying an unbounded vendor object
 #: into the inline summary would defeat the reduction it rides on.
 _SCALAR_VALUE_TYPES = (str, int, float)
+
+#: Bounds for the opt-in object projection. They constrain descriptor
+#: metadata as well as the copied JSON so a malformed or overly broad hint
+#: degrades to a smaller summary instead of bypassing JSONFlux.
+_MAX_RESULT_OBJECTS = 8
+_MAX_RESULT_OBJECT_FIELDS = 8
+_RESULT_OBJECT_BYTE_BUDGET = 1024
 
 #: Positional row-ordinal column the tail-sample query assigns via
 #: ``row_number() OVER ()``. DuckDB does not guarantee the order of a bare
@@ -423,6 +438,7 @@ class JsonFluxReducer:
         materialized = self._materialize(rows, context)
         spill_outcome = await self._spill(materialized, context)
         preserved_scalars = _preserved_scalars(payload, envelope_key, context)
+        preserved_scalars.update(_preserved_objects(payload, envelope_key, context))
         digest = _row_digest(rows, envelope_key, digest_spec)
         summary, handle = self._assemble(
             materialized, envelope_key, context, spill_outcome, preserved_scalars, digest
@@ -992,6 +1008,76 @@ def _preserved_scalars(
             )
             continue
         preserved[key] = value
+    return preserved
+
+
+def _preserved_objects(
+    payload: Any,
+    envelope_key: str | None,
+    context: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Copy bounded identity fields from explicitly named top-level objects.
+
+    ``result_objects`` is the object counterpart to ``result_scalars`` for a
+    response such as a TLS chain: reducing ``chain[]`` must not discard the
+    leaf's subject, SAN, and fingerprint, but copying the full leaf would also
+    copy its PEM. The hint is intentionally generic and opt-in, accepts only
+    direct object children, and keeps only scalar values or short scalar lists.
+    Whole objects, nested maps, and values outside the fixed byte budget stay
+    in the handle spill. Invalid hints are logged and ignored; reduction must
+    never turn an otherwise successful connector read into an error.
+    """
+    if not context:
+        return {}
+    raw = context.get(_RESULT_OBJECTS_CONTEXT_KEY)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("objects"), dict):
+        _log.warning(
+            "jsonflux_result_objects_invalid_shape",
+            op_id=context.get("op_id"),
+            received_type=type(raw).__name__,
+        )
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    objects = raw["objects"]
+    preserved: dict[str, dict[str, Any]] = {}
+    used_bytes = 0
+    for object_key, fields in list(objects.items())[:_MAX_RESULT_OBJECTS]:
+        if (
+            not isinstance(object_key, str)
+            or object_key == envelope_key
+            or object_key in _RESERVED_SUMMARY_KEYS
+            or not isinstance(fields, list)
+            or not all(isinstance(field, str) for field in fields)
+        ):
+            continue
+        value = payload.get(object_key)
+        if not isinstance(value, dict):
+            continue
+        projected: dict[str, Any] = {}
+        for field in fields[:_MAX_RESULT_OBJECT_FIELDS]:
+            child = value.get(field)
+            if (
+                child is None
+                or isinstance(child, _SCALAR_VALUE_TYPES)
+                or (
+                    isinstance(child, list)
+                    and all(item is None or isinstance(item, _SCALAR_VALUE_TYPES) for item in child)
+                )
+            ):
+                candidate = child
+            else:
+                continue
+            candidate_bytes = len(_serialize({object_key: {field: candidate}}))
+            if used_bytes + candidate_bytes > _RESULT_OBJECT_BYTE_BUDGET:
+                continue
+            projected[field] = candidate
+            used_bytes += candidate_bytes
+        if projected:
+            preserved[object_key] = projected
     return preserved
 
 

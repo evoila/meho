@@ -654,9 +654,14 @@ Which entry to pin depends on how the appliance's cert is issued:
 
 Behaviour for chains: `pem` is present on the **leaf and each presented
 chain entry** (leaf, intermediates, and the root when the server sends
-one) — leaf-only when the server presents only the leaf. The response
-stays inline (a certificate is a few KB; no JSONFlux handle threshold
-changes).
+one) — leaf-only when the server presents only the leaf. A single small
+certificate response stays inline unchanged. When a multi-certificate PEM
+payload exceeds JSONFlux's 4 KiB threshold, the reduced summary retains the
+handshake verdict (`handshake`, `reason`, `days_to_expiry`, `hostname_match`,
+`chain_complete`) and the leaf's `subject`, `san`, and SHA-256 fingerprint.
+The PEM is deliberately absent from that summary but remains in the spilled
+chain rows, retrievable with `result_query`; use that handle to obtain
+`leaf.pem` or another chain entry for `tls_ca_pin`.
 
 ## ICMP cohort — `net.ping` / `net.trace` / `net.path_mtu` (T6, #2411)
 

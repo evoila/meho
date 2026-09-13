@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — the single connector-owned session-token
+# harness (lock / cache / single-flight / refresh / fail-closed) plus the
+# stateless-scheme dispatch; already over the line-count limit on origin/main.
+# There is no responsibility boundary to split on — the harness is one unit.
+# This change adds only the secret-aware login-path branch for oauth2_mint's
+# per-target external issuer.
+
 """Base for ingested REST connectors made dispatchable by an ExecutionProfile.
 
 G0.28-T1 (#1967) — the **gating** half of Initiative #1965 (make ingested
@@ -406,7 +413,15 @@ class ProfiledRestConnector(HttpConnector):
         spec = self._session_spec(auth.scheme)
         secret = await self._load_credentials(target, operator)
         body = spec.build_body(auth, secret)
-        path = spec.login_path(auth)
+        # A scheme whose login endpoint depends on the resolved credential
+        # (oauth2_mint's per-target external ``token_url``) resolves through
+        # the secret-aware builder; every other scheme uses the profile-only
+        # ``login_path`` unchanged.
+        path = (
+            spec.login_path_with_secret(auth, secret)
+            if spec.login_path_with_secret is not None
+            else spec.login_path(auth)
+        )
         payload, established_path = await self._post_login(target, spec, auth, path, body, secret)
         minted = spec.extract_token(payload)
         if minted is None:

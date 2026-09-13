@@ -87,8 +87,18 @@ _EXPECTED_PRODUCT_VERSION = {
     ("bind9", "9.x"),
     # #1964 T1 #1975: profile-backed shipped-spec mechanism fixture.
     ("_fixture", "1.0"),
+    # meho-automation add-on: profile-backed generic connector with NO
+    # vendored spec (ingested at registration from the add-on's
+    # /openapi.json). Public #3571 oauth2_mint external issuer.
+    ("mehoauto", "0.1.0"),
 }
 _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
+# Profile-backed rows that ship NO spec at all: null ``upstream`` and null
+# ``spec_resource`` (the OpenAPI is ingested at registration time from the
+# live target's ``/openapi.json`` via the operator ``--spec`` on-ramp, never
+# vendored). They carry a ``profile_resource`` and ``catalog_ingest:
+# spec-only``. The meho-automation add-on is the first such row.
+_RUNTIME_SPEC_PRODUCTS = {"mehoauto"}
 # Products whose catalog row carries neither an ``upstream`` nor is a
 # hand-coded typed connector: the profile-backed shipped-spec rows whose
 # spec ships as package data via ``spec_resource``. The ``_fixture/1.0``
@@ -155,6 +165,14 @@ def test_shipped_catalog_typed_connectors_have_null_upstream() -> None:
         if entry.product in _SHIPPED_SPEC_PRODUCTS:
             assert entry.upstream is None, f"{entry.product} ships its spec (null upstream)"
             assert entry.spec_resource, f"{entry.product} needs a shipped spec_resource"
+        elif entry.product in _RUNTIME_SPEC_PRODUCTS:
+            # Profile-backed but spec-less: ingested at registration from the
+            # target's /openapi.json, never vendored. Null upstream + null
+            # spec_resource + a profile_resource, listed spec-only.
+            assert entry.upstream is None, f"{entry.product} ingests at runtime (null upstream)"
+            assert entry.spec_resource is None, f"{entry.product} vendors no spec"
+            assert entry.profile_resource, f"{entry.product} needs a profile_resource"
+            assert entry.catalog_ingest == "spec-only", f"{entry.product} must be spec-only"
         elif entry.product in _TYPED_PRODUCTS:
             assert entry.upstream is None, f"{entry.product} should be typed (null upstream)"
         else:
@@ -1082,12 +1100,15 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
       the listing emits the honest ``--spec`` ``next_step`` hint. (Row
       renumbered from ``nsx/4.2`` for the VCF-9 alignment, #1530.)
     """
-    spec_only_pairs = {("nsx", "9.0")}
+    # nsx/9.0 (fqdn-templated upstream, no shipped spec) plus the
+    # meho-automation add-on (profile-backed but NO vendored spec —
+    # ingested at registration from the live target's /openapi.json).
+    spec_only_pairs = {("nsx", "9.0"), ("mehoauto", "0.1.0")}
     for entry in load_catalog().entries:
         if (entry.product, entry.version) in spec_only_pairs:
             assert entry.catalog_ingest == "spec-only", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: spec-only "
-                "because its upstream is fqdn-templated and no spec ships yet"
+                "(fqdn-templated/absent upstream, or runtime-only /openapi.json ingest)"
             )
         else:
             assert entry.catalog_ingest == "supported", (

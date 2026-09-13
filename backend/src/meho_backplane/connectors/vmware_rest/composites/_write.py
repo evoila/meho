@@ -263,6 +263,11 @@ _OP_HOST_SOFTWARE_APPLY = "POST:/esx/settings/hosts/{host}/software?action=apply
 # row is ``{network (id), name, type}``. Mirrors ``_read._OP_LIST_NETWORK``.
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+# ``Network.Summary.type`` value for a host-scoped standard portgroup — the
+# ``filter.types`` value the standard-portgroup resolution reads (mirrors
+# ``_NIC_BACKING_STANDARD_PORTGROUP``, which is the same enum on the NIC
+# backing-spec side).
+_NETWORK_TYPE_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
 # ``Vcenter.Vm.Hardware.Ethernet.BackingSpec.type`` value for a standard
 # portgroup -- the default backing the NIC create / repoint specs target.
 _NIC_BACKING_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
@@ -6793,23 +6798,25 @@ async def _read_cdrom(
     return info if isinstance(info, dict) else None
 
 
-async def _resolve_distributed_portgroup(
+async def _resolve_portgroup_by_name(
     *,
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     portgroup_name: str,
+    network_type: str,
 ) -> tuple[str | None, str, list[dict[str, Any]]]:
-    """Resolve a distributed-portgroup display name to its network moid.
+    """Resolve a portgroup display name to its network moid, scoped to *network_type*.
 
-    Reads ``GET:/vcenter/network`` filtered to ``DISTRIBUTED_PORTGROUP`` +
-    the name (the #1602 fix -- there is no dedicated portgroup list
-    resource). Returns ``(network_moid, "ok", [])`` on a unique match,
-    ``(None, "not_found", [])`` on no match, or ``(None, "ambiguous",
-    candidates)`` when the name is not unique. Shared between the
-    ``vm.nic.repoint`` handler (dispatch time) and its preview builder
-    (#1608), so the reviewer sees the same portgroup the approved dispatch
-    will bind.
+    Reads ``GET:/vcenter/network`` filtered to *network_type*
+    (``DISTRIBUTED_PORTGROUP`` / ``STANDARD_PORTGROUP``) + the name (the
+    #1602 fix -- there is no dedicated portgroup list resource). Returns
+    ``(network_moid, "ok", [])`` on a unique match, ``(None, "not_found",
+    [])`` on no match, or ``(None, "ambiguous", candidates)`` when the name
+    is not unique. Standard portgroups are host-scoped, so one display name
+    routinely resolves to several ``Network`` moids (one per host) --
+    ``ambiguous`` is the expected, correct fail-closed outcome there, and
+    the caller resolves it with an explicit ``network`` moid.
     """
     listing = await _read_sub_op(
         connector,
@@ -6817,7 +6824,7 @@ async def _resolve_distributed_portgroup(
         operator,
         _OP_LIST_NETWORK,
         {
-            "filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP],
+            "filter.types": [network_type],
             "filter.names": [portgroup_name],
         },
     )
@@ -6835,6 +6842,69 @@ async def _resolve_distributed_portgroup(
     if not isinstance(network_moid, str):
         return None, "not_found", matches
     return network_moid, "ok", []
+
+
+async def _resolve_distributed_portgroup(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+) -> tuple[str | None, str, list[dict[str, Any]]]:
+    """Resolve a *distributed*-portgroup display name to its network moid.
+
+    Thin ``DISTRIBUTED_PORTGROUP``-scoped wrapper over
+    :func:`_resolve_portgroup_by_name`, kept as the stable seam the
+    ``vm.nic.repoint`` preview builder imports (#1608) so the reviewer sees
+    the same portgroup the approved dispatch binds.
+    """
+    return await _resolve_portgroup_by_name(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        network_type=_NETWORK_TYPE_DISTRIBUTED_PORTGROUP,
+    )
+
+
+async def _validate_network_moid(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    network_moid: str,
+    network_type: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Confirm an explicit ``Network`` moid exists and is of *network_type*.
+
+    Reads ``GET:/vcenter/network`` filtered to the moid (``filter.networks``)
+    -- the escape hatch for a host-scoped standard portgroup whose display
+    name is ambiguous across hosts. Returns ``(row, "ok")`` when the moid
+    resolves and its ``type`` matches, ``(None, "not_found")`` when no row
+    carries the moid, or ``(row, "type_mismatch")`` when it resolves but is
+    the wrong network kind for the requested backing.
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {"filter.networks": [network_moid]},
+    )
+    rows = _unwrap_value(listing)
+    match = (
+        next(
+            (row for row in rows if isinstance(row, dict) and row.get("network") == network_moid),
+            None,
+        )
+        if isinstance(rows, list)
+        else None
+    )
+    if match is None:
+        return None, "not_found"
+    if match.get("type") != network_type:
+        return match, "type_mismatch"
+    return match, "ok"
 
 
 def _resize_requires_power_off(
@@ -7001,6 +7071,50 @@ async def vm_resize_composite(
     }
 
 
+async def _resolve_repoint_target(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+    backing_type: str,
+    explicit_network: str | None,
+) -> tuple[str | None, str, list[dict[str, Any]], str]:
+    """Resolve the ``vm.nic.repoint`` target network moid + display name.
+
+    Returns ``(network_moid, resolution, candidates, resolved_name)`` where
+    resolution is ``ok`` / ``not_found`` / ``ambiguous`` / ``type_mismatch``.
+    When *explicit_network* is given, name resolution is skipped and the
+    moid is validated for existence + type-consistency with *backing_type*;
+    otherwise the name is resolved against ``GET:/vcenter/network`` scoped
+    to *backing_type*. Shared verbatim between the handler (dispatch time)
+    and its preview builder so the approval preview cannot drift from the
+    approved dispatch.
+    """
+    if explicit_network:
+        row, status = await _validate_network_moid(
+            connector=connector,
+            target=target,
+            operator=operator,
+            network_moid=explicit_network,
+            network_type=backing_type,
+        )
+        resolved_name = (row.get("name") if isinstance(row, dict) else None) or portgroup_name
+        if status == "ok":
+            return explicit_network, "ok", [], resolved_name
+        if status == "type_mismatch":
+            return None, "type_mismatch", ([row] if isinstance(row, dict) else []), resolved_name
+        return None, "not_found", [], resolved_name
+    network_moid, resolution, candidates = await _resolve_portgroup_by_name(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        network_type=backing_type,
+    )
+    return network_moid, resolution, candidates, portgroup_name
+
+
 async def vm_nic_repoint_composite(
     *,
     operator: Operator,
@@ -7008,19 +7122,32 @@ async def vm_nic_repoint_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Repoint an existing vNIC to a different distributed portgroup.
+    """Repoint an existing vNIC onto a distributed or standard portgroup.
 
     Op-id: ``vmware.composite.vm.nic.repoint``. Reads the NIC's current
     backing + MAC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``,
-    resolves the target portgroup by name via ``GET:/vcenter/network``
-    filtered to ``DISTRIBUTED_PORTGROUP`` (the #1602 fix -- no dedicated
-    portgroup list resource), then PATCHes the NIC backing. A name that
-    resolves to zero / many portgroups refuses the repoint
-    (``not_found`` / ``ambiguous``) with no PATCH issued.
+    resolves the target portgroup, then PATCHes the NIC backing to
+    ``{type: backing_type, network}`` (the same internal sub-op the
+    ``host.detach_from_vds`` fallback path uses).
+
+    ``backing_type`` (default ``DISTRIBUTED_PORTGROUP``, back-compatible)
+    picks the network kind. The name is resolved via ``GET:/vcenter/network``
+    filtered to that kind (the #1602 fix -- no dedicated portgroup list
+    resource). Standard portgroups are host-scoped, so one display name
+    routinely resolves to several ``Network`` moids (one per host); the
+    vCenter REST Automation API exposes no reliable VM->host mapping, so an
+    ambiguous name fails closed (``ambiguous``) and the operator supplies
+    the exact moid via ``network``. An explicit ``network`` moid skips name
+    resolution and is validated for type-consistency (``invalid_request``
+    on mismatch). A name matching zero portgroups returns ``not_found``.
+    No PATCH is issued on any non-``ok`` resolution.
     """
     vm_moid = params["vm"]
     nic_id = params["nic"]
     portgroup_name = params["portgroup_name"]
+    backing_type = params.get("backing_type", _NIC_BACKING_DISTRIBUTED_PORTGROUP)
+    network_param = params.get("network")
+    explicit_network = network_param if isinstance(network_param, str) and network_param else None
 
     nic_info = await _read_ethernet_nic(
         connector=connector, target=target, operator=operator, vm_moid=vm_moid, nic_id=nic_id
@@ -7028,29 +7155,59 @@ async def vm_nic_repoint_composite(
     mac_address = nic_info.get("mac_address") if nic_info else None
     current_backing = nic_info.get("backing") if nic_info else None
 
-    network_moid, resolution, candidates = await _resolve_distributed_portgroup(
-        connector=connector, target=target, operator=operator, portgroup_name=portgroup_name
+    network_moid, resolution, candidates, resolved_name = await _resolve_repoint_target(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        backing_type=backing_type,
+        explicit_network=explicit_network,
     )
+    kind = "standard" if backing_type == _NIC_BACKING_STANDARD_PORTGROUP else "distributed"
     base = {
         "vm": vm_moid,
         "nic": nic_id,
         "mac_address": mac_address,
         "current_backing": current_backing,
-        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+        "requested_backing": {
+            "portgroup_id": network_moid,
+            "portgroup_name": resolved_name,
+            "backing_type": backing_type,
+        },
     }
     if resolution == "not_found":
-        return {
-            **base,
-            "status": "not_found",
-            "candidates": [],
-            "guidance": f"no distributed portgroup named {portgroup_name!r}",
-        }
+        guidance = (
+            f"network moid {explicit_network!r} not found"
+            if explicit_network
+            else f"no {kind} portgroup named {portgroup_name!r}"
+        )
+        return {**base, "status": "not_found", "candidates": [], "guidance": guidance}
     if resolution == "ambiguous":
+        moids = [c.get("network") for c in candidates if isinstance(c, dict)]
+        if backing_type == _NIC_BACKING_STANDARD_PORTGROUP:
+            guidance = (
+                f"multiple standard portgroups named {portgroup_name!r} (standard "
+                "portgroups are host-scoped -- one Network moid per host); pass the "
+                f"moid of the one on the VM's host via the 'network' param. candidates: {moids}"
+            )
+        else:
+            guidance = (
+                f"multiple distributed portgroups share the name {portgroup_name!r}; pass a "
+                f"unique name or the exact moid via the 'network' param. candidates: {moids}"
+            )
+        return {**base, "status": "ambiguous", "candidates": candidates, "guidance": guidance}
+    if resolution == "type_mismatch":
+        actual = (
+            candidates[0].get("type") if candidates and isinstance(candidates[0], dict) else None
+        )
         return {
             **base,
-            "status": "ambiguous",
+            "status": "invalid_request",
             "candidates": candidates,
-            "guidance": "multiple distributed portgroups share the name; pass a unique name",
+            "guidance": (
+                f"network moid {explicit_network!r} is a {actual!r} network, not the "
+                f"requested backing_type {backing_type!r}"
+            ),
         }
 
     gate, _ = await _write_sub_op(
@@ -7061,7 +7218,7 @@ async def vm_nic_repoint_composite(
         {
             "vm": vm_moid,
             "nic": nic_id,
-            "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid},
+            "backing": {"type": backing_type, "network": network_moid},
         },
     )
     if gate is not None:

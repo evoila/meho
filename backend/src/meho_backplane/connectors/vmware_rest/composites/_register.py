@@ -1185,18 +1185,25 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.nic.repoint",
         handler=vm_nic_repoint_composite,
-        summary="Repoint a vNIC to a different distributed portgroup.",
+        summary="Repoint a vNIC onto a distributed or standard portgroup.",
         description=(
             "Reads the NIC's current backing + MAC via "
             "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}, resolves the "
             "target portgroup by display name via "
-            "GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP (there "
-            "is no dedicated portgroup list resource), then PATCHes the NIC "
-            "backing to {type: DISTRIBUTED_PORTGROUP, network}. A name that "
-            "resolves to zero / many portgroups refuses the repoint "
-            "(status='not_found' / 'ambiguous') with no PATCH issued. The "
-            "from->to network pair is what the four-eyes reviewer needs. "
-            "Equivalent of 'govc vm.network.change'."
+            "GET:/vcenter/network?filter.types=<backing_type> (there is no "
+            "dedicated portgroup list resource), then PATCHes the NIC "
+            "backing to {type: backing_type, network}. backing_type is "
+            "DISTRIBUTED_PORTGROUP (default) or STANDARD_PORTGROUP -- the "
+            "latter moves a NIC onto a host-local standard-switch portgroup "
+            "(e.g. to repair a VM whose NIC landed on an L2 that cannot "
+            "reach its gateway). Standard portgroups are host-scoped, so a "
+            "name can match one moid per host (status='ambiguous'); pass an "
+            "explicit 'network' moid to pick one. An explicit 'network' moid "
+            "skips name resolution and is type-checked against backing_type "
+            "(status='invalid_request' on mismatch); a name matching zero "
+            "portgroups returns status='not_found'. No PATCH is issued on "
+            "any non-repointed status. The from->to network pair is what the "
+            "four-eyes reviewer needs. Equivalent of 'govc vm.network.change'."
         ),
         parameter_schema=VM_NIC_REPOINT_PARAMETER_SCHEMA,
         response_schema=VM_NIC_REPOINT_RESPONSE_SCHEMA,

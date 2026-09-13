@@ -99,7 +99,7 @@ Two preview depths, chosen per composite
   NIC backing / CD-ROM backing via the same shared helpers the handlers
   use (:func:`._write._read_vm_info` / :func:`._write._read_ethernet_nic`
   / :func:`._write._read_cdrom` /
-  :func:`._write._resolve_distributed_portgroup`) and pairs it with the
+  :func:`._write._resolve_repoint_target`) and pairs it with the
   requested change. Declines (``None`` -> identifier-only default) when no
   connector resolved or the VM read returns no dict, and fails-soft on a
   resolution fault exactly like the fan-out builders.
@@ -167,6 +167,7 @@ from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
+    _NIC_BACKING_DISTRIBUTED_PORTGROUP,
     _list_child_resource_pool_ids,
     _read_cdrom,
     _read_ethernet_nic,
@@ -176,8 +177,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     _resolve_cluster_hosts,
     _resolve_cluster_name,
     _resolve_disk_info,
-    _resolve_distributed_portgroup,
     _resolve_named_hosts_in_cluster,
+    _resolve_repoint_target,
     _resolve_vm_list,
     _resolve_vm_name,
 )
@@ -874,11 +875,12 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
     The from->to network pair is what the four-eyes reviewer needs: the
     NIC's current backing (which network it is on now) and the target
-    portgroup (name + resolved moid). Reads the NIC via
-    :func:`._write._read_ethernet_nic` and resolves the portgroup via
-    :func:`._write._resolve_distributed_portgroup` (the same helper the
-    approved dispatch binds); the VM ``name`` comes from
-    :func:`._write._read_vm_info`. No NIC PATCH fires here.
+    portgroup (``backing_type`` + resolved moid + name). Reads the NIC via
+    :func:`._write._read_ethernet_nic` and resolves the target via
+    :func:`._write._resolve_repoint_target` (the same helper the approved
+    dispatch binds, so distributed and standard portgroups preview
+    identically); the VM ``name`` comes from :func:`._write._read_vm_info`.
+    No NIC PATCH fires here.
     """
     vm = ctx.params.get("vm")
     nic = ctx.params.get("nic")
@@ -890,6 +892,9 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         or ctx.connector_instance is None
     ):
         return None
+    backing_type = ctx.params.get("backing_type", _NIC_BACKING_DISTRIBUTED_PORTGROUP)
+    network_param = ctx.params.get("network")
+    explicit_network = network_param if isinstance(network_param, str) and network_param else None
     info = await _read_vm_info(
         connector=ctx.connector_instance,  # type: ignore[arg-type]
         target=ctx.target,
@@ -903,11 +908,13 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         vm_moid=vm,
         nic_id=nic,
     )
-    network_moid, _resolution, _candidates = await _resolve_distributed_portgroup(
+    network_moid, _resolution, _candidates, resolved_name = await _resolve_repoint_target(
         connector=ctx.connector_instance,  # type: ignore[arg-type]
         target=ctx.target,
         operator=ctx.operator,
         portgroup_name=portgroup_name,
+        backing_type=backing_type,
+        explicit_network=explicit_network,
     )
     return {
         "vm": vm,
@@ -915,7 +922,11 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "nic": nic,
         "mac_address": nic_info.get("mac_address") if nic_info else None,
         "current_backing": nic_info.get("backing") if nic_info else None,
-        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+        "requested_backing": {
+            "portgroup_id": network_moid,
+            "portgroup_name": resolved_name,
+            "backing_type": backing_type,
+        },
     }
 
 

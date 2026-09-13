@@ -2131,6 +2131,7 @@ async def test_vm_nic_repoint_sub_op_sequence(
     assert result.result["requested_backing"] == {
         "portgroup_id": "dvportgroup-9",
         "portgroup_name": "prod-pg",
+        "backing_type": "DISTRIBUTED_PORTGROUP",
     }
     assert recorder.calls == [
         ("GET", "/vcenter/vm/vm-1/hardware/ethernet/4000"),

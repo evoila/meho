@@ -474,6 +474,15 @@ an already stricter safety tier and an existing approval requirement. Existing
 enablement, review state, and other operator metadata are unchanged by this
 promotion. The dry-run path applies the same floor before reporting its result.
 
+#### Applying corrected floors to existing rows
+
+Deploying a corrected connector floor does not rewrite rows that were already
+ingested. Run the next connector ingest — `POST /api/v1/connectors/ingest` or
+`meho connector ingest` — to apply the corrected `safety_level` and approval
+posture to existing `endpoint_descriptor` rows. That re-ingest is the
+operator action that performs the monotonic existing-row update; it does not
+change the floor mechanism or lower an already stricter row.
+
 `vmware-rest-9.0` has the following `dangerous` +
 `requires_approval=True` floor. It accepts every mutating HTTP verb so a future
 vendor spelling cannot bypass the contract; its current vCenter routes use the

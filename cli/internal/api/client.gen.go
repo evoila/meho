@@ -60,6 +60,25 @@ const (
 	AuthModelSharedServiceAccount AuthModel = "shared_service_account"
 )
 
+// Defines values for BroadcastAnnounceRequestPhase.
+const (
+	BroadcastAnnounceRequestPhaseCompletion BroadcastAnnounceRequestPhase = "completion"
+	BroadcastAnnounceRequestPhaseStart      BroadcastAnnounceRequestPhase = "start"
+	BroadcastAnnounceRequestPhaseUpdate     BroadcastAnnounceRequestPhase = "update"
+)
+
+// Defines values for BroadcastAnnounceRequestPlannedOpClass.
+const (
+	BroadcastAnnounceRequestPlannedOpClassApproval        BroadcastAnnounceRequestPlannedOpClass = "approval"
+	BroadcastAnnounceRequestPlannedOpClassAuditQuery      BroadcastAnnounceRequestPlannedOpClass = "audit_query"
+	BroadcastAnnounceRequestPlannedOpClassCredentialMint  BroadcastAnnounceRequestPlannedOpClass = "credential_mint"
+	BroadcastAnnounceRequestPlannedOpClassCredentialRead  BroadcastAnnounceRequestPlannedOpClass = "credential_read"
+	BroadcastAnnounceRequestPlannedOpClassCredentialWrite BroadcastAnnounceRequestPlannedOpClass = "credential_write"
+	BroadcastAnnounceRequestPlannedOpClassOther           BroadcastAnnounceRequestPlannedOpClass = "other"
+	BroadcastAnnounceRequestPlannedOpClassRead            BroadcastAnnounceRequestPlannedOpClass = "read"
+	BroadcastAnnounceRequestPlannedOpClassWrite           BroadcastAnnounceRequestPlannedOpClass = "write"
+)
+
 // Defines values for BroadcastOverrideCreateDetail.
 const (
 	BroadcastOverrideCreateDetailAggregate BroadcastOverrideCreateDetail = "aggregate"
@@ -2816,6 +2835,36 @@ type BodyVaultPutUiVaultPutPost struct {
 type BoolCompare struct {
 	Expect *bool  `json:"expect,omitempty"`
 	Type   string `json:"type"`
+}
+
+// BroadcastAnnounceRequest The REST representation of a governed agent announcement.
+type BroadcastAnnounceRequest struct {
+	Activity       string                                  `json:"activity"`
+	Phase          *BroadcastAnnounceRequestPhase          `json:"phase,omitempty"`
+	PlannedOpClass *BroadcastAnnounceRequestPlannedOpClass `json:"planned_op_class"`
+	RunId          *openapi_types.UUID                     `json:"run_id"`
+	Scope          *string                                 `json:"scope"`
+	Target         *string                                 `json:"target"`
+	Targets        *[]string                               `json:"targets,omitempty"`
+	TtlMinutes     *int                                    `json:"ttl_minutes"`
+	WorkRef        *string                                 `json:"work_ref"`
+}
+
+// BroadcastAnnounceRequestPhase defines model for BroadcastAnnounceRequest.Phase.
+type BroadcastAnnounceRequestPhase string
+
+// BroadcastAnnounceRequestPlannedOpClass defines model for BroadcastAnnounceRequest.PlannedOpClass.
+type BroadcastAnnounceRequestPlannedOpClass string
+
+// BroadcastAnnounceResponse Acknowledgement with distinct durable event id and stream cursor.
+type BroadcastAnnounceResponse struct {
+	Cursor         string              `json:"cursor"`
+	EventId        openapi_types.UUID  `json:"event_id"`
+	PlannedOpClass *string             `json:"planned_op_class"`
+	RunId          *openapi_types.UUID `json:"run_id"`
+	Targets        *[]string           `json:"targets"`
+	TtlMinutes     *int                `json:"ttl_minutes"`
+	WorkRef        *string             `json:"work_ref"`
 }
 
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
@@ -9384,6 +9433,11 @@ type ListAutomationSurfaceApiV1AutomationGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// AnnounceBroadcastApiV1BroadcastAnnouncePostParams defines parameters for AnnounceBroadcastApiV1BroadcastAnnouncePost.
+type AnnounceBroadcastApiV1BroadcastAnnouncePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
 type ListOverridesApiV1BroadcastOverridesGetParams struct {
 	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
@@ -9398,6 +9452,19 @@ type CreateOverrideApiV1BroadcastOverridesPostParams struct {
 
 // DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams defines parameters for DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete.
 type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RecentBroadcastEventsApiV1BroadcastRecentGetParams defines parameters for RecentBroadcastEventsApiV1BroadcastRecentGet.
+type RecentBroadcastEventsApiV1BroadcastRecentGetParams struct {
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	OpClass       *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal     *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target        *string `form:"target,omitempty" json:"target,omitempty"`
+	ActorSub      *string `form:"actor_sub,omitempty" json:"actor_sub,omitempty"`
+	WorkRef       *string `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	ActiveOnly    *bool   `form:"active_only,omitempty" json:"active_only,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -10574,6 +10641,9 @@ type AskDocsEndpointApiV1AskDocsPostJSONRequestBody = AskDocsRequest
 
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
+
+// AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody defines body for AnnounceBroadcastApiV1BroadcastAnnouncePost for application/json ContentType.
+type AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody = BroadcastAnnounceRequest
 
 // CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody defines body for CreateOverrideApiV1BroadcastOverridesPost for application/json ContentType.
 type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrideCreate
@@ -12498,6 +12568,11 @@ type ClientInterface interface {
 	// ListAutomationSurfaceApiV1AutomationGet request
 	ListAutomationSurfaceApiV1AutomationGet(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AnnounceBroadcastApiV1BroadcastAnnouncePostWithBody request with any body
+	AnnounceBroadcastApiV1BroadcastAnnouncePostWithBody(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AnnounceBroadcastApiV1BroadcastAnnouncePost(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, body AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListOverridesApiV1BroadcastOverridesGet request
 	ListOverridesApiV1BroadcastOverridesGet(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12508,6 +12583,9 @@ type ClientInterface interface {
 
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RecentBroadcastEventsApiV1BroadcastRecentGet request
+	RecentBroadcastEventsApiV1BroadcastRecentGet(ctx context.Context, params *RecentBroadcastEventsApiV1BroadcastRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetAssignmentApiV1ChecksAssignmentGet request
 	GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -14550,6 +14628,30 @@ func (c *Client) ListAutomationSurfaceApiV1AutomationGet(ctx context.Context, pa
 	return c.Client.Do(req)
 }
 
+func (c *Client) AnnounceBroadcastApiV1BroadcastAnnouncePostWithBody(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnounceBroadcastApiV1BroadcastAnnouncePost(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, body AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListOverridesApiV1BroadcastOverridesGet(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListOverridesApiV1BroadcastOverridesGetRequest(c.Server, params)
 	if err != nil {
@@ -14588,6 +14690,18 @@ func (c *Client) CreateOverrideApiV1BroadcastOverridesPost(ctx context.Context, 
 
 func (c *Client) DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(c.Server, overrideId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RecentBroadcastEventsApiV1BroadcastRecentGet(ctx context.Context, params *RecentBroadcastEventsApiV1BroadcastRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRecentBroadcastEventsApiV1BroadcastRecentGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -23322,6 +23436,61 @@ func NewListAutomationSurfaceApiV1AutomationGetRequest(server string, params *Li
 	return req, nil
 }
 
+// NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequest calls the generic AnnounceBroadcastApiV1BroadcastAnnouncePost builder with application/json body
+func NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequest(server string, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, body AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequestWithBody generates requests for AnnounceBroadcastApiV1BroadcastAnnouncePost with any type of body
+func NewAnnounceBroadcastApiV1BroadcastAnnouncePostRequestWithBody(server string, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/broadcast/announce")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListOverridesApiV1BroadcastOverridesGetRequest generates requests for ListOverridesApiV1BroadcastOverridesGet
 func NewListOverridesApiV1BroadcastOverridesGetRequest(server string, params *ListOverridesApiV1BroadcastOverridesGetParams) (*http.Request, error) {
 	var err error
@@ -23468,6 +23637,182 @@ func NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(server stri
 	}
 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRecentBroadcastEventsApiV1BroadcastRecentGetRequest generates requests for RecentBroadcastEventsApiV1BroadcastRecentGet
+func NewRecentBroadcastEventsApiV1BroadcastRecentGetRequest(server string, params *RecentBroadcastEventsApiV1BroadcastRecentGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/broadcast/recent")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OpClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ActorSub != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "actor_sub", runtime.ParamLocationQuery, *params.ActorSub); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.WorkRef != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "work_ref", runtime.ParamLocationQuery, *params.WorkRef); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ActiveOnly != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "active_only", runtime.ParamLocationQuery, *params.ActiveOnly); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -42282,6 +42627,11 @@ type ClientWithResponsesInterface interface {
 	// ListAutomationSurfaceApiV1AutomationGetWithResponse request
 	ListAutomationSurfaceApiV1AutomationGetWithResponse(ctx context.Context, params *ListAutomationSurfaceApiV1AutomationGetParams, reqEditors ...RequestEditorFn) (*ListAutomationSurfaceApiV1AutomationGetResponse, error)
 
+	// AnnounceBroadcastApiV1BroadcastAnnouncePostWithBodyWithResponse request with any body
+	AnnounceBroadcastApiV1BroadcastAnnouncePostWithBodyWithResponse(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnounceBroadcastApiV1BroadcastAnnouncePostResponse, error)
+
+	AnnounceBroadcastApiV1BroadcastAnnouncePostWithResponse(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, body AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody, reqEditors ...RequestEditorFn) (*AnnounceBroadcastApiV1BroadcastAnnouncePostResponse, error)
+
 	// ListOverridesApiV1BroadcastOverridesGetWithResponse request
 	ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error)
 
@@ -42292,6 +42642,9 @@ type ClientWithResponsesInterface interface {
 
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error)
+
+	// RecentBroadcastEventsApiV1BroadcastRecentGetWithResponse request
+	RecentBroadcastEventsApiV1BroadcastRecentGetWithResponse(ctx context.Context, params *RecentBroadcastEventsApiV1BroadcastRecentGetParams, reqEditors ...RequestEditorFn) (*RecentBroadcastEventsApiV1BroadcastRecentGetResponse, error)
 
 	// GetAssignmentApiV1ChecksAssignmentGetWithResponse request
 	GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error)
@@ -44665,6 +45018,29 @@ func (r ListAutomationSurfaceApiV1AutomationGetResponse) StatusCode() int {
 	return 0
 }
 
+type AnnounceBroadcastApiV1BroadcastAnnouncePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *BroadcastAnnounceResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnounceBroadcastApiV1BroadcastAnnouncePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnounceBroadcastApiV1BroadcastAnnouncePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListOverridesApiV1BroadcastOverridesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -44727,6 +45103,29 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RecentBroadcastEventsApiV1BroadcastRecentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RecentBroadcastEventsApiV1BroadcastRecentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RecentBroadcastEventsApiV1BroadcastRecentGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -52664,6 +53063,23 @@ func (c *ClientWithResponses) ListAutomationSurfaceApiV1AutomationGetWithRespons
 	return ParseListAutomationSurfaceApiV1AutomationGetResponse(rsp)
 }
 
+// AnnounceBroadcastApiV1BroadcastAnnouncePostWithBodyWithResponse request with arbitrary body returning *AnnounceBroadcastApiV1BroadcastAnnouncePostResponse
+func (c *ClientWithResponses) AnnounceBroadcastApiV1BroadcastAnnouncePostWithBodyWithResponse(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnounceBroadcastApiV1BroadcastAnnouncePostResponse, error) {
+	rsp, err := c.AnnounceBroadcastApiV1BroadcastAnnouncePostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnounceBroadcastApiV1BroadcastAnnouncePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AnnounceBroadcastApiV1BroadcastAnnouncePostWithResponse(ctx context.Context, params *AnnounceBroadcastApiV1BroadcastAnnouncePostParams, body AnnounceBroadcastApiV1BroadcastAnnouncePostJSONRequestBody, reqEditors ...RequestEditorFn) (*AnnounceBroadcastApiV1BroadcastAnnouncePostResponse, error) {
+	rsp, err := c.AnnounceBroadcastApiV1BroadcastAnnouncePost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnounceBroadcastApiV1BroadcastAnnouncePostResponse(rsp)
+}
+
 // ListOverridesApiV1BroadcastOverridesGetWithResponse request returning *ListOverridesApiV1BroadcastOverridesGetResponse
 func (c *ClientWithResponses) ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error) {
 	rsp, err := c.ListOverridesApiV1BroadcastOverridesGet(ctx, params, reqEditors...)
@@ -52697,6 +53113,15 @@ func (c *ClientWithResponses) DeleteOverrideApiV1BroadcastOverridesOverrideIdDel
 		return nil, err
 	}
 	return ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp)
+}
+
+// RecentBroadcastEventsApiV1BroadcastRecentGetWithResponse request returning *RecentBroadcastEventsApiV1BroadcastRecentGetResponse
+func (c *ClientWithResponses) RecentBroadcastEventsApiV1BroadcastRecentGetWithResponse(ctx context.Context, params *RecentBroadcastEventsApiV1BroadcastRecentGetParams, reqEditors ...RequestEditorFn) (*RecentBroadcastEventsApiV1BroadcastRecentGetResponse, error) {
+	rsp, err := c.RecentBroadcastEventsApiV1BroadcastRecentGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRecentBroadcastEventsApiV1BroadcastRecentGetResponse(rsp)
 }
 
 // GetAssignmentApiV1ChecksAssignmentGetWithResponse request returning *GetAssignmentApiV1ChecksAssignmentGetResponse
@@ -58464,6 +58889,39 @@ func ParseListAutomationSurfaceApiV1AutomationGetResponse(rsp *http.Response) (*
 	return response, nil
 }
 
+// ParseAnnounceBroadcastApiV1BroadcastAnnouncePostResponse parses an HTTP response from a AnnounceBroadcastApiV1BroadcastAnnouncePostWithResponse call
+func ParseAnnounceBroadcastApiV1BroadcastAnnouncePostResponse(rsp *http.Response) (*AnnounceBroadcastApiV1BroadcastAnnouncePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnounceBroadcastApiV1BroadcastAnnouncePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest BroadcastAnnounceResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListOverridesApiV1BroadcastOverridesGetResponse parses an HTTP response from a ListOverridesApiV1BroadcastOverridesGetWithResponse call
 func ParseListOverridesApiV1BroadcastOverridesGetResponse(rsp *http.Response) (*ListOverridesApiV1BroadcastOverridesGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -58544,6 +59002,39 @@ func ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp *htt
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRecentBroadcastEventsApiV1BroadcastRecentGetResponse parses an HTTP response from a RecentBroadcastEventsApiV1BroadcastRecentGetWithResponse call
+func ParseRecentBroadcastEventsApiV1BroadcastRecentGetResponse(rsp *http.Response) (*RecentBroadcastEventsApiV1BroadcastRecentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RecentBroadcastEventsApiV1BroadcastRecentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

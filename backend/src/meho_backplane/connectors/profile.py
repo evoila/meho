@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — one cohesive reviewed schema module (the
+# ExecutionProfile schema + its closed auth/version/pagination catalogs);
+# already over the line-count limit on origin/main. Splitting it would
+# fragment a single reviewed artifact across files with no responsibility
+# boundary to split on. Pre-existing; this change only adds the oauth2_mint
+# external-issuer fields (#3571).
+
 """The ``ExecutionProfile`` schema + the closed named auth-scheme catalog.
 
 G0.28-T3 (#1969) — the load-bearing schema half of Initiative #1965 (make
@@ -61,7 +68,9 @@ from the secret broker, never serialized into the reviewed profile.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Literal, get_args
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -498,14 +507,76 @@ class ReservedAuthSchemeError(ExecutionProfileError):
         )
 
 
+#: Host suffixes treated as unambiguously cluster-internal / non-public, so a
+#: plaintext ``http`` ``token_url`` pointing at one is accepted (the
+#: established east-west in-cluster posture). Everything else with a dotted
+#: FQDN must use ``https``. A single-label (dotless) host is also treated as
+#: internal — a bare Kubernetes Service name (``keycloak``) only resolves
+#: in-cluster. Kept as a closed constant, not an operator knob.
+_INTERNAL_HTTP_HOST_SUFFIXES: tuple[str, ...] = (
+    ".svc",
+    ".svc.cluster.local",
+    ".cluster.local",
+    ".local",
+    ".internal",
+)
+
+
+def _is_internal_http_host(host: str) -> bool:
+    """Return whether *host* may be dialed over plaintext ``http``.
+
+    True for a loopback / private / link-local / unique-local IP literal, a
+    dotless single-label hostname (an in-cluster Service name), or a host
+    ending in one of :data:`_INTERNAL_HTTP_HOST_SUFFIXES`. A public,
+    globally-routable IP or a dotted public FQDN returns False, so an ``http``
+    ``token_url`` for it is rejected at profile validation (fail-closed).
+    """
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    normalised = host.lower().rstrip(".")
+    if "." not in normalised:
+        return True
+    return normalised.endswith(_INTERNAL_HTTP_HOST_SUFFIXES)
+
+
+def _validate_token_url(url: str) -> str:
+    """Validate an ``oauth2_mint`` external-issuer ``token_url``.
+
+    Fail-closed on anything but an absolute ``http(s)`` URL with a host.
+    ``https`` is always accepted; plaintext ``http`` is accepted **only** for
+    a cluster-internal / private-address host (:func:`_is_internal_http_host`)
+    — never for a public host. The value is not an expression / template: it
+    is the single absolute token endpoint the mint POSTs to, so it does not
+    re-open the rejected-DSL line (#1177).
+    """
+    if not url.strip():
+        raise ValueError("token_url must be non-blank when provided")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"token_url must be an absolute http(s) URL with a host: {url!r}")
+    if parts.scheme == "https":
+        return url
+    if _is_internal_http_host(parts.hostname):
+        return url
+    raise ValueError(
+        f"token_url must use https for a public host; plaintext http is "
+        f"accepted only for a cluster-internal / private-address issuer: {url!r}"
+    )
+
+
 class AuthSpec(BaseModel):
     """The declarative auth block of an :class:`ExecutionProfile`.
 
     Selects a named, vetted extractor (:attr:`scheme`) and names the
     secret-bundle keys it reads (:attr:`secret_fields`). Carries **no**
     path/template/expression field — that is the rejected-DSL line. The
-    only scheme-shaping knob is :attr:`value_kind`, a closed enum that only
-    applies to ``static_header`` (bearer-wrap vs raw placement).
+    only scheme-shaping knobs are :attr:`value_kind` (a closed enum that only
+    applies to ``static_header``) and the three ``oauth2_mint`` external-issuer
+    fields (:attr:`token_url` / :attr:`scope` / :attr:`audience`), which name
+    *where* the token is minted and *what* scope/audience the grant carries —
+    never *how* a token is parsed.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -540,6 +611,35 @@ class AuthSpec(BaseModel):
             "static_header only: 'bearer' wraps the value as "
             "'Bearer <value>', 'raw' places it verbatim. Must be None for "
             "every other scheme; required for static_header."
+        ),
+    )
+    token_url: str | None = Field(
+        default=None,
+        description=(
+            "oauth2_mint only: absolute https URL of the OAuth2 token endpoint "
+            "when the token issuer is a separate host from the target API. "
+            "When None (the default), the token is minted target-relative at "
+            "'/realms/master/protocol/openid-connect/token' — byte-identical "
+            "to today. Plaintext http is accepted only for a cluster-internal "
+            "/ private-address issuer; https is required for a public host. "
+            "Must be None for every other scheme."
+        ),
+    )
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "oauth2_mint only: optional OAuth2 'scope', forwarded verbatim as "
+            "the 'scope' form parameter of the client-credentials grant. Must "
+            "be None for every other scheme."
+        ),
+    )
+    audience: str | None = Field(
+        default=None,
+        description=(
+            "oauth2_mint only: optional token audience, forwarded verbatim as "
+            "the 'audience' form parameter (the Keycloak / RFC 8693-style "
+            "parameter) of the client-credentials grant. Must be None for "
+            "every other scheme."
         ),
     )
 
@@ -580,6 +680,41 @@ class AuthSpec(BaseModel):
                 raise ValueError("static_header requires value_kind ('bearer' or 'raw')")
         elif self.value_kind is not None:
             raise ValueError(f"value_kind is only valid for static_header, not {self.scheme!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _oauth2_fields_match_scheme(self) -> AuthSpec:
+        """Bind ``token_url`` / ``scope`` / ``audience`` to ``oauth2_mint``.
+
+        The three external-issuer knobs only shape the OAuth2 client-credentials
+        form grant, so they are meaningless (and forbidden) for every other
+        scheme — a profile that sets one elsewhere is malformed, rejected at
+        the API boundary (422) and at boot. All three are optional for
+        ``oauth2_mint`` itself; omitting them keeps today's target-relative,
+        scope-less, audience-less mint byte-identical. ``token_url``, when set,
+        is validated fail-closed (absolute https, or http only for a
+        cluster-internal / private-address issuer); a blank ``scope`` /
+        ``audience`` is rejected rather than sent as an empty form value.
+        """
+        oauth2_fields = {
+            "token_url": self.token_url,
+            "scope": self.scope,
+            "audience": self.audience,
+        }
+        if self.scheme != "oauth2_mint":
+            set_here = sorted(name for name, value in oauth2_fields.items() if value is not None)
+            if set_here:
+                raise ValueError(
+                    f"{set_here} {'is' if len(set_here) == 1 else 'are'} only "
+                    f"valid for the oauth2_mint scheme, not {self.scheme!r}"
+                )
+            return self
+        if self.token_url is not None:
+            _validate_token_url(self.token_url)
+        if self.scope is not None and not self.scope.strip():
+            raise ValueError("scope must be non-blank when provided")
+        if self.audience is not None and not self.audience.strip():
+            raise ValueError("audience must be non-blank when provided")
         return self
 
 

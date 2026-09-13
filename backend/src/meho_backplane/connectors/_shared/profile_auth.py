@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — the one registry of vetted per-scheme auth
+# extractors (the closed named-auth catalog's runtime half); already over the
+# line-count limit on origin/main. Each scheme's mechanics belong together in
+# this single reviewed module — there is no responsibility boundary to split
+# on. Pre-existing; this change only extends oauth2_mint for an external
+# issuer (#3571).
+
 """Named auth-scheme extractors for ``ProfiledRestConnector`` (#1970).
 
 G0.28-T4 — the runtime half of the named-auth catalog T3 (#1969) defined as
@@ -514,10 +521,15 @@ def _extract_access_token(payload: Any) -> SessionToken | None:
 
 # -- oauth2_mint (keycloak: form client-credentials grant -> Bearer) --------
 
-#: Keycloak's token endpoint path. The admin-realm segment in the typed
+#: Keycloak's target-relative token endpoint path — the default when the
+#: profile declares no ``token_url``. The admin-realm segment in the typed
 #: connector is a realm-routing concern T6 owns; the named scheme uses the
 #: conventional ``master`` admin realm so a profiled keycloak mints against
-#: the same endpoint shape the typed connector does.
+#: the same endpoint shape the typed connector does. When the profile sets an
+#: absolute ``auth.token_url`` (an issuer whose host differs from the target),
+#: :func:`_oauth2_token_endpoint` returns that instead and the login POST is
+#: dialed at the external issuer (#3571) — the pooled client resolves an
+#: absolute URL as-is, so ``base_url`` (the target) is bypassed for the mint.
 _OAUTH2_TOKEN_PATH = "/realms/master/protocol/openid-connect/token"
 
 #: Refresh margin shaved off ``expires_in`` so a near-expiry token is
@@ -531,19 +543,41 @@ _OAUTH2_REFRESH_MARGIN_SECONDS = 30.0
 _OAUTH2_DEFAULT_TTL_SECONDS = 60.0
 
 
+def _oauth2_token_endpoint(auth: AuthSpec) -> str:
+    """Return the token endpoint the ``oauth2_mint`` login POSTs to.
+
+    The profile's absolute ``auth.token_url`` when set (an issuer whose host
+    differs from the target; #3571), else the target-relative
+    :data:`_OAUTH2_TOKEN_PATH` default — byte-identical to today's keycloak
+    parity. The pooled ``httpx.AsyncClient`` resolves an absolute URL as-is
+    (its target ``base_url`` applies only to a relative path), so the same
+    ``client.post(...)`` seam dials either endpoint with no harness change.
+    """
+    return auth.token_url or _OAUTH2_TOKEN_PATH
+
+
 def _oauth2_mint_body(auth: AuthSpec, secret: Mapping[str, str]) -> dict[str, str]:
     """Build the OAuth2 client-credentials grant form body.
 
     ``grant_type=client_credentials`` with ``client_id`` / ``client_secret``
     from the secret bundle the profile declared. Form-encoded by the
     ``oauth2_mint`` spec's ``encoding="form"`` — Keycloak's token endpoint
-    does not accept JSON.
+    does not accept JSON. When the profile declares ``auth.scope`` /
+    ``auth.audience`` (only meaningful for an external issuer that requires
+    them), they are forwarded verbatim as the ``scope`` / ``audience`` form
+    parameters; both default to absent, so the keycloak-parity body is
+    byte-identical to today (#3571).
     """
-    return {
+    body = {
         "grant_type": "client_credentials",
         "client_id": _require_field(secret, "client_id", scheme="oauth2_mint"),
         "client_secret": _require_field(secret, "client_secret", scheme="oauth2_mint"),
     }
+    if auth.scope is not None:
+        body["scope"] = auth.scope
+    if auth.audience is not None:
+        body["audience"] = auth.audience
+    return body
 
 
 def _extract_oauth2_token(payload: Any) -> SessionToken | None:
@@ -607,7 +641,7 @@ SESSION_SCHEME_SPECS: dict[str, SessionSchemeSpec] = {
         token_value_kind="bearer",
     ),
     "oauth2_mint": SessionSchemeSpec(
-        login_path=lambda _auth: _OAUTH2_TOKEN_PATH,
+        login_path=_oauth2_token_endpoint,
         login_credentials="body",
         encoding="form",
         build_body=_oauth2_mint_body,

@@ -87,7 +87,21 @@ def test_auth_spec_has_no_dsl_fields() -> None:
     fails this test loudly.
     """
     fields = set(AuthSpec.model_fields)
-    assert fields == {"scheme", "secret_fields", "header_name", "value_kind"}
+    # The oauth2_mint external-issuer fields (token_url/scope/audience, #3571)
+    # name *where* the token is minted and *what* scope/audience the grant
+    # carries — a single absolute endpoint + two opaque strings, never a
+    # path/template/expression the substrate would interpret. They stay on
+    # the right side of the #1177 line, so they are added to the expected
+    # set rather than to `forbidden`.
+    assert fields == {
+        "scheme",
+        "secret_fields",
+        "header_name",
+        "value_kind",
+        "token_url",
+        "scope",
+        "audience",
+    }
     forbidden = {
         "token_location",
         "field_map",
@@ -194,6 +208,141 @@ def test_value_kind_forbidden_for_non_static_header() -> None:
 def test_value_kind_literal_closed() -> None:
     with pytest.raises(ValidationError):
         AuthSpec(scheme="static_header", secret_fields=("token",), value_kind="custom")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------
+# oauth2_mint external-issuer fields (token_url / scope / audience, #3571)
+# --------------------------------------------------------------------------
+
+_EXTERNAL_ISSUER_URL = "https://idp.example.test/realms/example/protocol/openid-connect/token"
+
+
+def test_oauth2_mint_defaults_have_no_external_issuer_fields() -> None:
+    """Omitting the new fields keeps the byte-identical target-relative mint."""
+    spec = AuthSpec(scheme="oauth2_mint", secret_fields=("client_id", "client_secret"))
+    assert spec.token_url is None
+    assert spec.scope is None
+    assert spec.audience is None
+
+
+def test_oauth2_mint_accepts_external_issuer_fields() -> None:
+    """An external https issuer + scope + audience validate on oauth2_mint."""
+    spec = AuthSpec(
+        scheme="oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+        scope="svc",
+        audience="downstream-api",
+    )
+    assert spec.token_url == _EXTERNAL_ISSUER_URL
+    assert spec.scope == "svc"
+    assert spec.audience == "downstream-api"
+
+
+@pytest.mark.parametrize("field", ["token_url", "scope", "audience"])
+@pytest.mark.parametrize("scheme", ["basic", "static_header", "session_login"])
+def test_external_issuer_fields_forbidden_on_non_oauth2_scheme(field: str, scheme: str) -> None:
+    """token_url/scope/audience are rejected on every scheme but oauth2_mint."""
+    auth: dict[str, object] = {"scheme": scheme, "secret_fields": ("token",)}
+    if scheme == "static_header":
+        auth["value_kind"] = "bearer"
+    auth[field] = _EXTERNAL_ISSUER_URL if field == "token_url" else "v"
+    with pytest.raises(ValidationError, match=r"only.*valid for the oauth2_mint scheme"):
+        AuthSpec(**auth)  # type: ignore[arg-type]
+
+
+def test_token_url_allows_https_public_host() -> None:
+    AuthSpec(
+        scheme="oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://keycloak:8080/realms/example/protocol/openid-connect/token",
+        "http://kc.svc.cluster.local/token",
+        "http://kc.internal/token",
+        "http://10.1.2.3/token",
+        "http://127.0.0.1:8080/token",
+        "http://[::1]:8080/token",
+    ],
+)
+def test_token_url_allows_http_for_internal_host(url: str) -> None:
+    """Plaintext http is accepted only for a cluster-internal / private issuer."""
+    spec = AuthSpec(
+        scheme="oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=url,
+    )
+    assert spec.token_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://idp.example.test/token",  # dotted public FQDN
+        "http://8.8.8.8/token",  # globally-routable public IP
+    ],
+)
+def test_token_url_rejects_http_for_public_host(url: str) -> None:
+    with pytest.raises(ValidationError, match="must use https for a public host"):
+        AuthSpec(
+            scheme="oauth2_mint",
+            secret_fields=("client_id", "client_secret"),
+            token_url=url,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/realms/example/protocol/openid-connect/token",  # relative, not absolute
+        "ftp://idp.example.test/token",  # non-http(s) scheme
+        "https:///token",  # no host
+        "   ",  # blank
+    ],
+)
+def test_token_url_rejects_non_absolute_http_url(url: str) -> None:
+    with pytest.raises(ValidationError):
+        AuthSpec(
+            scheme="oauth2_mint",
+            secret_fields=("client_id", "client_secret"),
+            token_url=url,
+        )
+
+
+@pytest.mark.parametrize("field", ["scope", "audience"])
+def test_scope_audience_reject_blank(field: str) -> None:
+    with pytest.raises(ValidationError, match="non-blank"):
+        AuthSpec(
+            scheme="oauth2_mint",
+            secret_fields=("client_id", "client_secret"),
+            **{field: "   "},
+        )
+
+
+def test_boot_guard_passes_for_external_issuer_profile() -> None:
+    """The startup-load scheme guard accepts a profile carrying the new fields."""
+    profile = ExecutionProfile(
+        product="acme",
+        version="1",
+        auth=AuthSpec(
+            scheme="oauth2_mint",
+            secret_fields=("client_id", "client_secret"),
+            token_url=_EXTERNAL_ISSUER_URL,
+            scope="svc",
+            audience="downstream-api",
+        ),
+        fingerprint=_FINGERPRINT,
+        probe="delegate",
+        pagination=_PAGINATION,
+    )
+    # Does not raise — the guard partitions on scheme only; the optional
+    # fields are transparent to it.
+    validate_execution_profile(profile)
 
 
 # --------------------------------------------------------------------------

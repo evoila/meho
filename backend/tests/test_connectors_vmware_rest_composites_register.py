@@ -51,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     performance_summary_composite,
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
@@ -241,7 +242,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # network.portgroup.security.set + the content-library import
     # vm.import_from_library #3229). (The former host.network_uplinks /
     # host.vsan_health reads were re-shipped as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 51
+    assert stub_embedding_service.encode_one.call_count == len(_COMPOSITES)
 
 
 @pytest.mark.asyncio
@@ -510,7 +511,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 51
+    assert first_count == len(_COMPOSITES)
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

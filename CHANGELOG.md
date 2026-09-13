@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Connector-advertised safety floor for VMware REST generic operations: VM hardware writes, VM create/delete, and VM power writes now ingest as `dangerous` and `requires_approval`. The vendor-specific matching rules live with the VMware connector and the ordinary OpenAPI parser stays vendor-neutral. Existing catalog rows take the corrected posture on their next connector re-ingest (`POST /api/v1/connectors/ingest`) — deployment alone does not rewrite stored descriptors, and re-ingest never weakens a stricter reviewed safety tier, approval requirement, enablement, or review state. (#3563 / #3564)
+- vSphere 9.0 ingested catalog guarded against unqualified targets: an enabled `vmware-rest` 9.0 ingested descriptor dispatched against a non-`vmware` target or a target whose version falls outside `>=9,<10` (missing, invalid, or 8.0.x) now returns the structured error `unqualified_target_version` before policy or approval, with one synchronous audit row and no connector constructed. The dispatcher resolves the descriptor owner's exact v2 registry identity and calls a connector-owned, vendor-neutral compatibility hook; VMware supplies the PEP 440 target predicate. Typed and composite operations are unaffected, and a 9.x match is not a claim that every operation is qualified. (#3565 / #3568)
+
+  **Operator upgrade note (release that ships #3565).** After the 9.0 catalog target guard (#3565), a target below 9.x served by the 9.0 catalog fails with `unqualified_target_version` for every enabled ingested `vmware-rest` op until an 8.x catalog is ingested. Ingest the `vmware-rest-8.0` catalog (`meho connector ingest --catalog vmware/8.0`) to restore governed generic operations on fingerprinted 8.0.x targets; typed and composite ops are unaffected either way.
+
+### Added
+
+- `vmware-rest-8.0` catalog registered beside the 9.0 catalog (dual-impl per #3038): a `VmwareRest80Connector` thin subclass advertises the disjoint band `>=8.0,<8.1`, so the fingerprint-first resolver selects it for 8.0.x targets (versioned beats the shared product wildcard) while 9.x targets keep resolving to `vmware-rest-9.0`. The #3565 compatibility guard is now boundary-per-catalog (the 8.0 class rejects targets outside `>=8.0,<8.1`; the 9.0 guard is byte-identical), and the `(product, impl_id)` VM-write safety floor (#3563 / #3564) applies to the 8.0 catalog's ingested rows too. A MEHO-authored 8.0 U3 minimal OpenAPI spec ships as package data with a `vmware/8.0` catalog row; the vendor 8.0 U3 spec is recorded as an acquisition gap in the compatibility manifest (the `vsphere-8.x` artifact stays `availability: unavailable`). Operators ingest the catalog with `meho connector ingest --catalog vmware/8.0` then enable `vmware-rest-8.0`. (#3569 / #3580)
+
 ## [0.34.3] - 2026-09-12
 
 ### Added

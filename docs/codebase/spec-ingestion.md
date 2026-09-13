@@ -244,6 +244,14 @@ T2 (#1976) authored the real artifacts:
 * `vmware/9.0` → `specs/vmware_rest_minimal.yaml` (9 vCenter inventory
   read ops under `/api`) + `profiles/vmware_rest_minimal.yaml`
   (`session_login` auth, `/api/about` fingerprint).
+* `vmware/8.0` → `specs/vmware_rest_8_0_minimal.yaml` +
+  `profiles/vmware_rest_8_0_minimal.yaml` (#3569). The 8.0 U3 sibling of
+  the 9.0 row: the same 9 inventory read ops (the 8.0 U3 and 9.0 REST read
+  shapes match) with `info.version: "8.0.3"`, dispatched by
+  `VmwareRest80Connector` — a second versioned catalog registered beside
+  `vmware/9.0` (dual-impl) so fingerprinted 8.0.x targets keep a governed
+  generic path after the 9.0 catalog's target guard. Same
+  `session_login` auth and `/api/about` fingerprint as 9.0.
 * `sddc/9.0` → `specs/sddc_manager_minimal.yaml` (9 SDDC Manager
   inventory + lifecycle read ops under `/v1`) +
   `profiles/sddc_manager_minimal.yaml` (`basic` auth,

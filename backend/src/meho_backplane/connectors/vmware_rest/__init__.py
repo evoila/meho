@@ -41,6 +41,7 @@ from meho_backplane.connectors.registry import register_connector_v2
 # import lifecycle as this connector's v2 and typed-operation registrations.
 from meho_backplane.connectors.vmware_rest import ingest_safety as _ingest_safety  # noqa: F401
 from meho_backplane.connectors.vmware_rest.connector import (
+    VmwareRest80Connector,
     VmwareRestConnector,
     product_from_line_id,
 )
@@ -56,6 +57,21 @@ register_connector_v2(
     version="9.0",
     impl_id="vmware-rest",
     cls=VmwareRestConnector,
+)
+
+# Second versioned catalog for the ``vmware-rest`` implementation (#3569),
+# under the dual-impl policy (#3038): the 8.0 catalog serves fingerprinted
+# 8.0.x targets that the 9.0 catalog's #3565 guard rejects. Registered as
+# the versioned triple only -- the ``(vmware, "", "")`` wildcard below stays
+# owned by :class:`VmwareRestConnector`, so an 8.0.x target resolves to this
+# class via ``versioned_over_wildcard`` and the 9.0 class keeps the wildcard.
+# Endpoint-descriptor rows for the ingested 8.0 U3 catalog land under
+# ``connector_id="vmware-rest-8.0"``.
+register_connector_v2(
+    product="vmware",
+    version="8.0",
+    impl_id="vmware-rest",
+    cls=VmwareRest80Connector,
 )
 
 # G0.15-T6 (#1215) wildcard fallback -- the K8s sibling pattern fanned
@@ -102,6 +118,7 @@ register_typed_op_registrar(register_vmware_typed_operations)
 __all__ = [
     "VMWARE_TYPED_OPS",
     "SessionCredentials",
+    "VmwareRest80Connector",
     "VmwareRestConnector",
     "VsphereSessionLoader",
     "VsphereTargetLike",

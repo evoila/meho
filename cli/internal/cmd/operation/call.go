@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -44,6 +45,8 @@ type CallResult struct {
 	DurationMs float64         `json:"duration_ms"`
 }
 
+var workRefPattern = regexp.MustCompile(`^gh:[^/[:space:]]+/[^#[:space:]]+#[1-9][0-9]*$`)
+
 // newCallCmd returns the `meho operation call` command.
 //
 // CLI shape:
@@ -51,6 +54,7 @@ type CallResult struct {
 //	meho operation call <connector_id> <op_id> \
 //	  [--target <slug>]                        # target name (required for ops that read a target)
 //	  [--params '<json>' | @<file>]            # operation params (object)
+//	  [--work-ref gh:<owner>/<repo>#<n>]       # external change-ticket reference
 //	  [--preview-hash <hash>]                  # destructive-tier binding from `operation preview` (#3197)
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
@@ -67,6 +71,7 @@ func newCallCmd() *cobra.Command {
 	var (
 		targetName        string
 		paramsFlag        string
+		workRef           string
 		previewHash       string
 		jsonOut           bool
 		backplaneOverride string
@@ -106,6 +111,7 @@ func newCallCmd() *cobra.Command {
 				OpID:              args[1],
 				TargetName:        targetName,
 				ParamsFlag:        paramsFlag,
+				WorkRef:           workRef,
 				PreviewHash:       previewHash,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -116,6 +122,8 @@ func newCallCmd() *cobra.Command {
 		"target slug to dispatch against (required for ops that read a target)")
 	cmd.Flags().StringVar(&paramsFlag, "params", "",
 		"operation params as inline JSON or @<file>; omitted means no params")
+	cmd.Flags().StringVar(&workRef, "work-ref", "",
+		"external change-ticket reference for this dispatch's audit and approval rows (e.g. gh:evoila/meho#13)")
 	cmd.Flags().StringVar(&previewHash, "preview-hash", "",
 		"preview_hash from a prior `meho operation preview` — required for a destructive-tier op (#3197)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
@@ -130,12 +138,17 @@ type callOptions struct {
 	OpID              string
 	TargetName        string
 	ParamsFlag        string
+	WorkRef           string
 	PreviewHash       string
 	JSONOut           bool
 	BackplaneOverride string
 }
 
 func runCall(cmd *cobra.Command, opts callOptions) error {
+	if opts.WorkRef != "" && !workRefPattern.MatchString(opts.WorkRef) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("--work-ref must match gh:<owner>/<repo>#<n>"), opts.JSONOut)
+	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
@@ -244,6 +257,10 @@ func postCall(
 	if params != nil {
 		p := params
 		body.Params = &p
+	}
+	if opts.WorkRef != "" {
+		wr := opts.WorkRef
+		body.WorkRef = &wr
 	}
 	// Thread the destructive-tier preview binding (#3197). Left nil when
 	// --preview-hash is unset so a bare call stays byte-identical to the

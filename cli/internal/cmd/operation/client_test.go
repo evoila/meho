@@ -520,6 +520,75 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 	}
 	if f.lastResultQueryBody == nil || f.lastResultQueryBody.HandleId.String() != handleID {
 		t.Fatalf("result-query did not receive the rendered handle; got %+v", f.lastResultQueryBody)
+// TestPostCallWorkRefSetWhenSupplied proves --work-ref reaches the typed
+// dispatch body so the backplane can stamp it on approval and audit rows.
+func TestPostCallWorkRefSetWhenSupplied(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	const workRef = "gh:evoila/meho#3545"
+	opts := callOptions{
+		ConnectorID: "vault-1.x",
+		OpID:        "vault.kv.read",
+		WorkRef:     workRef,
+	}
+	if _, err := postCall(context.Background(), f, opts, nil); err != nil {
+		t.Fatalf("postCall: %v", err)
+	}
+	if f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != workRef {
+		t.Fatalf("work_ref not threaded through; got %+v", f.lastCallBody.WorkRef)
+	}
+}
+
+// TestRunCallForwardsValidWorkRef exercises the cobra flag through the real
+// command path and into the generated CallOperationBody.
+func TestRunCallForwardsValidWorkRef(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{Status: "ok", OpID: "vault.kv.read", DurationMs: 1})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"vault-1.x", "vault.kv.read", "--work-ref", "gh:evoila/meho#3545", "--backplane", "https://x",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if f.lastCallBody.WorkRef == nil || *f.lastCallBody.WorkRef != "gh:evoila/meho#3545" {
+		t.Fatalf("work_ref not forwarded from flag; got %+v", f.lastCallBody.WorkRef)
+	}
+}
+
+// TestRunCallRejectsMalformedWorkRefBeforeRequest ensures bad ticket syntax
+// fails locally rather than issuing a dispatch without trustworthy linkage.
+func TestRunCallRejectsMalformedWorkRefBeforeRequest(t *testing.T) {
+	f := &fakeOperationsClient{}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	var errBuf bytes.Buffer
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{
+		"vault-1.x", "vault.kv.read", "--work-ref", "not-a-ticket", "--backplane", "https://x",
+	})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("malformed work ref should return a command error")
+	}
+	if !strings.Contains(errBuf.String(), "--work-ref must match gh:<owner>/<repo>#<n>") {
+		t.Fatalf("expected work-ref validation message; got %q", errBuf.String())
+	}
+	if f.lastCallBody != nil {
+		t.Fatalf("malformed work ref must fail before dispatch; got %+v", f.lastCallBody)
 	}
 }
 

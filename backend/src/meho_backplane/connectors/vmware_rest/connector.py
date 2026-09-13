@@ -96,6 +96,7 @@ import httpx
 import structlog
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import ParseError, fromstring
+from packaging.version import InvalidVersion, Version
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -107,6 +108,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -419,6 +421,35 @@ class VmwareRestConnector(HttpConnector):
     version = "9.0"
     impl_id = "vmware-rest"
     supported_version_range = ">=8.5,<10.0"
+    enforces_catalog_target_compatibility = True
+
+    @classmethod
+    def catalog_target_incompatibility(
+        cls,
+        *,
+        descriptor_source_kind: str,
+        target_product: str | None,
+        target_version: str | None,
+        selected_target_connector: type[Connector] | None,
+    ) -> str | None:
+        """Guard the ingested vSphere 9 catalog without qualifying 8.x routes."""
+        del cls
+        if descriptor_source_kind != "ingested":
+            return None
+        if target_product != "vmware":
+            return "target product is not vmware"
+        if target_version is None:
+            return "target version is missing"
+        try:
+            version = Version(target_version)
+        except InvalidVersion:
+            return "target version is invalid"
+        if not Version("9") <= version < Version("10"):
+            return "target version is outside the supported 9.x catalog boundary"
+        if selected_target_connector is None:
+            return "target connector could not be resolved"
+        return None
+
     # Outranks the GenericRestConnector auto-shim's priority=0 if both
     # somehow register for the same triple; the idempotency check in
     # ensure_connector_class_registered should make this unreachable

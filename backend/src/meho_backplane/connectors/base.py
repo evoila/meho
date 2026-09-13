@@ -96,6 +96,29 @@ class Connector(ABC):
     # :data:`ShimKind`.
     _shim_kind: ShimKind = "none"
 
+    #: Opt-in for a connector-owned check that compares an ingested catalog
+    #: descriptor with a resolved target before dispatch policy runs. The
+    #: default keeps existing connectors and descriptor kinds unchanged.
+    enforces_catalog_target_compatibility: bool = False
+
+    @classmethod
+    def catalog_target_incompatibility(
+        cls,
+        *,
+        descriptor_source_kind: str,
+        target_product: str | None,
+        target_version: str | None,
+        selected_target_connector: type["Connector"] | None,
+    ) -> str | None:
+        """Return an operator-safe reason when a catalog cannot serve a target.
+
+        The dispatcher supplies only descriptor source metadata and pure
+        target-resolution facts. Connector packages own any vendor-specific
+        predicate; returning ``None`` permits normal policy and execution.
+        """
+        del cls, descriptor_source_kind, target_product, target_version, selected_target_connector
+        return None
+
     @abstractmethod
     async def fingerprint(
         self,

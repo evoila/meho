@@ -135,15 +135,20 @@ Microsoft CA integration requires a SAN certificate (KB 454242).
    <pinned-after> --same-lineage --output <shelf>/comparisons/<pair>.json` and
    `uv run python scripts/validate_vcf_api_contract_manifest.py --manifest
    ../docs/compatibility/vcf-api-contract-manifest.yaml`.
-2. **Descriptor-to-target contract check.** Add catalog profile metadata in
-   `backend/src/meho_backplane/operations/dispatcher.py` and target matching in
-   `backend/src/meho_backplane/targets/resolver.py`, with pre-dispatch
-   compatibility tests in `backend/tests/test_operations_dispatcher.py` and
-   `backend/tests/test_connectors_resolver.py` for a caller descriptor and target class.
-   Prove 8.0.1/2/3 versus 9.x accepts compatible shared handlers and rejects
-   incompatible descriptor paths. This is independent of #3047 and #3518.
-   Verify with `uv run pytest tests/test_connectors_resolver.py -q` and focused
-   dispatcher tests.
+2. **Descriptor-to-target contract check.** The dispatcher obtains the caller
+   descriptor's owner from the v2 registry tuple, resolves the target class
+   through `backend/src/meho_backplane/connectors/resolver.py`, and asks the
+   owner class's vendor-neutral compatibility hook before policy or transport.
+   VMware owns the initial bounded predicate: enabled ingested
+   `vmware-rest` 9.0 rows return the stable
+   `unqualified_target_version` structured error (and one synchronous audit
+   row) unless the target is `vmware` with a normalized version in `>=9,<10`.
+   Missing, invalid, 8.x, and other non-9 targets neither park for approval
+   nor construct a connector. A 9.x result only avoids this rejection; it is
+   not a claim that every operation is qualified. Package 3 owns complete
+   catalog deltas. Typed/composite dispatch, VI JSON/base-path and target
+   capability boundaries remain unchanged. Verify with `uv run pytest
+   tests/test_connectors_resolver.py tests/test_operations_dispatcher.py -q`.
 3. **Versioned catalog profiles and operation gates.** Implement vSphere
    REST/VI JSON 8.x/9.x and NSX 4.x/9 profiles in
    `backend/src/meho_backplane/connectors/vmware_rest/` and

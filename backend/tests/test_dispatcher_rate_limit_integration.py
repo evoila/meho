@@ -44,7 +44,17 @@ def _operator() -> Operator:
 @pytest.fixture
 def stub_dispatch_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
     """Stub the dispatcher seams reached before + at the #3500 limit block."""
-    descriptor = SimpleNamespace(source_kind="typed", parameter_schema={}, op_id="svc.read")
+    # Match the descriptor identity the dispatcher receives from storage.
+    # This unadvertised typed row must pass directly to the limit block;
+    # catalog-owner guards are opt-in and ingested-only.
+    descriptor = SimpleNamespace(
+        product="svc",
+        version="1.0",
+        impl_id="svc",
+        source_kind="typed",
+        parameter_schema={},
+        op_id="svc.read",
+    )
     monkeypatch.setattr(dispatcher, "lookup_descriptor", AsyncMock(return_value=descriptor))
     monkeypatch.setattr(dispatcher, "validate_params", lambda schema, params: [])
     monkeypatch.setattr(

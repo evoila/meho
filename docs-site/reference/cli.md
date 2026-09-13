@@ -3137,6 +3137,7 @@ meho operation call <connector_id> <op_id> [flags]
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
 - `--preview-hash` — preview_hash from a prior `meho operation preview` — required for a destructive-tier op
 - `--target` — target slug to dispatch against (required for ops that read a target)
+- `--work-ref` — external change-ticket reference for this dispatch's audit and approval rows
 
 ### `meho operation groups`
 

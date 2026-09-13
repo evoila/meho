@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import (
@@ -39,6 +40,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (
     build_vm_info_retrieve_params,
     vm_info_impl,
 )
+from meho_backplane.operations._errors import result_connector_not_found, status_code_for_result
 from meho_backplane.operations._validate import validate_params
 
 
@@ -163,6 +165,19 @@ _POWERED_ON_NO_IP = {
         ],
     },
 }
+
+_MANAGED_OBJECT_NOT_FOUND_FAULT = """<?xml version="1.0"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:vim="urn:vim25"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soapenv:Body>
+    <soapenv:Fault>
+      <faultcode>ServerFaultCode</faultcode>
+      <faultstring>The object 'vim.VirtualMachine:vm-42' has already been deleted.</faultstring>
+      <detail><vim:ManagedObjectNotFound xsi:type="vim:ManagedObjectNotFound" /></detail>
+    </soapenv:Fault>
+  </soapenv:Body>
+</soapenv:Envelope>"""
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +326,45 @@ async def test_vm_info_property_read_failure_propagates() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         await vm_info_impl(conn, _make_operator(), _Target(), {"vm": "vm-42"})
+
+
+def test_retrieve_properties_managed_object_not_found_maps_to_structured_result() -> None:
+    """The HTTP 500 fault is parsed before the dispatcher sees HTTPX's error."""
+    response = httpx.Response(
+        500,
+        text=_MANAGED_OBJECT_NOT_FOUND_FAULT,
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.0"),
+    )
+    error = httpx.HTTPStatusError("upstream fault", request=response.request, response=response)
+
+    with pytest.raises(ConnectorResourceNotFoundError) as raised:
+        VmwareRestConnector._raise_managed_object_not_found(
+            error,
+            "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+            build_vm_info_retrieve_params("vm-42"),
+        )
+
+    result = result_connector_not_found("vmware.vm.info", raised.value, duration_ms=1.0)
+    assert result.status == "not_found"
+    assert result.extras["error_code"] == "not_found"
+    assert result.extras["resource_id"] == "vm-42"
+    assert result.extras["resource_ids"] == ["vm-42"]
+    assert status_code_for_result(result.status) == 404
+
+
+def test_retrieve_properties_non_fault_500_stays_http_error() -> None:
+    response = httpx.Response(
+        500,
+        text="vCenter is temporarily unavailable",
+        request=httpx.Request("POST", "https://vc.test.invalid/sdk/vim25/9.0"),
+    )
+    error = httpx.HTTPStatusError("upstream failure", request=response.request, response=response)
+
+    VmwareRestConnector._raise_managed_object_not_found(
+        error,
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+        build_vm_info_retrieve_params("vm-42"),
+    )
 
 
 @pytest.mark.asyncio

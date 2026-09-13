@@ -22,7 +22,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``connector_error``.
+``not_found`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -41,6 +41,7 @@ import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -54,6 +55,7 @@ __all__ = [
     "result_connector_error",
     "result_connector_http_403",
     "result_connector_http_422",
+    "result_connector_not_found",
     "result_connector_probe_refused",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -792,6 +794,25 @@ def result_connector_error(
         status="error",
         op_id=op_id,
         error=f"connector_error: {type(exc).__name__}",
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_not_found(
+    op_id: str,
+    exc: ConnectorResourceNotFoundError,
+    duration_ms: float,
+) -> OperationResult:
+    """Return a connector-confirmed missing-resource result."""
+    resource_ids = list(exc.resource_ids)
+    extras: dict[str, Any] = {"error_code": "not_found", "resource_ids": resource_ids}
+    if len(resource_ids) == 1:
+        extras["resource_id"] = resource_ids[0]
+    return OperationResult(
+        status="not_found",
+        op_id=op_id,
+        error=f"not_found: {_sanitize_free_text(str(exc))}",
         duration_ms=duration_ms,
         extras=extras,
     )
@@ -1948,4 +1969,6 @@ def status_code_for_result(result_status: str) -> int:
         return 429
     if result_status == "pending":
         return 202
+    if result_status == "not_found":
+        return 404
     return 500

@@ -108,7 +108,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -188,6 +188,27 @@ _SESSION_HEADER = "vmware-api-session-id"
 # shared :data:`SESSION_TOKEN_OBJECT_KEY` so the typed and profiled
 # (``session_login_basic``) extractors can't drift apart (#2047).
 _SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
+
+
+def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
+    """Return the addressed MoIDs from a ``RetrievePropertiesEx`` body."""
+    if not isinstance(body, dict):
+        return []
+    resource_ids: list[str] = []
+    for spec in body.get("specSet", []):
+        if not isinstance(spec, dict):
+            continue
+        for object_spec in spec.get("objectSet", []):
+            if not isinstance(object_spec, dict):
+                continue
+            obj = object_spec.get("obj")
+            if not isinstance(obj, dict):
+                continue
+            value = obj.get("value")
+            if isinstance(value, str) and value:
+                resource_ids.append(value)
+    return resource_ids
+
 
 # Session endpoints + the spec-relative-op → /api-or-/rest mount
 # mapping live in ``._mount`` (extracted to keep this module within
@@ -695,24 +716,28 @@ class VmwareRestConnector(HttpConnector):
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
             legacy_path = mounted_path(session_path, vmomi_path)
-            return await self._post_json(target, legacy_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target, legacy_path, vmomi_path, operator, json
+            )
 
         api_path = mounted_path(session_path, vmomi_path)
         version = await self._about_version(target, operator)
         release = vmomi_release_from_version(version)
         if release is None:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(target, api_path, vmomi_path, operator, json)
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
         try:
-            return await self._post_json(target, vijson_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target, vijson_path, vmomi_path, operator, json
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
         # Single fallback to the /api-mounted vmomi form (the observed 9.x
         # accommodation); if that also 404s, surface both attempts.
         try:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(target, api_path, vmomi_path, operator, json)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(
@@ -720,6 +745,58 @@ class VmwareRestConnector(HttpConnector):
                     f"on vCenter {version}"
                 ) from exc
             raise
+
+    async def _post_vmomi_json_at_path(
+        self,
+        target: VsphereTargetLike,
+        path: str,
+        vmomi_path: str,
+        operator: Operator,
+        body: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """POST one VI-JSON path and promote its explicit missing-object fault."""
+        try:
+            return await self._post_json(target, path, operator=operator, json=body)
+        except httpx.HTTPStatusError as exc:
+            self._raise_managed_object_not_found(exc, vmomi_path, body)
+            raise
+
+    @staticmethod
+    def _raise_managed_object_not_found(
+        exc: httpx.HTTPStatusError,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Promote a vim ``ManagedObjectNotFound`` read fault.
+
+        VI-JSON reports vim faults as HTTP 500, so status alone cannot
+        distinguish a deleted object from a transient vCenter failure.  Parse
+        the SOAP-shaped fault body first and only map the explicit vim fault
+        on the shared ``RetrievePropertiesEx`` read seam.
+        """
+        fault = parse_soap_fault(exc.response.text)
+        VmwareRestConnector._raise_managed_object_not_found_fault(fault, vmomi_path, body)
+
+    @staticmethod
+    def _raise_managed_object_not_found_fault(
+        fault: SoapFault | None,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Raise the generic missing-resource signal for one parsed vim fault."""
+        if not vmomi_path.endswith("/RetrievePropertiesEx"):
+            return
+        if fault is None or fault.fault_type != "ManagedObjectNotFound":
+            return
+        resource_ids = _retrieve_properties_resource_ids(body)
+        if not resource_ids:
+            return
+        noun = "resource" if len(resource_ids) == 1 else "resources"
+        identifiers = ", ".join(repr(resource_id) for resource_id in resource_ids)
+        raise ConnectorResourceNotFoundError(
+            resource_ids,
+            f"vSphere {noun} {identifiers} was not found (ManagedObjectNotFound)",
+        )
 
     async def _about_version(self, target: VsphereTargetLike, operator: Operator) -> str | None:
         """Return *target*'s version string for the VI-JSON ``{release}`` segment.
@@ -1201,6 +1278,7 @@ class VmwareRestConnector(HttpConnector):
         resp = await self._soap_post(client, envelope, extensions, soap_action=soap_action)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
+            self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
             raise self._soap_fault_error(fault, target, message=message)
         resp.raise_for_status()

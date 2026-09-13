@@ -164,7 +164,12 @@ from meho_backplane.connectors.vmware_rest.soap_pbm import (
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
-__all__ = ["VmwareRestConnector", "product_from_line_id", "service_versions_api_version"]
+__all__ = [
+    "VmwareRest80Connector",
+    "VmwareRestConnector",
+    "product_from_line_id",
+    "service_versions_api_version",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -423,6 +428,18 @@ class VmwareRestConnector(HttpConnector):
     supported_version_range = ">=8.5,<10.0"
     enforces_catalog_target_compatibility = True
 
+    #: Ingested-catalog target boundary this connector qualifies. The guard
+    #: rejects an ingested dispatch whose fingerprinted target version falls
+    #: outside ``[floor, ceiling)``. The 9.0 class owns the 9.x line;
+    #: :class:`VmwareRest80Connector` overrides these three attributes for the
+    #: 8.0.x line so each versioned catalog advertises its own bounded
+    #: predicate instead of sharing the 9.x boundary. Keeping the boundary on
+    #: the class (not hard-coded in the method) is what lets the dual-impl
+    #: sibling reuse the guard without loosening it for the 9.0 catalog.
+    _catalog_version_floor = Version("9")
+    _catalog_version_ceiling = Version("10")
+    _catalog_version_band_label = "9.x"
+
     @classmethod
     def catalog_target_incompatibility(
         cls,
@@ -432,8 +449,13 @@ class VmwareRestConnector(HttpConnector):
         target_version: str | None,
         selected_target_connector: type[Connector] | None,
     ) -> str | None:
-        """Guard the ingested vSphere 9 catalog without qualifying 8.x routes."""
-        del cls
+        """Guard an ingested vSphere catalog against an unqualified target.
+
+        The boundary is per-catalog: the 9.0 class qualifies the 9.x line,
+        the 8.0 subclass the 8.0.x line. A dispatch whose descriptor is owned
+        by this class but whose fingerprinted target falls outside the class's
+        ``[floor, ceiling)`` is rejected before any connector is constructed.
+        """
         if descriptor_source_kind != "ingested":
             return None
         if target_product != "vmware":
@@ -444,8 +466,11 @@ class VmwareRestConnector(HttpConnector):
             version = Version(target_version)
         except InvalidVersion:
             return "target version is invalid"
-        if not Version("9") <= version < Version("10"):
-            return "target version is outside the supported 9.x catalog boundary"
+        if not cls._catalog_version_floor <= version < cls._catalog_version_ceiling:
+            return (
+                "target version is outside the supported "
+                f"{cls._catalog_version_band_label} catalog boundary"
+            )
         if selected_target_connector is None:
             return "target connector could not be resolved"
         return None
@@ -2293,3 +2318,37 @@ class VmwareRestConnector(HttpConnector):
                     session_path=revoke_path,
                 )
         await super().aclose()
+
+
+class VmwareRest80Connector(VmwareRestConnector):
+    """vSphere REST connector for fingerprinted 8.0.x vCenter / ESXi targets.
+
+    Second versioned catalog for the ``vmware-rest`` implementation,
+    registered as ``(product="vmware", version="8.0", impl_id="vmware-rest")``
+    beside the 9.0 catalog under the dual-impl policy: both implementations
+    register against the same product and the resolver selects one per target
+    by fingerprint. Endpoint-descriptor rows for the ingested 8.0 U3 catalog
+    live under ``connector_id="vmware-rest-8.0"``.
+
+    Everything but the version identity and the ingested-catalog boundary is
+    inherited from :class:`VmwareRestConnector`: session auth, dispatch, and
+    the ``vmware-rest`` safety floor (keyed on ``(product, impl_id)``, so it
+    covers this class's ingested writes too). ``supported_version_range``
+    covers the fingerprinted 8.0.x line only and is disjoint from the base
+    class's ``>=8.5,<10.0`` band, so an 8.0.x target resolves here (versioned
+    beats the product wildcard) while the 9.0 catalog's guard keeps rejecting
+    it. The catalog-boundary attributes narrow the inherited guard to the
+    8.0.x line, so an ingested dispatch against an 8.0.3 target is not
+    rejected with ``unqualified_target_version``.
+
+    Scope is the 8.0 U3 catalog: the band covers the whole 8.0.x fingerprint
+    line so no 8.0.x target is stranded, while the pinned catalog evidence in
+    the VCF API contract manifest qualifies 8.0 U3 only (it does not claim
+    8.0 U1 / U2 or a general all-8.x qualification).
+    """
+
+    version = "8.0"
+    supported_version_range = ">=8.0,<8.1"
+    _catalog_version_floor = Version("8.0")
+    _catalog_version_ceiling = Version("8.1")
+    _catalog_version_band_label = "8.0.x"

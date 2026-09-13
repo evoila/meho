@@ -513,6 +513,22 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 2. Importing `meho_backplane.connectors.vmware_rest` triggers the
    module-level `register_connector_v2(product="vmware", version="9.0",
    impl_id="vmware-rest", cls=VmwareRestConnector)` call.
+2b. The same import also registers the **second versioned catalog**
+   `register_connector_v2(product="vmware", version="8.0",
+   impl_id="vmware-rest", cls=VmwareRest80Connector)` (#3569, dual-impl
+   #3038) plus the shared product wildcard `(vmware, "", "")` owned by
+   `VmwareRestConnector`. `VmwareRest80Connector` is a thin subclass of
+   `VmwareRestConnector` (`version="8.0"`,
+   `supported_version_range=">=8.0,<8.1"`, and the ingested-catalog guard
+   boundary narrowed to the 8.0.x line via the
+   `_catalog_version_floor`/`_catalog_version_ceiling`/`_catalog_version_band_label`
+   attributes). The bands are disjoint (8.0 catalog `>=8.0,<8.1`; 9.0
+   catalog `>=8.5,<10.0`), so a fingerprinted 8.0.x target resolves to
+   `vmware-rest-8.0` (versioned beats the wildcard) and a 9.x target to
+   `vmware-rest-9.0`. Ingested rows for the 8.0 U3 catalog land under
+   `connector_id="vmware-rest-8.0"`; the shared `(product, impl_id)` safety
+   floor covers them identically. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls

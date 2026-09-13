@@ -1380,13 +1380,111 @@ async def test_vm_nic_repoint_preview_reads_backing_and_resolves_portgroup() -> 
             "network": "dvportgroup-1",
             "network_name": "old-net",
         },
-        "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+        "requested_backing": {
+            "portgroup_id": "dvportgroup-9",
+            "portgroup_name": "prod-net",
+            "backing_type": "DISTRIBUTED_PORTGROUP",
+        },
     }
     assert recorder.specs == [
         "/vcenter/vm/vm-1",
         "/vcenter/vm/vm-1/hardware/ethernet/4000",
         "/vcenter/network",
     ]
+
+
+async def test_vm_nic_repoint_preview_standard_portgroup_resolves_name() -> None:
+    """The NIC preview reflects backing_type=STANDARD_PORTGROUP and resolves the name."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {
+                        "type": "DISTRIBUTED_PORTGROUP",
+                        "network": "dvportgroup-1",
+                        "network_name": "old-net",
+                    },
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "network-1001",
+                        "name": "mgmt-standard-pg",
+                        "type": "STANDARD_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "nic": "4000",
+                "portgroup_name": "mgmt-standard-pg",
+                "backing_type": "STANDARD_PORTGROUP",
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["current_backing"]["network"] == "dvportgroup-1"
+    assert preview["requested_backing"] == {
+        "portgroup_id": "network-1001",
+        "portgroup_name": "mgmt-standard-pg",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_nic_repoint_preview_explicit_network_moid() -> None:
+    """The preview honours an explicit network moid (validate-by-moid, no name resolve)."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-1"},
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {"network": "network-1002", "name": "svc-net", "type": "STANDARD_PORTGROUP"}
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "nic": "4000",
+                "portgroup_name": "svc-net",
+                "backing_type": "STANDARD_PORTGROUP",
+                "network": "network-1002",
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["requested_backing"] == {
+        "portgroup_id": "network-1002",
+        "portgroup_name": "svc-net",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    # The network read filtered by moid (filter.networks -> bare on /api), never by name.
+    net_read = next(q for spec, q in recorder.read_calls if spec == "/vcenter/network")
+    assert net_read == {"networks": ["network-1002"]}
 
 
 async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
@@ -1519,7 +1617,11 @@ async def test_vm_nic_repoint_park_carries_network_from_to_pair(
             "nic": "4000",
             "mac_address": "aa:bb",
             "current_backing": {"type": "STANDARD_PORTGROUP"},
-            "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+            "requested_backing": {
+                "portgroup_id": "dvportgroup-9",
+                "portgroup_name": "prod-net",
+                "backing_type": "DISTRIBUTED_PORTGROUP",
+            },
         },
         "preview_populated": True,
         "safety_level": "dangerous",

@@ -980,7 +980,7 @@ enum) are:
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
-| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
+| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 
 `vm.create` is the only composite that issues a compensating
@@ -1011,12 +1011,23 @@ a host-pinning ISO:
   the operator gets a typed status instead of a raw vCenter 400.
 - **`vm.nic.repoint`** reads the NIC's current backing + MAC via
   `GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, resolves the target
-  distributed portgroup by display name via
-  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`, then PATCHes
+  portgroup by display name via
+  `GET:/vcenter/network?filter.types=<backing_type>`, then PATCHes
   `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}` with
-  `{backing: {type: DISTRIBUTED_PORTGROUP, network: <moid>}}`. A name
-  that matches zero / many portgroups refuses the repoint
-  (`not_found` / `ambiguous`) with no PATCH issued.
+  `{backing: {type: backing_type, network: <moid>}}` — the same internal
+  sub-op the `host.detach_from_vds` fallback path uses. `backing_type` is
+  `DISTRIBUTED_PORTGROUP` (default, back-compatible) or
+  `STANDARD_PORTGROUP`; the latter moves a NIC onto a host-local
+  standard-switch portgroup (e.g. to repair a NIC stranded on an L2 that
+  cannot reach its gateway). Standard portgroups are host-scoped, so one
+  display name routinely resolves to several `Network` moids (one per
+  host) and the REST Automation API exposes no reliable VM->host mapping,
+  so an ambiguous name fails closed (`ambiguous`, candidate moids listed)
+  and the operator supplies the exact moid via the `network` param. An
+  explicit `network` moid skips name resolution and is validated for
+  existence + type-consistency with `backing_type` (`invalid_request` on
+  mismatch); a name matching zero portgroups returns `not_found`. No PATCH
+  is issued on any non-`repointed` status.
 - **`vm.device.cdrom`** reads the device's current backing + state via
   `GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}` (surfacing a host-local
   ISO path the approver needs to see), then dispatches the `action`:
@@ -1955,7 +1966,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
-| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
+| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |

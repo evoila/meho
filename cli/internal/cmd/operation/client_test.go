@@ -520,6 +520,9 @@ func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
 	}
 	if f.lastResultQueryBody == nil || f.lastResultQueryBody.HandleId.String() != handleID {
 		t.Fatalf("result-query did not receive the rendered handle; got %+v", f.lastResultQueryBody)
+	}
+}
+
 // TestPostCallWorkRefSetWhenSupplied proves --work-ref reaches the typed
 // dispatch body so the backplane can stamp it on approval and audit rows.
 func TestPostCallWorkRefSetWhenSupplied(t *testing.T) {

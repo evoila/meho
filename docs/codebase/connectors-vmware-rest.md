@@ -1252,16 +1252,30 @@ different vim fields for two different clustering models:
   its own locking (e.g. Oracle RAC, or a clustered filesystem). It is a disk
   property, independent of the controller's bus-sharing.
 
-Both require `eagerzeroedthick` disks. For a WSFC/FCI node: create the OS
-separately (or clone from a template), give each node a dedicated
-`physical`-bus-sharing controller with the EZT shared disks (`vm.create`
-`scsi_bus_sharing="physical"` + `provisioning="eagerzeroedthick"` on the first
-node), then `vm.disk.attach` the same VMDKs onto the second node at the
-identical `controller_key`/`unit_number`. Leave `sharing="none"` for WSFC —
-reach for `multi_writer` only when the guest application (not SCSI-3 PR) owns
-the locking. (`vm.create` currently folds shared disks at create time; adding
-a newly-created EZT shared disk to an *already-provisioned* VM is a follow-up,
-not in this task's scope.)
+**Choose the storage mechanism before applying those knobs.** The VMware
+guidance distinguishes two shared-disk paths; they do not share a universal
+EZT or datastore-flag requirement (vSAN 8.0 documentation; vSphere 8.0,
+Table 568).
+
+- **VMFS clustered VMDK.** This path requires `eagerzeroedthick` shared disks,
+  FC or NVMe-FC connectivity (and NVMe-TCP on 8.0 U3), and the datastore's
+  Clustered VMDK flag. Use the physical SCSI-bus-sharing controller for the
+  WSFC/SQL FCI reservation model.
+- **vSAN native shared VMDK.** This path is provisioned through the vSAN
+  storage policy, including Object Space Reservation where required. Any disk
+  type is allowed; there is no VMFS-style datastore Clustered VMDK flag to
+  set on vSAN.
+
+The shared operational recipe is the same after selecting the applicable
+mechanism: create the OS separately (or clone from a template), give each node
+a dedicated `physical`-bus-sharing controller, create the shared disks on the
+first node with that mechanism's provisioning requirements, then
+`vm.disk.attach` the same VMDKs onto the second node at identical
+`controller_key`/`unit_number`. Leave `sharing="none"` for WSFC — reach for
+`multi_writer` only when the guest application, rather than SCSI-3 PR, owns
+locking. (`vm.create` currently folds shared disks at create time; adding a
+newly-created shared disk to an *already-provisioned* VM is a follow-up, not
+in this task's scope.)
 
 The `vm.disk.attach` park-time preview is a param-echo (`{vm, vmdk_path,
 controller_key, unit_number, sharing}`) — the params fully name the blast

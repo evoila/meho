@@ -55,7 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
-from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors import OperationResult, resolve_connector
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -1454,13 +1454,21 @@ async def test_vmware_ingested_catalog_guard_rejects_before_policy_and_transport
         impl_id="vmware-rest",
         cls=_VmwareGuardHttpConnector,
     )
+    # Production registers this v1-shaped fallback beside the 9.0 entry.
+    # It deliberately resolves a known 8.x target after the versioned range
+    # excludes it; the catalog guard must still reject before construction.
+    register_connector("vmware", _VmwareGuardHttpConnector)
     await _add_vmware_guard_descriptor(session)
+
+    target = _FakeTarget(product=product, version=version)
+    if product == "vmware" and version in {"8.0", "8.0.3"}:
+        assert resolve_connector(target) is _VmwareGuardHttpConnector
 
     result = await dispatch(
         operator=_make_operator(principal_kind=PrincipalKind.AGENT),
         connector_id="vmware-rest-9.0",
         op_id="POST:/api/vcenter/vm/example",
-        target=_FakeTarget(product=product, version=version),
+        target=target,
         params={},
     )
 

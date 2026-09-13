@@ -131,3 +131,27 @@ def test_comparator_classifies_openapi_content_media_type_changes() -> None:
     assert result["changed"] == [
         {"operation_id": "POST:/things/{id}", "fields": ["request", "media_types"]}
     ]
+
+
+def test_comparator_classifies_referenced_openapi_content_media_types() -> None:
+    before = _document()
+    after = _document()
+    for document, media_type in ((before, "application/json"), (after, "application/xml")):
+        document["components"]["requestBodies"] = {
+            "Request": {"content": {media_type: {"schema": {"type": "string"}}}}
+        }
+        document["components"]["responses"] = {
+            "Ok": {"description": "ok", "content": {media_type: {"schema": {"type": "string"}}}}
+        }
+        operation = document["paths"]["/things/{id}"]["post"]
+        operation["requestBody"] = {"$ref": "#/components/requestBodies/Request"}
+        operation["responses"] = {"200": {"$ref": "#/components/responses/Ok"}}
+
+    result = catalog_diff.compare_catalogs(before, after, same_lineage=True)
+
+    assert result["changed"] == [
+        {
+            "operation_id": "POST:/things/{id}",
+            "fields": ["request", "responses", "media_types"],
+        }
+    ]

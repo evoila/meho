@@ -111,11 +111,13 @@ def _request_shape(document: Mapping[str, Any], operation: Mapping[str, Any]) ->
     ]
 
 
-def _openapi_content_media_types(operation: Mapping[str, Any]) -> dict[str, Any]:
+def _openapi_content_media_types(
+    document: Mapping[str, Any], operation: Mapping[str, Any]
+) -> dict[str, Any]:
     """Return OAS3 request and response content media types by location."""
-    request_body = operation.get("requestBody", {})
+    request_body = dereference(document, operation.get("requestBody", {}))
     request_content = request_body.get("content", {}) if isinstance(request_body, Mapping) else {}
-    responses = operation.get("responses", {})
+    responses = dereference(document, operation.get("responses", {}))
     response_content = (
         {
             str(status): sorted(content)
@@ -185,7 +187,7 @@ def _operation_record(
         "media_types": {
             "consumes": operation.get("consumes", document.get("consumes", [])),
             "produces": operation.get("produces", document.get("produces", [])),
-            "openapi_content": _openapi_content_media_types(operation)
+            "openapi_content": _openapi_content_media_types(document, operation)
             if "openapi" in document
             else {},
         },

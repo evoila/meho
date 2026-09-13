@@ -488,6 +488,41 @@ func TestPostCallParamsNilWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestReducedCallResultRendersHandleAndResultQueryAcceptsIt(t *testing.T) {
+	const handleID = "11111111-1111-1111-1111-111111111111"
+	result := &CallResult{
+		Status: "ok", OpID: "vmware.vm.list", DurationMs: 12,
+		Result: json.RawMessage(`{"row_count":60,"sample":[{"name":"vm-1"}]}`),
+		Handle: json.RawMessage(`{"handle_id":"` + handleID + `","total_rows":60}`),
+		Extras: json.RawMessage(`{"flight_recorder_trace_handle":{"handle_id":"22222222-2222-2222-2222-222222222222"}}`),
+	}
+	var rendered bytes.Buffer
+	printCallResult(&rendered, "vmware-rest-9.0", "vmware.vm.list", result)
+	if !strings.Contains(rendered.String(), "result handle:") || !strings.Contains(rendered.String(), handleID) {
+		t.Fatalf("human render must expose the result handle id; got %q", rendered.String())
+	}
+
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal call result: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"handle":{"handle_id":"`+handleID+`"`)) ||
+		!bytes.Contains(raw, []byte(`"flight_recorder_trace_handle"`)) {
+		t.Fatalf("--json envelope must retain both handles; got %s", raw)
+	}
+
+	queryResponse, _ := json.Marshal(ResultQueryResult{HandleID: handleID})
+	f := &fakeOperationsClient{resultQueryResponses: []*api.PostResultQueryApiV1OperationsResultQueryPostResponse{{
+		HTTPResponse: makeHTTPResp(200), Body: queryResponse,
+	}}}
+	if _, err := postResultQuery(context.Background(), f, makeHandleUUID(t, handleID), 0, 50, nil); err != nil {
+		t.Fatalf("result-query must accept the rendered handle: %v", err)
+	}
+	if f.lastResultQueryBody == nil || f.lastResultQueryBody.HandleId.String() != handleID {
+		t.Fatalf("result-query did not receive the rendered handle; got %+v", f.lastResultQueryBody)
+	}
+}
+
 // TestPostCallRefreshOn401 — same one-shot refresh dance as
 // TestGetGroupsRefreshesOn401AndRetries, exercised through postCall.
 func TestPostCallRefreshOn401(t *testing.T) {

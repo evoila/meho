@@ -38,6 +38,7 @@ type CallResult struct {
 	Status     string          `json:"status"`
 	OpID       string          `json:"op_id"`
 	Result     json.RawMessage `json:"result"`
+	Handle     json.RawMessage `json:"handle,omitempty"`
 	Error      *string         `json:"error"`
 	Extras     json.RawMessage `json:"extras,omitempty"`
 	DurationMs float64         `json:"duration_ms"`
@@ -282,10 +283,19 @@ func printCallResult(w io.Writer, connectorID, opID string, r *CallResult) {
 			pretty, err := prettyJSON(r.Result)
 			if err == nil {
 				fmt.Fprintln(w, pretty)
-				return
+			} else {
+				// Fallback: raw bytes when pretty-printing failed.
+				fmt.Fprintln(w, string(r.Result))
 			}
-			// Fallback: raw bytes when pretty-printing failed.
-			fmt.Fprintln(w, string(r.Result))
+		}
+		if len(r.Handle) > 0 && string(r.Handle) != "null" {
+			fmt.Fprintln(w, "result handle:")
+			pretty, err := prettyJSON(r.Handle)
+			if err == nil {
+				fmt.Fprintln(w, pretty)
+			} else {
+				fmt.Fprintln(w, string(r.Handle))
+			}
 		}
 		return
 	}

@@ -1069,6 +1069,10 @@ narrow-waist contract.
   `api.CallOperationBody.PreviewHash`; left nil when unset so a bare
   call is byte-identical to the pre-#3197 wire shape. Ignored by the
   dispatcher for every non-destructive op.
+- Reduced set-shaped call results retain their envelope-level `handle` in both
+  render modes. The human renderer labels it `result handle`; its
+  `handle_id` is the UUID accepted by `meho operation result-query`. This is
+  distinct from any `flight_recorder_trace_handle` in `extras`.
 
 ### HTTP shape
 

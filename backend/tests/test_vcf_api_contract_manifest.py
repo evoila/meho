@@ -88,7 +88,7 @@ def test_vcf_regression_subsets_match_registered_sddc_and_vmware_operations() ->
             "must be a lowercase SHA-256",
         ),
         (
-            lambda data: data["artifacts"]["vsphere-8.x"].__setitem__(
+            lambda data: data["artifacts"]["vcf-5x-bom"].__setitem__(
                 "catalog", {"paths": 0, "operations": 0, "schemas": 0}
             ),
             "must not invent catalog counts",

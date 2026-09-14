@@ -643,6 +643,17 @@ additive generic facility: a descriptor without `result_objects` retains the
 existing bookkeeping-only reduced summary, and the full collection remains
 retrievable through `result_query`.
 
+For typed descriptors with an explicit response schema, a top-level array plus
+two or more named outcome fields (`handshake`, `reachable`, `reason`,
+`success`, `ok`, `healthy`, `status`, `state`, `resultStatus`, or
+`executionStatus`) is a verdict-plus-collection result. Every such outcome
+field must appear in `result_scalars.keys`; the registry conformance test runs
+the complete typed registrar set and rejects omissions. A lone `status` does
+not qualify because it can describe an opaque vendor state rather than an
+outcome. `result_objects` does not persist arbitrary sibling objects: a full
+bounded value is available through `result_query` only if that object aliases
+the collection that was spilled, as `leaf` aliases `chain[0]` for TLS.
+
 For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 

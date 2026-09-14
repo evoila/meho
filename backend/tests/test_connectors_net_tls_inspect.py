@@ -614,16 +614,6 @@ async def test_tls_inspect_registered_as_safe_ungated_typed_op(
     assert schema["properties"]["hostname_match"]["type"] == "boolean"
     assert schema["properties"]["chain_complete"]["type"] == "boolean"
     assert "fingerprint_sha256" in schema["properties"]["chain"]["items"]["properties"]
-    # Registry-level contract: any registered descriptor whose schema pairs
-    # the TLS verdict fields with a collection must preserve those verdicts.
-    verdict_fields = {"handshake", "reason", "days_to_expiry", "hostname_match", "chain_complete"}
-    collection_fields = {
-        name
-        for name, definition in schema["properties"].items()
-        if isinstance(definition, dict) and definition.get("type") == "array"
-    }
-    assert collection_fields
-    assert verdict_fields <= set(row.llm_instructions["result_scalars"]["keys"])
 
 
 def test_tls_inspect_classifies_as_read() -> None:

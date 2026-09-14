@@ -338,6 +338,7 @@ _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "reading: the op fails with error_code='connector_probe_refused' "
         "and nothing was dialed."
     ),
+    "result_scalars": {"keys": ["reachable", "reason", "status"]},
 }
 
 

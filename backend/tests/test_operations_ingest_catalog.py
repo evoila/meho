@@ -517,7 +517,7 @@ def test_shipped_vmware_sddc_rows_are_profile_backed(
 @pytest.mark.parametrize(
     ("spec_resource", "expected_ops", "needle_path"),
     [
-        ("vmware_rest_minimal.yaml", 9, "GET:/api/vcenter/vm"),
+        ("vmware_rest_minimal.yaml", 9, "GET:/vcenter/vm"),
         ("sddc_manager_minimal.yaml", 9, "GET:/v1/sddc-managers"),
     ],
 )

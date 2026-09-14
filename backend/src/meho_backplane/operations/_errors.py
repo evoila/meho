@@ -22,7 +22,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``not_found`` / ``connector_error``.
+``not_found`` / ``connector_timeout`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -813,6 +813,56 @@ def result_connector_not_found(
         status="not_found",
         op_id=op_id,
         error=f"not_found: {_sanitize_free_text(str(exc))}",
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_timeout(
+    op_id: str,
+    exc: httpx.TransportError,
+    duration_ms: float,
+) -> OperationResult:
+    """Return a structured timeout or other HTTP transport-fault result.
+
+    ``httpx`` exposes a per-request timeout map through the request extension.
+    A non-timeout transport failure has no truthful phase, so it is labelled
+    ``transport`` and carries no configured phase timeout.
+    """
+    phase_by_type: tuple[tuple[type[httpx.TimeoutException], str], ...] = (
+        (httpx.ConnectTimeout, "connect"),
+        (httpx.ReadTimeout, "read"),
+        (httpx.WriteTimeout, "write"),
+        (httpx.PoolTimeout, "pool"),
+    )
+    phase = "transport"
+    for timeout_type, candidate in phase_by_type:
+        if isinstance(exc, timeout_type):
+            phase = candidate
+            break
+    configured_timeout: float | None = None
+    try:
+        request = exc.request
+    except RuntimeError:
+        request = None
+    extensions = getattr(request, "extensions", None)
+    if isinstance(extensions, Mapping):
+        timeout = extensions.get("timeout")
+        if isinstance(timeout, Mapping):
+            value = timeout.get(phase)
+            if isinstance(value, (int, float)):
+                configured_timeout = float(value)
+    extras: dict[str, Any] = {
+        "error_code": "connector_timeout",
+        "phase": phase,
+        "exception_class": type(exc).__name__,
+        "configured_timeout": configured_timeout,
+        "exception_message": _sanitize_free_text(str(exc)),
+    }
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"connector_timeout: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
     )

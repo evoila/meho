@@ -1066,7 +1066,7 @@ async def test_oauth2_mint_external_issuer_does_not_log_secret_or_token() -> Non
 # value carried in Vault, never a constant in the shipped profile)
 # ---------------------------------------------------------------------------
 
-_CRED_ISSUER_URL = "https://realm.example.test/realms/evba/protocol/openid-connect/token"
+_CRED_ISSUER_URL = "https://realm.example.test/realms/example/protocol/openid-connect/token"
 
 
 @pytest.mark.asyncio

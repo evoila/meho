@@ -241,6 +241,9 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.tools import (
         doc_collections_delete as doc_collections_delete_tool,
     )
+    from meho_backplane.mcp.tools import (
+        doc_collections_update as doc_collections_update_tool,
+    )
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
 
@@ -298,6 +301,13 @@ def isolated_registry() -> Iterator[None]:
     # unregistered in any test file that imports this fixture after the
     # first one runs in the process.
     importlib.reload(doc_collections_delete_tool)
+    # #3601: the ``update_doc_collections`` registry in-place-update tool
+    # lives in a separate module (mirroring ``doc_collections_create`` /
+    # ``_delete``) so it joins the reload list for the same reason every
+    # other tool module does -- the autouse ``clear_registries()`` above
+    # would otherwise leave it unregistered in any test file that imports
+    # this fixture after the first one runs in the process.
+    importlib.reload(doc_collections_update_tool)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
     # #2485: the guarded node hard-delete tool

@@ -390,9 +390,9 @@ table can never silently drift from the code:
   reclassification or an un-pinned addition fails CI at the listing path
   a client actually observes.
 
-Counts: **25 working + 53 operator + 1 pairing-gated automation =
-79 registered tools**, plus the **3 human-only verbs** (below) that
-carry no MCP registration under any claim set. The 25 working and 53
+Counts: **25 working + 54 operator + 1 pairing-gated automation =
+80 registered tools**, plus the **3 human-only verbs** (below) that
+carry no MCP registration under any claim set. The 25 working and 54
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single
@@ -462,6 +462,7 @@ session (on top of the Role + Extra-gate columns).
 |---|---|---|---|
 | `create_doc_collections` | tenant_admin | `meho-docs` | Register a new documentation collection for search routing. |
 | `delete_doc_collections` | tenant_admin | `meho-docs` | Deregister a disabled, tenant-owned documentation collection. |
+| `update_doc_collections` | tenant_admin | `meho-docs` | Repoint an existing collection's backend ref (and other mutable fields) in place; a global row also needs `platform_admin`. |
 | `meho_agent_principals_list` | operator | — | List agent principals registered for the tenant. |
 | `meho_agent_principals_register` | tenant_admin | — | Register a new agent principal. |
 | `meho_agent_principals_revoke` | tenant_admin | — | Revoke an agent principal (kill switch). |

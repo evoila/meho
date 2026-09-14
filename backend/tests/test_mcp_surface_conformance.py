@@ -71,12 +71,13 @@ _DOCS_CAPABILITY = "meho-docs"
 _DOCS_WORKING_TOOLS: frozenset[str] = frozenset({"search_docs", "ask_docs", "list_doc_collections"})
 
 #: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the
-#: three working docs tools plus the two operator-surface doc-collection
+#: three working docs tools plus the three operator-surface doc-collection
 #: lifecycle tools. All drop out when the capability is absent, so an
-#: elevated session without ``meho-docs`` loses all five.
+#: elevated session without ``meho-docs`` loses all six.
 _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
+    "update_doc_collections",
 }
 
 #: The **pairing-gated** automation family (Task #3029). Unlike the docs
@@ -188,6 +189,7 @@ OPERATOR_SURFACE_SORTED: tuple[str, ...] = (
     "meho_topology_delete_node",
     "meho_topology_unannotate",
     "query_audit",
+    "update_doc_collections",
 )
 
 #: The full elevated listing (working + operator), sorted — what an

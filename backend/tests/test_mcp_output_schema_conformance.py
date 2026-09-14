@@ -85,6 +85,7 @@ _COVERED_TOOLS: frozenset[str] = frozenset(
         "meho_automation_list",
         "create_doc_collections",
         "delete_doc_collections",
+        "update_doc_collections",
         "list_doc_collections",
         "list_operation_groups",
         "list_targets",
@@ -423,6 +424,41 @@ async def test_delete_doc_collections_conforms(
         _call(client, "delete_doc_collections", {"collection_key": "vmware"}),
     )
     assert payload == {"collection_key": "vmware"}
+
+
+@pytest.mark.parametrize(
+    "custom_client",
+    [
+        {
+            "role": TenantRole.TENANT_ADMIN,
+            "capabilities": frozenset({_DOCS_CAPABILITY}),
+        }
+    ],
+    indirect=True,
+)
+async def test_update_doc_collections_conforms(
+    custom_client: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    client, _op = custom_client
+    await seed_doc_collection(collection_key="vmware", status="ready", tenant_id=OPERATOR_TENANT_ID)
+    payload = _assert_conforms(
+        "update_doc_collections",
+        _call(
+            client,
+            "update_doc_collections",
+            {
+                "collection_key": "vmware",
+                "backend": {
+                    "type": "corpus-http",
+                    "ref": {"endpoint": "https://corpus-new.test/v1/search"},
+                },
+            },
+        ),
+    )
+    assert payload["collection_key"] == "vmware"
+    # A backend change resets the row to provisioning for a re-probe.
+    assert payload["status"] == "provisioning"
 
 
 # ---------------------------------------------------------------------------

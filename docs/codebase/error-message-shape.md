@@ -501,13 +501,16 @@ set).
   `build_version_mismatch_detail` /
   `build_uncovered_version_label_detail` lifted into a shared module
   so REST and MCP emit the same shape.
-- **Transport faults (#3407):** HTTPX timeout and network failures return
+- **Transport faults (#3407):** HTTPX TimeoutException and non-ConnectError
+  TransportError failures return
   `error_code="connector_timeout"` with `phase` (`connect`, `read`, `write`,
   `pool`, or `transport` when it cannot be known), `exception_class`, the
   request's `configured_timeout` for a known phase (otherwise `null`), and
   `duration_ms`. The summary remains greppable as
   `connector_timeout: <ExceptionClass>`; TLS verification keeps its dedicated
-  `connector_tls_verify_failed` envelope. Flight-recorder spans remain #3408.
+  `connector_tls_verify_failed` envelope, while other ConnectError failures
+  retain their established `connector_error` envelope. Flight-recorder spans
+  remain #3408.
 - **Sibling Tasks that cite this doc:**
   T1 [#1142](https://github.com/evoila/meho/issues/1142) (dispatcher),
   T5 [#1146](https://github.com/evoila/meho/issues/1146) (feed),

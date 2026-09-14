@@ -1182,7 +1182,7 @@ async def _run_branch_with_error_handling(
         conn_result = (
             result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
             if is_tls_verify_failure
-            else result_connector_timeout(op_id, conn_exc, duration_ms)
+            else result_connector_error(op_id, conn_exc, duration_ms)
         )
         return await _audit_error_and_return(
             conn_result,

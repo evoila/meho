@@ -207,6 +207,55 @@ def test_parse_petstore_30_safety_heuristic() -> None:
     assert ops["HEAD:/pets/{petId}/photos"].safety_level == "safe"
 
 
+def test_parse_vim_destructive_actions_raise_tier_and_require_approval() -> None:
+    """VIM's POST-shaped destructive methods cannot rely on HTTP verb alone."""
+    rows = parse_openapi(
+        "file:///vi-json-safety.yaml",
+        content="""
+openapi: 3.1.0
+info: {title: VIM safety fixture, version: '1.0'}
+paths:
+  /VirtualMachine/{moId}/Destroy_Task:
+    post:
+      operationId: VirtualMachine.Destroy_Task
+      responses: {'200': {description: accepted}}
+  /Datastore/{moId}/DeleteDatastoreFile_Task:
+    post:
+      operationId: DeleteDatastoreFile_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/RemoveSnapshot_Task:
+    post:
+      operationId: VirtualMachine.RemoveSnapshot_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Unregister:
+    post:
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Reset_Task:
+    post:
+      operationId: VirtualMachine.Reset_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Destroyer_Task:
+    post:
+      operationId: VirtualMachine.Destroyer_Task
+      responses: {'200': {description: accepted}}
+""",
+    )
+    ops = _by_op_id(rows)
+
+    for op_id in (
+        "POST:/VirtualMachine/{moId}/Destroy_Task",
+        "POST:/Datastore/{moId}/DeleteDatastoreFile_Task",
+        "POST:/VirtualMachine/{moId}/RemoveSnapshot_Task",
+        "POST:/VirtualMachine/{moId}/Unregister",
+    ):
+        assert ops[op_id].safety_level == "dangerous"
+        assert ops[op_id].requires_approval is True
+
+    assert ops["POST:/VirtualMachine/{moId}/Reset_Task"].safety_level == "caution"
+    assert ops["POST:/VirtualMachine/{moId}/Reset_Task"].requires_approval is False
+    assert ops["POST:/VirtualMachine/{moId}/Destroyer_Task"].safety_level == "caution"
+
+
 # -- parse_openapi: YAML 1.1 timestamp typing (#2272) ----------------------
 
 

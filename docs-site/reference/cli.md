@@ -910,6 +910,25 @@ Manage broadcast-detail overrides (overrides list / set / remove)
 meho broadcast
 ```
 
+### `meho broadcast announce`
+
+Publish a governed broadcast announcement
+
+```
+meho broadcast announce <activity> [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit JSON
+- `--phase` — start, update, or completion
+- `--planned-op-class` — declared operation class
+- `--run-id` — agent run UUID
+- `--scope` — announcement scope
+- `--target` — target name
+- `--targets` — target names
+- `--ttl-minutes` — claim TTL in minutes (1-1440)
+- `--work-ref` — external work reference
+
 ### `meho broadcast overrides`
 
 List, create, and delete broadcast-detail override rules
@@ -955,6 +974,39 @@ meho broadcast overrides set [flags]
 - `--op-id-pattern` — op_id glob (e.g. "vault.kv.*" or "k8s.configmap.info"); regex chars are rejected
 - `--scope-field` — scope field (one of: namespace, target_name); leave empty for an op-wide rule
 - `--scope-value` — scope value (e.g. "kube-system"); required when --scope-field is set
+
+### `meho broadcast recent`
+
+Read recent broadcast events for the operator's tenant
+
+```
+meho broadcast recent [flags]
+```
+
+- `--active-only` — exclude expired TTL claims
+- `--actor-sub` — exact delegated-agent filter
+- `--backplane` — backplane URL
+- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--json` — emit JSON
+- `--limit` — maximum events (1-1000)
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
+- `--work-ref` — exact work-reference filter
+
+### `meho broadcast watch`
+
+Tail the tenant broadcast SSE feed
+
+```
+meho broadcast watch [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit each event as JSON
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
 
 ## `meho connector`
 

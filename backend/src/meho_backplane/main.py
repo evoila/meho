@@ -78,6 +78,7 @@ from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.automation import router as api_v1_automation_router
+from meho_backplane.api.v1.broadcast import router as api_v1_broadcast_router
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
@@ -916,6 +917,10 @@ app.include_router(api_v1_topology_router)
 # from the JWT's tenant_id claim so cross-tenant subscription is
 # impossible by construction.
 app.include_router(api_v1_feed_router)
+# #3470 -- REST adapters for the broadcast working surface. The JSON history
+# and announce routes share the strict MCP reader/publisher seams; watch uses
+# the existing /api/v1/feed SSE route above.
+app.include_router(api_v1_broadcast_router)
 # #3079 -- async governed dispatch handle surface at
 # /api/v1/operations/runs*. Registered BEFORE the operations router so the
 # literal ``/runs`` list route wins over that router's ``/{descriptor_id}``

@@ -91,6 +91,15 @@ _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
 #: carried the family.
 _AUTOMATION_GATED_TOOLS: frozenset[str] = frozenset({"meho_automation_list"})
 
+# The broadcast working surface has a one-to-one operator CLI counterpart.
+# Keep this explicit manifest beside the MCP listing pin so a broadcast tool
+# cannot be added or renamed without its matching `meho broadcast` verb.
+_BROADCAST_WORKING_SURFACE_CLI_VERBS: dict[str, str] = {
+    "meho_broadcast_recent": "meho broadcast recent",
+    "meho_broadcast_announce": "meho broadcast announce",
+    "meho_broadcast_watch": "meho broadcast watch",
+}
+
 #: The default working surface, as the exact sorted listing a ``tools/list``
 #: response carries for a session that clears role + capability but is NOT
 #: ``mcp:admin``-elevated. This literal is the conformance snapshot; it is
@@ -242,6 +251,17 @@ def test_pinned_surfaces_are_sorted_and_unique() -> None:
     for pinned in (WORKING_SURFACE_SORTED, OPERATOR_SURFACE_SORTED, FULL_SURFACE_SORTED):
         assert list(pinned) == sorted(pinned)
         assert len(pinned) == len(set(pinned))
+
+
+def test_broadcast_working_surface_has_cli_parity() -> None:
+    """Every broadcast working-surface tool has its documented CLI verb."""
+    broadcast_tools = {
+        name for name in WORKING_SURFACE_SORTED if name.startswith("meho_broadcast_")
+    }
+    assert set(_BROADCAST_WORKING_SURFACE_CLI_VERBS) == broadcast_tools
+    assert all(
+        verb.startswith("meho broadcast ") for verb in _BROADCAST_WORKING_SURFACE_CLI_VERBS.values()
+    )
 
 
 def test_pinned_surfaces_partition_the_live_registry() -> None:

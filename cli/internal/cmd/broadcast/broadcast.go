@@ -59,17 +59,17 @@ func NewRootCmd() *cobra.Command {
 		Long:         broadcastLongHelp,
 		SilenceUsage: true,
 	}
+	cmd.AddCommand(newRecentCmd())
+	cmd.AddCommand(newAnnounceCmd())
+	cmd.AddCommand(newWatchCmd())
 	cmd.AddCommand(newOverridesCmd())
 	return cmd
 }
 
-const broadcastLongHelp = "Tenant-admin verbs for managing per-tenant broadcast-detail " +
-	"override rules. The rules feed the publish-time resolver (G6.3-T2 #379) " +
-	"that decides whether each broadcast event renders full-detail or " +
-	"aggregate-only. Every verb is tenant_admin-only; non-admin callers " +
-	"see 403 insufficient_role. Cross-tenant probes (DELETE on another " +
-	"tenant's id) return 404 -- existence is not leaked across tenant " +
-	"boundaries."
+const broadcastLongHelp = "Read, announce, and watch tenant broadcast activity, or manage " +
+	"tenant-admin detail overrides. Recent and announce use the same governed " +
+	"history and publish paths as the MCP working-surface tools; watch tails the " +
+	"existing authenticated SSE feed. Override verbs are tenant_admin-only."
 
 // newOverridesCmd returns the `meho broadcast overrides` parent.
 func newOverridesCmd() *cobra.Command {

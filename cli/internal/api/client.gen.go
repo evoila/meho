@@ -3423,6 +3423,7 @@ type ConnectorSpecEntry struct {
 	CatalogIngest              *ConnectorSpecEntryCatalogIngest `json:"catalog_ingest,omitempty"`
 	ImplId                     string                           `json:"impl_id"`
 	Notes                      *string                          `json:"notes,omitempty"`
+	OpAllowlist                *[]OpAllowlistEntry              `json:"op_allowlist"`
 	Product                    string                           `json:"product"`
 	ProfileResource            *string                          `json:"profile_resource"`
 	RequiresConnectorClass     string                           `json:"requires_connector_class"`
@@ -4266,6 +4267,17 @@ type DraftTemplateResponse struct {
 	Slug    string `json:"slug"`
 	Status  string `json:"status"`
 	Version int    `json:"version"`
+}
+
+// DroppedOpModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.op_allowlist.DroppedOp`.
+//
+// One operation the product's declared ingest op allowlist excluded
+// before persistence (security review T3-F01) — surfaced so the operator
+// sees exactly what an ingest of a wider spec dropped.
+type DroppedOpModel struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 // EditGroupBody PATCH body for “/api/v1/connectors/{id}/groups/{key}“.
@@ -5139,7 +5151,9 @@ type IngestJobStatusResponse struct {
 	// an extra ``connector_id`` echo for round-trip clarity.
 	// ``safety_changes`` (#2702) is additive with an empty-list default,
 	// so pre-existing clients see no shape change on ingests that
-	// reclassify nothing.
+	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
+	// likewise additive with empty defaults — ``0`` / ``[]`` for every
+	// product that declares no ingest op allowlist.
 	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
 	JobId     openapi_types.UUID            `json:"job_id"`
 	Product   *string                       `json:"product"`
@@ -5287,7 +5301,9 @@ type IngestResponse struct {
 	// an extra ``connector_id`` echo for round-trip clarity.
 	// ``safety_changes`` (#2702) is additive with an empty-list default,
 	// so pre-existing clients see no shape change on ingests that
-	// reclassify nothing.
+	// reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
+	// likewise additive with empty defaults — ``0`` / ``[]`` for every
+	// product that declares no ingest op allowlist.
 	Ingestion IngestionResultModel `json:"ingestion"`
 }
 
@@ -5300,10 +5316,14 @@ type IngestResponse struct {
 // an extra “connector_id“ echo for round-trip clarity.
 // “safety_changes“ (#2702) is additive with an empty-list default,
 // so pre-existing clients see no shape change on ingests that
-// reclassify nothing.
+// reclassify nothing. “dropped_count“ / “dropped_ops“ (T3-F01) are
+// likewise additive with empty defaults — “0“ / “[]“ for every
+// product that declares no ingest op allowlist.
 type IngestionResultModel struct {
 	ConnectorId         string               `json:"connector_id"`
 	ConnectorRegistered bool                 `json:"connector_registered"`
+	DroppedCount        *int                 `json:"dropped_count,omitempty"`
+	DroppedOps          *[]DroppedOpModel    `json:"dropped_ops,omitempty"`
 	InsertedCount       int                  `json:"inserted_count"`
 	OperationsGrouped   bool                 `json:"operations_grouped"`
 	SafetyChanges       *[]SafetyChangeModel `json:"safety_changes,omitempty"`
@@ -5652,6 +5672,23 @@ type NextStepRequest struct {
 // NextStepRequest_VerifyResponse defines model for NextStepRequest.VerifyResponse.
 type NextStepRequest_VerifyResponse struct {
 	union json.RawMessage
+}
+
+// OpAllowlistEntry One “(method, path)“ an ingested connector's op set is closed to.
+//
+// Declarative half of the per-product ingest op allowlist (security
+// review T3-F01). A catalog row that declares
+// :attr:`ConnectorSpecEntry.op_allowlist` names the *exact* operations
+// that may persist from an ingest of that product; every other parsed
+// operation is dropped before persistence (see
+// :mod:`meho_backplane.operations.ingest.op_allowlist`), so a connector
+// whose design invariant is "closed to these N ops" is enforced in code,
+// not by operator discipline. The pair is normalised the same way the
+// ingest filter keys a parsed operation: “method“ upper-cased, “path“
+// the verbatim spec path template (query string already stripped).
+type OpAllowlistEntry struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 // OperationCallStep A step the agent dispatches via the operation registry.

@@ -1,7 +1,8 @@
 # JSONFlux result preservation
 
 When a registered typed operation's explicit response schema has a top-level
-array plus two or more outcome fields (`handshake`, `reachable`, `reason`,
+array plus one recognised Boolean outcome field (`handshake`, `reachable`,
+`success`, `ok`, or `healthy`) or two or more outcome fields (`handshake`, `reachable`, `reason`,
 `success`, `ok`, `healthy`, `status`, `state`, `resultStatus`, or
 `executionStatus`), it must declare every such outcome field in
 `llm_instructions.result_scalars.keys`. The registry conformance sweep enforces

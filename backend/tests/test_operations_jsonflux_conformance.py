@@ -18,9 +18,10 @@ from meho_backplane.operations.typed_register import run_typed_op_registrars
 from meho_backplane.settings import get_settings
 
 # A result schema qualifies when it explicitly describes both a top-level
-# collection and a complete caller-visible outcome bundle.  One ``status`` is
-# not enough: it can be an opaque vendor state, while two outcome fields form
-# a verdict a caller must retain beside the spilled detail.
+# collection and a caller-visible outcome. A lone ``status`` is not enough: it
+# can be an opaque vendor state. One recognised Boolean verdict is unambiguous;
+# otherwise two outcome fields form the outcome bundle a caller must retain beside
+# the spilled detail.
 _VERDICT_FIELD_NAMES = frozenset(
     {
         "handshake",
@@ -34,6 +35,9 @@ _VERDICT_FIELD_NAMES = frozenset(
         "resultStatus",
         "executionStatus",
     }
+)
+_UNAMBIGUOUS_BOOLEAN_VERDICT_FIELD_NAMES = frozenset(
+    {"handshake", "reachable", "success", "ok", "healthy"}
 )
 
 
@@ -61,7 +65,13 @@ def _required_result_scalars(schema: dict[str, Any] | None) -> set[str]:
     if not has_collection:
         return set()
     verdict_fields = set(properties).intersection(_VERDICT_FIELD_NAMES)
-    return verdict_fields if len(verdict_fields) >= 2 else set()
+    has_unambiguous_boolean_verdict = any(
+        field in _UNAMBIGUOUS_BOOLEAN_VERDICT_FIELD_NAMES
+        and isinstance(properties[field], dict)
+        and _schema_type_includes(properties[field], "boolean")
+        for field in verdict_fields
+    )
+    return verdict_fields if has_unambiguous_boolean_verdict or len(verdict_fields) >= 2 else set()
 
 
 def _missing_verdict_scalar_hints(descriptors: list[EndpointDescriptor]) -> dict[str, list[str]]:
@@ -146,3 +156,28 @@ def test_verdict_plus_collection_conformance_rejects_new_unhinted_descriptor() -
     assert _missing_verdict_scalar_hints([descriptor]) == {
         "example.health.inspect": ["reachable", "reason", "status"]
     }
+
+
+@pytest.mark.parametrize(
+    ("op_id", "verdict", "collection"),
+    [
+        ("example.delete.report", "success", "rows"),
+        ("example.probe.report", "reachable", "checks"),
+    ],
+)
+def test_single_unambiguous_boolean_verdict_with_collection_requires_a_hint(
+    op_id: str, verdict: str, collection: str
+) -> None:
+    """A future registrar cannot evade the rule with one Boolean verdict field."""
+    descriptor = type("Descriptor", (), {})()
+    descriptor.op_id = op_id
+    descriptor.response_schema = {
+        "type": "object",
+        "properties": {
+            verdict: {"type": "boolean"},
+            collection: {"type": "array", "items": {"type": "object"}},
+        },
+    }
+    descriptor.llm_instructions = {}
+
+    assert _missing_verdict_scalar_hints([descriptor]) == {op_id: [verdict]}

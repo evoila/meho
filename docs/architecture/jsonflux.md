@@ -644,7 +644,8 @@ existing bookkeeping-only reduced summary, and the full collection remains
 retrievable through `result_query`.
 
 For typed descriptors with an explicit response schema, a top-level array plus
-two or more named outcome fields (`handshake`, `reachable`, `reason`,
+one recognised Boolean outcome field (`handshake`, `reachable`, `success`, `ok`,
+or `healthy`) or two or more named outcome fields (`handshake`, `reachable`, `reason`,
 `success`, `ok`, `healthy`, `status`, `state`, `resultStatus`, or
 `executionStatus`) is a verdict-plus-collection result. Every such outcome
 field must appear in `result_scalars.keys`; the registry conformance test runs

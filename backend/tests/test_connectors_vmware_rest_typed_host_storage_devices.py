@@ -170,6 +170,7 @@ class _FakeConnector:
         self._mount_prefix = mount_prefix
         self.get_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self.promote_missing_calls: list[bool] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -207,10 +208,12 @@ class _FakeConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
+        self.promote_missing_calls.append(promote_managed_object_not_found)
         if path.endswith("/QueryBootDevices"):
             if self._boot_error is not None:
                 raise self._boot_error
@@ -242,6 +245,7 @@ async def test_esxi_target_resolves_ha_host_without_listing() -> None:
         _esxi_target(),  # type: ignore[arg-type]
         {},  # no host param -- the host is the target
     )
+    assert conn.promote_missing_calls == [True]
     assert out["status"] == "ok"
     assert out["host"] == STANDALONE_ESXI_HOST_MOID
     assert out["device_count"] == 1

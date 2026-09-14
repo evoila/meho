@@ -193,6 +193,7 @@ async def _read_host_uplink_row(
             _RETRIEVE_PROPERTIES_PATH,
             operator=operator,
             json=build_host_network_uplinks_retrieve_params(host_moid),
+            promote_managed_object_not_found=True,
         )
     except (httpx.HTTPError, RuntimeError) as exc:
         row["pnics"] = None

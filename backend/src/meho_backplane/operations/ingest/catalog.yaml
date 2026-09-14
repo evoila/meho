@@ -358,3 +358,70 @@ entries:
       validate_shipped_artifacts dry-run-parses both with the live ingest
       parser. T2 (#1976) authors the real vmware/sddc profile-backed rows;
       this row is the self-test that the mechanism is wired correctly.
+
+  # --- Paired add-on: meho-automation launch/validate/gate (public #3571) ---
+
+  - product: mehoauto
+    version: "0.1.0"
+    # Dispatch-canonical, hyphen-free product slug. The connector_id parse
+    # ({impl_id}-{version}) recovers the product from the FIRST hyphen
+    # segment of impl_id, so a hyphenated product would not round-trip
+    # (the same constraint that gave sddc-manager -> `sddc`,
+    # vcf-automation -> `vcfa`, vcf-fleet -> `fleet`). `mehoauto-rest-0.1.0`
+    # parses to (mehoauto, 0.1.0, mehoauto-rest). The add-on's Kubernetes
+    # service name (meho-automation) and the Keycloak audience
+    # (meho-automation) are decoupled from this slug and unaffected.
+    impl_id: mehoauto-rest
+    # Profile-backed row: requires_connector_class names the synthesised
+    # ProfiledRestConnector subclass stamp_catalog_profiled_connectors
+    # materialises from the profile at boot. It need not pre-exist in the
+    # v2 registry — validate_catalog_registry_coverage exempts a
+    # profile_resource-carrying row from the class-presence +
+    # triple-registration checks.
+    requires_connector_class: ProfiledRestConnector_mehoauto_0_1_0
+    # NO vendored spec and NO catalog upstream. The add-on's OpenAPI is not
+    # redistributed in this repo; the connector is ingested at registration
+    # time from the add-on's published /openapi.json (OpenAPI 3.1). The
+    # backplane's server-side spec fetch is public-https-only (SSRF
+    # hardening) and the add-on is an in-cluster plaintext service, so the
+    # sanctioned path is the operator `--spec` on-ramp (fetch /openapi.json,
+    # ingest its bytes). catalog_ingest: spec-only makes the connector
+    # listing's next_step hint point at `--spec`, not `--catalog`.
+    upstream: null
+    spec_resource: null
+    profile_resource: meho_automation_minimal.yaml
+    catalog_ingest: spec-only
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      The meho-automation add-on as a versioned, profile-backed generic
+      connector target (public #3571 oauth2_mint external issuer; #2900 P1
+      auth). Base URL http://meho-automation:8000 (in-cluster ClusterIP;
+      set on the target at registration — the add-on OpenAPI declares no
+      servers block). Ops in scope: launch (POST /api/v1/runs), validate
+      (POST /api/v1/blueprints/{blueprint_id}/validate), gate decision
+      (POST /api/v1/runs/{run_id}/gates/{node_id}/decision). Ingest at
+      registration from /openapi.json via `--spec`; NO spec is vendored
+      here. After ingest the connector-owned safety floor
+      (connectors/meho_automation/ingest_safety.py) pins all three at
+      `caution` (no backplane approval park — the add-on's own gate nodes
+      are the human control, operator decision); validate is a read-side
+      dry-run that still rides `caution` because an ingested POST never sits
+      below the caution floor. See docs/codebase/connectors-meho-automation.md.
+    # Ingest op allowlist (security review T3-F01). The add-on's real
+    # /openapi.json publishes ~30 mutating routes (tenant/site/adoption/run
+    # DELETEs, fleet import, blueprint/environment/deployment CRUD). This
+    # connector's op set is CLOSED to exactly launch / validate / gate, so the
+    # ingest path persists ONLY these three (method, path) pairs and DROPS
+    # every other parsed op before persistence — an operator who curls the
+    # full spec and `meho connector enable`s cannot cascade is_enabled onto a
+    # tenant DELETE. These pairs are kept consistent with the connector-owned
+    # safety floor's pinned keys (connectors/meho_automation/ingest_safety.py)
+    # by a drift-guard test (test_operations_ingest_catalog.py).
+    op_allowlist:
+      - method: POST
+        path: /api/v1/runs
+      - method: POST
+        path: /api/v1/blueprints/{blueprint_id}/validate
+      - method: POST
+        path: /api/v1/runs/{run_id}/gates/{node_id}/decision

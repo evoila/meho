@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — one cohesive catalog module (the
+# ConnectorSpecEntry schema + its loaders + the boot-time registry/artifact
+# validators); already over the line-count limit on origin/main. Splitting it
+# would fragment a single reviewed artifact with no clean responsibility
+# boundary. Pre-existing; this change only adds the declarative op-allowlist
+# field + its lookup helper (security review T3-F01).
+
 """Curated connector-spec catalog (Goal #214 raw-REST ingest on-ramp; #743).
 
 The catalog maps ``(product, version)`` to the recommended OpenAPI spec
@@ -206,6 +213,50 @@ def info_version_matches_compatibility(info_version: str, patterns: tuple[str, .
     return False
 
 
+class OpAllowlistEntry(BaseModel):
+    """One ``(method, path)`` an ingested connector's op set is closed to.
+
+    Declarative half of the per-product ingest op allowlist (security
+    review T3-F01). A catalog row that declares
+    :attr:`ConnectorSpecEntry.op_allowlist` names the *exact* operations
+    that may persist from an ingest of that product; every other parsed
+    operation is dropped before persistence (see
+    :mod:`meho_backplane.operations.ingest.op_allowlist`), so a connector
+    whose design invariant is "closed to these N ops" is enforced in code,
+    not by operator discipline. The pair is normalised the same way the
+    ingest filter keys a parsed operation: ``method`` upper-cased, ``path``
+    the verbatim spec path template (query string already stripped).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    method: str = Field(min_length=1, max_length=16)
+    path: str = Field(min_length=1, max_length=512)
+
+    @field_validator("method")
+    @classmethod
+    def _method_upper(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("op_allowlist method must not be blank")
+        return normalized
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_absolute(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("op_allowlist path must not be blank")
+        if not normalized.startswith("/"):
+            raise ValueError(f"op_allowlist path {normalized!r} must start with '/'")
+        return normalized
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """The ``(METHOD, path)`` tuple the ingest filter matches against."""
+        return (self.method, self.path)
+
+
 class ConnectorSpecEntry(BaseModel):
     """One curated ``(product, version)`` -> spec-source mapping.
 
@@ -303,6 +354,23 @@ class ConnectorSpecEntry(BaseModel):
     #: the hint and POST a ``--catalog`` body anyway still hit the
     #: existing structured 422s.
     catalog_ingest: CatalogIngestSupport = "supported"
+    #: Declarative per-product ingest op allowlist (security review T3-F01).
+    #: When set, the ingest path persists **only** the operations whose
+    #: ``(method, path)`` matches an entry here; every other parsed operation
+    #: is dropped before persistence (never staged, so a subsequent
+    #: ``enable_connector`` cascade cannot reach it) by
+    #: :func:`meho_backplane.operations.ingest.op_allowlist.apply_op_allowlist`,
+    #: and the ingest result carries the dropped count + list. This enforces
+    #: a connector whose op set is closed to a fixed list in code, declared in
+    #: data — not by operator discipline. ``None`` (the default) keeps the
+    #: historical behaviour: every parsed op is persisted (staged / disabled).
+    #: Generic: any catalog product MAY declare an allowlist. The
+    #: ``mehoauto`` row uses it to guarantee only launch / validate / gate
+    #: persist even when the operator ingests the add-on's full
+    #: ``/openapi.json``; a drift guard keeps it consistent with the
+    #: connector-owned safety floor's pinned keys
+    #: (``connectors/meho_automation/ingest_safety.py``).
+    op_allowlist: tuple[OpAllowlistEntry, ...] | None = None
 
     @field_validator("product", "version", "impl_id", "requires_connector_class")
     @classmethod
@@ -389,6 +457,29 @@ class ConnectorSpecEntry(BaseModel):
         if any(not url for url in normalized):
             raise ValueError("upstream URLs must be non-empty")
         return normalized
+
+    @field_validator("op_allowlist")
+    @classmethod
+    def _op_allowlist_nonempty_unique(
+        cls, value: tuple[OpAllowlistEntry, ...] | None
+    ) -> tuple[OpAllowlistEntry, ...] | None:
+        """A declared allowlist must be non-empty and unique on ``(method, path)``.
+
+        ``None`` is the no-allowlist default. An **empty** list is rejected
+        rather than silently treated as "drop everything": a product that
+        declares an allowlist must name at least one op, so a typo that
+        produced an empty list fails loud at parse time (the same
+        fail-loud-early posture as the compatibility-pattern validator)
+        instead of quietly persisting zero ops on every ingest.
+        """
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("op_allowlist must be null (no allowlist) or a non-empty list")
+        keys = [entry.key for entry in value]
+        if len(set(keys)) != len(keys):
+            raise ValueError("op_allowlist entries must be unique on (method, path)")
+        return value
 
 
 class ConnectorSpecCatalog(BaseModel):
@@ -512,6 +603,22 @@ def load_catalog() -> ConnectorSpecCatalog:
     """
     raw = resources.files(_CATALOG_PACKAGE).joinpath(_CATALOG_RESOURCE).read_text(encoding="utf-8")
     return parse_catalog(raw)
+
+
+def op_allowlist_for(product: str, version: str) -> frozenset[tuple[str, str]] | None:
+    """Return the declared ``(METHOD, path)`` ingest allowlist for a product.
+
+    Looks up the catalog row for ``(product, version)`` and projects its
+    :attr:`ConnectorSpecEntry.op_allowlist` to a frozen set of normalised
+    ``(method, path)`` keys the ingest filter matches parsed operations
+    against. Returns ``None`` when the product is not in the catalog or the
+    row declares no allowlist — the caller reads ``None`` as "no allowlist,
+    persist every op" (the historical behaviour, security review T3-F01).
+    """
+    entry = load_catalog().get(product, version)
+    if entry is None or entry.op_allowlist is None:
+        return None
+    return frozenset(op.key for op in entry.op_allowlist)
 
 
 def load_spec_resource(spec_resource: str) -> str:

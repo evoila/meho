@@ -1061,6 +1061,117 @@ async def test_oauth2_mint_external_issuer_does_not_log_secret_or_token() -> Non
 
 
 # ---------------------------------------------------------------------------
+# oauth2_mint external issuer — token_url sourced from the per-target credential
+# (the meho-automation add-on shape: the realm endpoint is a per-deployment
+# value carried in Vault, never a constant in the shipped profile)
+# ---------------------------------------------------------------------------
+
+_CRED_ISSUER_URL = "https://realm.example.test/realms/example/protocol/openid-connect/token"
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_is_dialed_for_the_mint() -> None:
+    """A ``token_url`` credential field (no profile ``token_url``) drives the mint.
+
+    The profile declares ``token_url`` in ``secret_fields`` and sets no
+    ``auth.token_url``; the resolved secret bundle carries the endpoint. The
+    mint POSTs to that credential-sourced absolute URL and the resulting Bearer
+    is returned for the target call.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+        audience="meho-automation",
+    )
+    assert profile.auth.token_url is None  # never in the profile
+    connector = _connector(
+        "oauth2_mint",
+        {"client_id": "cid", "client_secret": "csec", "token_url": _CRED_ISSUER_URL},
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    async with respx.mock() as mock:
+        route = mock.post(_CRED_ISSUER_URL).respond(
+            200, json={"access_token": "tok-cred", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-cred"}
+    request = route.calls[0].request
+    assert str(request.url) == _CRED_ISSUER_URL
+    body = request.read().decode()
+    assert "grant_type=client_credentials" in body
+    assert "client_id=cid" in body
+    assert "audience=meho-automation" in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_overrides_profile_token_url() -> None:
+    """A credential ``token_url`` takes precedence over a profile ``token_url``."""
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+        token_url=_EXTERNAL_ISSUER_URL,  # profile default...
+    )
+    connector = _connector(
+        "oauth2_mint",
+        # ...overridden per-target by the credential value.
+        {"client_id": "cid", "client_secret": "csec", "token_url": _CRED_ISSUER_URL},
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    # assert_all_called=False: the profile route is deliberately never dialed
+    # (the credential value wins), which is exactly what this test asserts.
+    async with respx.mock(assert_all_called=False) as mock:
+        cred_route = mock.post(_CRED_ISSUER_URL).respond(
+            200, json={"access_token": "tok-cred", "expires_in": 300}
+        )
+        profile_route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-profile", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-cred"}
+    assert cred_route.called
+    assert not profile_route.called
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_fails_closed_on_public_http() -> None:
+    """A plaintext-http credential ``token_url`` to a public host fails closed.
+
+    The credential-sourced endpoint clears the SAME fail-closed rule the
+    profile field does (``_validate_token_url``): a public host must use
+    ``https``, so a misconfigured Vault value never ships the client secret to
+    a public host over cleartext. No mint request is made.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+    )
+    connector = _connector(
+        "oauth2_mint",
+        {
+            "client_id": "cid",
+            "client_secret": "csec",
+            "token_url": "http://attacker.example.com/token",
+        },
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    # No respx mock: the fail-closed validation raises before any HTTP is
+    # attempted, so no mint request is ever made.
+    with pytest.raises(ValueError, match="https for a public host"):
+        await connector.auth_headers(target, operator=_operator())
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
 # Per-target isolation — the hoisted cache keys on (tenant_id, id)
 # ---------------------------------------------------------------------------
 

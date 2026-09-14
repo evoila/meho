@@ -26032,6 +26032,14 @@
             ],
             "title": "Catalog Ingest",
             "default": "supported"
+          },
+          "op_allowlist": {
+            "items": {
+              "$ref": "#/components/schemas/OpAllowlistEntry"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Op Allowlist"
           }
         },
         "additionalProperties": false,
@@ -27507,6 +27515,25 @@
         "title": "DraftTemplateResponse",
         "description": "Response for ``meho_runbook_draft_template`` -- the created draft's coordinates."
       },
+      "DroppedOpModel": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "method",
+          "path"
+        ],
+        "title": "DroppedOpModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.op_allowlist.DroppedOp`.\n\nOne operation the product's declared ingest op allowlist excluded\nbefore persistence (security review T3-F01) \u2014 surfaced so the operator\nsees exactly what an ingest of a wider spec dropped."
+      },
       "EditGroupBody": {
         "properties": {
           "when_to_use": {
@@ -28912,6 +28939,18 @@
             },
             "type": "array",
             "title": "Safety Changes"
+          },
+          "dropped_count": {
+            "type": "integer",
+            "title": "Dropped Count",
+            "default": 0
+          },
+          "dropped_ops": {
+            "items": {
+              "$ref": "#/components/schemas/DroppedOpModel"
+            },
+            "type": "array",
+            "title": "Dropped Ops"
           }
         },
         "type": "object",
@@ -28924,7 +28963,7 @@
           "operations_grouped"
         ],
         "title": "IngestionResultModel",
-        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity.\n``safety_changes`` (#2702) is additive with an empty-list default,\nso pre-existing clients see no shape change on ingests that\nreclassify nothing."
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity.\n``safety_changes`` (#2702) is additive with an empty-list default,\nso pre-existing clients see no shape change on ingests that\nreclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are\nlikewise additive with empty defaults \u2014 ``0`` / ``[]`` for every\nproduct that declares no ingest op allowlist."
       },
       "KbEntry": {
         "properties": {
@@ -29357,6 +29396,30 @@
         ],
         "title": "NextStepRequest",
         "description": "Request body for ``meho_runbook_next`` -- advance the run.\n\n:attr:`last_verified` is the caller's *claim* that the previous\nstep's verify gate was satisfied. It is **informational only**:\nthe substrate (engine, G12.3-T2) is the verify oracle, and a\nrequest from a caller whose previous-step state is not\n``verified`` returns 400 *regardless* of what\n:attr:`last_verified` says. The field exists so the wire log\ncaptures the caller's belief alongside the substrate's decision\n-- useful for diagnosing a client that thinks it advanced when\nthe substrate did not.\n\n:attr:`verify_response` carries the operator's answer for a\n``confirm`` step or the engine's captured result for an\n``operation_call`` step. ``None`` is valid only on the very first\n``meho_runbook_next`` call (when no prior step exists to verify)."
+      },
+      "OpAllowlistEntry": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "method",
+          "path"
+        ],
+        "title": "OpAllowlistEntry",
+        "description": "One ``(method, path)`` an ingested connector's op set is closed to.\n\nDeclarative half of the per-product ingest op allowlist (security\nreview T3-F01). A catalog row that declares\n:attr:`ConnectorSpecEntry.op_allowlist` names the *exact* operations\nthat may persist from an ingest of that product; every other parsed\noperation is dropped before persistence (see\n:mod:`meho_backplane.operations.ingest.op_allowlist`), so a connector\nwhose design invariant is \"closed to these N ops\" is enforced in code,\nnot by operator discipline. The pair is normalised the same way the\ningest filter keys a parsed operation: ``method`` upper-cased, ``path``\nthe verbatim spec path template (query string already stripped)."
       },
       "OperationCallStep": {
         "properties": {

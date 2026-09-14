@@ -1842,6 +1842,23 @@ def _result_scalars_from_descriptor(descriptor: EndpointDescriptor) -> dict[str,
     return None
 
 
+def _result_objects_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract a bounded ``result_objects`` projection from an operation.
+
+    Connectors use ``{"objects": {"leaf": ["subject", "san"]}}`` when a
+    collection reduction needs to keep selected fields from a top-level object
+    inline. The reducer validates and bounds the projection; this layer only
+    keeps descriptor access out of the reducer, mirroring ``result_scalars``.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_objects")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
     """Extract ``result_digest`` from a descriptor's ``llm_instructions``.
 
@@ -1955,6 +1972,9 @@ async def _reduce_or_error(
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:
         reducer_context["result_scalars"] = result_scalars
+    result_objects = _result_objects_from_descriptor(descriptor)
+    if result_objects is not None:
+        reducer_context["result_objects"] = result_objects
     # #3122: forward the op's row-digest hint (when the connector author
     # registered one via ``llm_instructions``) so the reducer reduces the
     # named collection even in the presence of a sibling array and writes the

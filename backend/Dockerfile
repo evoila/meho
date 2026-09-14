@@ -26,31 +26,41 @@
 # Source        : docker.io/library/python:3.12-slim (Debian trixie,
 #                 Python 3.12.x, multi-arch manifest list)
 
-# ---------- Wheel builder (native, arch-independent app wheel) ---------------
-# `meho-backplane` is a pure-Python distribution (`py3-none-any`), so its
-# wheel is byte-identical on every arch. Build it ONCE on the native
-# `$BUILDPLATFORM` here rather than under QEMU in the per-target `builder`
-# stage below. This removes uv's build-isolation resolution of the
-# `hatchling` build backend from the emulated arm64 build: that fresh PyPI
-# fetch fails with `client error (Connect)` under qemu-user whenever the
-# buildkit uv-cache mount is cold (evoila/meho#3626), while the locked
-# dependency *download* in `builder` is unaffected. Only the pure-Python app
-# wheel moves here; the compiled dependency wheels still install for the
-# TARGET arch in `builder` (see the invariant note there).
+# ---------- Wheel builder (arch-independent app wheel, no fresh resolve) ------
+# The failing operation on a cold cache is uv's build-isolation *resolution*
+# of the `hatchling` build backend: it issues a fresh PyPI index query plus a
+# PEP 658 `.whl.metadata` fetch, and those connections fail with `client
+# error (Connect) / operation timed out` from the CI runner cluster — on BOTH
+# native amd64 and emulated arm64 (evoila/meho#3626). uv's LOCKED download of
+# pinned wheels (direct file URLs from uv.lock) succeeds on the same host in
+# the same run. Passing builds avoided the resolve only because a warm buildkit
+# uv-cache mount served `hatchling` offline.
 #
-# hatch's `force-include` (alembic.ini + alembic/) and the `[project].readme`
-# field are read at wheel-build time, so the full backend source, README and
-# migration tree must be present in this stage's context.
+# So build the wheel without any fresh resolve: install `hatchling` from the
+# lock (the `build` dependency group, via the reliable locked-download path),
+# then run the wheel build with `--no-build-isolation` so uv reuses that
+# installed backend instead of resolving it. `meho-backplane` is pure-Python
+# (`py3-none-any`), so its wheel is arch-independent — building it once on the
+# native `$BUILDPLATFORM` also skips the slow emulated wheel build, and keeps
+# the build backend out of the runtime venv (this stage is discarded). hatch's
+# `force-include` (alembic.ini + alembic/) and the `[project].readme` field are
+# read at build time, so the full source, README and migration tree are staged.
 FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
 COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
-ENV UV_PYTHON_DOWNLOADS=0
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_LINK_MODE=copy
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
+# Install ONLY the build backend from the lock (direct-URL download, no index
+# resolve), into /app/.venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv build --wheel --out-dir /wheels
+    uv sync --locked --no-install-project --only-group build
+# Build the wheel reusing the installed backend — no fresh PyPI resolution.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
 
 # ---------- Builder ----------------------------------------------------------
 # Resolves and installs locked dependencies into /app/.venv. The two-step
@@ -94,22 +104,20 @@ ENV UV_PYTHON_DOWNLOADS=0 \
 
 WORKDIR /app
 
-# Step 1: install dependencies only (cacheable).
-# README.md is co-copied here because hatchling resolves
-# `[project].readme = "README.md"` at wheel-build time during the second
-# `uv sync` below; staging it in the deps-only layer costs ~1 KB on a
-# cache hit and avoids needing a separate COPY before that step.
+# Step 1: install locked dependencies only (cacheable). README.md is
+# co-copied so `uv sync` can read `[project].readme = "README.md"` from
+# pyproject without error; it costs ~1 KB on a cache hit.
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-# Step 2: install the project from the wheel prebuilt natively in the
-# `wheelbuilder` stage. Installing a built pure-Python wheel needs neither a
-# build backend nor a network resolve, so — unlike the former
-# `uv sync --no-editable`, whose build-isolation resolve of `hatchling`
-# failed under arm64 QEMU on a cold cache (evoila/meho#3626) — this step
-# never contacts PyPI. Dependencies are already in /app/.venv from Step 1;
-# `--no-deps` scopes the install to the project distribution alone, and
+# Step 2: install the project from the wheel prebuilt in the `wheelbuilder`
+# stage. Installing a built pure-Python wheel needs neither a build backend
+# nor a network resolve, so — unlike the former `uv sync --no-editable`, whose
+# build-isolation resolve of `hatchling` failed to connect from the CI cluster
+# on a cold cache (evoila/meho#3626, reproduced on both amd64 and arm64) —
+# this step never contacts PyPI. Dependencies are already in /app/.venv from
+# Step 1; `--no-deps` scopes the install to the project distribution alone, and
 # `--offline` fails loud rather than silently reaching for the network. The
 # wheel carries the `ui/` static tree the Tailwind step below compiles
 # against, exactly as the sync install did.

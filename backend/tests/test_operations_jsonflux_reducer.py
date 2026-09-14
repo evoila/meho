@@ -769,6 +769,19 @@ def test_preserved_objects_keeps_normal_leaf_identity_and_marks_huge_values() ->
     assert huge["result_object_truncations"] == {"leaf": ["san"]}
 
 
+def test_preserved_objects_bounds_a_long_san_list_without_silent_drop() -> None:
+    san = [f"dns-{index}-" + "x" * 245 for index in range(16)]
+    preserved = _preserved_objects(
+        {"leaf": {"subject": "CN=normal", "san": san, "fingerprint_sha256": "f" * 64}, "chain": []},
+        "chain",
+        {"result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}}},
+    )
+    assert preserved["leaf"]["subject"] == "CN=normal"
+    assert preserved["leaf"]["fingerprint_sha256"] == "f" * 64
+    assert preserved["leaf"]["san"]
+    assert preserved["result_object_truncations"] == {"leaf": ["san"]}
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher integration — broken reducer → connector_error
 # ---------------------------------------------------------------------------
@@ -2185,3 +2198,73 @@ async def test_reducing_dispatch_preserves_registered_result_scalars(
     assert result.result["row_count"] == 60
     assert result.result["source_key"] == "validationChecks"
     assert "validationChecks" not in result.result
+
+
+async def _tls_shaped_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    del target, params
+    leaf = {
+        "subject": "CN=appliance.test",
+        "san": ["appliance.test"],
+        "fingerprint_sha256": "a" * 64,
+        "pem": "L" * 3000,
+    }
+    return {
+        "handshake": True,
+        "reason": None,
+        "days_to_expiry": 20.0,
+        "hostname_match": True,
+        "chain_complete": True,
+        "leaf": leaf,
+        "chain": [leaf, {**leaf, "pem": "I" * 3000}],
+    }
+
+
+async def test_registered_descriptor_forwards_tls_identity_to_reducer(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Persisted descriptor metadata, not hand-built context, drives reduction."""
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="tls.shaped",
+        handler=_tls_shaped_handler,
+        summary="TLS",
+        description="TLS",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        llm_instructions={
+            "result_scalars": {
+                "keys": [
+                    "handshake",
+                    "reason",
+                    "days_to_expiry",
+                    "hostname_match",
+                    "chain_complete",
+                ]
+            },
+            "result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}},
+        },
+        embedding_service=stub_embedding_service,
+    )
+    store = _FakeStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="tls.shaped",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+    assert result.status == "ok" and result.handle is not None
+    assert result.result["leaf"] == {
+        "subject": "CN=appliance.test",
+        "san": ["appliance.test"],
+        "fingerprint_sha256": "a" * 64,
+    }
+    assert result.result["handshake"] is True
+    assert store.spills[0]["rows"][0]["pem"] == "L" * 3000

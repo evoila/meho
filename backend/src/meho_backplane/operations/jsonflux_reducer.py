@@ -251,7 +251,14 @@ _RESULT_DIGEST_CONTEXT_KEY = "result_digest"
 #: load-bearing for every consumer and must never be shadowed by a vendor
 #: field that happens to share a name.
 _RESERVED_SUMMARY_KEYS = frozenset(
-    {"row_count", "total", "sample_rows_returned", "sample_bytes", "source_key"}
+    {
+        "row_count",
+        "total",
+        "sample_rows_returned",
+        "sample_bytes",
+        "source_key",
+        "result_object_truncations",
+    }
 )
 
 #: JSON scalar types a ``result_scalars`` hint may preserve. ``bool`` is an
@@ -1104,13 +1111,28 @@ def _bounded_object_value(value: Any) -> tuple[Any, bool]:
     if isinstance(value, list):
         truncated = len(value) > _RESULT_OBJECT_LIST_ITEMS
         bounded: list[Any] = []
+        used_bytes = 0
         for item in value[:_RESULT_OBJECT_LIST_ITEMS]:
             if isinstance(item, str):
                 rendered, item_truncated = _bounded_object_value(item)
+                encoded = rendered.encode("utf-8")
+                remaining = _RESULT_OBJECT_VALUE_BYTE_BUDGET - used_bytes
+                if remaining <= 0:
+                    truncated = True
+                    break
+                if len(encoded) > remaining:
+                    rendered = encoded[:remaining].decode("utf-8", "ignore")
+                    item_truncated = True
                 bounded.append(rendered)
+                used_bytes += len(rendered.encode("utf-8"))
                 truncated = truncated or item_truncated
             else:
+                item_bytes = len(_serialize(item))
+                if used_bytes + item_bytes > _RESULT_OBJECT_VALUE_BYTE_BUDGET:
+                    truncated = True
+                    break
                 bounded.append(item)
+                used_bytes += item_bytes
         return bounded, truncated
     return value, False
 

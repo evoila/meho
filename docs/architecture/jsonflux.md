@@ -637,7 +637,8 @@ objects with eight fields each and a 4096-byte aggregate projection budget.
 Each string (including a list item) is bounded to 1024 bytes. A normal
 identity value within that bound stays verbatim; an exceptional value is
 returned as its bounded prefix and named in `result_object_truncations`, so a
-caller knows to retrieve the complete value from the handle spill. This is an
+caller knows to retrieve the complete value from the handle spill when that
+object is an alias of the spilled collection (as the TLS leaf is). This is an
 additive generic facility: a descriptor without `result_objects` retains the
 existing bookkeeping-only reduced summary, and the full collection remains
 retrievable through `result_query`.

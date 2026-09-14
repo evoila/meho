@@ -18,11 +18,16 @@ per-op MCP tool family:
 - **No hand-coded connector class.** The dispatchable
   `ProfiledRestConnector` is synthesised from the shipped
   `ExecutionProfile` at boot by `stamp_catalog_profiled_connectors`.
-- **No vendored spec.** The three ops are ingested at registration time from
+- **No vendored spec.** The connector is ingested at registration time from
   the add-on's published `/openapi.json` (OpenAPI 3.1) via the operator
   `--spec` on-ramp. The add-on's OpenAPI is **not committed to this repo**.
-- **No new agent tools.** The three ops ride `op_id` under `call_operation`;
-  the MCP working surface is unchanged.
+  The add-on publishes its **full** API (~30 mutating routes: tenant / site /
+  adoption / run DELETEs, fleet import, blueprint / environment / deployment
+  CRUD), but this connector's op set is **closed** to exactly launch /
+  validate / gate — a declarative catalog op-allowlist enforces that closure
+  in code (see [Ingest op allowlist](#ingest-op-allowlist) below).
+- **No new agent tools.** The three curated ops ride `op_id` under
+  `call_operation`; the MCP working surface is unchanged.
 
 Dispatch triple: `(product="mehoauto", version="0.1.0",
 impl_id="mehoauto-rest")`. The product slug is **hyphen-free** on purpose:
@@ -145,9 +150,9 @@ The Vault credential the target's `secret_ref` points at therefore holds:
    (The add-on OpenAPI declares no `servers` block, so the base URL is set on
    the target here.)
 
-2. **Ingest the ops from the add-on's live spec** via the `--spec` on-ramp —
-   there is no vendored spec and no catalog upstream, so `--catalog` is not
-   the path (the listing's `next_step` hint says so):
+2. **Ingest from the add-on's live spec** via the `--spec` on-ramp — there is
+   no vendored spec and no catalog upstream, so `--catalog` is not the path
+   (the listing's `next_step` hint says so):
 
    ```
    # fetch the add-on's published OpenAPI (unauthenticated), then ingest its bytes
@@ -157,11 +162,21 @@ The Vault credential the target's `secret_ref` points at therefore holds:
      --spec file:///tmp/mehoauto.openapi.json
    ```
 
-   The three ops land **staged / disabled** (`is_enabled=false`,
-   `source_kind=ingested`) with the pinned tiers above.
+   The fetched `/openapi.json` is the add-on's **full** API (~30 mutating
+   routes), but the catalog op-allowlist (see below) drops every route except
+   the three curated ops **before persistence**, so exactly three
+   `EndpointDescriptor` rows land — `POST /api/v1/runs` (launch),
+   `POST /api/v1/blueprints/{blueprint_id}/validate` (validate), and
+   `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate) — **staged /
+   disabled** (`is_enabled=false`, `source_kind=ingested`) with the pinned
+   tiers above. The ingest result reports the dropped count + the dropped
+   `(method, path)` list. Because the ~27 mutating routes are never persisted
+   and never staged, the `enable` in the next step cannot cascade
+   `is_enabled=true` onto a tenant/run DELETE or a fleet import.
 
 3. **Review the LLM-proposed op groups + per-group hints**, then **enable**
-   the connector (staged → enabled) once the surface looks right:
+   the connector (staged → enabled) once the surface looks right. Enable is
+   safe: only the three allowlisted ops exist to enable.
 
    ```
    meho connector enable mehoauto-rest-0.1.0
@@ -174,6 +189,56 @@ The Vault credential the target's `secret_ref` points at therefore holds:
      --op-id 'POST:/api/v1/blueprints/{blueprint_id}/validate' \
      --target automation-addon --params '{"blueprint_id": "...", "inputs": {...}}'
    ```
+
+### Recipe notes (do not skip)
+
+- **The execution profile's `token_url` MUST be set to the realm's token
+  endpoint.** The add-on authenticates against an **external** issuer, and the
+  backplane has **no safe default token endpoint** for an external issuer — so
+  the `token_url` is carried per-target in the Vault credential (see the auth
+  section above). A credential bundle without a `token_url` falls through to
+  the profile's `auth.token_url` and then to a target-relative default, which
+  is wrong for an external issuer and will fail auth. Populate `token_url` in
+  the Vault credential with the realm's `.../protocol/openid-connect/token`
+  URL.
+- **The issuer host must be admitted by the SSRF target allowlist, and target
+  TLS verification must stay on.** The `token_url` is validated fail-closed by
+  the same `_validate_token_url` SSRF rule the profile field clears (`https`,
+  host on the outbound allowlist). Admit the realm's issuer host on that
+  allowlist; do **not** disable TLS verification on the target to work around
+  a cert problem — fix the trust chain instead.
+
+## Ingest op allowlist
+
+The add-on's `/openapi.json` publishes its full API — ~30 mutating routes
+across tenant / site / adoption / run (including DELETEs), fleet import, and
+blueprint / environment / deployment CRUD. This connector's design invariant
+is that its op set is **closed** to exactly three operations:
+
+| op | `(method, path)` | tier |
+|---|---|---|
+| launch | `POST /api/v1/runs` | `caution` |
+| validate | `POST /api/v1/blueprints/{blueprint_id}/validate` | `caution` |
+| gate decision | `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` | `caution` |
+
+That closure is enforced in code, declared in data. The catalog row
+(`operations/ingest/catalog.yaml`, product `mehoauto`) declares an
+`op_allowlist` naming exactly those three `(method, path)` pairs. On the
+ingest path — for both a first ingest and any re-ingest of a wider spec —
+`operations/ingest/op_allowlist.py` drops every parsed operation outside the
+allowlist **before persistence**: dropped ops are never written and never
+staged, so `enable_connector`'s `is_enabled=true` cascade cannot reach them.
+The ingest result carries the dropped count and the dropped `(method, path)`
+list, and one structured log line (`ingest_op_allowlist_dropped`) records the
+drop.
+
+The allowlist `(method, path)` pairs are kept consistent with the
+connector-owned safety floor's pinned keys
+(`connectors/meho_automation/ingest_safety.py`) by a drift-guard test — the
+set of ops that may persist can never diverge from the set whose tiers are
+pinned. The allowlist is generic: any catalog product **may** declare an
+`op_allowlist`; absence keeps the historical behaviour (every parsed op is
+persisted).
 
 ## Boot guards
 

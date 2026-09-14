@@ -243,7 +243,10 @@ This is the meho-automation add-on connector's shape — see
 recipe and the operator decision that launch / validate / gate all ride
 `caution` without a backplane approval park (validate is a read-side dry-run
 that still rides `caution` because an ingested POST never sits below the
-caution floor).
+caution floor). The connector's op set is **closed** to exactly those three
+ops even though the add-on's `/openapi.json` publishes its full API: a
+declarative catalog `op_allowlist` drops every other route before persistence
+(see that doc's "Ingest op allowlist" section).
 
 ## References
 

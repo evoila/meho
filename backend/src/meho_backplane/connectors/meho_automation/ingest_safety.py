@@ -71,8 +71,27 @@ def meho_automation_safety_floor(
     return proto
 
 
-register_ingest_safety_floor(
-    product="mehoauto",
-    impl_id="mehoauto-rest",
-    floor=meho_automation_safety_floor,
-)
+#: Dispatch-canonical product / impl the floor is keyed by (see module docstring).
+_PRODUCT = "mehoauto"
+_IMPL_ID = "mehoauto-rest"
+
+
+def register_safety_floor() -> None:
+    """Register this connector's ingest safety floor in the process-global registry.
+
+    Idempotent: :func:`register_ingest_safety_floor` assigns
+    ``_FLOORS[(product, impl_id)] = floor``, so calling this more than once
+    (e.g. re-invoked by a test after another test cleared ``_FLOORS``) leaves
+    exactly one registration and is safe. Called once as an import side effect
+    below (via the package ``__init__``); a test may call it directly to make
+    a ``has_safety_floor`` assertion order-robust without relying on import
+    order (``_FLOORS`` isolation is tracked in #3605).
+    """
+    register_ingest_safety_floor(
+        product=_PRODUCT,
+        impl_id=_IMPL_ID,
+        floor=meho_automation_safety_floor,
+    )
+
+
+register_safety_floor()

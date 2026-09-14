@@ -41,6 +41,7 @@ from meho_backplane.api.v1.connectors_ingest import (
     router as connectors_ingest_router,
 )
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.connectors.meho_automation import ingest_safety as meho_automation_ingest_safety
 from meho_backplane.connectors.registry import (
     all_connectors_v2,
     register_connector_v2,
@@ -52,10 +53,12 @@ from meho_backplane.operations.ingest.catalog import (
     CatalogError,
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
+    OpAllowlistEntry,
     info_version_matches_compatibility,
     load_catalog,
     load_profile_resource,
     load_spec_resource,
+    op_allowlist_for,
     parse_catalog,
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
@@ -1113,6 +1116,88 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
         else:
             assert entry.catalog_ingest == "supported", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: supported"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Declarative ingest op allowlist (security review T3-F01) — the catalog is
+# the data half; enforcement lives in operations/ingest/op_allowlist.py.
+# ---------------------------------------------------------------------------
+
+
+def test_entry_defaults_to_no_op_allowlist() -> None:
+    """``op_allowlist=None`` is the default — absence keeps every op."""
+    assert _entry().op_allowlist is None
+    assert op_allowlist_for("demo", "1.0") is None  # not a shipped product
+
+
+def test_entry_accepts_an_op_allowlist_and_normalises_it() -> None:
+    entry = _entry(
+        op_allowlist=[
+            {"method": "post", "path": " /api/v1/runs "},
+            {"method": "POST", "path": "/api/v1/blueprints/{blueprint_id}/validate"},
+        ]
+    )
+    assert entry.op_allowlist is not None
+    # method upper-cased, path stripped.
+    assert entry.op_allowlist[0].key == ("POST", "/api/v1/runs")
+    assert entry.op_allowlist[1].key == ("POST", "/api/v1/blueprints/{blueprint_id}/validate")
+
+
+def test_entry_rejects_empty_op_allowlist() -> None:
+    """An explicit empty list is a config error, not 'drop everything'."""
+    with pytest.raises(ValidationError, match=r"null .* or a non-empty list"):
+        _entry(op_allowlist=[])
+
+
+def test_entry_rejects_duplicate_op_allowlist_pairs() -> None:
+    with pytest.raises(ValidationError, match="unique on"):
+        _entry(
+            op_allowlist=[
+                {"method": "POST", "path": "/api/v1/runs"},
+                {"method": "post", "path": "/api/v1/runs"},
+            ]
+        )
+
+
+def test_op_allowlist_entry_rejects_relative_path() -> None:
+    with pytest.raises(ValidationError, match="must start with '/'"):
+        OpAllowlistEntry.model_validate({"method": "POST", "path": "api/v1/runs"})
+
+
+def test_op_allowlist_entry_rejects_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        OpAllowlistEntry.model_validate({"method": "POST", "path": "/x", "typo": 1})
+
+
+def test_shipped_mehoauto_row_declares_the_three_op_allowlist() -> None:
+    """The shipped mehoauto row closes ingest to exactly launch/validate/gate."""
+    allow = op_allowlist_for("mehoauto", "0.1.0")
+    assert allow == {
+        ("POST", "/api/v1/runs"),
+        ("POST", "/api/v1/blueprints/{blueprint_id}/validate"),
+        ("POST", "/api/v1/runs/{run_id}/gates/{node_id}/decision"),
+    }
+
+
+def test_shipped_mehoauto_allowlist_matches_the_connector_safety_floor_keys() -> None:
+    """Drift guard (T3-F01 crit. d): the catalog allowlist and the connector-
+    owned safety floor's pinned keys must name the SAME three ops, so the set
+    of ops that may persist can never diverge from the set whose tiers are
+    pinned. If they drift, one of the two files was edited without the other.
+    """
+    allow = op_allowlist_for("mehoauto", "0.1.0")
+    assert allow == meho_automation_ingest_safety._CAUTION_OPS
+
+
+def test_only_mehoauto_row_declares_an_op_allowlist() -> None:
+    """The allowlist is opt-in and targeted; every other shipped row is None."""
+    for entry in load_catalog().entries:
+        if entry.product == "mehoauto":
+            assert entry.op_allowlist is not None
+        else:
+            assert entry.op_allowlist is None, (
+                f"{entry.product}/{entry.version} unexpectedly declares an op_allowlist"
             )
 
 

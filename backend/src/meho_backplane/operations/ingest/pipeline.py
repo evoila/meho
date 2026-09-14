@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — the end-to-end ingestion-pipeline service
+# (parse + register + grouping phases, dry-run, and the connector-list query
+# helper) bundled as one cohesive service; already over the line-count limit on
+# origin/main. This change only threads the op-allowlist dropped-op counts
+# through the dry-run + aggregation + API projection (security review T3-F01).
+
 """End-to-end ingestion-pipeline service + connector-list query helper.
 
 This module bundles the three T1 / T2 / T3 stages into one
@@ -95,6 +101,7 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
 )
 from meho_backplane.operations.ingest.api_schemas import (
     AffectedSensorModel,
+    DroppedOpModel,
     GroupingResultModel,
     IngestionResultModel,
     SafetyChangeModel,
@@ -116,6 +123,7 @@ from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
 )
+from meho_backplane.operations.ingest.op_allowlist import DroppedOp, apply_op_allowlist
 from meho_backplane.operations.ingest.openapi import (
     parse_openapi,
     parse_openapi_with_provenance,
@@ -383,6 +391,11 @@ class IngestionPipelineResult:
             operations_grouped=self.ingestion.operations_grouped,
             safety_changes=[
                 _safety_change_to_model(change) for change in self.ingestion.safety_changes
+            ],
+            dropped_count=self.ingestion.dropped_count,
+            dropped_ops=[
+                DroppedOpModel(method=dropped.method, path=dropped.path)
+                for dropped in self.ingestion.dropped_ops
             ],
         )
         grouping_model: GroupingResultModel | None = None
@@ -889,6 +902,7 @@ class IngestionPipelineService:
         path to verify a spec parses before they commit.
         """
         total_ops = 0
+        dropped: list[DroppedOp] = []
         for spec in specs:
             # G0.16-T1 (#1303): wrap the synchronous parser in
             # ``asyncio.to_thread`` so a 7+ MB OpenAPI spec walk does
@@ -901,15 +915,25 @@ class IngestionPipelineService:
             parsed = await asyncio.to_thread(
                 parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
             )
+            # Mirror the register path (T3-F01): the dry-run count must reflect
+            # only what would persist, so an operator previewing a wide spec
+            # against an allowlisted product sees the bounded count, not the
+            # raw route total. Absence of an allowlist keeps every op.
+            allowlist_result = apply_op_allowlist(
+                product=product, version=version, operations=parsed
+            )
             floored = tuple(
                 apply_safety_floor(product=product, version=version, impl_id=impl_id, proto=proto)
-                for proto in parsed
+                for proto in allowlist_result.kept
             )
             total_ops += len(floored)
+            dropped.extend(allowlist_result.dropped)
         ingestion = IngestionResult(
             inserted_count=total_ops,
             updated_count=0,
             skipped_count=0,
+            dropped_count=len(dropped),
+            dropped_ops=tuple(dropped),
             connector_registered=False,
             operations_grouped=False,
         )
@@ -968,6 +992,7 @@ class IngestionPipelineService:
         aggregated_updated = 0
         aggregated_skipped = 0
         aggregated_safety_changes: list[SafetyChange] = []
+        aggregated_dropped: list[DroppedOp] = []
         connector_registered = False
 
         for spec in specs:
@@ -985,6 +1010,7 @@ class IngestionPipelineService:
             aggregated_updated += partial.updated_count
             aggregated_skipped += partial.skipped_count
             aggregated_safety_changes.extend(partial.safety_changes)
+            aggregated_dropped.extend(partial.dropped_ops)
             connector_registered = connector_registered or partial.connector_registered
 
         if execution_profile is not None:
@@ -1007,6 +1033,8 @@ class IngestionPipelineService:
             connector_registered=connector_registered,
             operations_grouped=False,
             safety_changes=tuple(aggregated_safety_changes),
+            dropped_count=len(aggregated_dropped),
+            dropped_ops=tuple(aggregated_dropped),
         )
 
     async def _register_one_spec(

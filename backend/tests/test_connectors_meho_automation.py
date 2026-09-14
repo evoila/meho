@@ -30,6 +30,7 @@ tool inventory globally and is unaffected by this data-only connector.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from unittest.mock import AsyncMock
@@ -39,7 +40,10 @@ import yaml
 from sqlalchemy import select
 
 from meho_backplane.connectors.base import shim_kind
-from meho_backplane.connectors.meho_automation.ingest_safety import meho_automation_safety_floor
+from meho_backplane.connectors.meho_automation.ingest_safety import (
+    meho_automation_safety_floor,
+    register_safety_floor,
+)
 from meho_backplane.connectors.profile import ExecutionProfile, validate_execution_profile
 from meho_backplane.connectors.registry import (
     _eager_import_connectors,
@@ -61,7 +65,7 @@ from meho_backplane.operations.ingest.catalog import (
 from meho_backplane.operations.ingest.openapi import parse_openapi
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.register_ingested import register_ingested_operations
-from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
+from meho_backplane.operations.ingest.safety_floors import apply_safety_floor, has_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 _PRODUCT = "mehoauto"
@@ -432,6 +436,233 @@ def test_ingest_protos_carry_the_floor_before_persistence() -> None:
         curated = meho_automation_safety_floor(_VERSION, p)
         assert curated is not p
         assert curated.safety_level == "caution"
+
+
+# ---------------------------------------------------------------------------
+# Floor registration is wired into the process-global registry
+# ---------------------------------------------------------------------------
+
+
+def test_connector_registers_its_safety_floor_in_the_global_registry() -> None:
+    """A broken side-effect import in the connector package would leave the
+    floor unregistered and silently fall back to the generic verb heuristic.
+
+    Order-robust: re-invoke the connector's own idempotent registration
+    function first (do NOT rely on import order or on another test having
+    imported the package), then assert the process-global registry reports the
+    floor for the (product, impl_id). ``_FLOORS`` cross-test isolation is
+    tracked separately in #3605.
+    """
+    register_safety_floor()  # idempotent — safe to call regardless of prior state
+    # A curated op the floor rewrites -> has_safety_floor detects the floor.
+    assert has_safety_floor(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        proto=_proto("POST", _LAUNCH),
+    )
+    # Idempotency: a second call leaves the floor registered (no duplicate, no
+    # unregister) — the assertion still holds.
+    register_safety_floor()
+    assert has_safety_floor(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        proto=_proto("POST", _LAUNCH),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ingest op allowlist (security review T3-F01) — a wide spec persists exactly
+# the three allowlisted ops; every other route is dropped before persistence.
+# ---------------------------------------------------------------------------
+
+# The add-on's real /openapi.json publishes ~30 mutating routes; this synthetic
+# spec mirrors the route FAMILIES (tenants / sites / env_specs / deployments /
+# artifacts / blueprints / environments / adoptions / fleet / runs) with
+# GENERIC schema names — it is NOT the add-on's real spec. It includes the
+# three allowlisted ops plus DELETE routes and a POST /api/v1/fleet/import.
+_WIDE_ROUTE_KEYS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The three allowlisted ops (must survive ingest).
+        ("POST", _LAUNCH),
+        ("POST", _VALIDATE),
+        ("POST", _GATE),
+        # tenants
+        ("GET", "/api/v1/tenants"),
+        ("POST", "/api/v1/tenants"),
+        ("GET", "/api/v1/tenants/{tenant_id}"),
+        ("DELETE", "/api/v1/tenants/{tenant_id}"),
+        # sites
+        ("GET", "/api/v1/sites"),
+        ("POST", "/api/v1/sites"),
+        ("DELETE", "/api/v1/sites/{site_id}"),
+        # env_specs
+        ("GET", "/api/v1/env_specs"),
+        ("POST", "/api/v1/env_specs"),
+        ("PUT", "/api/v1/env_specs/{spec_id}"),
+        ("DELETE", "/api/v1/env_specs/{spec_id}"),
+        # deployments
+        ("GET", "/api/v1/deployments"),
+        ("POST", "/api/v1/deployments"),
+        ("DELETE", "/api/v1/deployments/{deployment_id}"),
+        # artifacts
+        ("GET", "/api/v1/artifacts"),
+        ("POST", "/api/v1/artifacts"),
+        ("DELETE", "/api/v1/artifacts/{artifact_id}"),
+        # blueprints (CRUD around the allowlisted validate sub-route)
+        ("GET", "/api/v1/blueprints"),
+        ("POST", "/api/v1/blueprints"),
+        ("PATCH", "/api/v1/blueprints/{blueprint_id}"),
+        ("DELETE", "/api/v1/blueprints/{blueprint_id}"),
+        # environments
+        ("GET", "/api/v1/environments"),
+        ("POST", "/api/v1/environments"),
+        ("DELETE", "/api/v1/environments/{environment_id}"),
+        # adoptions
+        ("POST", "/api/v1/adoptions"),
+        ("DELETE", "/api/v1/adoptions/{adoption_id}"),
+        # fleet
+        ("POST", "/api/v1/fleet/import"),
+        ("GET", "/api/v1/fleet"),
+        # runs (non-allowlisted verbs on the launch collection / items)
+        ("GET", "/api/v1/runs"),
+        ("GET", "/api/v1/runs/{run_id}"),
+        ("DELETE", "/api/v1/runs/{run_id}"),
+    }
+)
+
+
+def _wide_spec() -> str:
+    """A ~34-route OpenAPI 3.1 mirroring the add-on's route families."""
+    paths: dict[str, dict[str, object]] = {}
+    for method, path in _WIDE_ROUTE_KEYS:
+        operation: dict[str, object] = {
+            "summary": f"{method} {path}",
+            "responses": {"200": {"description": "ok"}},
+        }
+        params = [
+            {"name": var, "in": "path", "required": True, "schema": {"type": "string"}}
+            for var in re.findall(r"{(\w+)}", path)
+        ]
+        if params:
+            operation["parameters"] = params
+        if method in ("POST", "PUT", "PATCH"):
+            operation["requestBody"] = {
+                "content": {"application/json": {"schema": {"type": "object"}}}
+            }
+        paths.setdefault(path, {})[method.lower()] = operation
+    spec = {
+        "openapi": "3.1.0",
+        "info": {"title": "Wide Automation", "version": _VERSION},
+        "paths": paths,
+    }
+    return json.dumps(spec)
+
+
+@pytest.mark.asyncio
+async def test_wide_spec_ingests_to_exactly_the_three_allowlisted_ops(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    register_safety_floor()
+    protos = parse_openapi("spec:wide", spec_source="spec:wide", content=_wide_spec())
+    # Sanity: the wide spec really does parse the full mutating surface.
+    assert len(protos) == len(_WIDE_ROUTE_KEYS)
+    assert len(protos) >= 30
+
+    result = await register_ingested_operations(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        spec_source="wide-synthetic-meho-automation",
+        operations=protos,
+        base_url="http://meho-automation:8000",
+        embedding_service=stub_embedding_service,
+        register_shim=False,
+    )
+    # Exactly the three allowlisted ops persist; every other route is dropped
+    # before persistence (never staged), and the result carries the count.
+    assert result.inserted_count == 3
+    assert result.dropped_count == len(_WIDE_ROUTE_KEYS) - 3
+    dropped_keys = {(dropped.method, dropped.path) for dropped in result.dropped_ops}
+    # The mutating routes the finding calls out are among the dropped set.
+    assert ("DELETE", "/api/v1/tenants/{tenant_id}") in dropped_keys
+    assert ("POST", "/api/v1/fleet/import") in dropped_keys
+    assert ("DELETE", "/api/v1/runs/{run_id}") in dropped_keys
+    # None of the three allowlisted ops were dropped.
+    assert dropped_keys.isdisjoint({("POST", _LAUNCH), ("POST", _VALIDATE), ("POST", _GATE)})
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == _PRODUCT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert {row.op_id for row in rows} == {
+        f"POST:{_LAUNCH}",
+        f"POST:{_VALIDATE}",
+        f"POST:{_GATE}",
+    }
+    # All three ride caution, no approval park, staged/disabled at ingest.
+    for row in rows:
+        assert (row.safety_level, row.requires_approval) == ("caution", False)
+        assert row.is_enabled is False
+        assert row.source_kind == "ingested"
+
+
+@pytest.mark.asyncio
+async def test_reingest_of_the_wide_spec_stays_bounded_to_three(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Re-ingesting the wide spec keeps exactly three persisted ops — the
+    allowlist bounds every register call, not just the first."""
+    register_safety_floor()
+    protos = parse_openapi("spec:wide", spec_source="spec:wide", content=_wide_spec())
+
+    first = await register_ingested_operations(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        spec_source="wide-synthetic-meho-automation",
+        operations=protos,
+        base_url="http://meho-automation:8000",
+        embedding_service=stub_embedding_service,
+        register_shim=False,
+    )
+    assert first.inserted_count == 3
+
+    second = await register_ingested_operations(
+        product=_PRODUCT,
+        version=_VERSION,
+        impl_id=_IMPL_ID,
+        spec_source="wide-synthetic-meho-automation",
+        operations=protos,
+        base_url="http://meho-automation:8000",
+        embedding_service=stub_embedding_service,
+        register_shim=False,
+    )
+    # Idempotent re-ingest: the three unchanged ops skip, none inserted, and
+    # the wide surface is still dropped (bounded on the re-ingest path too).
+    assert second.inserted_count == 0
+    assert second.dropped_count == len(_WIDE_ROUTE_KEYS) - 3
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        count = len(
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == _PRODUCT)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert count == 3
 
 
 # ---------------------------------------------------------------------------

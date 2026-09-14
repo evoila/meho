@@ -356,3 +356,20 @@ entries:
       are the human control, operator decision); validate is a read-side
       dry-run that still rides `caution` because an ingested POST never sits
       below the caution floor. See docs/codebase/connectors-meho-automation.md.
+    # Ingest op allowlist (security review T3-F01). The add-on's real
+    # /openapi.json publishes ~30 mutating routes (tenant/site/adoption/run
+    # DELETEs, fleet import, blueprint/environment/deployment CRUD). This
+    # connector's op set is CLOSED to exactly launch / validate / gate, so the
+    # ingest path persists ONLY these three (method, path) pairs and DROPS
+    # every other parsed op before persistence — an operator who curls the
+    # full spec and `meho connector enable`s cannot cascade is_enabled onto a
+    # tenant DELETE. These pairs are kept consistent with the connector-owned
+    # safety floor's pinned keys (connectors/meho_automation/ingest_safety.py)
+    # by a drift-guard test (test_operations_ingest_catalog.py).
+    op_allowlist:
+      - method: POST
+        path: /api/v1/runs
+      - method: POST
+        path: /api/v1/blueprints/{blueprint_id}/validate
+      - method: POST
+        path: /api/v1/runs/{run_id}/gates/{node_id}/decision

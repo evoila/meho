@@ -542,7 +542,15 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `vmware-rest-9.0`. Ingested rows for the 8.0 U3 catalog land under
    `connector_id="vmware-rest-8.0"`; the shared `(product, impl_id)` safety
    floor covers them identically. See
-   [vcf-api-compatibility.md](vcf-api-compatibility.md).
+   [vcf-api-compatibility.md](vcf-api-compatibility.md). Both shipped minimal
+   specs (`vmware_rest_8_0_minimal.yaml` and `vmware_rest_minimal.yaml`) carry
+   the `/api` mount on `servers[0].url` and key their inventory paths bare, so
+   the ingested op_ids read `GET:/vcenter/vm` — byte-identical to the vendor
+   `vcenter.yaml` catalog and to the spec-relative form `_mount.py` re-mounts
+   onto `/api` (modern) or `/rest` (legacy) per target; only the `/api/about`
+   fingerprint-probe path is keyed literally (`GET:/api/about`). The reconcile
+   lane `test_connectors_vmware_rest_8_0_spec_reconcile.py` pins the two specs
+   to an identical served-op_id set, so they are re-keyed in lock-step (#3614).
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls

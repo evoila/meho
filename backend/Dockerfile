@@ -26,6 +26,42 @@
 # Source        : docker.io/library/python:3.12-slim (Debian trixie,
 #                 Python 3.12.x, multi-arch manifest list)
 
+# ---------- Wheel builder (arch-independent app wheel, no fresh resolve) ------
+# The failing operation on a cold cache is uv's build-isolation *resolution*
+# of the `hatchling` build backend: it issues a fresh PyPI index query plus a
+# PEP 658 `.whl.metadata` fetch, and those connections fail with `client
+# error (Connect) / operation timed out` from the CI runner cluster — on BOTH
+# native amd64 and emulated arm64 (evoila/meho#3626). uv's LOCKED download of
+# pinned wheels (direct file URLs from uv.lock) succeeds on the same host in
+# the same run. Passing builds avoided the resolve only because a warm buildkit
+# uv-cache mount served `hatchling` offline.
+#
+# So build the wheel without any fresh resolve: install `hatchling` from the
+# lock (the `build` dependency group, via the reliable locked-download path),
+# then run the wheel build with `--no-build-isolation` so uv reuses that
+# installed backend instead of resolving it. `meho-backplane` is pure-Python
+# (`py3-none-any`), so its wheel is arch-independent — building it once on the
+# native `$BUILDPLATFORM` also skips the slow emulated wheel build, and keeps
+# the build backend out of the runtime venv (this stage is discarded). hatch's
+# `force-include` (alembic.ini + alembic/) and the `[project].readme` field are
+# read at build time, so the full source, README and migration tree are staged.
+FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
+COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_LINK_MODE=copy
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./
+# Install ONLY the build backend from the lock (direct-URL download, no index
+# resolve), into /app/.venv.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --only-group build
+# Build the wheel reusing the installed backend — no fresh PyPI resolution.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
+
 # ---------- Builder ----------------------------------------------------------
 # Resolves and installs locked dependencies into /app/.venv. The two-step
 # `uv sync` (deps first, then project) keeps the dependency layer cacheable
@@ -33,14 +69,15 @@
 # https://docs.astral.sh/uv/guides/integration/docker/.
 #
 # Multi-arch invariant: buildx runs this whole Dockerfile once per target
-# `--platform` (e.g. linux/amd64 and linux/arm64). We do *not* split the
-# builder onto `--platform=$BUILDPLATFORM` because the backplane depends
-# on compiled-wheel packages (`asyncpg`, `cryptography`, `pydantic-core`)
-# that must be installed for the **target** arch — cross-compiling those
-# from a builder running on a different arch is fragile. Instead we
-# accept QEMU emulation cost for the non-native target (typically 3–5×
-# slower than native for arm64 on amd64 hosts; documented in
-# `docs/codebase/backend.md`). `BUILDPLATFORM` and `TARGETPLATFORM` are
+# `--platform` (e.g. linux/amd64 and linux/arm64). The dependency install
+# below is NOT cross-compiled — the backplane depends on compiled-wheel
+# packages (`asyncpg`, `cryptography`, `pydantic-core`) that must be
+# installed for the **target** arch, so `uv sync` runs under QEMU emulation
+# for the non-native target (typically 3–5× slower than native for arm64 on
+# amd64 hosts; documented in `docs/codebase/backend.md`). Only the
+# pure-Python, arch-independent `meho-backplane` wheel is built on the native
+# `$BUILDPLATFORM` (in the `wheelbuilder` stage above) and installed here —
+# never rebuilt under emulation. `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS builder
@@ -67,26 +104,26 @@ ENV UV_PYTHON_DOWNLOADS=0 \
 
 WORKDIR /app
 
-# Step 1: install dependencies only (cacheable).
-# README.md is co-copied here because hatchling resolves
-# `[project].readme = "README.md"` at wheel-build time during the second
-# `uv sync` below; staging it in the deps-only layer costs ~1 KB on a
-# cache hit and avoids needing a separate COPY before that step.
+# Step 1: install locked dependencies only (cacheable). README.md is
+# co-copied so `uv sync` can read `[project].readme = "README.md"` from
+# pyproject without error; it costs ~1 KB on a cache hit.
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-# Step 2: copy the project source and install the project itself, non-editable
-# so the wheel ends up in the venv rather than as a `.pth` reference. The
-# wheel build pulls in `alembic.ini` and `alembic/` via hatch's
-# `[tool.hatch.build.targets.wheel.force-include]` (see backend/pyproject.toml);
-# hatch errors out when a force-include source is missing, so both must
-# exist in the build context at the moment of `uv sync --no-editable`.
-COPY src ./src
-COPY alembic ./alembic
-COPY alembic.ini ./
+# Step 2: install the project from the wheel prebuilt in the `wheelbuilder`
+# stage. Installing a built pure-Python wheel needs neither a build backend
+# nor a network resolve, so — unlike the former `uv sync --no-editable`, whose
+# build-isolation resolve of `hatchling` failed to connect from the CI cluster
+# on a cold cache (evoila/meho#3626, reproduced on both amd64 and arm64) —
+# this step never contacts PyPI. Dependencies are already in /app/.venv from
+# Step 1; `--no-deps` scopes the install to the project distribution alone, and
+# `--offline` fails loud rather than silently reaching for the network. The
+# wheel carries the `ui/` static tree the Tailwind step below compiles
+# against, exactly as the sync install did.
+COPY --from=wheelbuilder /wheels /wheels
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    VIRTUAL_ENV=/app/.venv uv pip install --no-deps --offline /wheels/*.whl
 
 # ---------- Operator-console CSS (Initiative #337, Task #863) ---------------
 # Build the compiled Tailwind 4 + DaisyUI 5 bundle for the /ui surface using

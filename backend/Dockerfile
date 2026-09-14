@@ -156,27 +156,42 @@ RUN set -eux; \
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
 
-# ---------- Base-OS security patch: util-linux family (CVE-2026-53615) -------
-# ----------                        + openssl family    (CVE-2026-14456) ------
-# The pinned base still carries util-linux 2.41-5, which Trivy flags as a
-# fixable HIGH (CVE-2026-53615). Debian trixie-security already serves the fix
-# (2.41.5-0+deb13u1), but the upstream python:3.14-slim manifest has not been
-# rebuilt against it yet, so the digest bump the Dependabot docker block would
-# normally carry cannot clear it. Same story for openssl 3.5.6-1~deb13u2,
-# flagged as fixable HIGH CVE-2026-14456 with the fix (3.5.7-1~deb13u2)
-# already in trixie-security. Rather than publish a release image with a
-# known fixable HIGH, upgrade just those binary families to the security
-# version in one apt layer (indexes dropped in the same RUN, so no apt metadata
-# persists in the image). This is a targeted --only-upgrade of packages already
-# present — no new package enters the image — and is the sibling in intent of
-# the pip uninstall below: keep the Trivy scan clean. Remove this layer once
-# the base-digest bump lands a rebuilt base already carrying util-linux
-# >= 2.41.5-0+deb13u1 and openssl >= 3.5.7-1~deb13u2.
+# ---------- Base-OS security patch: base packages Trivy flags fixable --------
+# The pinned base carries several Debian trixie packages that Trivy flags as
+# fixable CRITICAL/HIGH, each with the fix already served by the trixie apt
+# repo but NOT yet in a rebuilt upstream python:3.14-slim manifest — so the
+# base-digest bump the Dependabot docker block would normally carry cannot
+# clear them. (As of this layer's last touch the freshly-rebuilt upstream tag
+# picked up util-linux and openssl but still ships the vulnerable perl-base,
+# gzip, libpcre2 and libsqlite3, so a digest bump alone leaves the gate red.)
+# Rather than publish a release image with a known fixable CRITICAL/HIGH, we
+# upgrade just those already-present binaries to the trixie security version in
+# one apt layer (indexes dropped in the same RUN, so no apt metadata persists
+# in the image). This is a targeted --only-upgrade of packages already present
+# — no new package enters the image — the sibling in intent of the pip
+# uninstall below: keep the Trivy scan (and the image workflow's promotion
+# gate) clean. Families and the fix that clears each:
+#   util-linux (+ libuuid1/libmount1/libblkid1/libsmartcols1/liblastlog2-2/
+#     mount/bsdutils/login)   >= 2.41.5-0+deb13u1   CVE-2026-53615
+#   openssl (+ libssl3t64/openssl-provider-legacy)
+#                             >= 3.5.7-1~deb13u2    CVE-2026-14456
+#   perl-base                 >= 5.40.1-6+deb13u1   CVE-2026-8376 (CRITICAL),
+#                                                   CVE-2026-57433, CVE-2026-57432,
+#                                                   CVE-2026-48962, CVE-2026-42497
+#   gzip                      >= 1.13-1+deb13u1     CVE-2026-41992
+#   libpcre2-8-0              >= 10.46-1~deb13u2    CVE-2026-86145, CVE-2026-89161
+#   libsqlite3-0              >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
+# Drop each package from this layer once a base-digest bump lands a rebuilt
+# base already carrying that package at (or above) the version listed here.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade \
       util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
       mount bsdutils login \
       openssl libssl3t64 openssl-provider-legacy \
+      perl-base \
+      gzip \
+      libpcre2-8-0 \
+      libsqlite3-0 \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).

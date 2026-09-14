@@ -6,7 +6,7 @@
 # this change (~1490 lines); splitting the metadata table is out of scope for
 # the #3349 governed-subop wiring.
 
-"""``register_vmware_composite_operations`` -- registrar for the 53 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 54 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -92,6 +92,7 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
+    namespace_status_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
@@ -190,6 +191,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NAMESPACE_CREATE_RESPONSE_SCHEMA,
     NAMESPACE_DELETE_PARAMETER_SCHEMA,
     NAMESPACE_DELETE_RESPONSE_SCHEMA,
+    NAMESPACE_STATUS_PARAMETER_SCHEMA,
+    NAMESPACE_STATUS_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_CREATE_PARAMETER_SCHEMA,
@@ -425,10 +428,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "policy, a TKr/VKr content library, and VM classes; the container a VKS "
         "guest cluster is created into and the last vCenter-REST step before "
         "k8s.apply of the Cluster CR) and tear one down (namespace.delete, "
-        "destructive + approval: cascades to every workload inside it). The "
+        "destructive + approval: cascades to every workload inside it). Poll a "
+        "namespace's readiness with namespace.status (safe: config_status "
+        "CONFIGURING -> RUNNING + a derived ready flag, boot-enabled like "
+        "supervisor.status). The "
         "right group for 'stand up Kubernetes on this cluster', 'tear the "
         "Supervisor down', 'has the Supervisor come up yet?', 'create the "
-        "namespace for the guest cluster', or 'delete this namespace'. Pair with "
+        "namespace for the guest cluster', 'has the namespace come up yet?', or "
+        "'delete this namespace'. Pair with "
         "'storage' for the SPBM policy id the enable spec / namespace needs, "
         "'content_library' for the TKr library id the namespace binds, and "
         "'networking' for the workload / management network context."
@@ -1755,6 +1762,32 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="destructive",
         requires_approval=True,
     ),
+    _CompositeSpec(
+        op_id="vmware.composite.namespace.status",
+        handler=namespace_status_composite,
+        summary="Read a vSphere Namespace's config status (poll-friendly, boot-enabled).",
+        description=(
+            "Reads GET /vcenter/namespaces/instances/{namespace} and reshapes "
+            "Namespaces.Instances.Info into a compact, inline-pollable envelope: "
+            "the scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + a "
+            "derived ready flag + stats + description + capped messages stay "
+            "top-level so a runbook OperationCallVerify step or a Sensor "
+            "assertion can poll config_status=='RUNNING' / ready==true directly. "
+            "The governed, boot-enabled poll op namespace.create/.delete hand the "
+            "caller for the asynchronous convergence poll -- symmetric with "
+            "supervisor.status; a GET 404 returns exists=false rather than a "
+            "fault (the namespace is not yet visible mid-create, or gone after "
+            "delete). Read-only -- unlike the raw ingested get-by-name row (which "
+            "lands disabled behind per-deployment operator review), a typed read "
+            "composite is dispatchable at connector import on every deployment."
+        ),
+        parameter_schema=NAMESPACE_STATUS_PARAMETER_SCHEMA,
+        response_schema=NAMESPACE_STATUS_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "read-only", "namespace-management", "namespace", "vks", "supervisor"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
     # storage_policy.* — governed NFS tag-based SPBM policy (#3494)
     # ----------------------------------------------------------------
     _CompositeSpec(
@@ -1931,9 +1964,10 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 53 composites total -- 13 read (T5 / #508 + the 4 guest-ops
-    reads / #3100 + the supervisor status / storage-policy list / two
-    SUBSCRIBED content-library reads) + 40 write (T6 / #509 + the
+    Scope: 54 composites total -- 14 read (T5 / #508 + the 4 guest-ops
+    reads / #3100 + the supervisor status + the vSphere Namespace status
+    (#3502) / storage-policy list / two SUBSCRIBED content-library reads) +
+    40 write (T6 / #509 + the
     destructive-tier ``vm.destroy`` / #3198, the governed vSphere Namespace
     create/delete ``namespace.create`` (caution) / ``namespace.delete``
     (destructive) / #3502, the governed resource-pool allocation writes

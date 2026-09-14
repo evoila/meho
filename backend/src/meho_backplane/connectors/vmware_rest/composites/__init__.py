@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 53 composites land before
+``endpoint_descriptor`` upserts for the 54 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -89,6 +89,7 @@ from meho_backplane.connectors.vmware_rest.composites._library import (
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
+    namespace_status_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
@@ -174,6 +175,7 @@ __all__ = [
     "host_evacuate_composite",
     "namespace_create_composite",
     "namespace_delete_composite",
+    "namespace_status_composite",
     "network_portgroup_audit_composite",
     "network_portgroup_create_composite",
     "network_portgroup_security_set_composite",

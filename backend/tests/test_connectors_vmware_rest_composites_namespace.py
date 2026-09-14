@@ -35,10 +35,13 @@ from meho_backplane.connectors.vmware_rest.composites import _namespace, _write,
 from meho_backplane.connectors.vmware_rest.composites._namespace import (
     namespace_create_composite,
     namespace_delete_composite,
+    namespace_status_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NAMESPACE_CREATE_PARAMETER_SCHEMA,
     NAMESPACE_DELETE_PARAMETER_SCHEMA,
+    NAMESPACE_STATUS_PARAMETER_SCHEMA,
+    NAMESPACE_STATUS_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations._preview import PreviewContext, blast_radius_missing_reason
 
@@ -321,6 +324,88 @@ async def test_delete_parked_gate_short_circuits(monkeypatch: pytest.MonkeyPatch
 
 
 # ---------------------------------------------------------------------------
+# status (boot-enabled read composite)
+# ---------------------------------------------------------------------------
+
+
+async def test_status_running_is_ready_and_projects_fields() -> None:
+    connector = _RecordingConnector(
+        get_info={
+            "config_status": "RUNNING",
+            "stats": {"cpu_used": 1000, "memory_used": 2048, "storage_used": 4096},
+            "description": "envision guest-cluster namespace",
+            "messages": [{"severity": "INFO", "details": {"default_message": "ok"}}],
+        }
+    )
+    result = await namespace_status_composite(
+        operator=_operator(),
+        target=object(),
+        params={"namespace": "envision-ns"},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["namespace"] == "envision-ns"
+    assert result["exists"] is True
+    assert result["config_status"] == "RUNNING"
+    assert result["ready"] is True
+    assert result["stats"] == {"cpu_used": 1000, "memory_used": 2048, "storage_used": 4096}
+    assert result["description"] == "envision guest-cluster namespace"
+    assert result["message_count"] == 1
+    assert len(result["messages"]) == 1
+    # A read never routes through the write gate.
+    assert connector.writes == []
+    assert connector.gets == ["/api/vcenter/namespaces/instances/envision-ns"]
+    # Response is schema-valid.
+    Draft202012Validator(NAMESPACE_STATUS_RESPONSE_SCHEMA).validate(result)
+
+
+async def test_status_configuring_is_not_ready() -> None:
+    connector = _RecordingConnector(get_info={"config_status": "CONFIGURING", "messages": []})
+    result = await namespace_status_composite(
+        operator=_operator(),
+        target=object(),
+        params={"namespace": "envision-ns"},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["exists"] is True
+    assert result["config_status"] == "CONFIGURING"
+    assert result["ready"] is False
+
+
+async def test_status_absent_when_read_404s() -> None:
+    connector = _RecordingConnector(get_404=True)
+    result = await namespace_status_composite(
+        operator=_operator(),
+        target=object(),
+        params={"namespace": "gone-ns"},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert result["exists"] is False
+    assert result["ready"] is False
+    assert result["config_status"] is None
+    assert result["stats"] is None
+    assert result["messages"] == []
+    assert result["message_count"] == 0
+    Draft202012Validator(NAMESPACE_STATUS_RESPONSE_SCHEMA).validate(result)
+
+
+async def test_status_caps_messages_inline() -> None:
+    connector = _RecordingConnector(
+        get_info={
+            "config_status": "CONFIGURING",
+            "messages": [{"severity": "INFO", "details": {"i": i}} for i in range(40)],
+        }
+    )
+    result = await namespace_status_composite(
+        operator=_operator(),
+        target=object(),
+        params={"namespace": "envision-ns", "messages_limit": 5},
+        connector=connector,  # type: ignore[arg-type]
+    )
+    assert len(result["messages"]) == 5
+    assert result["message_count"] == 40
+
+
+# ---------------------------------------------------------------------------
 # parameter-schema conformance
 # ---------------------------------------------------------------------------
 
@@ -345,6 +430,14 @@ def test_create_schema_requires_supervisor_and_namespace() -> None:
 def test_delete_schema_requires_namespace_only() -> None:
     validator = Draft202012Validator(NAMESPACE_DELETE_PARAMETER_SCHEMA)
     validator.validate({"namespace": "ns"})
+    assert list(validator.iter_errors({"namespace": "ns", "extra": 1}))
+    assert list(validator.iter_errors({}))
+
+
+def test_status_schema_accepts_namespace_and_optional_limit() -> None:
+    validator = Draft202012Validator(NAMESPACE_STATUS_PARAMETER_SCHEMA)
+    validator.validate({"namespace": "ns"})
+    validator.validate({"namespace": "ns", "messages_limit": 10})
     assert list(validator.iter_errors({"namespace": "ns", "extra": 1}))
     assert list(validator.iter_errors({}))
 

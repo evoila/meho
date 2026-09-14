@@ -151,6 +151,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.file.read",
     # Supervisor (WCP) status read (#3281).
     "vmware.composite.supervisor.status",
+    # Governed vSphere Namespace status read (#3502) -- boot-enabled poll op.
+    "vmware.composite.namespace.status",
     # Storage-policy list read (#3494).
     "vmware.composite.storage_policy.list",
     # Content-library SUBSCRIBED reads (#3495).
@@ -168,8 +170,9 @@ _CAUTION_OP_IDS: tuple[str, ...] = (
     "vmware.composite.content_library.subscribed.sync",
 )
 
-# 53 total -- 13 read (T5 / #508 + 4 guest-ops reads / #3100 + the
-# supervisor status read / #3281 + storage_policy.list / #3494 + 2 SUBSCRIBED
+# 54 total -- 14 read (T5 / #508 + 4 guest-ops reads / #3100 + the
+# supervisor status read / #3281 + the vSphere Namespace status read / #3502 +
+# storage_policy.list / #3494 + 2 SUBSCRIBED
 # content-library reads / #3495) + 2 caution content-library writes / #3495 + 38 write
 # (the two below + the governed vSphere Namespace create/delete / #3502)
 # (T6 / #509 + vm.power / #2301 + vm.disk.grow / #2893 +

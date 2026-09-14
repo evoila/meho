@@ -67,6 +67,7 @@ _CLASSIFIER_OTHER = frozenset(
         "vmware.composite.supervisor.enable",
         "vmware.composite.supervisor.disable",
         "vmware.composite.supervisor.status",
+        "vmware.composite.namespace.status",
         "vmware.composite.content_library.subscribed.sync",
         "vmware.composite.content_library.subscribed.status",
     }

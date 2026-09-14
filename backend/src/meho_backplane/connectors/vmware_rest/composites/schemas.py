@@ -5537,6 +5537,88 @@ NAMESPACE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": True,
 }
 
+#: ``vmware.composite.namespace.status`` parameter schema. Reads a single
+#: namespace by name; ``messages_limit`` caps the inline ``messages`` array.
+NAMESPACE_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "vSphere Namespace name to read status for (rides the "
+                "``{namespace}`` segment of "
+                "GET /vcenter/namespaces/instances/{namespace})."
+            ),
+        },
+        "messages_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Optional cap on the inline ``messages`` array (default 25). "
+                "``message_count`` always carries the uncapped size."
+            ),
+        },
+    },
+    "required": ["namespace"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.namespace.status`` response schema. Shaped for inline
+#: polling: the scalar ``config_status`` / ``ready`` / ``exists`` stay
+#: top-level so a runbook OperationCallVerify step or a Sensor assertion reads
+#: them without a JSONFlux handle -- the governed, boot-enabled poll op the
+#: namespace.create / .delete composites hand the caller (symmetric with
+#: ``vmware.composite.supervisor.status``).
+NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "namespace": {"type": "string", "description": "Input namespace name."},
+        "exists": {
+            "type": "boolean",
+            "description": (
+                "False when the read-back GET 404s (namespace not yet visible "
+                "mid-create, or gone after delete) -- a normal poll answer, not "
+                "a fault; the other fields are then null / empty."
+            ),
+        },
+        "config_status": {
+            "type": ["string", "null"],
+            "description": (
+                "Namespaces.Instances.ConfigStatus: CONFIGURING / REMOVING / "
+                "RUNNING / ERROR. ``null`` when the namespace is absent or the "
+                "field is missing from the vCenter payload."
+            ),
+        },
+        "ready": {
+            "type": "boolean",
+            "description": (
+                "True iff config_status == 'RUNNING' -- the single poll "
+                "predicate a runbook / Sensor waits on before creating a VKS "
+                "guest cluster into the namespace."
+            ),
+        },
+        "stats": {
+            "type": ["object", "null"],
+            "description": (
+                "Namespaces.Instances.Stats (cpu_used / memory_used / "
+                "storage_used); ``null`` when absent."
+            ),
+        },
+        "description": {
+            "type": ["string", "null"],
+            "description": "The namespace description; ``null`` when absent.",
+        },
+        "messages": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Namespaces.Instances.Message rows (severity + details).",
+        },
+        "message_count": {"type": "integer", "description": "Uncapped message count."},
+    },
+    "required": ["namespace", "exists", "config_status", "ready"],
+}
+
 
 # ===========================================================================
 # Content-library SUBSCRIBED-library composites (#3495)

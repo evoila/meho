@@ -26,12 +26,25 @@ built to show; these two composites close that gap:
   ``safety_level="destructive"`` + ``requires_approval=True`` (mandatory human
   approval; a ``DELETE`` child is never grant-clearable, so this always parks).
   Read-back verifies absence (``GET`` 404) -> ``status="deleted"``.
+* ``vmware.composite.namespace.status`` --
+  ``GET /vcenter/namespaces/instances/{namespace}`` -> the scalar
+  ``config_status`` (``CONFIGURING`` -> ``RUNNING`` / ``ERROR`` / ``REMOVING``)
+  + a derived ``ready`` flag + ``stats`` + capped ``messages``.
+  ``safety_level="safe"`` + ``requires_approval=False``. The **governed,
+  boot-enabled** poll op ``namespace.create`` / ``.delete`` hand the caller for
+  the asynchronous convergence poll -- symmetric with
+  ``vmware.composite.supervisor.status``.
 
-The **reads** (list / get) are the already-enabled ingested ``GET`` rows
-(``GET /vcenter/namespaces/instances`` / ``.../v2`` /
-``.../instances/{namespace}``); the dispatcher JSONFlux-reduces the set-shaped
-list automatically, so no read composite is added here (the create / delete
-read-backs use the un-gated ``_read_sub_op`` seam directly).
+The **list** read (``GET /vcenter/namespaces/instances`` / ``.../v2``) is left
+to the already-enabled ingested rows; the dispatcher JSONFlux-reduces the
+set-shaped list automatically. The single-namespace **get** is wrapped as the
+boot-enabled ``namespace.status`` composite above -- *not* left to the ingested
+``GET /vcenter/namespaces/instances/{namespace}`` row, because that row lands
+``is_enabled=False`` behind per-deployment operator review, so a caller polling
+create/delete convergence on a fresh boot would have no governed read. A typed
+read composite is dispatchable at connector import on every deployment
+(symmetric with ``supervisor.status``); the create / delete read-backs share
+the same un-gated ``_read_sub_op`` seam directly.
 
 Generic-vs-typed
 ----------------
@@ -96,6 +109,7 @@ if TYPE_CHECKING:
 __all__ = [
     "namespace_create_composite",
     "namespace_delete_composite",
+    "namespace_status_composite",
 ]
 
 
@@ -129,6 +143,16 @@ _OPTIONAL_CREATE_SPEC_FIELDS: Final[tuple[str, ...]] = (
 #: ``Namespaces.Instances.Info.config_status`` value that means the namespace
 #: is being asynchronously torn down (delete accepted, workloads draining).
 _CONFIG_STATUS_REMOVING: Final = "REMOVING"
+
+#: ``Namespaces.Instances.Info.config_status`` value that means the namespace
+#: has finished configuring and is ready for VKS guest clusters -- the single
+#: poll predicate ``namespace.status`` exposes as ``ready``.
+_CONFIG_STATUS_RUNNING: Final = "RUNNING"
+
+#: Default inline cap on the ``namespace.status`` ``messages`` array (mirrors
+#: ``supervisor.status``): keeps the status envelope pollable without a
+#: JSONFlux handle. ``message_count`` always carries the uncapped size.
+_STATUS_MESSAGES_DEFAULT_CAP: Final = 25
 
 
 async def _read_namespace_info(
@@ -211,10 +235,11 @@ async def namespace_create_composite(
         "config_status": config_status,
         "guidance": (
             "vSphere Namespace create accepted (asynchronous). The namespace "
-            "moves config_status CONFIGURING -> RUNNING; re-read GET "
-            "/vcenter/namespaces/instances/{namespace} until RUNNING before "
-            "creating a VKS guest cluster into it. config_status == 'ERROR' "
-            "needs operator intervention."
+            "moves config_status CONFIGURING -> RUNNING; poll "
+            "vmware.composite.namespace.status (the governed, boot-enabled read "
+            "composite -- it returns ready==true once config_status is RUNNING) "
+            "before creating a VKS guest cluster into it. config_status == "
+            "'ERROR' needs operator intervention."
         ),
     }
 
@@ -272,9 +297,9 @@ async def namespace_delete_composite(
             "config_status": config_status,
             "guidance": (
                 "delete accepted; the namespace is asynchronously REMOVING "
-                "(workloads inside are being torn down). Re-read GET "
-                "/vcenter/namespaces/instances/{namespace} until it 404s to "
-                "confirm removal."
+                "(workloads inside are being torn down). Poll "
+                "vmware.composite.namespace.status until it reports "
+                "exists==false to confirm removal."
             ),
         }
     return {
@@ -285,4 +310,85 @@ async def namespace_delete_composite(
             f"DELETE was accepted but the namespace still reports config_status "
             f"{config_status!r} (not REMOVING); re-check the target."
         ),
+    }
+
+
+def _project_messages(items: Any, cap: int) -> tuple[list[dict[str, Any]], int]:
+    """Cap + project a namespace ``messages`` array; return ``(capped, total)``.
+
+    Keeps the array small + inline so ``namespace.status`` stays pollable
+    without a JSONFlux handle. Non-dict rows are dropped; ``total`` is the
+    uncapped count so a caller sees the true size even when the list is
+    truncated. Mirrors ``_supervisor._project_messages``.
+    """
+    if not isinstance(items, list):
+        return [], 0
+    rows = [row for row in items if isinstance(row, dict)]
+    return rows[:cap], len(rows)
+
+
+async def namespace_status_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any]:
+    """Read a vSphere Namespace's config status -- poll-friendly + boot-enabled (#3502).
+
+    Op-id: ``vmware.composite.namespace.status``. ``safety_level="safe"`` +
+    ``requires_approval=False``. Issues the un-gated
+    ``GET /vcenter/namespaces/instances/{namespace}`` read and reshapes
+    ``Namespaces.Instances.Info`` into a compact, inline-pollable envelope: the
+    scalar ``config_status`` (``CONFIGURING`` / ``REMOVING`` / ``RUNNING`` /
+    ``ERROR``) and the derived ``ready`` flag stay top-level so a runbook
+    ``OperationCallVerify`` step or a Sensor assertion can poll
+    ``config_status == 'RUNNING'`` / ``ready == true`` directly -- never behind
+    a set-shaped handle.
+
+    This is the **governed, boot-enabled** poll op ``namespace.create`` /
+    ``.delete`` hand the caller. Unlike the raw ingested
+    ``GET /vcenter/namespaces/instances/{namespace}`` row -- which lands
+    ``is_enabled=False`` behind per-deployment operator review -- a typed read
+    composite is dispatchable at connector import on every deployment,
+    symmetric with ``vmware.composite.supervisor.status``.
+
+    A ``GET`` 404 (the namespace does not exist -- not yet visible mid-create,
+    or gone after delete) is a normal poll answer, returned as ``exists=False``
+    / ``config_status=None`` / ``ready=False`` rather than a fault; any other
+    transport / status fault propagates for the dispatcher to wrap
+    ``connector_error``. The ``messages`` array is capped inline to
+    :data:`_STATUS_MESSAGES_DEFAULT_CAP` (override with ``messages_limit``);
+    ``message_count`` carries the uncapped size. Read-only.
+    """
+    namespace = params["namespace"]
+    cap = params.get("messages_limit", _STATUS_MESSAGES_DEFAULT_CAP)
+
+    info = await _read_namespace_info(connector, target, operator, namespace)
+    if info is None:
+        return {
+            "namespace": namespace,
+            "exists": False,
+            "config_status": None,
+            "ready": False,
+            "stats": None,
+            "description": None,
+            "messages": [],
+            "message_count": 0,
+        }
+
+    status_value = info.get("config_status")
+    config_status = status_value if isinstance(status_value, str) else None
+    stats = info.get("stats")
+    description = info.get("description")
+    messages, message_count = _project_messages(info.get("messages"), cap)
+    return {
+        "namespace": namespace,
+        "exists": True,
+        "config_status": config_status,
+        "ready": config_status == _CONFIG_STATUS_RUNNING,
+        "stats": stats if isinstance(stats, dict) else None,
+        "description": description if isinstance(description, str) else None,
+        "messages": messages,
+        "message_count": message_count,
     }

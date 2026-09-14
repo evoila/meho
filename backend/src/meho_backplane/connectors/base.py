@@ -22,11 +22,26 @@ from meho_backplane.connectors.schemas import (
     TopologyHints,
 )
 
-__all__ = ["Connector", "ShimKind", "shim_kind"]
+__all__ = ["Connector", "ConnectorResourceNotFoundError", "ShimKind", "shim_kind"]
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
 type Target = Any
+
+
+class ConnectorResourceNotFoundError(Exception):
+    """A connector identified an addressed upstream resource as absent.
+
+    Connectors raise this only for an explicit upstream missing-resource
+    signal, never by inferring absence from a transport failure.  The
+    dispatcher turns it into the common structured ``not_found`` envelope,
+    keeping vendor fault parsing at the connector boundary.
+    """
+
+    def __init__(self, resource_ids: list[str], message: str) -> None:
+        super().__init__(message)
+        self.resource_ids = resource_ids
+
 
 #: G0.28-T1 (#1967) — tri-state dispatchability classification of a
 #: connector class, replacing the binary ``issubclass(GenericRestConnector)``

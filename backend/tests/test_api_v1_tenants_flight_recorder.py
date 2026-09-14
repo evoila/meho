@@ -154,9 +154,36 @@ def _patch(
     return client.patch(_ROUTE, json=body, headers={"Authorization": f"Bearer {token}"})
 
 
+def _get(client: TestClient, token: str) -> Any:
+    return client.get(_ROUTE, headers={"Authorization": f"Bearer {token}"})
+
+
 # ---------------------------------------------------------------------------
 # Happy path + resolved read-back
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_returns_effective_and_raw_policy(client: TestClient) -> None:
+    await _seed_tenants(a_enabled=True, a_agent_readable=None, a_retention=None)
+    key = make_rsa_keypair("kid-get")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _get(client, _token(key))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["raw"] == {
+        "tenant_id": str(_TENANT_A),
+        "flight_recorder_enabled": True,
+        "flight_recorder_agent_readable": None,
+        "flight_recorder_retention_days": None,
+    }
+    assert body["effective"] == {
+        "tenant_id": str(_TENANT_A),
+        "flight_recorder_enabled": True,
+        "flight_recorder_agent_readable": True,
+        "flight_recorder_retention_days": 7,
+    }
 
 
 @pytest.mark.asyncio
@@ -280,6 +307,19 @@ async def test_non_admin_roles_get_403(client: TestClient, role: TenantRole) -> 
     assert resp.json()["detail"] == "insufficient_role"
     # The rejected write mutated nothing.
     assert (await _fetch_tenant(_TENANT_A)).flight_recorder_enabled is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [TenantRole.OPERATOR, TenantRole.READ_ONLY])
+async def test_get_requires_tenant_admin(client: TestClient, role: TenantRole) -> None:
+    await _seed_tenants()
+    key = make_rsa_keypair(f"kid-get-rbac-{role.value}")
+    token = _token(key, sub=f"op-get-{role.value}", role=role)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = _get(client, token)
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "insufficient_role"
 
 
 # ---------------------------------------------------------------------------

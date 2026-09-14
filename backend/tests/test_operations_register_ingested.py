@@ -432,6 +432,82 @@ def test_eager_connector_import_registers_vmware_safety_floor() -> None:
     assert floored.requires_approval is True
 
 
+@pytest.mark.asyncio
+async def test_vmware_8_0_catalog_hardware_writes_receive_connector_safety_floor(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The 8.0 U3 catalog gets the same VM-write floor as 9.0 at registration (#3569).
+
+    The floor is keyed on ``(product, impl_id)``, and #3569 scopes it to both
+    qualified catalog versions, so ingesting the same hardware-write families
+    under ``version="8.0"`` must promote them to dangerous + approval-gated
+    exactly as the 9.0 catalog does.
+    """
+    paths = (
+        "/vcenter/vm/{vm}/hardware/ethernet",
+        "/vcenter/vm/{vm}/hardware/disk/{disk}",
+        "/vcenter/vm/{vm}/hardware/cpu",
+        "/vcenter/vm/{vm}/hardware/memory",
+    )
+    operations = [
+        _proto(f"{method}:{path}", method=method, path=path)
+        for method in ("POST", "PUT", "PATCH", "DELETE")
+        for path in paths
+    ]
+
+    await register_ingested_operations(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=operations,
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.product == "vmware",
+                    EndpointDescriptor.version == "8.0",
+                )
+            )
+        ).scalars()
+        assert {(row.safety_level, row.requires_approval) for row in rows} == {("dangerous", True)}
+
+
+@pytest.mark.parametrize("version", ["8.0", "9.0"])
+def test_vmware_floor_promotes_both_qualified_catalog_versions(version: str) -> None:
+    """The connector floor covers both the 8.0 U3 and 9.0 catalogs (#3569)."""
+    proto = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    floored = apply_safety_floor(
+        product="vmware",
+        version=version,
+        impl_id="vmware-rest",
+        proto=proto,
+    )
+    assert floored.safety_level == "dangerous"
+    assert floored.requires_approval is True
+
+
+def test_vmware_floor_leaves_unqualified_version_unchanged() -> None:
+    """The floor is scoped to the qualified catalog versions, not every version."""
+    proto = _proto(
+        "POST:/vcenter/vm/{vm}/hardware/ethernet",
+        method="POST",
+        path="/vcenter/vm/{vm}/hardware/ethernet",
+    )
+    assert (
+        apply_safety_floor(product="vmware", version="8.1", impl_id="vmware-rest", proto=proto)
+        is proto
+    )
+
+
 # ---------------------------------------------------------------------------
 # Body-hash skip path (idempotency)
 # ---------------------------------------------------------------------------

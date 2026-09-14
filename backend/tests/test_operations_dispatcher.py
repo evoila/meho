@@ -64,7 +64,10 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
-from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest.connector import (
+    VmwareRest80Connector,
+    VmwareRestConnector,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import (
@@ -1461,12 +1464,13 @@ async def _add_vmware_guard_descriptor(
     *,
     source_kind: str = "ingested",
     requires_approval: bool = True,
+    version: str = "9.0",
 ) -> None:
     descriptor = EndpointDescriptor(
         id=uuid.uuid4(),
         tenant_id=None,
         product="vmware",
-        version="9.0",
+        version=version,
         impl_id="vmware-rest",
         op_id="POST:/api/vcenter/vm/example",
         source_kind=source_kind,
@@ -1608,6 +1612,64 @@ async def test_vmware_typed_descriptor_does_not_use_catalog_guard_on_8x(
         connector_id="vmware-rest-9.0",
         op_id="POST:/api/vcenter/vm/example",
         target=_FakeTarget(product="vmware", version="8.0"),
+        params={},
+    )
+
+    assert result.extras.get("error_code") != "unqualified_target_version"
+
+
+class _VmwareGuard80HttpConnector(VmwareRest80Connector):
+    """8.0 U3 catalog compatibility predicate with a transport-free test seam."""
+
+    async def _request_json(  # type: ignore[override]
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        del target, method, path, operator, params, json, extra_headers
+        return {"ok": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["8.0.3", "8.0.3.24022510", "8.0"])
+async def test_vmware_8_0_catalog_serves_fingerprinted_8_0_x_target(
+    version: str,
+    session: AsyncSession,
+) -> None:
+    """The 8.0 U3 catalog resolves and serves a fingerprinted 8.0.x target (#3569).
+
+    The 8.0 catalog exists precisely so the fingerprinted 8.0.x targets the
+    9.0 catalog's guard rejects keep a governed generic path. The owner-class
+    lookup on the ``vmware-rest-8.0`` descriptor names VmwareRest80Connector,
+    whose guard band is the 8.0.x line, so the dispatch is not rejected with
+    ``unqualified_target_version`` -- the mirror image of the 9.0 guard's
+    rejection of the same target.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="8.0",
+        impl_id="vmware-rest",
+        cls=_VmwareGuard80HttpConnector,
+    )
+    # Production registers the v1-shaped wildcard beside the versioned entry;
+    # the versioned 8.0 band must still win via ``versioned_over_wildcard``.
+    register_connector("vmware", _VmwareGuard80HttpConnector)
+    await _add_vmware_guard_descriptor(session, requires_approval=False, version="8.0")
+
+    target = _FakeTarget(product="vmware", version=version)
+    assert resolve_connector(target) is _VmwareGuard80HttpConnector
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vmware-rest-8.0",
+        op_id="POST:/api/vcenter/vm/example",
+        target=target,
         params={},
     )
 

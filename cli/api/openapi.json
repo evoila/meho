@@ -1362,6 +1362,48 @@
       }
     },
     "/api/v1/tenants/flight-recorder-policy": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Get Flight Recorder Policy",
+        "description": "Read the caller's effective and raw flight-recorder policy (#3447).\n\nThe raw section is the tenant row's stored tri-state values. The effective\nsection deliberately calls the dispatch resolver so global defaults and the\nglobal capture kill switch use exactly the same precedence as the hot path.\nNo target is supplied: this is the tenant default before a per-target\noverride is considered.",
+        "operationId": "get_flight_recorder_policy_api_v1_tenants_flight_recorder_policy_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantFlightRecorderPolicyRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "tenants"
@@ -3243,6 +3285,198 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/recent": {
+      "get": {
+        "tags": [
+          "broadcast"
+        ],
+        "summary": "Recent Broadcast Events",
+        "description": "Read one tenant-scoped, LLM-safe broadcast history page.",
+        "operationId": "recent_broadcast_events_api_v1_broadcast_recent_get",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target"
+            }
+          },
+          {
+            "name": "actor_sub",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Actor Sub"
+            }
+          },
+          {
+            "name": "work_ref",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Work Ref"
+            }
+          },
+          {
+            "name": "active_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Active Only"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Recent Broadcast Events Api V1 Broadcast Recent Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/announce": {
+      "post": {
+        "tags": [
+          "broadcast"
+        ],
+        "summary": "Announce Broadcast",
+        "description": "Durably publish a tenant-scoped agent announcement through the shared seam.",
+        "operationId": "announce_broadcast_api_v1_broadcast_announce_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastAnnounceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastAnnounceResponse"
+                }
               }
             }
           },
@@ -24749,6 +24983,137 @@
         "title": "BoolCompare",
         "description": "Boolean comparator: the value must be strictly ``bool``.\n\nA non-boolean observed value is ``unknown`` (no truthiness coercion);\na boolean that does not match :attr:`expect` is ``critical``."
       },
+      "BroadcastAnnounceRequest": {
+        "properties": {
+          "activity": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Activity"
+          },
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
+          "scope": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Scope"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "start",
+              "update",
+              "completion"
+            ],
+            "title": "Phase",
+            "default": "update"
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Targets"
+          },
+          "planned_op_class": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "credential_read",
+              "credential_write",
+              "credential_mint",
+              "audit_query",
+              "approval",
+              "other"
+            ],
+            "nullable": true,
+            "title": "Planned Op Class"
+          },
+          "ttl_minutes": {
+            "type": "integer",
+            "maximum": 1440.0,
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Ttl Minutes"
+          },
+          "work_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Run Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "activity"
+        ],
+        "title": "BroadcastAnnounceRequest",
+        "description": "The REST representation of a governed agent announcement."
+      },
+      "BroadcastAnnounceResponse": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Event Id"
+          },
+          "cursor": {
+            "type": "string",
+            "title": "Cursor"
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Targets"
+          },
+          "planned_op_class": {
+            "type": "string",
+            "nullable": true,
+            "title": "Planned Op Class"
+          },
+          "ttl_minutes": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Ttl Minutes"
+          },
+          "work_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Work Ref"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Run Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "event_id",
+          "cursor"
+        ],
+        "title": "BroadcastAnnounceResponse",
+        "description": "Acknowledgement with distinct durable event id and stream cursor."
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -27163,6 +27528,36 @@
         ],
         "title": "EffectPhase",
         "description": "The two records the runner writes per executed write item.\n\n* :attr:`INTENT` \u2014 written **before** the mutation is attempted (the runner\n  is about to execute a centrally-authorised write). Its presence without a\n  matching :attr:`OUTCOME` is itself evidence (the runner crashed or was\n  cut off mid-write).\n* :attr:`OUTCOME` \u2014 written **after** the handler returns, carrying the\n  runner-level result status."
+      },
+      "EffectiveTenantFlightRecorderPolicy": {
+        "properties": {
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "flight_recorder_enabled": {
+            "type": "boolean",
+            "title": "Flight Recorder Enabled"
+          },
+          "flight_recorder_agent_readable": {
+            "type": "boolean",
+            "title": "Flight Recorder Agent Readable"
+          },
+          "flight_recorder_retention_days": {
+            "type": "integer",
+            "title": "Flight Recorder Retention Days"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "flight_recorder_enabled",
+          "flight_recorder_agent_readable",
+          "flight_recorder_retention_days"
+        ],
+        "title": "EffectiveTenantFlightRecorderPolicy",
+        "description": "Flight-recorder policy after global and tenant defaults are resolved."
       },
       "EnableReadsResponse": {
         "properties": {
@@ -33340,6 +33735,23 @@
         ],
         "title": "TenantFlightRecorderPolicy",
         "description": "Resolved per-tenant flight-recorder policy -- the PATCH read-back shape.\n\nFrozen; maps 1:1 to the three ``tenant`` policy columns plus the tenant id.\n``flight_recorder_agent_readable`` and ``flight_recorder_retention_days``\nare nullable: ``None`` means \"inherit\" (agent-read follows the capture\ndefault) / \"use the global default\" (retention) respectively."
+      },
+      "TenantFlightRecorderPolicyRead": {
+        "properties": {
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveTenantFlightRecorderPolicy"
+          },
+          "raw": {
+            "$ref": "#/components/schemas/TenantFlightRecorderPolicy"
+          }
+        },
+        "type": "object",
+        "required": [
+          "effective",
+          "raw"
+        ],
+        "title": "TenantFlightRecorderPolicyRead",
+        "description": "Tenant policy read response with resolved and stored values (#3447)."
       },
       "TenantFlightRecorderPolicyUpdate": {
         "properties": {

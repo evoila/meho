@@ -454,12 +454,10 @@ func TestPrintQueryTableEmpty(t *testing.T) {
 	}
 }
 
-// TestPrintQueryTablePrefersPrincipalName pins the PRINCIPAL column
-// contract (#3338): the resolved principal_name, already carried
-// in-band on the audit row, renders in preference to the raw sub —
-// mirroring the TARGET column's target_name handling — and a row
-// without a name falls back to the sub.
-func TestPrintQueryTablePrefersPrincipalName(t *testing.T) {
+// TestPrintQueryTableShowsPrincipalNameAlongsideSub pins the PRINCIPAL column
+// contract (#3301): the resolved principal_name is shown alongside the raw sub,
+// and a row without a name falls back to the sub alone.
+func TestPrintQueryTableShowsPrincipalNameAlongsideSub(t *testing.T) {
 	name := "Alice Admin"
 	var buf bytes.Buffer
 	printQueryTable(&buf, &api.AuditQueryResult{
@@ -485,8 +483,8 @@ func TestPrintQueryTablePrefersPrincipalName(t *testing.T) {
 	if !strings.Contains(out, "Alice Admin") {
 		t.Errorf("PRINCIPAL column dropped the resolved name: %s", out)
 	}
-	if strings.Contains(out, "alice-sub") {
-		t.Errorf("PRINCIPAL column printed the sub despite a resolved name: %s", out)
+	if !strings.Contains(out, "Alice Admin (alice-sub)") {
+		t.Errorf("PRINCIPAL column did not show the name alongside the sub: %s", out)
 	}
 	if !strings.Contains(out, "bob-sub-only") {
 		t.Errorf("PRINCIPAL column dropped the sub fallback when the name was absent: %s", out)

@@ -64,6 +64,7 @@ class _FakeConnector:
         self._mount_prefix = mount_prefix
         self.mount_calls: list[str] = []
         self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self.promote_missing_calls: list[bool] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -77,6 +78,7 @@ class _FakeConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         # vmomi RetrievePropertiesEx read via the vmomi seam; the handler
         # passes the spec-relative path (the /sdk/vim25 mount is the
@@ -84,6 +86,7 @@ class _FakeConnector:
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
+        self.promote_missing_calls.append(promote_managed_object_not_found)
         return self._props_result
 
 
@@ -154,6 +157,7 @@ async def test_object_collect_reads_datastore_properties() -> None:
         _Target(),
         {"type": "Datastore", "moid": "datastore-5", "properties": ["summary.freeSpace"]},
     )
+    assert conn.promote_missing_calls == [True]
 
     # The vmomi read routes through _post_vmomi_json (not mount_op_path);
     # the handler addresses it by the spec-relative path (#2466).

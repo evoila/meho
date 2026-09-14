@@ -10,6 +10,13 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# Versioned catalogs whose ingested VM writes carry this floor. Both the 9.0
+# (#3563/#3564) and the 8.0 U3 (#3569) generic catalogs share the same
+# hardware-mutating VM write families, so the floor applies identically. The
+# floor is registered once per ``(product, impl_id)``; this set scopes it to
+# the qualified catalog versions rather than every future version.
+_FLOORED_VERSIONS = frozenset({"8.0", "9.0"})
+
 
 def _requires_vmware_safety_floor(method: str, path: str) -> bool:
     """Identify VMware VM families whose generic writes require approval."""
@@ -32,8 +39,10 @@ def _requires_vmware_safety_floor(method: str, path: str) -> bool:
 def vmware_rest_safety_floor(
     version: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Promote VM hardware, lifecycle, and power writes for VMware REST 9.0."""
-    if version != "9.0" or not _requires_vmware_safety_floor(proto.method.upper(), proto.path):
+    """Promote VM hardware, lifecycle, and power writes for the VMware catalogs."""
+    if version not in _FLOORED_VERSIONS or not _requires_vmware_safety_floor(
+        proto.method.upper(), proto.path
+    ):
         return proto
     safety_level = proto.safety_level if proto.safety_level == "destructive" else "dangerous"
     return proto.model_copy(update={"safety_level": safety_level, "requires_approval": True})

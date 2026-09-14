@@ -244,6 +244,14 @@ T2 (#1976) authored the real artifacts:
 * `vmware/9.0` → `specs/vmware_rest_minimal.yaml` (9 vCenter inventory
   read ops under `/api`) + `profiles/vmware_rest_minimal.yaml`
   (`session_login` auth, `/api/about` fingerprint).
+* `vmware/8.0` → `specs/vmware_rest_8_0_minimal.yaml` +
+  `profiles/vmware_rest_8_0_minimal.yaml` (#3569). The 8.0 U3 sibling of
+  the 9.0 row: the same 9 inventory read ops (the 8.0 U3 and 9.0 REST read
+  shapes match) with `info.version: "8.0.3"`, dispatched by
+  `VmwareRest80Connector` — a second versioned catalog registered beside
+  `vmware/9.0` (dual-impl) so fingerprinted 8.0.x targets keep a governed
+  generic path after the 9.0 catalog's target guard. Same
+  `session_login` auth and `/api/about` fingerprint as 9.0.
 * `sddc/9.0` → `specs/sddc_manager_minimal.yaml` (9 SDDC Manager
   inventory + lifecycle read ops under `/v1`) +
   `profiles/sddc_manager_minimal.yaml` (`basic` auth,
@@ -460,8 +468,17 @@ Frozen Pydantic v2 model. One per operation. Maps 1:1 to a subset of
 | `tags` | `tags` | Spec tags + optional `spec:<source>` marker |
 | `parameter_schema` | `parameter_schema` | Flattened JSON Schema 2020-12 with `x-meho-param-loc`; `additionalProperties: false` (#293) |
 | `response_schema` | `response_schema` | Success-response schema or `None` |
-| `safety_level` | `safety_level` | HTTP-verb heuristic, then any connector-owned minimum safety floor |
-| `requires_approval` | `requires_approval` | `False` at parse time, then any connector-owned minimum safety floor |
+| `safety_level` | `safety_level` | HTTP-verb heuristic, narrow VIM destructive-action hint, then any connector-owned minimum safety floor |
+| `requires_approval` | `requires_approval` | `False` for ordinary operations; `True` for destructive-action hints or a connector-owned minimum safety floor |
+
+The parser treats a VIM-style operation whose `operationId` or final path
+method starts with `Destroy`, `Delete`, `Remove`, or `Unregister` as
+`dangerous` and `requires_approval=True`. VI-JSON exposes managed-object
+methods as `POST /<Type>/{moId}/<Method>`, so its HTTP verb alone would
+otherwise classify an object destroy as `caution`. This is a raise-only rule:
+it never weakens a stricter existing classification. The vocabulary is narrow
+by design; connector-owned safety floors remain the explicit scoped overlay
+for vendor- and version-specific rules.
 
 #### Connector safety floors
 

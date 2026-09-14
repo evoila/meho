@@ -75,6 +75,10 @@ from meho_backplane.operations.ingest.catalog import (
 # docs/cross-repo/github-connector.md.
 _EXPECTED_PRODUCT_VERSION = {
     ("vmware", "9.0"),
+    # #3569: second versioned vmware-rest catalog (8.0 U3), dual-impl beside
+    # 9.0 so fingerprinted 8.0.x targets keep a governed generic path after
+    # the 9.0 catalog's target guard.
+    ("vmware", "8.0"),
     ("sddc", "9.0"),
     ("harbor", "2.x"),
     # #1530: NSX-T 4.x was renumbered onto the VCF train at VCF 9.0;

@@ -108,7 +108,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
-from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -164,7 +164,12 @@ from meho_backplane.connectors.vmware_rest.soap_pbm import (
 )
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
-__all__ = ["VmwareRestConnector", "product_from_line_id", "service_versions_api_version"]
+__all__ = [
+    "VmwareRest80Connector",
+    "VmwareRestConnector",
+    "product_from_line_id",
+    "service_versions_api_version",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -188,6 +193,27 @@ _SESSION_HEADER = "vmware-api-session-id"
 # shared :data:`SESSION_TOKEN_OBJECT_KEY` so the typed and profiled
 # (``session_login_basic``) extractors can't drift apart (#2047).
 _SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
+
+
+def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
+    """Return the addressed MoIDs from a ``RetrievePropertiesEx`` body."""
+    if not isinstance(body, dict):
+        return []
+    resource_ids: list[str] = []
+    for spec in body.get("specSet", []):
+        if not isinstance(spec, dict):
+            continue
+        for object_spec in spec.get("objectSet", []):
+            if not isinstance(object_spec, dict):
+                continue
+            obj = object_spec.get("obj")
+            if not isinstance(obj, dict):
+                continue
+            value = obj.get("value")
+            if isinstance(value, str) and value:
+                resource_ids.append(value)
+    return resource_ids
+
 
 # Session endpoints + the spec-relative-op → /api-or-/rest mount
 # mapping live in ``._mount`` (extracted to keep this module within
@@ -423,6 +449,18 @@ class VmwareRestConnector(HttpConnector):
     supported_version_range = ">=8.5,<10.0"
     enforces_catalog_target_compatibility = True
 
+    #: Ingested-catalog target boundary this connector qualifies. The guard
+    #: rejects an ingested dispatch whose fingerprinted target version falls
+    #: outside ``[floor, ceiling)``. The 9.0 class owns the 9.x line;
+    #: :class:`VmwareRest80Connector` overrides these three attributes for the
+    #: 8.0.x line so each versioned catalog advertises its own bounded
+    #: predicate instead of sharing the 9.x boundary. Keeping the boundary on
+    #: the class (not hard-coded in the method) is what lets the dual-impl
+    #: sibling reuse the guard without loosening it for the 9.0 catalog.
+    _catalog_version_floor = Version("9")
+    _catalog_version_ceiling = Version("10")
+    _catalog_version_band_label = "9.x"
+
     @classmethod
     def catalog_target_incompatibility(
         cls,
@@ -432,8 +470,13 @@ class VmwareRestConnector(HttpConnector):
         target_version: str | None,
         selected_target_connector: type[Connector] | None,
     ) -> str | None:
-        """Guard the ingested vSphere 9 catalog without qualifying 8.x routes."""
-        del cls
+        """Guard an ingested vSphere catalog against an unqualified target.
+
+        The boundary is per-catalog: the 9.0 class qualifies the 9.x line,
+        the 8.0 subclass the 8.0.x line. A dispatch whose descriptor is owned
+        by this class but whose fingerprinted target falls outside the class's
+        ``[floor, ceiling)`` is rejected before any connector is constructed.
+        """
         if descriptor_source_kind != "ingested":
             return None
         if target_product != "vmware":
@@ -444,8 +487,11 @@ class VmwareRestConnector(HttpConnector):
             version = Version(target_version)
         except InvalidVersion:
             return "target version is invalid"
-        if not Version("9") <= version < Version("10"):
-            return "target version is outside the supported 9.x catalog boundary"
+        if not cls._catalog_version_floor <= version < cls._catalog_version_ceiling:
+            return (
+                "target version is outside the supported "
+                f"{cls._catalog_version_band_label} catalog boundary"
+            )
         if selected_target_connector is None:
             return "target connector could not be resolved"
         return None
@@ -646,6 +692,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -680,7 +727,11 @@ class VmwareRestConnector(HttpConnector):
         /sdk/vim25/8.0.3.0/... and /api/... both 404 on vCenter 8.0.3``)
         rather than a bare 404. Non-404 failures (401 / 403 / 5xx /
         transport) propagate unchanged — those are not "this mount isn't
-        served".
+        served". ``promote_managed_object_not_found`` is intentionally opt-in
+        for a typed single-resource read that can safely render a missing MoID
+        as ``not_found``. It defaults to ``False`` so shared task polling and
+        destructive-composite preflight reads retain their existing transport
+        failure semantics (#3479).
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -691,28 +742,62 @@ class VmwareRestConnector(HttpConnector):
         # unreached on ESXi and unchanged for vCenter (no vCenter target ever
         # carries the esxi flavor).
         if self._session_flavors.get(target_cache_key(target)) == HOST_FLAVOR_ESXI:
-            return await self._post_soap(target, vmomi_path, operator=operator, json=json)
+            return await self._post_soap(
+                target,
+                vmomi_path,
+                operator=operator,
+                json=json,
+                promote_managed_object_not_found=promote_managed_object_not_found,
+            )
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
             legacy_path = mounted_path(session_path, vmomi_path)
-            return await self._post_json(target, legacy_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                legacy_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
 
         api_path = mounted_path(session_path, vmomi_path)
         version = await self._about_version(target, operator)
         release = vmomi_release_from_version(version)
         if release is None:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
         try:
-            return await self._post_json(target, vijson_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                vijson_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
         # Single fallback to the /api-mounted vmomi form (the observed 9.x
         # accommodation); if that also 404s, surface both attempts.
         try:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(
@@ -720,6 +805,60 @@ class VmwareRestConnector(HttpConnector):
                     f"on vCenter {version}"
                 ) from exc
             raise
+
+    async def _post_vmomi_json_at_path(
+        self,
+        target: VsphereTargetLike,
+        path: str,
+        vmomi_path: str,
+        operator: Operator,
+        body: dict[str, Any] | None,
+        promote_managed_object_not_found: bool,
+    ) -> dict[str, Any]:
+        """POST one VI-JSON path, optionally promoting an explicit missing object."""
+        try:
+            return await self._post_json(target, path, operator=operator, json=body)
+        except httpx.HTTPStatusError as exc:
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found(exc, vmomi_path, body)
+            raise
+
+    @staticmethod
+    def _raise_managed_object_not_found(
+        exc: httpx.HTTPStatusError,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Promote a vim ``ManagedObjectNotFound`` read fault.
+
+        VI-JSON reports vim faults as HTTP 500, so status alone cannot
+        distinguish a deleted object from a transient vCenter failure.  Parse
+        the SOAP-shaped fault body first and only map the explicit vim fault
+        on the shared ``RetrievePropertiesEx`` read seam.
+        """
+        fault = parse_soap_fault(exc.response.text)
+        VmwareRestConnector._raise_managed_object_not_found_fault(fault, vmomi_path, body)
+
+    @staticmethod
+    def _raise_managed_object_not_found_fault(
+        fault: SoapFault | None,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Raise the generic missing-resource signal for one parsed vim fault."""
+        if not vmomi_path.endswith("/RetrievePropertiesEx"):
+            return
+        if fault is None or fault.fault_type != "ManagedObjectNotFound":
+            return
+        resource_ids = _retrieve_properties_resource_ids(body)
+        if not resource_ids:
+            return
+        noun = "resource" if len(resource_ids) == 1 else "resources"
+        identifiers = ", ".join(repr(resource_id) for resource_id in resource_ids)
+        raise ConnectorResourceNotFoundError(
+            resource_ids,
+            f"vSphere {noun} {identifiers} was not found (ManagedObjectNotFound)",
+        )
 
     async def _about_version(self, target: VsphereTargetLike, operator: Operator) -> str | None:
         """Return *target*'s version string for the VI-JSON ``{release}`` segment.
@@ -1159,6 +1298,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """The ESXi twin of the VI-JSON transport: one vmomi method as SOAP over ``/sdk``.
 
@@ -1201,6 +1341,8 @@ class VmwareRestConnector(HttpConnector):
         resp = await self._soap_post(client, envelope, extensions, soap_action=soap_action)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
             raise self._soap_fault_error(fault, target, message=message)
         resp.raise_for_status()
@@ -2293,3 +2435,37 @@ class VmwareRestConnector(HttpConnector):
                     session_path=revoke_path,
                 )
         await super().aclose()
+
+
+class VmwareRest80Connector(VmwareRestConnector):
+    """vSphere REST connector for fingerprinted 8.0.x vCenter / ESXi targets.
+
+    Second versioned catalog for the ``vmware-rest`` implementation,
+    registered as ``(product="vmware", version="8.0", impl_id="vmware-rest")``
+    beside the 9.0 catalog under the dual-impl policy: both implementations
+    register against the same product and the resolver selects one per target
+    by fingerprint. Endpoint-descriptor rows for the ingested 8.0 U3 catalog
+    live under ``connector_id="vmware-rest-8.0"``.
+
+    Everything but the version identity and the ingested-catalog boundary is
+    inherited from :class:`VmwareRestConnector`: session auth, dispatch, and
+    the ``vmware-rest`` safety floor (keyed on ``(product, impl_id)``, so it
+    covers this class's ingested writes too). ``supported_version_range``
+    covers the fingerprinted 8.0.x line only and is disjoint from the base
+    class's ``>=8.5,<10.0`` band, so an 8.0.x target resolves here (versioned
+    beats the product wildcard) while the 9.0 catalog's guard keeps rejecting
+    it. The catalog-boundary attributes narrow the inherited guard to the
+    8.0.x line, so an ingested dispatch against an 8.0.3 target is not
+    rejected with ``unqualified_target_version``.
+
+    Scope is the 8.0 U3 catalog: the band covers the whole 8.0.x fingerprint
+    line so no 8.0.x target is stranded, while the pinned catalog evidence in
+    the VCF API contract manifest qualifies 8.0 U3 only (it does not claim
+    8.0 U1 / U2 or a general all-8.x qualification).
+    """
+
+    version = "8.0"
+    supported_version_range = ">=8.0,<8.1"
+    _catalog_version_floor = Version("8.0")
+    _catalog_version_ceiling = Version("8.1")
+    _catalog_version_band_label = "8.0.x"

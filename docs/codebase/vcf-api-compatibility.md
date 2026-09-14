@@ -173,6 +173,56 @@ Microsoft CA integration requires a SAN certificate (KB 454242).
    plus the shelf reconcile command for its `docs/<service>-<release>/MANIFEST.md`
    records.
 
+## Shipped: `vmware-rest-8.0` (vSphere 8.0 U3)
+
+Package 3's vSphere 8.0 catalog shipped for the 8.0 U3 line (#3569). The
+`vmware-rest` implementation now registers a **second versioned catalog**,
+`(product="vmware", version="8.0", impl_id="vmware-rest")`, beside the 9.0
+catalog under the dual-impl policy (both implementations register against the
+same product and the resolver selects one per target by fingerprint). It is a
+generic connector — a `VmwareRest80Connector` subclass of
+`VmwareRestConnector` that inherits session auth, dispatch, and the
+`(product, impl_id)` safety floor, and overrides only the version identity and
+the ingested-catalog boundary.
+
+- **Resolver band.** `supported_version_range = ">=8.0,<8.1"`, disjoint from
+  the 9.0 class's `>=8.5,<10.0`, so a fingerprinted 8.0.x target resolves to
+  the 8.0 catalog (versioned beats the product wildcard) and a 9.x target
+  keeps resolving to the 9.0 catalog.
+- **Per-catalog guard.** The Package-2 compatibility hook is now per-catalog:
+  the 9.0 class rejects targets outside `>=9,<10`, and the 8.0 class rejects
+  targets outside `>=8.0,<8.1`. An ingested dispatch of a `vmware-rest-8.0`
+  descriptor against an 8.0.3 target is therefore **not** rejected with
+  `unqualified_target_version` — the mirror image of the 9.0 guard's rejection
+  of the same target. The 9.0 guard is unchanged.
+- **Safety floors.** The VMware hardware/lifecycle/power write floor
+  (`dangerous` + approval) is keyed on `(product, impl_id)` and applies to the
+  8.0 catalog's ingested rows exactly as it does for 9.0.
+- **Shipped spec.** `vmware_rest_8_0_minimal.yaml` (a MEHO-authored minimal
+  OpenAPI 3.0 read subset, `info.version: "8.0.3"`) ships as package data with
+  a paired `ExecutionProfile`, so `meho connector ingest --catalog vmware/8.0`
+  works without a hand-fetch — the same on-ramp as `vmware/9.0`.
+
+**Operator upgrade note (release that ships #3565).** After the 9.0 catalog
+target guard (#3565), a target below 9.x served by the 9.0 catalog fails with
+`unqualified_target_version` for every enabled ingested `vmware-rest` op until
+an 8.x catalog is ingested. Ingest the `vmware-rest-8.0` catalog
+(`meho connector ingest --catalog vmware/8.0`) to restore governed generic
+operations on fingerprinted 8.0.x targets; typed and composite ops are
+unaffected either way.
+
+**Acquisition gap (Package 1, 8.0 U3).** The pinned 8.0 U3 vendor `vcenter.yaml`
+/ `vi-json.yaml` are **not yet acquired** — the public `vmware/vcf-api-specs`
+repo is tagged 9.0/9.1 only, and the appliance/portal specs need authenticated
+retrieval (Broadcom Developer Portal login, or generation off a live 8.0.3
+vCenter). The `vsphere-8.x` artifact in the contract manifest therefore stays
+`availability: unavailable`, and the VCF 5.2.x release rows it serves are
+`evidence_level: registered` (the class advertises the 8.0.x band) rather than
+`spec-fixture-qualified`. Pinning the raw catalog to the shelf's
+`docs/vcenter-8.0/` arms the always-shipped reconcile lane
+(`tests/test_connectors_vmware_rest_8_0_spec_reconcile.py`) to compare the
+shipped minimal against the vendor surface.
+
 ## References
 
 - [Broadcom KB 314608](https://knowledge.broadcom.com/external/article/314608),

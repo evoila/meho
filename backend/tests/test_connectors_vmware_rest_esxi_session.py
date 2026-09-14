@@ -68,6 +68,7 @@ import respx
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest import connector as connector_module
@@ -144,6 +145,14 @@ _HOST_CONFIG_FAULT_XML = _envelope(
     "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
     "<faultstring>The NFS export is unreachable.</faultstring>"
     '<detail><HostConfigFaultFault xsi:type="HostConfigFault"></HostConfigFaultFault></detail>'
+    "</soapenv:Fault>"
+)
+
+_MANAGED_OBJECT_NOT_FOUND_FAULT_XML = _envelope(
+    "<soapenv:Fault><faultcode>ServerFaultCode</faultcode>"
+    "<faultstring>The object has already been deleted.</faultstring>"
+    '<detail><ManagedObjectNotFound xsi:type="ManagedObjectNotFound">'
+    "</ManagedObjectNotFound></detail>"
     "</soapenv:Fault>"
 )
 
@@ -401,6 +410,41 @@ async def test_auth_is_cookie_not_header_on_host_reads() -> None:
     read_request = route.calls[-1].request
     assert f"{_SOAP_COOKIE}={_COOKIE_VALUE}" in read_request.headers.get("cookie", "")
     assert read_request.headers.get("vmware-api-session-id") is None
+
+
+@pytest.mark.asyncio
+async def test_esxi_soap_managed_object_fault_promotes_only_for_opted_in_read() -> None:
+    """The actual /sdk SOAP transport preserves the addressed MoID on promotion."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    target = _esxi_fingerprinted()
+
+    def _fault_router(request: httpx.Request) -> httpx.Response:
+        method = _soap_method(request.content.decode("utf-8"))
+        if method == "RetrieveServiceContent":
+            return httpx.Response(200, text=_SERVICE_CONTENT_XML)
+        if method == "Login":
+            return httpx.Response(
+                200,
+                text=_LOGIN_OK_XML,
+                headers={"set-cookie": f"{_SOAP_COOKIE}={_COOKIE_VALUE}; Path=/"},
+            )
+        return httpx.Response(500, text=_MANAGED_OBJECT_NOT_FOUND_FAULT_XML)
+
+    body = {"specSet": [{"objectSet": [{"obj": {"type": "VirtualMachine", "value": "vm-42"}}]}]}
+    async with respx.mock(base_url=_ESXI_BASE) as mock:
+        route = mock.post(_SDK).mock(side_effect=_fault_router)
+        with pytest.raises(ConnectorResourceNotFoundError) as raised:
+            await connector._post_vmomi_json(
+                target,
+                "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
+                operator=_make_operator(),
+                json=body,
+                promote_managed_object_not_found=True,
+            )
+
+    assert route.call_count == 3
+    assert raised.value.resource_ids == ["vm-42"]
 
 
 @pytest.mark.asyncio

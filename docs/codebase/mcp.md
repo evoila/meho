@@ -434,9 +434,9 @@ add-on-family gate.
 | `list_doc_collections` | operator | `meho-docs` | List the documentation collections this session may search. |
 | `list_operation_groups` | operator | — | List a connector's enabled operation groups. |
 | `list_targets` | operator | — | List the tenant's accessible infrastructure targets. |
-| `meho_broadcast_announce` | operator | — | Publish an agent-authored announcement to the tenant stream. |
-| `meho_broadcast_recent` | operator | — | Read the tenant's recent broadcast events. |
-| `meho_broadcast_watch` | operator | — | Long-poll the tenant broadcast stream for new events. |
+| `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
+| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads through the shared strict history reader. |
+| `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
 | `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |

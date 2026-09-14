@@ -98,6 +98,58 @@ entries:
       the HTML Broadcom Developer Portal). VmwareRestConnector handles
       dispatch (typed). See #743 / connector-ingestion.md.
 
+  - product: vmware
+    version: "8.0"
+    impl_id: vmware-rest
+    requires_connector_class: VmwareRest80Connector
+    # #3569: second versioned catalog for the vmware-rest implementation,
+    # the 8.0 U3 sibling of vmware/9.0 above (dual-impl #3038). After #3565
+    # the 9.0 ingested catalog rejects a fingerprinted 8.0.x target with
+    # `unqualified_target_version`; this row registers `vmware-rest-8.0` so
+    # those targets keep a governed generic path. Same on-ramp as vmware/9.0:
+    # the Broadcom Developer Portal serves text/html and the appliance URL is
+    # fqdn-templated, so the backend cannot dereference an `upstream` and a
+    # MEHO-authored minimal spec + reviewed ExecutionProfile ship as package
+    # data instead.
+    upstream: null
+    # Shipped OpenAPI spec + ExecutionProfile, both in-package data files
+    # collected into the wheel (pyproject.toml's
+    # [tool.hatch.build.targets.wheel].artifacts) and dry-run-parsed at boot
+    # by validate_shipped_artifacts.
+    spec_resource: vmware_rest_8_0_minimal.yaml
+    profile_resource: vmware_rest_8_0_minimal.yaml
+    catalog_ingest: supported
+    spec_info_version: null
+    # The shipped 8.0 minimal spec declares info.version "8.0.3"; the catalog
+    # `version` is the product-line label "8.0". The PEP-440 prefix-match in
+    # `_classify_version_match` treats "8.0" <-> "8.0.3" as exact (release
+    # tuple (8, 0) is a prefix of (8, 0, 3)); this declaration is
+    # belt-and-suspenders for an operator who later re-ingests the full 8.0 U3
+    # appliance spec under a finer variant. Per api-shape-conventions.md
+    # section 9.
+    spec_info_versions_compatible:
+      - "8.0.x"
+    sha256: null
+    notes: >-
+      Profile-backed shipped-spec row (#3569). The shipped spec_resource
+      (vmware_rest_8_0_minimal.yaml) is a MEHO-authored minimal, Apache-2.0
+      OpenAPI 3.0 description of the vCenter inventory READ ops MEHO surfaces
+      on vSphere 8.0 U3 -- it is NOT the full vendor surface, and it is the
+      same inventory-read subset as vmware/9.0 (the 8.0 U3 and 9.0 REST read
+      shapes match). The full vSphere 8.0 U3 specs (vcenter.yaml +
+      vi-json.yaml) are the provenance pointers in
+      docs/compatibility/vcf-api-contract-manifest.yaml; the public
+      vmware/vcf-api-specs repo is tagged 9.0/9.1 only, so a full-surface
+      re-ingest is off a live 8.0.3 appliance via the explicit-quadruple
+      --spec shape:
+      https://developer.broadcom.com/xapis/vsphere-automation-api/latest/
+      and
+      https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/
+      (both served by the appliance at https://<vcenter-fqdn>/, mirrored on
+      the HTML Broadcom Developer Portal). VmwareRest80Connector handles
+      dispatch (typed), inheriting VmwareRestConnector. See #743 /
+      connector-ingestion.md.
+
   - product: sddc
     version: "9.0"
     impl_id: sddc-rest

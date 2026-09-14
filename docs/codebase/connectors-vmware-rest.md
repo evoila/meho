@@ -57,6 +57,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
+- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
+  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
+  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+  `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
+  into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
+  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  returns `status="not_found"` with `extras.error_code="not_found"`,
+  `extras.resource_ids`, and the singular `extras.resource_id` when one object
+  was addressed. A different fault, a non-PropertyCollector vmomi method, or
+  a transport-only 5xx remains `connector_error`; the mapping never infers
+  absence from the status code. Promotion defaults off on the shared seam, so
+  task polls and destructive-composite preflight/execute reads retain their
+  existing failure semantics; #3479 owns those paths.
 - **Read composites** (`composites/_read.py`) — seven module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
   `event_tail_composite`, `performance_summary_composite`,
@@ -359,8 +374,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `_CompositeSpec` rows (13 read + 36 dangerous/destructive writes + 2
   caution content-library subscribed writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. Idempotent on re-run
-  via the body-hash skip path.
+  implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
@@ -513,6 +527,22 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 2. Importing `meho_backplane.connectors.vmware_rest` triggers the
    module-level `register_connector_v2(product="vmware", version="9.0",
    impl_id="vmware-rest", cls=VmwareRestConnector)` call.
+2b. The same import also registers the **second versioned catalog**
+   `register_connector_v2(product="vmware", version="8.0",
+   impl_id="vmware-rest", cls=VmwareRest80Connector)` (#3569, dual-impl
+   #3038) plus the shared product wildcard `(vmware, "", "")` owned by
+   `VmwareRestConnector`. `VmwareRest80Connector` is a thin subclass of
+   `VmwareRestConnector` (`version="8.0"`,
+   `supported_version_range=">=8.0,<8.1"`, and the ingested-catalog guard
+   boundary narrowed to the 8.0.x line via the
+   `_catalog_version_floor`/`_catalog_version_ceiling`/`_catalog_version_band_label`
+   attributes). The bands are disjoint (8.0 catalog `>=8.0,<8.1`; 9.0
+   catalog `>=8.5,<10.0`), so a fingerprinted 8.0.x target resolves to
+   `vmware-rest-8.0` (versioned beats the wildcard) and a 9.x target to
+   `vmware-rest-9.0`. Ingested rows for the 8.0 U3 catalog land under
+   `connector_id="vmware-rest-8.0"`; the shared `(product, impl_id)` safety
+   floor covers them identically. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md).
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls

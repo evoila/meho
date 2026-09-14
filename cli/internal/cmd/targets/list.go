@@ -188,7 +188,7 @@ func getTargets(
 }
 
 // printTargetsTable renders the list as a compact, scannable table.
-// Columns: NAME, ALIASES, PRODUCT, HOST per the issue's acceptance
+// Columns: NAME, ALIASES, PRODUCT, HOST, CAPTURE per the issue's acceptance
 // criterion 1. ID is omitted from the human view (operators rarely
 // need the UUID; --json surfaces it).
 func printTargetsTable(w io.Writer, summaries []api.TargetSummary) {
@@ -196,17 +196,22 @@ func printTargetsTable(w io.Writer, summaries []api.TargetSummary) {
 		fmt.Fprintln(w, "no targets registered in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-30s %-30s %-20s %s\n", "NAME", "ALIASES", "PRODUCT", "HOST")
+	fmt.Fprintf(w, "%-30s %-30s %-20s %-30s %s\n", "NAME", "ALIASES", "PRODUCT", "HOST", "CAPTURE")
 	for _, s := range summaries {
 		aliases := "-"
 		if len(s.Aliases) > 0 {
 			aliases = strings.Join(s.Aliases, ",")
 		}
-		fmt.Fprintf(w, "%-30s %-30s %-20s %s\n",
+		capture := "inherit"
+		if s.FlightRecorderCapture != nil {
+			capture = fmt.Sprintf("%t", *s.FlightRecorderCapture)
+		}
+		fmt.Fprintf(w, "%-30s %-30s %-20s %-30s %s\n",
 			truncate(s.Name, 30),
 			truncate(aliases, 30),
 			truncate(s.Product, 20),
-			truncate(s.Host, 80),
+			truncate(s.Host, 30),
+			capture,
 		)
 	}
 }

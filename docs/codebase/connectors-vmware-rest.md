@@ -8,15 +8,18 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 51 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 53 hand-authored composites
 that orchestrate cross-spec workflows: 13 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
 in `#2258`; plus the four guest-operations reads `#3100` and the
 Supervisor status read `#3281` + the storage-policy list read `#3494` +
 the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
-`content_library.subscribed.items.list` / `#3495`) and 38 write
+`content_library.subscribed.items.list` / `#3495`) and 40 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
+governed vSphere Namespace `namespace.create` (caution) +
+`namespace.delete` (destructive) / `#3502` (see the **Governed vSphere
+Namespace composites** subsection under Control flow), the
 governed NFS tag-based SPBM `storage_policy.create` (caution) +
 `storage_policy.delete` (destructive) / `#3494`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
@@ -813,7 +816,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 51 composites (13 reads + 38 writes) land as `source_kind="composite"`
+The 53 composites (13 reads + 40 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -1876,6 +1879,56 @@ The three op_ids are byte-for-byte the strings the ingest parser emits from
 the pinned `vcenter.yaml`; the reconcile guard
 `tests/acceptance/test_supervisor_op_id_reconcile.py` pins them (always-on
 string test + spec-backed parse).
+
+### Governed vSphere Namespace composites (`namespace.create` / `namespace.delete`, #3502)
+
+`composites/_namespace.py` (group `namespace_management`) governs the vSphere
+Namespace lifecycle on an enabled Supervisor. A vSphere Namespace is the
+container a VKS guest cluster is created into; it binds an SPBM storage policy
+(`#3494`), VM classes, and a TKr/VKr content library (`#3495`). VKS guest-cluster
+lifecycle then runs entirely from *inside* the Supervisor via Kubernetes CRDs
+(there is no `/tkg/*` vCenter REST family), so the namespace create is the last
+vCenter-REST step before the flow moves to `k8s.apply` of a `Cluster` CR on the
+Supervisor target. Two ops:
+
+**`namespace.create`** (`caution` / `requires_approval=True`) issues
+`POST:/vcenter/namespaces/instances/v2` with the
+`Namespaces.Instances.CreateSpecV2` body — `supervisor` (the enabled Supervisor
+id) + `namespace` (the DNS-1123 name) are required, and `access_list` /
+`storage_specs` (SPBM policy ids from `#3494`) / `vm_service_spec`
+(`content_libraries` from `#3495` + `vm_classes`) are optional pass-through
+sub-objects. Both are lifted straight into the top-level POST body (the
+top-level-`*Spec` envelope convention; there are no path vars). The create is
+**asynchronous** vCenter-side (`config_status` moves `CONFIGURING` → `RUNNING`);
+the handler read-backs `GET:/vcenter/namespaces/instances/{namespace}` best-effort
+to surface `config_status` and returns `status='created'`. A read-back that 404s
+(not yet visible) or faults leaves `config_status=None` — the create was still
+accepted.
+
+**`namespace.delete`** (`destructive` / `requires_approval=True`) issues
+`DELETE:/vcenter/namespaces/instances/{namespace}`, then read-back verifies
+absence. Mandatory human approval — the `DELETE` child is never grant-clearable,
+so it always parks. Deleting a namespace **cascades**: it destroys every
+workload inside it (VKS guest clusters, pods, PVCs), which the destructive-tier
+`_write_preview` builder states as the `permanent-cascades-to-workloads`
+irreversibility class (the individual workloads are not enumerable through the
+vCenter-REST namespace-instances surface, so `children` is an explicit empty
+list). Asynchronous read-back matrix: a `GET` that 404s → `status='deleted'`
+(the verified happy path); `config_status='REMOVING'` → `status='removing'`
+(teardown draining); a non-REMOVING status → `status='still_present'`.
+
+The get-by-name read-back is `GET:/vcenter/namespaces/instances/{namespace}` —
+there is **no** `/v2/` GET-by-name variant (the v2 form is create/list only).
+Both writes ride the standard governed REST sub-op seam
+(`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`/DELETE); the
+read-backs ride the un-gated `_read_sub_op` read seam.
+`_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes each write's grant set.
+The reads (list / get) themselves are the already-enabled ingested `GET` rows
+(`GET /vcenter/namespaces/instances` / `.../v2` / `.../instances/{namespace}`),
+JSONFlux-reduced by the dispatcher — no read composite is added. The three
+op_ids are pinned against `vcenter.yaml` by the reconcile lane
+`tests/test_connectors_vmware_rest_namespace_reconcile.py` (always-on shape test
++ spec-backed path-existence).
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 

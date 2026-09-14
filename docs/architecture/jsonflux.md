@@ -633,8 +633,11 @@ llm_instructions={
 The dispatcher forwards the raw hint to the reducer. The reducer copies only
 the named direct fields from named top-level objects; scalar values and short
 scalar lists are eligible, nested objects are not. It accepts at most eight
-objects with eight fields each and a 1024-byte aggregate projection budget.
-Fields that do not fit stay only in the full handle spill. This is an
+objects with eight fields each and a 4096-byte aggregate projection budget.
+Each string (including a list item) is bounded to 1024 bytes. A normal
+identity value within that bound stays verbatim; an exceptional value is
+returned as its bounded prefix and named in `result_object_truncations`, so a
+caller knows to retrieve the complete value from the handle spill. This is an
 additive generic facility: a descriptor without `result_objects` retains the
 existing bookkeeping-only reduced summary, and the full collection remains
 retrievable through `result_query`.

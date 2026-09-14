@@ -266,7 +266,10 @@ _SCALAR_VALUE_TYPES = (str, int, float)
 #: degrades to a smaller summary instead of bypassing JSONFlux.
 _MAX_RESULT_OBJECTS = 8
 _MAX_RESULT_OBJECT_FIELDS = 8
-_RESULT_OBJECT_BYTE_BUDGET = 1024
+_RESULT_OBJECT_BYTE_BUDGET = 4096
+_RESULT_OBJECT_VALUE_BYTE_BUDGET = 1024
+_RESULT_OBJECT_LIST_ITEMS = 16
+_RESULT_OBJECT_TRUNCATIONS_KEY = "result_object_truncations"
 
 #: Positional row-ordinal column the tail-sample query assigns via
 #: ``row_number() OVER ()``. DuckDB does not guarantee the order of a bare
@@ -1015,7 +1018,7 @@ def _preserved_objects(
     payload: Any,
     envelope_key: str | None,
     context: dict[str, Any] | None,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, Any]:
     """Copy bounded identity fields from explicitly named top-level objects.
 
     ``result_objects`` is the object counterpart to ``result_scalars`` for a
@@ -1043,7 +1046,8 @@ def _preserved_objects(
         return {}
 
     objects = raw["objects"]
-    preserved: dict[str, dict[str, Any]] = {}
+    preserved: dict[str, Any] = {}
+    truncations: dict[str, list[str]] = {}
     used_bytes = 0
     for object_key, fields in list(objects.items())[:_MAX_RESULT_OBJECTS]:
         if (
@@ -1071,14 +1075,44 @@ def _preserved_objects(
                 candidate = child
             else:
                 continue
+            candidate, truncated = _bounded_object_value(candidate)
             candidate_bytes = len(_serialize({object_key: {field: candidate}}))
             if used_bytes + candidate_bytes > _RESULT_OBJECT_BYTE_BUDGET:
                 continue
             projected[field] = candidate
             used_bytes += candidate_bytes
+            if truncated:
+                truncations.setdefault(object_key, []).append(field)
         if projected:
             preserved[object_key] = projected
+    if truncations:
+        preserved[_RESULT_OBJECT_TRUNCATIONS_KEY] = truncations
     return preserved
+
+
+def _bounded_object_value(value: Any) -> tuple[Any, bool]:
+    """Bound one projected value while making truncation explicit.
+
+    The full value remains in the JSONFlux handle spill.  A summary must never
+    silently drop an identity field solely because it is unusually large.
+    """
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        if len(encoded) <= _RESULT_OBJECT_VALUE_BYTE_BUDGET:
+            return value, False
+        return encoded[:_RESULT_OBJECT_VALUE_BYTE_BUDGET].decode("utf-8", "ignore"), True
+    if isinstance(value, list):
+        truncated = len(value) > _RESULT_OBJECT_LIST_ITEMS
+        bounded: list[Any] = []
+        for item in value[:_RESULT_OBJECT_LIST_ITEMS]:
+            if isinstance(item, str):
+                rendered, item_truncated = _bounded_object_value(item)
+                bounded.append(rendered)
+                truncated = truncated or item_truncated
+            else:
+                bounded.append(item)
+        return bounded, truncated
+    return value, False
 
 
 @dataclass(frozen=True, slots=True)

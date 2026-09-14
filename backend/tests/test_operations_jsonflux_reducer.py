@@ -732,7 +732,41 @@ def test_preserved_objects_rejects_nested_values_and_obeys_byte_budget() -> None
     }
     context = {"result_objects": {"objects": {"leaf": ["subject", "nested", "san"]}}}
 
-    assert _preserved_objects(payload, "chain", context) == {"leaf": {"subject": "CN=ok"}}
+    preserved = _preserved_objects(payload, "chain", context)
+    assert preserved["leaf"]["subject"] == "CN=ok"
+    assert preserved["leaf"]["san"] == ["x" * 1024]
+    assert preserved["result_object_truncations"] == {"leaf": ["san"]}
+
+
+def test_preserved_objects_keeps_normal_leaf_identity_and_marks_huge_values() -> None:
+    """Normal 1 KiB SANs stay verbatim; exceptional values remain recoverable."""
+    normal_san = "dns:" + "a" * 990
+    huge_san = "dns:" + "b" * 5000
+    context = {"result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}}}
+    normal = _preserved_objects(
+        {
+            "leaf": {"subject": "CN=normal", "san": [normal_san], "fingerprint_sha256": "f" * 64},
+            "chain": [],
+        },
+        "chain",
+        context,
+    )
+    assert normal["leaf"] == {
+        "subject": "CN=normal",
+        "san": [normal_san],
+        "fingerprint_sha256": "f" * 64,
+    }
+    assert "result_object_truncations" not in normal
+    huge = _preserved_objects(
+        {
+            "leaf": {"subject": "CN=huge", "san": [huge_san], "fingerprint_sha256": "f" * 64},
+            "chain": [],
+        },
+        "chain",
+        context,
+    )
+    assert huge["leaf"]["san"] == [huge_san[:1024]]
+    assert huge["result_object_truncations"] == {"leaf": ["san"]}
 
 
 # ---------------------------------------------------------------------------

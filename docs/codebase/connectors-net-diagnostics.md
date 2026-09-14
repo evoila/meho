@@ -659,7 +659,10 @@ certificate response stays inline unchanged. When a multi-certificate PEM
 payload exceeds JSONFlux's 4 KiB threshold, the reduced summary retains the
 handshake verdict (`handshake`, `reason`, `days_to_expiry`, `hostname_match`,
 `chain_complete`) and the leaf's `subject`, `san`, and SHA-256 fingerprint.
-The PEM is deliberately absent from that summary but remains in the spilled
+Normal identity strings up to 1024 bytes remain verbatim; an exceptional
+larger identity is returned as a bounded prefix and named in
+`result_object_truncations`, so the caller knows the complete value is in the
+handle. The PEM is deliberately absent from that summary but remains in the spilled
 chain rows, retrievable with `result_query`; use that handle to obtain
 `leaf.pem` or another chain entry for `tls_ca_pin`.
 

@@ -59,7 +59,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from meho_backplane.docs_collections.lifecycle import STATUS_PROVISIONING
 
@@ -71,6 +71,7 @@ __all__ = [
     "DocCollectionCreate",
     "DocCollectionCreateResponse",
     "DocCollectionSummary",
+    "DocCollectionUpdate",
     "project_doc_collection",
     "project_doc_collection_create_response",
     "project_doc_collection_to_summary",
@@ -128,6 +129,75 @@ class DocCollectionCreate(BaseModel):
             msg = "products entries must be non-empty"
             raise ValueError(msg)
         return value
+
+
+class DocCollectionUpdate(BaseModel):
+    """Request body for updating a doc collection's mutable fields (#3601).
+
+    A PATCH-style partial update: every field is optional and only the
+    fields actually present in the request are written (the service reads
+    ``model_dump(exclude_unset=True)``). It carries the operator-mutable
+    subset — ``backend`` (the routing record, including the ``corpus-http``
+    endpoint the SSRF screen validates), plus ``description`` /
+    ``when_to_use`` / ``products``. ``id`` / ``tenant_id`` / timestamps /
+    ``status`` / the probe-written liveness are server-owned and absent,
+    exactly as on :class:`DocCollectionCreate`; ``collection_key`` is the
+    path segment / tool argument that names the row, never a body field, so
+    a PATCH can neither rename nor re-scope a collection (``extra="forbid"``
+    rejects a smuggled ``tenant_id`` / ``collection_key``).
+
+    The motivator is repointing a migration-seeded collection's
+    ``backend.ref["endpoint"]`` when a deployment moves its corpus endpoint
+    (e.g. plain-``http`` → internal-CA ``https``): create 409s on the
+    existing key and delete refuses a global row, so there was no in-place
+    repoint. A ``backend`` change runs the same ``backend.type`` registry
+    validation + ``https`` / SSRF-allowlist endpoint screen the create path
+    runs, and resets the collection to ``provisioning`` (clearing the
+    stale probe-written liveness) so a follow-up probe re-validates against
+    the new endpoint — the service owns that reset.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: DocCollectionBackend | None = None
+    description: str | None = None
+    when_to_use: str | None = None
+    products: tuple[str, ...] | None = None
+
+    @field_validator("products")
+    @classmethod
+    def _strip_empty_products(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        """Reject blank product tokens — a ``""`` entry is a typo, not a product."""
+        if value is not None and any(not p.strip() for p in value):
+            msg = "products entries must be non-empty"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _require_a_mutable_field(self) -> DocCollectionUpdate:
+        """A PATCH must set at least one field and may not null out ``backend``.
+
+        An empty body is a no-op that would still cut an audit row, so it is
+        a 422 rather than a silent success. ``backend`` is NOT NULL at the
+        ORM layer (an empty backend is a routing-broken row), so an explicit
+        ``{"backend": null}`` — distinct from an omitted ``backend``, which
+        leaves the binding untouched — is rejected here; clear the *endpoint*
+        by sending ``backend.ref = {}`` (the deployment's ``settings.corpus_url``
+        then applies), not the whole binding.
+        """
+        if not self.model_fields_set:
+            msg = (
+                "a doc-collection update must set at least one of: backend, "
+                "description, when_to_use, products"
+            )
+            raise ValueError(msg)
+        if "backend" in self.model_fields_set and self.backend is None:
+            msg = (
+                "backend cannot be cleared to null; send backend.ref={} to "
+                "fall back to settings.corpus_url"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class DocCollection(BaseModel):

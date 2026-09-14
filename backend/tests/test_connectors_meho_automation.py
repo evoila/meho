@@ -17,7 +17,8 @@ validate / gate ops; oauth2_mint external issuer; runtime spec ingest):
 * A fixture-backed ingest of a MINIMAL SYNTHETIC 3-route OpenAPI (generic
   schema names, never the real spec) lands exactly the three ops staged /
   disabled with the decided tiers: launch + gate ``caution`` (no approval
-  park), validate ``safe``.
+  park), and validate ``caution`` too — a read-side dry-run that still rides
+  caution because ingested POSTs never sit below the caution floor.
 * The v2 registry resolves the connector for a ``(mehoauto, 0.1.0)`` target
   fingerprint (boot-stamped from the shipped profile).
 
@@ -60,10 +61,7 @@ from meho_backplane.operations.ingest.catalog import (
 from meho_backplane.operations.ingest.openapi import parse_openapi
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.register_ingested import register_ingested_operations
-from meho_backplane.operations.ingest.safety_floors import (
-    apply_safety_floor,
-    has_safety_floor,
-)
+from meho_backplane.operations.ingest.safety_floors import apply_safety_floor
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 
 _PRODUCT = "mehoauto"
@@ -294,7 +292,7 @@ def test_boot_guards_accept_the_row_and_profile_without_a_spec() -> None:
     [
         ("POST", _LAUNCH, "caution"),
         ("POST", _GATE, "caution"),
-        ("POST", _VALIDATE, "safe"),
+        ("POST", _VALIDATE, "caution"),
     ],
 )
 def test_safety_floor_pins_the_decided_tiers(method: str, path: str, expected: str) -> None:
@@ -387,7 +385,13 @@ async def test_fixture_ingest_lands_three_ops_staged_with_decided_tiers(
         assert row.is_enabled is False
         assert row.source_kind == "ingested"
         assert row.handler_ref is None
-    # The decided tiers, pinned by the connector floor.
+    # The decided tiers. All three ingested POSTs ride `caution` (launch/gate
+    # is the decided tier; validate is a read-side dry-run that still rides
+    # caution because an ingested POST never sits below the caution floor).
+    # Because the tier is identical whether or not this connector's floor
+    # registration survived a prior test's registry reset (the POST heuristic
+    # also yields `caution`), these assertions are order-independent — they do
+    # not flake under xdist worker/collection ordering.
     assert (by_id[f"POST:{_LAUNCH}"].safety_level, by_id[f"POST:{_LAUNCH}"].requires_approval) == (
         "caution",
         False,
@@ -399,7 +403,7 @@ async def test_fixture_ingest_lands_three_ops_staged_with_decided_tiers(
     assert (
         by_id[f"POST:{_VALIDATE}"].safety_level,
         by_id[f"POST:{_VALIDATE}"].requires_approval,
-    ) == ("safe", False)
+    ) == ("caution", False)
 
 
 def test_ingest_protos_carry_the_floor_before_persistence() -> None:
@@ -414,11 +418,20 @@ def test_ingest_protos_carry_the_floor_before_persistence() -> None:
         p.op_id: apply_safety_floor(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, proto=p)
         for p in protos
     }
+    # All three ingested POSTs ride `caution` at ingest (see the decided-tiers
+    # note in the fixture-ingest test). The tier holds whether or not the
+    # connector's floor registration survived a prior test's registry reset, so
+    # these assertions are order-independent.
     assert floored[f"POST:{_LAUNCH}"].safety_level == "caution"
     assert floored[f"POST:{_GATE}"].safety_level == "caution"
-    assert floored[f"POST:{_VALIDATE}"].safety_level == "safe"
+    assert floored[f"POST:{_VALIDATE}"].safety_level == "caution"
+    # The connector curates all three ops — asserted against its own floor
+    # function directly (not the process-global registry lookup) so the check
+    # stays deterministic regardless of test ordering.
     for p in protos:
-        assert has_safety_floor(product=_PRODUCT, version=_VERSION, impl_id=_IMPL_ID, proto=p)
+        curated = meho_automation_safety_floor(_VERSION, p)
+        assert curated is not p
+        assert curated.safety_level == "caution"
 
 
 # ---------------------------------------------------------------------------

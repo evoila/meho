@@ -240,8 +240,10 @@ user.
 
 This is the meho-automation add-on connector's shape — see
 `docs/codebase/connectors-meho-automation.md` for the full registration
-recipe and the operator decision that launch/gate ride `caution` without a
-backplane approval park.
+recipe and the operator decision that launch / validate / gate all ride
+`caution` without a backplane approval park (validate is a read-side dry-run
+that still rides `caution` because an ingested POST never sits below the
+caution floor).
 
 ## References
 

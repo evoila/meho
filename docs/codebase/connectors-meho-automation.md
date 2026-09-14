@@ -50,7 +50,7 @@ eager-imported at boot like every other connector subpackage.
 | Op (`op_id` after ingest) | Purpose | Safety tier |
 |---|---|---|
 | `POST:/api/v1/runs` | Launch a run | `caution` (no approval park) |
-| `POST:/api/v1/blueprints/{blueprint_id}/validate` | Validate a blueprint (read-side dry-run) | `safe` |
+| `POST:/api/v1/blueprints/{blueprint_id}/validate` | Validate a blueprint (read-side dry-run) | `caution` (no approval park) |
 | `POST:/api/v1/runs/{run_id}/gates/{node_id}/decision` | Decide an in-run gate | `caution` (no approval park) |
 
 The launch body is compiled server-side from typed `inputs`; passing
@@ -68,8 +68,12 @@ them:
 
 - launch + gate → `caution`, **`requires_approval=False`** (no backplane
   approval park);
-- validate → `safe` (downgraded from the POST-default `caution` because it
-  dispatches nothing).
+- validate → `caution`, **`requires_approval=False`**. Validate is a
+  read-side dry-run that dispatches nothing, but an ingested POST never sits
+  below the `caution` floor, so it rides `caution` too. `caution` executes
+  immediately with no approval park, so the tier is operationally identical
+  to a lower one here; pinning it `caution` keeps the decided tier the same
+  whether or not the floor registration is in force at ingest time.
 
 **Security note — launch executes without a backplane park.** Launch is a
 potentially destructive lifecycle operation, but this connector does **not**

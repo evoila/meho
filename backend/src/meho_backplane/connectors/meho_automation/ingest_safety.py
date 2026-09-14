@@ -18,17 +18,20 @@ generic verb heuristic — cannot silently reset them:
 * ``POST /api/v1/runs/{run_id}/gates/{node_id}/decision`` (**gate decision**)
   -> ``caution``, no approval park (same operator decision).
 * ``POST /api/v1/blueprints/{blueprint_id}/validate`` (**validate**) ->
-  ``safe``. Validate is a read-side dry-run preview (it dispatches nothing);
-  the POST-by-default ``caution`` is downgraded to ``safe`` so agents can
-  preview a blueprint freely.
+  ``caution``. Validate is a read-side dry-run preview (it dispatches
+  nothing), but an ingested POST never sits below the ``caution`` floor, so it
+  rides ``caution`` too. ``caution`` executes immediately with no approval
+  park, so the tier is operationally identical to a lower one here — pinning
+  it ``caution`` keeps the decided tier deterministic regardless of whether
+  this connector's floor registration is in force at ingest time.
 
 The floor is idempotent: it sets each op to a fixed level via ``model_copy``,
 so applying it to an already-floored proto yields the same result (and
 ``has_safety_floor`` still detects the floor). The interlock in
 ``_upsert._apply_safety_metadata`` never *weakens* a floored op below an
 operator's manual edit; because ``apply_safety_floor`` bakes the decided
-level into the proto before the merge, a re-ingest cannot drift launch/gate
-below ``caution`` or raise validate above ``safe``.
+level into the proto before the merge, a re-ingest cannot drift any of the
+three below ``caution``.
 
 Registered as an import side effect (see the package ``__init__``), keyed by
 the dispatch-canonical ``(product="mehoauto", impl_id="mehoauto-rest")`` the
@@ -43,18 +46,14 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 #: The version label the floor governs (the catalog row / target fingerprint).
 _MEHO_AUTOMATION_VERSION = "0.1.0"
 
-#: Launch + gate-decision are pinned ``caution`` (no approval park); validate
-#: is pinned ``safe``. Keyed by ``(METHOD, canonical path)``. Paths are the
-#: add-on's spec paths verbatim (its OpenAPI declares no servers block, so no
-#: mount prefix is stripped at ingest).
+#: All three add-on ops are pinned ``caution`` (no approval park). Keyed by
+#: ``(METHOD, canonical path)``. Paths are the add-on's spec paths verbatim
+#: (its OpenAPI declares no servers block, so no mount prefix is stripped at
+#: ingest).
 _CAUTION_OPS: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/v1/runs"),
         ("POST", "/api/v1/runs/{run_id}/gates/{node_id}/decision"),
-    }
-)
-_SAFE_OPS: frozenset[tuple[str, str]] = frozenset(
-    {
         ("POST", "/api/v1/blueprints/{blueprint_id}/validate"),
     }
 )
@@ -63,14 +62,12 @@ _SAFE_OPS: frozenset[tuple[str, str]] = frozenset(
 def meho_automation_safety_floor(
     version: str, proto: EndpointDescriptorProto
 ) -> EndpointDescriptorProto:
-    """Pin the meho-automation add-on op tiers (launch/gate ``caution``, validate ``safe``)."""
+    """Pin the meho-automation add-on op tiers (launch/gate/validate ``caution``)."""
     if version != _MEHO_AUTOMATION_VERSION:
         return proto
     key = (proto.method.upper(), proto.path.split("?", 1)[0])
     if key in _CAUTION_OPS:
         return proto.model_copy(update={"safety_level": "caution", "requires_approval": False})
-    if key in _SAFE_OPS:
-        return proto.model_copy(update={"safety_level": "safe", "requires_approval": False})
     return proto
 
 

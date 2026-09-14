@@ -351,7 +351,8 @@ entries:
       (POST /api/v1/runs/{run_id}/gates/{node_id}/decision). Ingest at
       registration from /openapi.json via `--spec`; NO spec is vendored
       here. After ingest the connector-owned safety floor
-      (connectors/meho_automation/ingest_safety.py) pins launch + gate at
+      (connectors/meho_automation/ingest_safety.py) pins all three at
       `caution` (no backplane approval park — the add-on's own gate nodes
-      are the human control, operator decision) and downgrades validate to
-      `safe`. See docs/codebase/connectors-meho-automation.md.
+      are the human control, operator decision); validate is a read-side
+      dry-run that still rides `caution` because an ingested POST never sits
+      below the caution floor. See docs/codebase/connectors-meho-automation.md.

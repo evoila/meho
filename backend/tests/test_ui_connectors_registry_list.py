@@ -677,6 +677,37 @@ def test_enable_reads_ambiguous_scope_panel() -> None:
     assert f"tenant_id={_TENANT_A}" in body
 
 
+def test_enable_reads_builtin_forbidden_panel() -> None:
+    """A tenant_admin enabling a built-in-only connector renders the 403 panel.
+
+    The built-in (global) row is shared by every tenant, so writing it
+    needs platform_admin (#3616 parity). A plain tenant_admin gets the
+    inline ``Platform admin required`` panel — not a 500 / stack trace,
+    and not the historical 404.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=None)  # built-in / global rows only
+
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        resp = client.post(
+            f"/ui/connectors/registry/{_CONNECTOR_ID}/enable-reads",
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert resp.status_code == 403, resp.text
+    body = resp.text
+    assert "data-registry-error" in body
+    assert "Platform admin required" in body
+    assert "Traceback" not in body
+
+
 def test_invalid_state_transition_panel() -> None:
     """An InvalidStateTransitionError 409 maps to a legible inline panel, not a 500.
 

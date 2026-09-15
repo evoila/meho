@@ -61,8 +61,11 @@ impossible. No read or edit surface accepts a tenant id from
 the body or query string — cross-tenant probes are impossible by
 construction. The one nuance: the ``operator`` role sees only their
 own tenant's connectors **and** built-ins (``tenant_id IS NULL``);
-the ``tenant_admin`` role additionally has write access to built-in
-ingests / edits / state transitions. The service layer
+the ``tenant_admin`` role additionally ingests into the built-in scope,
+but mutating an *existing* built-in row (enable / disable / enable-reads
+/ edit-group / edit-op) is a platform action gated on ``platform_admin``
+(a tenant_admin without it gets a 403 ``builtin_connector_write_forbidden``,
+mirroring the doc-collection global-row seat #3616). The service layer
 (:class:`ReviewService`, :class:`IngestionPipelineService`) carries
 matching tenant guards as defence-in-depth for sibling consumers
 (CLI verbs T5, admin MCP tools T7) that hit the service layer
@@ -80,6 +83,17 @@ Error mapping
 The service-layer exceptions map to HTTP status codes uniformly:
 
 * :class:`ConnectorNotFoundError` → 404.
+* :class:`BuiltinConnectorWriteForbiddenError` → 403 Forbidden. A
+  mutating route (``POST /{id}/enable``, ``/enable-reads``,
+  ``/disable``; ``PATCH /{id}/groups/{key}``, ``/operations/{op_id}``)
+  resolved to a built-in (``tenant_id IS NULL``) row but the caller is a
+  ``tenant_admin`` without ``platform_admin``. The ``detail`` body is the
+  structured ``builtin_connector_write_forbidden`` envelope
+  (:attr:`BuiltinConnectorWriteForbiddenError.detail`). This is the
+  single-built-in-row companion to the ambiguity 409 below: where the
+  id maps to exactly one row and it is built-in, a platform_admin may
+  mutate it and a plain tenant_admin is told *why* (403) instead of the
+  historical 404.
 * :class:`InvalidStateTransitionError` → 409 Conflict.
 * :class:`AmbiguousConnectorScopeError` → 409 Conflict (G0.26-T1
   #1801). A ``connector_id`` that resolves to **both** a tenant-curated
@@ -192,6 +206,7 @@ from meho_backplane.operations._lookup import (
 )
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     CatalogListResponse,
     ConnectorListResponse,
     ConnectorNotFoundError,
@@ -1408,6 +1423,15 @@ async def edit_group_endpoint(
             when_to_use=body.when_to_use,
             name=body.name,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # A built-in (global) connector row is shared by every tenant, so
+        # mutating it requires platform_admin, not tenant_admin alone
+        # (#3616 parity). A plain tenant_admin hitting a built-in-only
+        # label gets a typed 403 rather than the historical 404 conflation.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1474,6 +1498,15 @@ async def edit_op_endpoint(
             tenant_id=operator.tenant_id,
             **edit_op_overrides,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # A built-in (global) connector row is shared by every tenant, so
+        # mutating it requires platform_admin, not tenant_admin alone
+        # (#3616 parity). A plain tenant_admin hitting a built-in-only
+        # label gets a typed 403 rather than the historical 404 conflation.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1509,6 +1542,15 @@ async def enable_endpoint(
             connector_id,
             tenant_id=operator.tenant_id,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # A built-in (global) connector row is shared by every tenant, so
+        # mutating it requires platform_admin, not tenant_admin alone
+        # (#3616 parity). A plain tenant_admin hitting a built-in-only
+        # label gets a typed 403 rather than the historical 404 conflation.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -1577,6 +1619,15 @@ async def enable_reads_endpoint(
             tenant_id=operator.tenant_id,
             prefer=prefer,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # A built-in (global) connector row is shared by every tenant, so
+        # mutating it requires platform_admin, not tenant_admin alone
+        # (#3616 parity). A plain tenant_admin hitting a built-in-only
+        # label gets a typed 403 rather than the historical 404 conflation.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
     except AmbiguousConnectorScopeError as exc:
         # Same shared-resolver outcome as GET /{id}/review: a label that
         # maps to both a tenant row and a built-in row is a 409 with the
@@ -1613,6 +1664,15 @@ async def disable_endpoint(
             connector_id,
             tenant_id=operator.tenant_id,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # A built-in (global) connector row is shared by every tenant, so
+        # mutating it requires platform_admin, not tenant_admin alone
+        # (#3616 parity). A plain tenant_admin hitting a built-in-only
+        # label gets a typed 403 rather than the historical 404 conflation.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
     except ConnectorNotFoundError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

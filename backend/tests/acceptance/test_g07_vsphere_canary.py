@@ -863,6 +863,10 @@ def _make_canary_operator() -> Operator:
         raw_jwt="<canary-raw-jwt>",
         tenant_id=_CANARY_OPERATOR_TENANT,
         tenant_role=TenantRole.TENANT_ADMIN,
+        # The canary curates the built-in (global) scope
+        # (_CANARY_TENANT_ID is None), so its writes need the
+        # platform_admin seat (#3616 parity).
+        platform_admin=True,
     )
 
 

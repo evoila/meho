@@ -80,6 +80,13 @@ Review-queue failures (T4 #402) — raised from
   which is a *dispatch-time* tie between two connector **classes** for
   the same ``(product, version)`` (#1750 / #1752) — this one is a
   *row-scope* tie between a tenant row and a built-in row.
+* :class:`BuiltinConnectorWriteForbiddenError` — a mutating action
+  (enable / disable / enable-reads / edit-group / edit-op) resolved to
+  a built-in (``tenant_id IS NULL``) row, but the caller is a
+  ``tenant_admin`` without ``platform_admin``. A built-in row is shared
+  by every tenant, so mutating it is a platform action; the fronts map
+  this onto REST ``403`` / MCP ``-32602`` (not the ``404`` conflation),
+  mirroring the doc-collection global-row seat (#3616).
 
 Ingest-pipeline failures (G0.9-T8) — raised from
 :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`:
@@ -116,6 +123,7 @@ from uuid import UUID
 
 __all__ = [
     "AmbiguousConnectorScopeError",
+    "BuiltinConnectorWriteForbiddenError",
     "ConnectorNotFoundError",
     "ConnectorScopeCandidate",
     "InvalidSchemaError",
@@ -621,6 +629,55 @@ class AmbiguousConnectorScopeError(Exception):
             f"row resp. the built-in scope, tenant_admin, tenant_id=None). "
             f"See docs/codebase/error-message-shape.md."
         )
+
+
+class BuiltinConnectorWriteForbiddenError(Exception):
+    """Raised when a mutating action targets a built-in row without ``platform_admin``.
+
+    A built-in connector row (``tenant_id IS NULL``) is a shared,
+    global-catalogue entry every tenant sees, so enabling / disabling
+    it, bulk-enabling its reads, or editing one of its groups / ops is a
+    platform action, not a tenant one. The write surfaces
+    (``POST /{id}/enable``, ``/enable-reads``, ``/disable``; ``PATCH
+    /{id}/groups/{key}``, ``/operations/{op_id}``) carry a
+    ``tenant_admin`` floor that authorises a tenant to mutate *its own*
+    curated rows; crossing into the built-in catalogue is the orthogonal
+    ``platform_admin`` capability -- the same seat
+    :func:`~meho_backplane.docs_collections.service.update_doc_collection`
+    gates its global-row repoint on (#3616). A ``tenant_admin`` without
+    ``platform_admin`` is refused here with a typed error the fronts map
+    to a REST ``403`` / MCP ``-32602`` rather than the historical ``404``
+    conflation, so a built-in-only connector is enable-able by a
+    ``platform_admin`` instead of un-enable-able by anyone.
+
+    Inherits from :class:`Exception` directly (not :class:`ValueError`)
+    so callers can ``except BuiltinConnectorWriteForbiddenError``
+    precisely, the same posture :class:`ConnectorNotFoundError` and
+    :class:`AmbiguousConnectorScopeError` take. Carries a structured
+    ``detail`` mapping (a stable ``builtin_connector_write_forbidden``
+    classifier + ``connector_id`` + the rendered ``message``) the route
+    and MCP layers ship verbatim; it echoes no tenant identity, so it is
+    not a cross-tenant oracle.
+
+    Attributes
+    ----------
+    connector_id:
+        The operator-facing identifier whose built-in row was refused.
+    """
+
+    def __init__(self, *, connector_id: str) -> None:
+        self.connector_id = connector_id
+        self.detail: dict[str, object] = {
+            "error": "builtin_connector_write_forbidden",
+            "connector_id": connector_id,
+            "message": (
+                f"connector {connector_id!r} is a built-in (global) connector; "
+                f"enabling, disabling, or editing it requires the platform_admin "
+                f"capability, not tenant_admin alone. A tenant-curated connector "
+                f"is editable by its tenant_admin."
+            ),
+        }
+        super().__init__(self.detail["message"])
 
 
 class VersionMismatchError(ValueError):

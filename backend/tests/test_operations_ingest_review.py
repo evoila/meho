@@ -49,6 +49,7 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
     EditOpWarning,
@@ -90,6 +91,7 @@ def _make_operator(
     tenant_id: uuid.UUID,
     role: TenantRole = TenantRole.TENANT_ADMIN,
     sub: str | None = None,
+    platform_admin: bool = False,
 ) -> Operator:
     """Build a frozen :class:`Operator` with default test fields."""
     return Operator(
@@ -99,6 +101,7 @@ def _make_operator(
         raw_jwt=_FAKE_JWT,
         tenant_id=tenant_id,
         tenant_role=role,
+        platform_admin=platform_admin,
     )
 
 
@@ -1338,8 +1341,46 @@ async def test_builtin_connector_requires_tenant_admin_role() -> None:
 
 
 @pytest.mark.asyncio
-async def test_builtin_connector_accessible_to_tenant_admin() -> None:
-    """``tenant_admin`` mutates built-in connectors; audit echoes operator's tenant."""
+async def test_builtin_connector_accessible_to_platform_admin() -> None:
+    """``platform_admin`` mutates built-in connectors; audit echoes operator's tenant."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=2,
+        review_status="staged",
+    )
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    service = ReviewService(admin)
+
+    await service.enable_connector("vmware-rest-9.0", tenant_id=None)
+
+    statuses = await _group_statuses(tenant_id=None)
+    assert set(statuses.values()) == {"enabled"}
+
+    # Audit row carries the operator's tenant, not the affected
+    # rows' (NULL) scope.
+    row = await _latest_audit_row(op_id="meho_connector_enable")
+    assert row.tenant_id == operator_tenant
+
+
+@pytest.mark.asyncio
+async def test_builtin_connector_enable_forbidden_without_platform_admin() -> None:
+    """A plain ``tenant_admin`` mutating a built-in row is refused (403), not 404.
+
+    The reported v0.35.0 defect flavour + its RBAC floor: a freshly
+    ingested built-in (global, ``tenant_id IS NULL``) connector is
+    resolvable via the tenant-preferring fall-back, but mutating it is a
+    platform action. A ``tenant_admin`` without ``platform_admin`` gets a
+    typed :class:`BuiltinConnectorWriteForbiddenError` (the route maps it
+    to 403) rather than the historical
+    :class:`ConnectorNotFoundError`/404 or a silent all-tenant write.
+    Nothing transitions.
+    """
     operator_tenant = uuid.uuid4()
     await _seed_connector(
         tenant_id=None,
@@ -1353,15 +1394,124 @@ async def test_builtin_connector_accessible_to_tenant_admin() -> None:
     )
     service = ReviewService(admin)
 
-    await service.enable_connector("vmware-rest-9.0", tenant_id=None)
+    # Addressed by the operator's own tenant (the REST route contract:
+    # enable() passes operator.tenant_id, never null) — resolves to the
+    # built-in row via the fall-back, then the platform gate refuses it.
+    with pytest.raises(BuiltinConnectorWriteForbiddenError) as excinfo:
+        await service.enable_connector("vmware-rest-9.0", tenant_id=operator_tenant)
+    assert excinfo.value.connector_id == "vmware-rest-9.0"
+    assert excinfo.value.detail["error"] == "builtin_connector_write_forbidden"
+
+    # And the same refusal when the built-in scope is addressed explicitly.
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await service.enable_connector("vmware-rest-9.0", tenant_id=None)
+
+    statuses = await _group_statuses(tenant_id=None)
+    assert set(statuses.values()) == {"staged"}
+
+
+@pytest.mark.asyncio
+async def test_builtin_connector_enable_platform_admin_via_tenant_fallback() -> None:
+    """``platform_admin`` enables a built-in-only connector addressed by its own tenant.
+
+    The exact fix for the reported defect: the REST ``/enable`` route
+    always calls ``enable_connector(..., tenant_id=operator.tenant_id)``,
+    so a built-in-only label must resolve through the tenant-preferring
+    fall-back to the built-in row and enable it — no 404 — when the caller
+    holds ``platform_admin``.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        group_count=2,
+        ops_per_group=2,
+        review_status="staged",
+    )
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    service = ReviewService(admin)
+
+    await service.enable_connector("vmware-rest-9.0", tenant_id=operator_tenant)
+
+    statuses = await _group_statuses(tenant_id=None)
+    assert set(statuses.values()) == {"enabled"}
+    row = await _latest_audit_row(op_id="meho_connector_enable")
+    assert row.tenant_id == operator_tenant
+
+
+@pytest.mark.asyncio
+async def test_builtin_connector_disable_forbidden_without_platform_admin() -> None:
+    """The transition gate covers ``disable`` too (shared ``_transition_connector``)."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=1,
+        review_status="enabled",
+    )
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await service.disable_connector("vmware-rest-9.0", tenant_id=operator_tenant)
 
     statuses = await _group_statuses(tenant_id=None)
     assert set(statuses.values()) == {"enabled"}
 
-    # Audit row carries the operator's tenant, not the affected
-    # rows' (NULL) scope.
-    row = await _latest_audit_row(op_id="meho_connector_enable")
-    assert row.tenant_id == operator_tenant
+
+@pytest.mark.asyncio
+async def test_builtin_edit_op_and_group_gated_on_platform_admin() -> None:
+    """``edit_op`` / ``edit_group`` on a built-in row need ``platform_admin`` too."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=None,
+        group_count=1,
+        ops_per_group=1,
+        review_status="staged",
+    )
+    tenant_admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    ta_service = ReviewService(tenant_admin)
+
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await ta_service.edit_group(
+            "vmware-rest-9.0",
+            "group-0",
+            tenant_id=operator_tenant,
+            when_to_use="tenant admin should not reach the built-in row",
+        )
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await ta_service.edit_op(
+            "vmware-rest-9.0",
+            "GET:/api/v1/group-0/0",
+            tenant_id=operator_tenant,
+            is_enabled=True,
+        )
+
+    # platform_admin lands both edits.
+    platform_admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    pa_service = ReviewService(platform_admin)
+    await pa_service.edit_group(
+        "vmware-rest-9.0",
+        "group-0",
+        tenant_id=operator_tenant,
+        when_to_use="platform admin curated this built-in group",
+    )
+    warnings = await pa_service.edit_op(
+        "vmware-rest-9.0",
+        "GET:/api/v1/group-0/0",
+        tenant_id=operator_tenant,
+        is_enabled=True,
+    )
+    assert isinstance(warnings, list)
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert builtin_state["GET:/api/v1/group-0/0"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1625,11 +1775,15 @@ async def test_enable_reads_builtin_requires_tenant_admin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enable_reads_builtin_accessible_to_tenant_admin() -> None:
-    """``tenant_admin`` bulk-enables built-in reads; audit echoes operator's tenant."""
+async def test_enable_reads_builtin_accessible_to_platform_admin() -> None:
+    """``platform_admin`` bulk-enables built-in reads; audit echoes operator's tenant."""
     operator_tenant = uuid.uuid4()
     await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
-    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
     service = ReviewService(admin)
 
     ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=None)
@@ -1685,9 +1839,13 @@ async def test_enable_reads_falls_back_to_builtin_for_operator_tenant() -> None:
     """
     operator_tenant = uuid.uuid4()
     await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
-    # tenant_admin is required to act on the built-in scope; the
+    # platform_admin is required to WRITE the built-in scope; the
     # fallback resolves to tenant_id=None.
-    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
     service = ReviewService(admin)
 
     ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
@@ -1699,6 +1857,27 @@ async def test_enable_reads_falls_back_to_builtin_for_operator_tenant() -> None:
     assert builtin_state["GET:/api/v1/resource"] is True
     assert builtin_state["HEAD:/api/v1/resource"] is True
     assert builtin_state["POST:/api/v1/resource"] is False
+
+
+@pytest.mark.asyncio
+async def test_enable_reads_builtin_fallback_forbidden_without_platform_admin() -> None:
+    """A plain ``tenant_admin`` hitting the built-in read fall-back is refused (403).
+
+    Same shape as the transition gate: the #1135 fall-back still resolves
+    the built-in row for a tenant-addressed label, but flipping its reads
+    is a platform write, so a ``tenant_admin`` without ``platform_admin``
+    gets :class:`BuiltinConnectorWriteForbiddenError` and nothing flips.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
+    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    service = ReviewService(admin)
+
+    with pytest.raises(BuiltinConnectorWriteForbiddenError):
+        await service.enable_reads("vmware-rest-9.0", tenant_id=operator_tenant)
+
+    builtin_state = await _ops_enabled_state(tenant_id=None)
+    assert not any(builtin_state.values())
 
 
 @pytest.mark.asyncio
@@ -1759,11 +1938,15 @@ async def test_enable_reads_prefer_tenant_applies_to_tenant_row() -> None:
 
 @pytest.mark.asyncio
 async def test_enable_reads_prefer_builtin_applies_to_builtin_row() -> None:
-    """#2029: ``prefer='builtin'`` flips the built-in row's reads (tenant_admin)."""
+    """#2029: ``prefer='builtin'`` flips the built-in row's reads (platform_admin)."""
     operator_tenant = uuid.uuid4()
     await _seed_mixed_methods(tenant_id=operator_tenant, op_is_enabled=False)
     await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
-    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
     service = ReviewService(admin)
 
     ops_enabled = await service.enable_reads(
@@ -1793,7 +1976,14 @@ async def test_review_and_enable_reads_resolve_same_row_global_only() -> None:
     """
     operator_tenant = uuid.uuid4()
     await _seed_mixed_methods(tenant_id=None, op_is_enabled=False)
-    admin = _make_operator(tenant_id=operator_tenant, role=TenantRole.TENANT_ADMIN)
+    # platform_admin so the WRITE half is permitted on the built-in row;
+    # the parity property under test (read + write resolve the SAME row)
+    # is unaffected by the orthogonal platform gate.
+    admin = _make_operator(
+        tenant_id=operator_tenant,
+        role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
     service = ReviewService(admin)
 
     # Read path resolves to the built-in scope.

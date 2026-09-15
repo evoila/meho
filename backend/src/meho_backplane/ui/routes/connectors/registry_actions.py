@@ -227,6 +227,21 @@ def _panel_from_http_exception(
             ),
             status_code=404,
         )
+    if (
+        exc.status_code == 403
+        and isinstance(detail, dict)
+        and detail.get("error") == "builtin_connector_write_forbidden"
+    ):
+        return _render_error_panel(
+            request,
+            title="Platform admin required",
+            message=(
+                f"{connector_id!r} is a built-in (global) connector shared by "
+                "every tenant, so enabling or editing it requires the "
+                "platform_admin capability, not tenant_admin alone."
+            ),
+            status_code=403,
+        )
     raise exc
 
 

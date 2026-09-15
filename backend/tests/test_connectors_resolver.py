@@ -1214,3 +1214,55 @@ def test_resolve_github_real_registration_round_trips_for_catalog_triple() -> No
         f"is not registered in the v2 registry -- the dispatcher would "
         f"return no_connector on rows ingested from this entry"
     )
+
+
+def test_resolve_vmware_rest_dual_impl_selects_by_target_fingerprint() -> None:
+    """The real 8.0 / 9.0 vmware-rest catalogs resolve by target fingerprint.
+
+    Dual-impl (locked decision #3038): both versioned catalogs register
+    against ``product="vmware"`` beside the shared wildcard, and the resolver
+    picks one per target by its fingerprinted version. The bands are disjoint
+    (8.0 catalog ``>=8.0,<8.1``; 9.0 catalog ``>=8.5,<10.0``), so an 8.0.x
+    target lands on the 8.0 catalog and a 9.x target on the 9.0 catalog with
+    no operator preference needed. Proves the ``vmware-rest-8.0`` half of
+    #3569 without touching the resolver.
+    """
+    from meho_backplane.connectors.vmware_rest.connector import (
+        VmwareRest80Connector,
+        VmwareRestConnector,
+    )
+
+    register_connector_v2(
+        product="vmware", version="9.0", impl_id="vmware-rest", cls=VmwareRestConnector
+    )
+    register_connector_v2(
+        product="vmware", version="8.0", impl_id="vmware-rest", cls=VmwareRest80Connector
+    )
+    # The product wildcard stays owned by the 9.0 class (production shape);
+    # the versioned entries must still win via ``versioned_over_wildcard``.
+    register_connector_v2(product="vmware", version="", impl_id="", cls=VmwareRestConnector)
+
+    assert (
+        resolve_connector(_FakeTarget(product="vmware", fingerprint=_fingerprint("8.0.3.24022510")))
+        is VmwareRest80Connector
+    )
+    assert (
+        resolve_connector(_FakeTarget(product="vmware", fingerprint=_fingerprint("9.0.2.0")))
+        is VmwareRestConnector
+    )
+    # A bare 8.0 fingerprint (no build tuple) still lands on the 8.0 catalog.
+    assert (
+        resolve_connector(_FakeTarget(product="vmware", fingerprint=_fingerprint("8.0")))
+        is VmwareRest80Connector
+    )
+    # An operator pin to the versioned form resolves the same winner.
+    assert (
+        resolve_connector(
+            _FakeTarget(
+                product="vmware",
+                fingerprint=_fingerprint("8.0.3.24022510"),
+                preferred_impl_id="vmware-rest-8.0",
+            )
+        )
+        is VmwareRest80Connector
+    )

@@ -90,6 +90,7 @@ class _FakeConnector:
         self.mount_calls: list[str] = []
         self.get_calls: list[tuple[str, dict[str, Any] | None]] = []
         self.post_calls: list[tuple[str, dict[str, Any]]] = []
+        self.promote_missing_calls: list[bool] = []
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         del target, operator
@@ -123,6 +124,7 @@ class _FakeConnector:
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         # The vmomi RetrievePropertiesEx read routes through the vmomi seam
         # with the spec-relative path; the /sdk/vim25 mount is the
@@ -130,6 +132,7 @@ class _FakeConnector:
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
+        self.promote_missing_calls.append(promote_managed_object_not_found)
         if self._post_error is not None:
             raise self._post_error
         moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
@@ -244,6 +247,7 @@ async def test_lists_then_reads_props_per_host_mounted() -> None:
     assert conn.mount_calls == ["/vcenter/host"]
     assert conn.get_calls[0][0] == "/api/vcenter/host"
     assert len(conn.post_calls) == 2
+    assert conn.promote_missing_calls == [True, True]
     assert all(
         path == "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
         for path, _ in conn.post_calls

@@ -26,6 +26,42 @@
 # Source        : docker.io/library/python:3.12-slim (Debian trixie,
 #                 Python 3.12.x, multi-arch manifest list)
 
+# ---------- Wheel builder (arch-independent app wheel, no fresh resolve) ------
+# The failing operation on a cold cache is uv's build-isolation *resolution*
+# of the `hatchling` build backend: it issues a fresh PyPI index query plus a
+# PEP 658 `.whl.metadata` fetch, and those connections fail with `client
+# error (Connect) / operation timed out` from the CI runner cluster — on BOTH
+# native amd64 and emulated arm64 (evoila/meho#3626). uv's LOCKED download of
+# pinned wheels (direct file URLs from uv.lock) succeeds on the same host in
+# the same run. Passing builds avoided the resolve only because a warm buildkit
+# uv-cache mount served `hatchling` offline.
+#
+# So build the wheel without any fresh resolve: install `hatchling` from the
+# lock (the `build` dependency group, via the reliable locked-download path),
+# then run the wheel build with `--no-build-isolation` so uv reuses that
+# installed backend instead of resolving it. `meho-backplane` is pure-Python
+# (`py3-none-any`), so its wheel is arch-independent — building it once on the
+# native `$BUILDPLATFORM` also skips the slow emulated wheel build, and keeps
+# the build backend out of the runtime venv (this stage is discarded). hatch's
+# `force-include` (alembic.ini + alembic/) and the `[project].readme` field are
+# read at build time, so the full source, README and migration tree are staged.
+FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS wheelbuilder
+COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_LINK_MODE=copy
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./
+# Install ONLY the build backend from the lock (direct-URL download, no index
+# resolve), into /app/.venv.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --only-group build
+# Build the wheel reusing the installed backend — no fresh PyPI resolution.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    VIRTUAL_ENV=/app/.venv uv build --wheel --no-build-isolation --out-dir /wheels
+
 # ---------- Builder ----------------------------------------------------------
 # Resolves and installs locked dependencies into /app/.venv. The two-step
 # `uv sync` (deps first, then project) keeps the dependency layer cacheable
@@ -33,14 +69,15 @@
 # https://docs.astral.sh/uv/guides/integration/docker/.
 #
 # Multi-arch invariant: buildx runs this whole Dockerfile once per target
-# `--platform` (e.g. linux/amd64 and linux/arm64). We do *not* split the
-# builder onto `--platform=$BUILDPLATFORM` because the backplane depends
-# on compiled-wheel packages (`asyncpg`, `cryptography`, `pydantic-core`)
-# that must be installed for the **target** arch — cross-compiling those
-# from a builder running on a different arch is fragile. Instead we
-# accept QEMU emulation cost for the non-native target (typically 3–5×
-# slower than native for arm64 on amd64 hosts; documented in
-# `docs/codebase/backend.md`). `BUILDPLATFORM` and `TARGETPLATFORM` are
+# `--platform` (e.g. linux/amd64 and linux/arm64). The dependency install
+# below is NOT cross-compiled — the backplane depends on compiled-wheel
+# packages (`asyncpg`, `cryptography`, `pydantic-core`) that must be
+# installed for the **target** arch, so `uv sync` runs under QEMU emulation
+# for the non-native target (typically 3–5× slower than native for arm64 on
+# amd64 hosts; documented in `docs/codebase/backend.md`). Only the
+# pure-Python, arch-independent `meho-backplane` wheel is built on the native
+# `$BUILDPLATFORM` (in the `wheelbuilder` stage above) and installed here —
+# never rebuilt under emulation. `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS builder
@@ -67,26 +104,26 @@ ENV UV_PYTHON_DOWNLOADS=0 \
 
 WORKDIR /app
 
-# Step 1: install dependencies only (cacheable).
-# README.md is co-copied here because hatchling resolves
-# `[project].readme = "README.md"` at wheel-build time during the second
-# `uv sync` below; staging it in the deps-only layer costs ~1 KB on a
-# cache hit and avoids needing a separate COPY before that step.
+# Step 1: install locked dependencies only (cacheable). README.md is
+# co-copied so `uv sync` can read `[project].readme = "README.md"` from
+# pyproject without error; it costs ~1 KB on a cache hit.
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
-# Step 2: copy the project source and install the project itself, non-editable
-# so the wheel ends up in the venv rather than as a `.pth` reference. The
-# wheel build pulls in `alembic.ini` and `alembic/` via hatch's
-# `[tool.hatch.build.targets.wheel.force-include]` (see backend/pyproject.toml);
-# hatch errors out when a force-include source is missing, so both must
-# exist in the build context at the moment of `uv sync --no-editable`.
-COPY src ./src
-COPY alembic ./alembic
-COPY alembic.ini ./
+# Step 2: install the project from the wheel prebuilt in the `wheelbuilder`
+# stage. Installing a built pure-Python wheel needs neither a build backend
+# nor a network resolve, so — unlike the former `uv sync --no-editable`, whose
+# build-isolation resolve of `hatchling` failed to connect from the CI cluster
+# on a cold cache (evoila/meho#3626, reproduced on both amd64 and arm64) —
+# this step never contacts PyPI. Dependencies are already in /app/.venv from
+# Step 1; `--no-deps` scopes the install to the project distribution alone, and
+# `--offline` fails loud rather than silently reaching for the network. The
+# wheel carries the `ui/` static tree the Tailwind step below compiles
+# against, exactly as the sync install did.
+COPY --from=wheelbuilder /wheels /wheels
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-editable
+    VIRTUAL_ENV=/app/.venv uv pip install --no-deps --offline /wheels/*.whl
 
 # ---------- Operator-console CSS (Initiative #337, Task #863) ---------------
 # Build the compiled Tailwind 4 + DaisyUI 5 bundle for the /ui surface using
@@ -118,6 +155,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # output to .../static/dist/tailwind.css INSIDE the installed package tree
 # so the runtime stage's `COPY --from=builder /app/.venv` picks up the
 # artifact automatically (no extra COPY layer required).
+#
+# The class scan is driven by the explicit `@source` directives in
+# styles.css (templates/ + static/src/app/), NOT Tailwind's automatic
+# content detection: that detection is rooted at the CLI's cwd (this
+# WORKDIR, /app) and skips dot-directories, so once this stage stopped
+# copying `src/` to /app/src and the source moved into `/app/.venv/...`
+# (the wheel-install refactor, #3627), automatic detection scanned
+# nothing and shipped a utilities-less bundle -- a non-empty ~35 KB file
+# of preflight + theme only, which passed `test -s` yet rendered the
+# console as unstyled HTML. The `grep -q '\.btn'` gate below fails the
+# build loud if the scan ever again reaches no templates; `test -s` alone
+# could not catch it.
 #
 # `static/dist/` is .gitignore'd; only built artifacts live there. Local dev
 # runs the same CLI in --watch mode against the source tree (see
@@ -151,32 +200,49 @@ RUN set -eux; \
       -i "${UI_SP}/static/src/styles.css" \
       -o "${UI_SP}/static/dist/tailwind.css" \
       --minify; \
-    test -s "${UI_SP}/static/dist/tailwind.css"
+    test -s "${UI_SP}/static/dist/tailwind.css"; \
+    grep -q '\.btn' "${UI_SP}/static/dist/tailwind.css" \
+      || { echo "ERROR: compiled tailwind bundle carries no utility/component classes -- the @source content scan reached no templates. See evoila/meho#3627." >&2; exit 1; }
 
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
 
-# ---------- Base-OS security patch: util-linux family (CVE-2026-53615) -------
-# ----------                        + openssl family    (CVE-2026-14456) ------
-# The pinned base still carries util-linux 2.41-5, which Trivy flags as a
-# fixable HIGH (CVE-2026-53615). Debian trixie-security already serves the fix
-# (2.41.5-0+deb13u1), but the upstream python:3.14-slim manifest has not been
-# rebuilt against it yet, so the digest bump the Dependabot docker block would
-# normally carry cannot clear it. Same story for openssl 3.5.6-1~deb13u2,
-# flagged as fixable HIGH CVE-2026-14456 with the fix (3.5.7-1~deb13u2)
-# already in trixie-security. Rather than publish a release image with a
-# known fixable HIGH, upgrade just those binary families to the security
-# version in one apt layer (indexes dropped in the same RUN, so no apt metadata
-# persists in the image). This is a targeted --only-upgrade of packages already
-# present — no new package enters the image — and is the sibling in intent of
-# the pip uninstall below: keep the Trivy scan clean. Remove this layer once
-# the base-digest bump lands a rebuilt base already carrying util-linux
-# >= 2.41.5-0+deb13u1 and openssl >= 3.5.7-1~deb13u2.
+# ---------- Base-OS security patch: base packages Trivy flags fixable --------
+# The pinned base carries several Debian trixie packages that Trivy flags as
+# fixable CRITICAL/HIGH, each with the fix already served by the trixie apt
+# repo but NOT yet in a rebuilt upstream python:3.14-slim manifest — so the
+# base-digest bump the Dependabot docker block would normally carry cannot
+# clear them. (As of this layer's last touch the freshly-rebuilt upstream tag
+# picked up util-linux and openssl but still ships the vulnerable perl-base,
+# gzip, libpcre2 and libsqlite3, so a digest bump alone leaves the gate red.)
+# Rather than publish a release image with a known fixable CRITICAL/HIGH, we
+# upgrade just those already-present binaries to the trixie security version in
+# one apt layer (indexes dropped in the same RUN, so no apt metadata persists
+# in the image). This is a targeted --only-upgrade of packages already present
+# — no new package enters the image — the sibling in intent of the pip
+# uninstall below: keep the Trivy scan (and the image workflow's promotion
+# gate) clean. Families and the fix that clears each:
+#   util-linux (+ libuuid1/libmount1/libblkid1/libsmartcols1/liblastlog2-2/
+#     mount/bsdutils/login)   >= 2.41.5-0+deb13u1   CVE-2026-53615
+#   openssl (+ libssl3t64/openssl-provider-legacy)
+#                             >= 3.5.7-1~deb13u2    CVE-2026-14456
+#   perl-base                 >= 5.40.1-6+deb13u1   CVE-2026-8376 (CRITICAL),
+#                                                   CVE-2026-57433, CVE-2026-57432,
+#                                                   CVE-2026-48962, CVE-2026-42497
+#   gzip                      >= 1.13-1+deb13u1     CVE-2026-41992
+#   libpcre2-8-0              >= 10.46-1~deb13u2    CVE-2026-86145, CVE-2026-89161
+#   libsqlite3-0              >= 3.46.1-7+deb13u2   CVE-2026-11822, CVE-2026-11824
+# Drop each package from this layer once a base-digest bump lands a rebuilt
+# base already carrying that package at (or above) the version listed here.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade \
       util-linux libuuid1 libmount1 libblkid1 libsmartcols1 liblastlog2-2 \
       mount bsdutils login \
       openssl libssl3t64 openssl-provider-legacy \
+      perl-base \
+      gzip \
+      libpcre2-8-0 \
+      libsqlite3-0 \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).

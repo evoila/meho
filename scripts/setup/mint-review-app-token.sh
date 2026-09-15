@@ -76,7 +76,11 @@ done
 # Materialize the key for openssl. stdin mode buffers into a 0600
 # temp file that is removed on every exit path.
 TMP_KEY=""
-cleanup() { [ -n "$TMP_KEY" ] && rm -f "$TMP_KEY"; }
+cleanup() {
+  if [ -n "$TMP_KEY" ]; then
+    rm -f -- "$TMP_KEY"
+  fi
+}
 trap cleanup EXIT
 
 if [ "$KEY_FILE" = "-" ]; then

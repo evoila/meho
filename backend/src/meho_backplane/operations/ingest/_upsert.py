@@ -25,6 +25,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,7 +38,8 @@ from meho_backplane.operations.embed import (
     encode_endpoint_text,
 )
 from meho_backplane.operations.ingest.exceptions import OpIdCollision
-from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
+from meho_backplane.operations.ingest.safety_floors import has_safety_floor
+from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto, SafetyLevel
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 _SPEC_TAG_PREFIX = "spec:"
@@ -245,8 +247,7 @@ def _apply_skip_reembed(existing: EndpointDescriptor, ctx: UpsertContext) -> Non
     existing.path = ctx.proto.path
     existing.parameter_schema = ctx.proto.parameter_schema
     existing.response_schema = ctx.proto.response_schema
-    existing.safety_level = ctx.proto.safety_level
-    existing.requires_approval = ctx.proto.requires_approval
+    _apply_safety_metadata(existing, ctx)
     existing.needs_reingest = False
     existing.updated_at = ctx.now
 
@@ -269,8 +270,7 @@ def _apply_reembed_update(
     existing.tags = ctx.tags_with_marker
     existing.parameter_schema = ctx.proto.parameter_schema
     existing.response_schema = ctx.proto.response_schema
-    existing.safety_level = ctx.proto.safety_level
-    existing.requires_approval = ctx.proto.requires_approval
+    _apply_safety_metadata(existing, ctx)
     existing.needs_reingest = False
     existing.embedding = embedding
     existing.updated_at = ctx.now
@@ -311,6 +311,23 @@ def _build_new_descriptor(
     )
 
 
+def _apply_safety_metadata(existing: EndpointDescriptor, ctx: UpsertContext) -> None:
+    """Refresh safety metadata without weakening a connector-owned floor."""
+    if not has_safety_floor(
+        product=ctx.product,
+        version=ctx.version,
+        impl_id=ctx.impl_id,
+        proto=ctx.proto,
+    ):
+        existing.safety_level = ctx.proto.safety_level
+        existing.requires_approval = ctx.proto.requires_approval
+        return
+    ranks = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+    if ranks[existing.safety_level] < ranks[ctx.proto.safety_level]:
+        existing.safety_level = ctx.proto.safety_level
+    existing.requires_approval = existing.requires_approval or ctx.proto.requires_approval
+
+
 def _capture_safety_change(
     existing: EndpointDescriptor,
     ctx: UpsertContext,
@@ -323,12 +340,22 @@ def _capture_safety_change(
     skip-re-embed branch -- and would previously overwrite the level
     with no trace anywhere.
     """
-    if existing.safety_level == ctx.proto.safety_level:
+    incoming_safety: SafetyLevel = ctx.proto.safety_level
+    if has_safety_floor(
+        product=ctx.product,
+        version=ctx.version,
+        impl_id=ctx.impl_id,
+        proto=ctx.proto,
+    ):
+        ranks = {"safe": 0, "caution": 1, "dangerous": 2, "destructive": 3}
+        if ranks[existing.safety_level] > ranks[incoming_safety]:
+            incoming_safety = cast(SafetyLevel, existing.safety_level)
+    if existing.safety_level == incoming_safety:
         return None
     return SafetyLevelChange(
         op_id=ctx.proto.op_id,
         old_safety_level=existing.safety_level,
-        new_safety_level=ctx.proto.safety_level,
+        new_safety_level=incoming_safety,
     )
 
 

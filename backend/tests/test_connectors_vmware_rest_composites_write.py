@@ -81,7 +81,10 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_resize_composite,
     vm_snapshot_revert_composite,
 )
-from meho_backplane.connectors.vmware_rest.composites.schemas import VM_CREATE_RESPONSE_SCHEMA
+from meho_backplane.connectors.vmware_rest.composites.schemas import (
+    VM_CREATE_RESPONSE_SCHEMA,
+    VM_NIC_REPOINT_PARAMETER_SCHEMA,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -6499,6 +6502,7 @@ async def test_vm_nic_repoint_happy_path(gate: _GateRecorder) -> None:
     assert out["requested_backing"] == {
         "portgroup_id": "dvportgroup-9",
         "portgroup_name": "prod-net",
+        "backing_type": "DISTRIBUTED_PORTGROUP",
     }
     # The NIC read + the network resolve read are not gated; only the PATCH is.
     assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"]
@@ -6530,7 +6534,11 @@ async def test_vm_nic_repoint_portgroup_not_found(gate: _GateRecorder) -> None:
         connector=conn,  # type: ignore[arg-type]
     )
     assert out["status"] == "not_found"
-    assert out["requested_backing"] == {"portgroup_id": None, "portgroup_name": "ghost"}
+    assert out["requested_backing"] == {
+        "portgroup_id": None,
+        "portgroup_name": "ghost",
+        "backing_type": "DISTRIBUTED_PORTGROUP",
+    }
     assert gate.calls == []
 
 
@@ -6555,6 +6563,240 @@ async def test_vm_nic_repoint_ambiguous_portgroup(gate: _GateRecorder) -> None:
     assert out["status"] == "ambiguous"
     assert len(out["candidates"]) == 2
     assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_standard_portgroup_resolves_name(gate: _GateRecorder) -> None:
+    """backing_type=STANDARD_PORTGROUP resolves an unambiguous name -> standard-backed PATCH.
+
+    The same handler path the ``host.detach_from_vds`` fallback uses, now
+    reachable governed: move a NIC onto a host-local standard-switch
+    portgroup (e.g. to repair a NIC stranded on an L2 that cannot reach its
+    gateway).
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "mac_address": "00:50:56:aa:bb:cc",
+                "backing": {
+                    "type": "DISTRIBUTED_PORTGROUP",
+                    "network": "dvportgroup-1",
+                    "network_name": "old-net",
+                },
+            },
+            "/api/vcenter/network": [
+                {
+                    "network": "network-1001",
+                    "name": "mgmt-standard-pg",
+                    "type": "STANDARD_PORTGROUP",
+                }
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "mgmt-standard-pg",
+            "backing_type": "STANDARD_PORTGROUP",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "repointed"
+    assert out["requested_backing"] == {
+        "portgroup_id": "network-1001",
+        "portgroup_name": "mgmt-standard-pg",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"]
+    patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
+    assert patch_call["body"] == {
+        "backing": {"type": "STANDARD_PORTGROUP", "network": "network-1001"}
+    }
+    # The name resolve scoped filter.types to STANDARD_PORTGROUP (bare on /api).
+    net_read = next(c for c in conn.calls if c["path"] == "/api/vcenter/network")
+    assert net_read["query"]["types"] == ["STANDARD_PORTGROUP"]
+    assert net_read["query"]["names"] == ["mgmt-standard-pg"]
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_standard_ambiguous_across_hosts(gate: _GateRecorder) -> None:
+    """A host-scoped standard name resolves to one moid per host -> fail-closed ambiguous.
+
+    Standard portgroups are host-scoped, so the same display name routinely
+    yields several ``Network`` moids. The REST Automation API exposes no
+    reliable VM->host mapping, so the composite fails closed and the
+    remediation points the operator at the explicit ``network`` param.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {"mac_address": "aa", "backing": {}},
+            "/api/vcenter/network": [
+                {"network": "network-1001", "name": "svc-net", "type": "STANDARD_PORTGROUP"},
+                {"network": "network-1002", "name": "svc-net", "type": "STANDARD_PORTGROUP"},
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "svc-net",
+            "backing_type": "STANDARD_PORTGROUP",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous"
+    assert {c["network"] for c in out["candidates"]} == {"network-1001", "network-1002"}
+    # The remediation names the host-scoped cause and the escape-hatch param.
+    assert "host-scoped" in out["guidance"]
+    assert "network" in out["guidance"]
+    assert "network-1001" in out["guidance"] and "network-1002" in out["guidance"]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_explicit_network_moid(gate: _GateRecorder) -> None:
+    """An explicit network moid skips name resolution and PATCHes after a type check.
+
+    This is how the operator resolves the host-scoped ambiguity above: pass
+    the moid of the standard portgroup on the VM's host directly.
+    """
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "mac_address": "00:50:56:aa:bb:cc",
+                "backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-1"},
+            },
+            "/api/vcenter/network": [
+                {"network": "network-1001", "name": "svc-net", "type": "STANDARD_PORTGROUP"},
+                {"network": "network-1002", "name": "svc-net", "type": "STANDARD_PORTGROUP"},
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "svc-net",
+            "backing_type": "STANDARD_PORTGROUP",
+            "network": "network-1002",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "repointed"
+    assert out["requested_backing"] == {
+        "portgroup_id": "network-1002",
+        "portgroup_name": "svc-net",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
+    assert patch_call["body"] == {
+        "backing": {"type": "STANDARD_PORTGROUP", "network": "network-1002"}
+    }
+    # The validation read filtered by moid (filter.networks -> bare on /api),
+    # never by name -- proving name resolution was skipped.
+    net_read = next(c for c in conn.calls if c["path"] == "/api/vcenter/network")
+    assert net_read["query"] == {"networks": ["network-1002"]}
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_explicit_network_type_mismatch(gate: _GateRecorder) -> None:
+    """An explicit moid of the wrong network kind for backing_type -> invalid_request; no PATCH."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {"mac_address": "aa", "backing": {}},
+            "/api/vcenter/network": [
+                {"network": "dvportgroup-9", "name": "prod-net", "type": "DISTRIBUTED_PORTGROUP"}
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "prod-net",
+            "backing_type": "STANDARD_PORTGROUP",
+            "network": "dvportgroup-9",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_request"
+    assert out["candidates"][0]["network"] == "dvportgroup-9"
+    assert "STANDARD_PORTGROUP" in out["guidance"]
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_explicit_network_not_found(gate: _GateRecorder) -> None:
+    """An explicit moid that resolves to no network row -> not_found; no PATCH."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {"mac_address": "aa", "backing": {}},
+            "/api/vcenter/network": [],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "svc-net",
+            "backing_type": "STANDARD_PORTGROUP",
+            "network": "network-9999",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "not_found"
+    assert "network-9999" in out["guidance"]
+    assert gate.calls == []
+
+
+def test_vm_nic_repoint_parameter_schema_accepts_backing_type() -> None:
+    """The parameter schema admits both backing types + an explicit network, rejects junk."""
+    validator = Draft202012Validator(VM_NIC_REPOINT_PARAMETER_SCHEMA)
+    # Back-compatible minimal call (no backing_type) still validates.
+    validator.validate({"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"})
+    # Both enum values validate; the explicit network moid is accepted.
+    validator.validate(
+        {
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "prod-net",
+            "backing_type": "DISTRIBUTED_PORTGROUP",
+        }
+    )
+    validator.validate(
+        {
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "svc-net",
+            "backing_type": "STANDARD_PORTGROUP",
+            "network": "network-1001",
+        }
+    )
+    # An out-of-enum backing_type is rejected.
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "vm": "vm-1",
+                "nic": "4000",
+                "portgroup_name": "prod-net",
+                "backing_type": "OPAQUE_NETWORK",
+            }
+        )
+    # additionalProperties:False still rejects unknown keys.
+    with pytest.raises(ValidationError):
+        validator.validate({"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net", "bogus": 1})
 
 
 # ===========================================================================

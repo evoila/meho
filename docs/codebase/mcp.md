@@ -390,9 +390,9 @@ table can never silently drift from the code:
   reclassification or an un-pinned addition fails CI at the listing path
   a client actually observes.
 
-Counts: **25 working + 53 operator + 1 pairing-gated automation =
-79 registered tools**, plus the **3 human-only verbs** (below) that
-carry no MCP registration under any claim set. The 25 working and 53
+Counts: **25 working + 54 operator + 1 pairing-gated automation =
+80 registered tools**, plus the **3 human-only verbs** (below) that
+carry no MCP registration under any claim set. The 25 working and 54
 operator counts are the **unpaired baseline** — a session with every
 capability provisioned but no add-on paired — so they stay byte-identical
 to a build that never carried the automation family; the single
@@ -434,9 +434,9 @@ add-on-family gate.
 | `list_doc_collections` | operator | `meho-docs` | List the documentation collections this session may search. |
 | `list_operation_groups` | operator | — | List a connector's enabled operation groups. |
 | `list_targets` | operator | — | List the tenant's accessible infrastructure targets. |
-| `meho_broadcast_announce` | operator | — | Publish an agent-authored announcement to the tenant stream. |
-| `meho_broadcast_recent` | operator | — | Read the tenant's recent broadcast events. |
-| `meho_broadcast_watch` | operator | — | Long-poll the tenant broadcast stream for new events. |
+| `meho_broadcast_announce` | operator | — | CLI: `meho broadcast announce <activity>` publishes through the shared durable publisher. |
+| `meho_broadcast_recent` | operator | — | CLI: `meho broadcast recent` reads through the shared strict history reader. |
+| `meho_broadcast_watch` | operator | — | CLI: `meho broadcast watch` tails the authenticated `/api/v1/feed` SSE route. |
 | `meho_connector_list` | operator | — | List connectors visible to the tenant (plus built-in / global). |
 | `meho_runbook_abort` | operator | — | Abort an in-progress runbook run. |
 | `meho_runbook_list_runs` | operator | — | List runbook runs (operators see only their own). |
@@ -462,6 +462,7 @@ session (on top of the Role + Extra-gate columns).
 |---|---|---|---|
 | `create_doc_collections` | tenant_admin | `meho-docs` | Register a new documentation collection for search routing. |
 | `delete_doc_collections` | tenant_admin | `meho-docs` | Deregister a disabled, tenant-owned documentation collection. |
+| `update_doc_collections` | tenant_admin | `meho-docs` | Repoint an existing collection's backend ref (and other mutable fields) in place; a global row also needs `platform_admin`. |
 | `meho_agent_principals_list` | operator | — | List agent principals registered for the tenant. |
 | `meho_agent_principals_register` | tenant_admin | — | Register a new agent principal. |
 | `meho_agent_principals_revoke` | tenant_admin | — | Revoke an agent principal (kill switch). |

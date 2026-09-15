@@ -2960,11 +2960,13 @@ VM_RESIZE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.vm.nic.repoint`` parameter schema.
 #:
-#: Repoints an existing vNIC to a different distributed portgroup,
-#: resolved by display name via
-#: ``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`` (there is
-#: no dedicated portgroup list resource -- the #1602 reconciliation
-#: lesson). Ambiguous / missing names refuse the repoint.
+#: Repoints an existing vNIC onto a distributed **or** host-scoped standard
+#: portgroup, resolved by display name via
+#: ``GET:/vcenter/network?filter.types=<backing_type>`` (there is no
+#: dedicated portgroup list resource -- the #1602 reconciliation lesson).
+#: ``backing_type`` defaults to ``DISTRIBUTED_PORTGROUP`` (back-compatible).
+#: An explicit ``network`` moid skips name resolution. Ambiguous / missing
+#: names refuse the repoint.
 VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -2982,12 +2984,42 @@ VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Display name of the target distributed portgroup. "
-                "Resolved to its network moid via "
-                "``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP``. "
+                "Display name of the target portgroup, resolved to its "
+                "network moid via "
+                "``GET:/vcenter/network?filter.types=<backing_type>``. "
                 "A name matching zero portgroups returns "
                 "``status='not_found'``; more than one returns "
-                "``status='ambiguous'`` with the candidates listed."
+                "``status='ambiguous'`` with the candidates listed (for "
+                "host-scoped standard portgroups a name routinely matches "
+                "one moid per host -- pass ``network`` to pick one). Still "
+                "the human label the approver sees even when ``network`` is "
+                "supplied."
+            ),
+        },
+        "backing_type": {
+            "type": "string",
+            "enum": ["DISTRIBUTED_PORTGROUP", "STANDARD_PORTGROUP"],
+            "default": "DISTRIBUTED_PORTGROUP",
+            "description": (
+                "Network kind the NIC is repointed onto. "
+                "``DISTRIBUTED_PORTGROUP`` (default) targets a vDS "
+                "portgroup; ``STANDARD_PORTGROUP`` targets a host-local "
+                "standard-switch portgroup (e.g. to repair a NIC that "
+                "landed on an L2 that cannot reach its gateway). Drives "
+                "both the ``filter.types`` resolution scope and the PATCHed "
+                "``backing.type``."
+            ),
+        },
+        "network": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Explicit target ``Network`` moid. Skips name resolution "
+                "and is validated for existence + type-consistency with "
+                "``backing_type`` (a mismatch returns "
+                "``status='invalid_request'``). Required to disambiguate a "
+                "host-scoped standard portgroup whose name resolves to "
+                "several moids (``status='ambiguous'``)."
             ),
         },
     },
@@ -3110,12 +3142,16 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["repointed", "not_found", "ambiguous"],
+            "enum": ["repointed", "not_found", "ambiguous", "invalid_request"],
             "description": (
                 "``'repointed'`` -- the NIC backing was PATCHed to the "
-                "target portgroup; ``'not_found'`` -- no distributed "
-                "portgroup matched ``portgroup_name``; ``'ambiguous'`` -- "
-                "more than one did (candidates listed, no PATCH issued)."
+                "target portgroup; ``'not_found'`` -- no portgroup matched "
+                "``portgroup_name`` (or the explicit ``network`` moid did "
+                "not resolve); ``'ambiguous'`` -- more than one matched "
+                "(candidates listed -- pass ``network`` to pick one); "
+                "``'invalid_request'`` -- the explicit ``network`` moid is "
+                "the wrong network kind for ``backing_type``. No PATCH is "
+                "issued on any non-``repointed`` status."
             ),
         },
         "vm": {"type": "string", "description": "VM moid owning the NIC."},
@@ -3135,14 +3171,26 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
             "properties": {
                 "portgroup_id": {"type": ["string", "null"]},
                 "portgroup_name": {"type": "string"},
+                "backing_type": {
+                    "type": "string",
+                    "enum": ["DISTRIBUTED_PORTGROUP", "STANDARD_PORTGROUP"],
+                },
             },
-            "required": ["portgroup_id", "portgroup_name"],
-            "description": "The target distributed portgroup (moid resolved from the name).",
+            "required": ["portgroup_id", "portgroup_name", "backing_type"],
+            "description": (
+                "The target portgroup the reviewer approves: ``backing_type`` "
+                "(network kind), ``portgroup_id`` (resolved moid, ``null`` "
+                "when resolution failed), and ``portgroup_name`` (display "
+                "label)."
+            ),
         },
         "candidates": {
             "type": "array",
             "items": {"type": "object"},
-            "description": "Matching portgroup rows when ``status='ambiguous'`` (empty otherwise).",
+            "description": (
+                "Matching portgroup rows when ``status='ambiguous'`` / "
+                "``'invalid_request'`` (empty otherwise)."
+            ),
         },
         "guidance": {
             "type": ["string", "null"],

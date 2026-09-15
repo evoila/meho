@@ -113,11 +113,13 @@ from meho_backplane.mcp.tools._connector_shared import (
     _coerce_tenant_id,
     _model_dump_json_safe,
     raise_invalid_params_for_ambiguous_scope,
+    raise_invalid_params_for_builtin_write_forbidden,
     raise_invalid_params_for_connector_not_found,
     raise_invalid_params_for_edit_value_error,
 )
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     ConnectorStatusFilter,
     ReviewService,
@@ -214,6 +216,11 @@ async def _edit_group_handler(
             tenant_id=tenant_id,
             **patch,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in row + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden (#3616 parity), not the
+        # dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -272,6 +279,11 @@ async def _edit_op_handler(
             tenant_id=tenant_id,
             **patch,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in row + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden (#3616 parity), not the
+        # dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -298,6 +310,11 @@ async def _enable_handler(
     service = ReviewService(operator)
     try:
         await service.enable_connector(connector_id, tenant_id=tenant_id)
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in row + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden (#3616 parity), not the
+        # dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.
@@ -316,8 +333,11 @@ async def _enable_reads_handler(
     ``ops_enabled`` echoes the count of ops flipped (``0`` on the
     idempotent re-run). The ``tenant_id`` argument follows the #1699
     contract this module's mutators share: omitted / null → the
-    built-in / global scope (tenant_admin only); an explicit UUID →
-    that tenant's curated rows.
+    built-in / global scope; an explicit UUID → that tenant's curated
+    rows. Mutating a built-in row (whether addressed by null or reached
+    via the tenant-preferring fall-back) additionally requires
+    platform_admin — a tenant_admin without it is refused with a
+    structured -32602 builtin_connector_write_forbidden (#3616 parity).
     """
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
@@ -329,6 +349,11 @@ async def _enable_reads_handler(
             tenant_id=tenant_id,
             prefer=prefer,
         )
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in row + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden (#3616 parity), not the
+        # dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except AmbiguousConnectorScopeError as exc:
         # Same ambiguous-scope mapping as _review_handler: structured
         # -32602 with the candidate scopes instead of a bare -32603
@@ -356,6 +381,11 @@ async def _disable_handler(
     service = ReviewService(operator)
     try:
         await service.disable_connector(connector_id, tenant_id=tenant_id)
+    except BuiltinConnectorWriteForbiddenError as exc:
+        # Built-in row + tenant_admin without platform_admin → -32602
+        # builtin_connector_write_forbidden (#3616 parity), not the
+        # dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_builtin_write_forbidden(exc)
     except ConnectorNotFoundError as exc:
         # Unknown / cross-tenant label → -32602 connector_not_found
         # (#2481), not the dispatcher's bare -32603 class-name leak.

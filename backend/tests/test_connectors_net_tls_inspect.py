@@ -597,6 +597,23 @@ async def test_tls_inspect_registered_as_safe_ungated_typed_op(
     assert row.source_kind == "typed"
     assert row.safety_level == "safe"
     assert row.requires_approval is False
+    assert row.llm_instructions["result_scalars"]["keys"] == [
+        "handshake",
+        "reason",
+        "days_to_expiry",
+        "hostname_match",
+        "chain_complete",
+    ]
+    assert row.llm_instructions["result_objects"] == {
+        "objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}
+    }
+    schema = row.response_schema
+    assert schema["properties"]["chain"]["type"] == "array"
+    assert schema["properties"]["leaf"]["type"] == ["object", "null"]
+    assert schema["properties"]["days_to_expiry"]["type"] == ["number", "null"]
+    assert schema["properties"]["hostname_match"]["type"] == "boolean"
+    assert schema["properties"]["chain_complete"]["type"] == "boolean"
+    assert "fingerprint_sha256" in schema["properties"]["chain"]["items"]["properties"]
 
 
 def test_tls_inspect_classifies_as_read() -> None:
@@ -778,6 +795,7 @@ async def test_leaf_pem_round_trips_to_the_minted_cert(
     parsed = x509.load_pem_x509_certificate(leaf_pem.encode("ascii"))
     assert parsed.fingerprint(hashes.SHA256()) == cert.fingerprint(hashes.SHA256())
     assert str(parsed.serial_number) == body["leaf"]["serial"]
+    assert body["leaf"]["fingerprint_sha256"] == cert.fingerprint(hashes.SHA256()).hex()
 
 
 async def test_pem_present_on_every_chain_entry_no_private_material(

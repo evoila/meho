@@ -22,7 +22,7 @@ Each builder owns one ``error_code`` from the contract documented in
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
 ``connector_vault_forbidden`` / ``connector_probe_refused`` /
-``connector_error``.
+``not_found`` / ``connector_timeout`` / ``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -41,6 +41,7 @@ import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -54,6 +55,7 @@ __all__ = [
     "result_connector_error",
     "result_connector_http_403",
     "result_connector_http_422",
+    "result_connector_not_found",
     "result_connector_probe_refused",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
@@ -69,6 +71,7 @@ __all__ = [
     "result_target_invalid_type",
     "result_target_required",
     "result_unknown_op",
+    "result_unqualified_target_version",
     "status_code_for_result",
     "wrap_ok_result",
 ]
@@ -375,6 +378,29 @@ def result_no_connector(
         error=f"no_connector: no implementation for product={product!r} version={version!r}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+def result_unqualified_target_version(
+    op_id: str,
+    *,
+    reason: str,
+    target_product: str | None,
+    target_version: str | None,
+    duration_ms: float,
+) -> OperationResult:
+    """A connector-owned catalog guard rejected the target before policy."""
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"unqualified_target_version: {reason}",
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "unqualified_target_version",
+            "reason": reason,
+            "target_product": target_product,
+            "target_version": target_version,
+        },
     )
 
 
@@ -768,6 +794,75 @@ def result_connector_error(
         status="error",
         op_id=op_id,
         error=f"connector_error: {type(exc).__name__}",
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_not_found(
+    op_id: str,
+    exc: ConnectorResourceNotFoundError,
+    duration_ms: float,
+) -> OperationResult:
+    """Return a connector-confirmed missing-resource result."""
+    resource_ids = list(exc.resource_ids)
+    extras: dict[str, Any] = {"error_code": "not_found", "resource_ids": resource_ids}
+    if len(resource_ids) == 1:
+        extras["resource_id"] = resource_ids[0]
+    return OperationResult(
+        status="not_found",
+        op_id=op_id,
+        error=f"not_found: {_sanitize_free_text(str(exc))}",
+        duration_ms=duration_ms,
+        extras=extras,
+    )
+
+
+def result_connector_timeout(
+    op_id: str,
+    exc: httpx.TransportError,
+    duration_ms: float,
+) -> OperationResult:
+    """Return a structured timeout or other HTTP transport-fault result.
+
+    ``httpx`` exposes a per-request timeout map through the request extension.
+    A non-timeout transport failure has no truthful phase, so it is labelled
+    ``transport`` and carries no configured phase timeout.
+    """
+    phase_by_type: tuple[tuple[type[httpx.TimeoutException], str], ...] = (
+        (httpx.ConnectTimeout, "connect"),
+        (httpx.ReadTimeout, "read"),
+        (httpx.WriteTimeout, "write"),
+        (httpx.PoolTimeout, "pool"),
+    )
+    phase = "transport"
+    for timeout_type, candidate in phase_by_type:
+        if isinstance(exc, timeout_type):
+            phase = candidate
+            break
+    configured_timeout: float | None = None
+    try:
+        request = exc.request
+    except RuntimeError:
+        request = None
+    extensions = getattr(request, "extensions", None)
+    if isinstance(extensions, Mapping):
+        timeout = extensions.get("timeout")
+        if isinstance(timeout, Mapping):
+            value = timeout.get(phase)
+            if isinstance(value, (int, float)):
+                configured_timeout = float(value)
+    extras: dict[str, Any] = {
+        "error_code": "connector_timeout",
+        "phase": phase,
+        "exception_class": type(exc).__name__,
+        "configured_timeout": configured_timeout,
+        "exception_message": _sanitize_free_text(str(exc)),
+    }
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=f"connector_timeout: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
     )
@@ -1924,4 +2019,6 @@ def status_code_for_result(result_status: str) -> int:
         return 429
     if result_status == "pending":
         return 202
+    if result_status == "not_found":
+        return 404
     return 500

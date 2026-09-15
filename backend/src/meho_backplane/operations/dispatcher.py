@@ -258,11 +258,12 @@ from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
     ResultHandle,
+    get_connector_v2,
     resolve_connector_or_label,
     resolve_target_version,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import Connector, shim_kind
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
@@ -290,7 +291,9 @@ from meho_backplane.operations._errors import (
     result_connector_error,
     result_connector_http_403,
     result_connector_http_422,
+    result_connector_not_found,
     result_connector_probe_refused,
+    result_connector_timeout,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
@@ -305,6 +308,7 @@ from meho_backplane.operations._errors import (
     result_rate_limited,
     result_target_required,
     result_unknown_op,
+    result_unqualified_target_version,
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
@@ -1191,6 +1195,30 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    except httpx.TimeoutException as timeout_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, timeout_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except httpx.TransportError as transport_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, transport_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
@@ -1298,6 +1326,18 @@ async def _run_branch_with_error_handling(
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             result_connector_auth_failed(op_id, auth_exc, target, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except ConnectorResourceNotFoundError as not_found_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_not_found(op_id, not_found_exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -1827,6 +1867,23 @@ def _result_scalars_from_descriptor(descriptor: EndpointDescriptor) -> dict[str,
     return None
 
 
+def _result_objects_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract a bounded ``result_objects`` projection from an operation.
+
+    Connectors use ``{"objects": {"leaf": ["subject", "san"]}}`` when a
+    collection reduction needs to keep selected fields from a top-level object
+    inline. The reducer validates and bounds the projection; this layer only
+    keeps descriptor access out of the reducer, mirroring ``result_scalars``.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_objects")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
     """Extract ``result_digest`` from a descriptor's ``llm_instructions``.
 
@@ -1940,6 +1997,9 @@ async def _reduce_or_error(
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:
         reducer_context["result_scalars"] = result_scalars
+    result_objects = _result_objects_from_descriptor(descriptor)
+    if result_objects is not None:
+        reducer_context["result_objects"] = result_objects
     # #3122: forward the op's row-digest hint (when the connector author
     # registered one via ``llm_instructions``) so the reducer reduces the
     # named collection even in the presence of a sibling array and writes the
@@ -2447,6 +2507,50 @@ async def dispatch(
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
+    # A connector may opt an ingested catalog into a target-compatibility
+    # guard. The owner lookup is exact: it names the catalog the caller
+    # selected, while the resolver answers which connector class the target
+    # would use. Resolve only for an advertised guard so existing descriptor
+    # kinds retain their policy and targetless dispatch behaviour.
+    pre_resolved_connector_class: type[Connector] | None = None
+    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
+    if (
+        descriptor.source_kind == "ingested"
+        and owner_class is not None
+        and owner_class.enforces_catalog_target_compatibility
+    ):
+        pre_resolved_connector_class, _resolution_label, _resolution_message = (
+            resolve_connector_or_label(target)
+        )
+        target_product = getattr(target, "product", None)
+        if not isinstance(target_product, str) or not target_product:
+            target_product = None
+        target_version = resolve_target_version(target)
+        incompatibility = owner_class.catalog_target_incompatibility(
+            descriptor_source_kind=descriptor.source_kind,
+            target_product=target_product,
+            target_version=target_version,
+            selected_target_connector=pre_resolved_connector_class,
+        )
+        if incompatibility is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="unqualified_target_version",
+                duration_ms=duration_ms,
+            )
+            return result_unqualified_target_version(
+                op_id,
+                reason=incompatibility,
+                target_product=target_product,
+                target_version=target_version,
+                duration_ms=duration_ms,
+            )
+
     # --- Step 3.5: dispatch limits (#3500) --------------------------------
     # Per-principal rate limit + per-principal concurrent-op cap, enforced
     # here so CLI, MCP and the REST dispatch route are all covered by one
@@ -2631,9 +2735,21 @@ async def dispatch(
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
 
         # --- Step 5: connector resolution ---------------------------------
-        connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
-            descriptor, target
-        )
+        connector_instance: Connector | None
+        resolution_error: ResolutionLabel | None
+        exception_message: str | None
+        if pre_resolved_connector_class is not None:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
+        else:
+            (
+                connector_instance,
+                resolution_error,
+                exception_message,
+            ) = await _resolve_connector_instance(descriptor, target)
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before

@@ -89,14 +89,17 @@ class EndpointDescriptorProto(BaseModel):
     spec declares no success-response schema."""
 
     safety_level: SafetyLevel = "safe"
-    """Heuristic from the HTTP verb. ``GET`` / ``HEAD`` / ``OPTIONS``
-    → ``safe``; ``POST`` / ``PUT`` / ``PATCH`` → ``caution``;
-    ``DELETE`` → ``dangerous``. Operator can override at review
-    (T4 state machine), including to the most-restrictive
-    ``destructive`` tier (#3183) — the parser never assigns
-    ``destructive`` itself; it is an operator/typed-op decision."""
+    """Heuristic from the HTTP verb plus narrow destructive-action hints.
+
+    ``GET`` / ``HEAD`` / ``OPTIONS`` → ``safe``; ``POST`` / ``PUT`` /
+    ``PATCH`` → ``caution``; ``DELETE`` → ``dangerous``. A VIM-style
+    action named ``Destroy``, ``Delete``, ``Remove``, or ``Unregister``
+    raises its tier to ``dangerous`` and requires approval even though it
+    is a ``POST``. Operator review can still choose the most-restrictive
+    ``destructive`` tier (#3183); the parser never assigns it itself."""
 
     requires_approval: bool = False
-    """Always ``False`` at parse time. Operators flip per-op during
-    review (T4) for ops that should pause the dispatcher for
-    out-of-band approval."""
+    """False for ordinary parsed operations; semantic destructive-action
+    hints set it to ``True``. Operators can also flip it during review
+    (T4) for ops that should pause the dispatcher for out-of-band
+    approval."""

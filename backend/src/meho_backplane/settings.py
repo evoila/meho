@@ -322,6 +322,20 @@ class Settings(BaseModel):
         token and every agent / service principal is non-platform-admin
         unless a realm explicitly grants the claim. Override only when
         the realm exposes the flag under a different attribute.
+    jwt_platform_admin_role_name:
+        Optional **alternative** source for the cross-tenant
+        ``platform_admin`` flag: the name of a Keycloak **realm role**
+        that grants it. Default ``None`` (unset) — behaviour is then
+        exactly the boolean-claim path above. When set (via
+        ``JWT_PLATFORM_ADMIN_ROLE_NAME``), ``platform_admin`` resolves
+        to ``True`` if **either** the boolean claim above says true
+        **or** this exact role name appears in the token's
+        ``realm_access.roles`` list (the default Keycloak roles-scope
+        shape) — accommodating realms that express platform authority
+        as a realm role rather than a dedicated boolean mapper. The
+        match is **exact string equality** (no prefix / substring), and
+        the source stays **fail-closed**: a malformed ``realm_access``
+        shape or an absent role resolves to ``False``.
     jwt_approver_claim_name:
         Name of the JWT claim that carries the approve-only ``approver``
         capability flag (a JSON boolean) added by #3243. Default
@@ -1101,6 +1115,7 @@ class Settings(BaseModel):
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_scopes_claim_name: str = Field(default="scope", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
+    jwt_platform_admin_role_name: str | None = None
     jwt_approver_claim_name: str = Field(default="approver", min_length=1)
     jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
@@ -2138,6 +2153,9 @@ def get_settings() -> Settings:
         jwt_platform_admin_claim_name=os.environ.get(
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",
             "platform_admin",
+        ),
+        jwt_platform_admin_role_name=(
+            os.environ.get("JWT_PLATFORM_ADMIN_ROLE_NAME", "").strip() or None
         ),
         jwt_approver_claim_name=os.environ.get(
             "JWT_APPROVER_CLAIM_NAME",

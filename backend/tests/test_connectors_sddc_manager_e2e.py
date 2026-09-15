@@ -78,6 +78,10 @@ _OPERATOR = Operator(
     raw_jwt="<sddc-e2e-raw-jwt>",
     tenant_id=SDDC_CANARY_OPERATOR_TENANT,
     tenant_role=TenantRole.TENANT_ADMIN,
+    # Writing the built-in (global) scope (enable_reads with
+    # tenant_id=None below) is a platform action gated on platform_admin
+    # (#3616 parity): the canary operator holds the platform seat.
+    platform_admin=True,
 )
 
 _E2E_TARGET_NAME = "sddc-e2e-target"

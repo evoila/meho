@@ -290,6 +290,10 @@ class TestAnnounceRateLimitIntegration:
     ) -> None:
         """11th announce rejected; a peer principal unaffected; 0 disables."""
         monkeypatch.setenv("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10")
+        monkeypatch.setattr(
+            "meho_backplane.broadcast.rate_limit.time.time",
+            lambda: _FIXED_NOW,
+        )
         get_settings.cache_clear()
         reset_broadcast_client_for_testing()
         try:

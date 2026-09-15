@@ -608,6 +608,53 @@ values are preserved (shape stability across poll states). The hint is
 purely additive: an op without it keeps the bookkeeping-only summary,
 byte-identical to the pre-#3084 shape.
 
+### Bounded object identity — `result_objects` (#3425)
+
+Some set-shaped responses carry one useful nested identity object beside the
+collection. `net.tls_inspect`, for example, returns a leaf alias beside its
+presented `chain[]`: a multi-certificate response can exceed the 4 KiB JSONFlux
+threshold because of public PEM material even though it contains only a few
+certificates. Reducing the chain must keep the operator's handshake verdict
+and enough leaf identity to decide whether to retrieve the PEM, without
+silently inlining the PEM again.
+
+An operation can opt into a direct, bounded projection:
+
+```python
+llm_instructions={
+    "result_objects": {
+        "objects": {
+            "leaf": ["subject", "san", "fingerprint_sha256"],
+        },
+    },
+}
+```
+
+The dispatcher forwards the raw hint to the reducer. The reducer copies only
+the named direct fields from named top-level objects; scalar values and short
+scalar lists are eligible, nested objects are not. It accepts at most eight
+objects with eight fields each and a 4096-byte aggregate projection budget.
+Each string (including a list item) is bounded to 1024 bytes. A normal
+identity value within that bound stays verbatim; an exceptional value is
+returned as its bounded prefix and named in `result_object_truncations`, so a
+caller knows to retrieve the complete value from the handle spill when that
+object is an alias of the spilled collection (as the TLS leaf is). This is an
+additive generic facility: a descriptor without `result_objects` retains the
+existing bookkeeping-only reduced summary, and the full collection remains
+retrievable through `result_query`.
+
+For typed descriptors with an explicit response schema, a top-level array plus
+one recognised Boolean outcome field (`handshake`, `reachable`, `success`, `ok`,
+or `healthy`) or two or more named outcome fields (`handshake`, `reachable`, `reason`,
+`success`, `ok`, `healthy`, `status`, `state`, `resultStatus`, or
+`executionStatus`) is a verdict-plus-collection result. Every such outcome
+field must appear in `result_scalars.keys`; the registry conformance test runs
+the complete typed registrar set and rejects omissions. A lone `status` does
+not qualify because it can describe an opaque vendor state rather than an
+outcome. `result_objects` does not persist arbitrary sibling objects: a full
+bounded value is available through `result_query` only if that object aliases
+the collection that was spilled, as `leaf` aliases `chain[0]` for TLS.
+
 For the wire shape of `fetch_more` on a serialized `ResultHandle`,
 see [`operations-substrate.md` § `ResultHandle` shape](operations-substrate.md#resulthandle-shape-future-facing).
 

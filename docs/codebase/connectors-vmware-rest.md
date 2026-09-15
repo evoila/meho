@@ -57,6 +57,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
+- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
+  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
+  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+  `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
+  into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
+  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  returns `status="not_found"` with `extras.error_code="not_found"`,
+  `extras.resource_ids`, and the singular `extras.resource_id` when one object
+  was addressed. A different fault, a non-PropertyCollector vmomi method, or
+  a transport-only 5xx remains `connector_error`; the mapping never infers
+  absence from the status code. Promotion defaults off on the shared seam, so
+  task polls and destructive-composite preflight/execute reads retain their
+  existing failure semantics; #3479 owns those paths.
 - **Read composites** (`composites/_read.py`) — seven module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
   `event_tail_composite`, `performance_summary_composite`,
@@ -359,8 +374,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `_CompositeSpec` rows (13 read + 36 dangerous/destructive writes + 2
   caution content-library subscribed writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. Idempotent on re-run
-  via the body-hash skip path.
+  implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
@@ -513,6 +527,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 2. Importing `meho_backplane.connectors.vmware_rest` triggers the
    module-level `register_connector_v2(product="vmware", version="9.0",
    impl_id="vmware-rest", cls=VmwareRestConnector)` call.
+2b. The same import also registers the **second versioned catalog**
+   `register_connector_v2(product="vmware", version="8.0",
+   impl_id="vmware-rest", cls=VmwareRest80Connector)` (#3569, dual-impl
+   #3038) plus the shared product wildcard `(vmware, "", "")` owned by
+   `VmwareRestConnector`. `VmwareRest80Connector` is a thin subclass of
+   `VmwareRestConnector` (`version="8.0"`,
+   `supported_version_range=">=8.0,<8.1"`, and the ingested-catalog guard
+   boundary narrowed to the 8.0.x line via the
+   `_catalog_version_floor`/`_catalog_version_ceiling`/`_catalog_version_band_label`
+   attributes). The bands are disjoint (8.0 catalog `>=8.0,<8.1`; 9.0
+   catalog `>=8.5,<10.0`), so a fingerprinted 8.0.x target resolves to
+   `vmware-rest-8.0` (versioned beats the wildcard) and a 9.x target to
+   `vmware-rest-9.0`. Ingested rows for the 8.0 U3 catalog land under
+   `connector_id="vmware-rest-8.0"`; the shared `(product, impl_id)` safety
+   floor covers them identically. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md). Both shipped minimal
+   specs (`vmware_rest_8_0_minimal.yaml` and `vmware_rest_minimal.yaml`) carry
+   the `/api` mount on `servers[0].url` and key their inventory paths bare, so
+   the ingested op_ids read `GET:/vcenter/vm` — byte-identical to the vendor
+   `vcenter.yaml` catalog and to the spec-relative form `_mount.py` re-mounts
+   onto `/api` (modern) or `/rest` (legacy) per target; only the `/api/about`
+   fingerprint-probe path is keyed literally (`GET:/api/about`). The reconcile
+   lane `test_connectors_vmware_rest_8_0_spec_reconcile.py` pins the two specs
+   to an identical served-op_id set, so they are re-keyed in lock-step (#3614).
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls
@@ -980,7 +1018,7 @@ enum) are:
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
-| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
+| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 
 `vm.create` is the only composite that issues a compensating
@@ -1011,12 +1049,23 @@ a host-pinning ISO:
   the operator gets a typed status instead of a raw vCenter 400.
 - **`vm.nic.repoint`** reads the NIC's current backing + MAC via
   `GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, resolves the target
-  distributed portgroup by display name via
-  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`, then PATCHes
+  portgroup by display name via
+  `GET:/vcenter/network?filter.types=<backing_type>`, then PATCHes
   `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}` with
-  `{backing: {type: DISTRIBUTED_PORTGROUP, network: <moid>}}`. A name
-  that matches zero / many portgroups refuses the repoint
-  (`not_found` / `ambiguous`) with no PATCH issued.
+  `{backing: {type: backing_type, network: <moid>}}` — the same internal
+  sub-op the `host.detach_from_vds` fallback path uses. `backing_type` is
+  `DISTRIBUTED_PORTGROUP` (default, back-compatible) or
+  `STANDARD_PORTGROUP`; the latter moves a NIC onto a host-local
+  standard-switch portgroup (e.g. to repair a NIC stranded on an L2 that
+  cannot reach its gateway). Standard portgroups are host-scoped, so one
+  display name routinely resolves to several `Network` moids (one per
+  host) and the REST Automation API exposes no reliable VM->host mapping,
+  so an ambiguous name fails closed (`ambiguous`, candidate moids listed)
+  and the operator supplies the exact moid via the `network` param. An
+  explicit `network` moid skips name resolution and is validated for
+  existence + type-consistency with `backing_type` (`invalid_request` on
+  mismatch); a name matching zero portgroups returns `not_found`. No PATCH
+  is issued on any non-`repointed` status.
 - **`vm.device.cdrom`** reads the device's current backing + state via
   `GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}` (surfacing a host-local
   ISO path the approver needs to see), then dispatches the `action`:
@@ -1241,16 +1290,30 @@ different vim fields for two different clustering models:
   its own locking (e.g. Oracle RAC, or a clustered filesystem). It is a disk
   property, independent of the controller's bus-sharing.
 
-Both require `eagerzeroedthick` disks. For a WSFC/FCI node: create the OS
-separately (or clone from a template), give each node a dedicated
-`physical`-bus-sharing controller with the EZT shared disks (`vm.create`
-`scsi_bus_sharing="physical"` + `provisioning="eagerzeroedthick"` on the first
-node), then `vm.disk.attach` the same VMDKs onto the second node at the
-identical `controller_key`/`unit_number`. Leave `sharing="none"` for WSFC —
-reach for `multi_writer` only when the guest application (not SCSI-3 PR) owns
-the locking. (`vm.create` currently folds shared disks at create time; adding
-a newly-created EZT shared disk to an *already-provisioned* VM is a follow-up,
-not in this task's scope.)
+**Choose the storage mechanism before applying those knobs.** The VMware
+guidance distinguishes two shared-disk paths; they do not share a universal
+EZT or datastore-flag requirement (vSAN 8.0 documentation; vSphere 8.0,
+Table 568).
+
+- **VMFS clustered VMDK.** This path requires `eagerzeroedthick` shared disks,
+  FC or NVMe-FC connectivity (and NVMe-TCP on 8.0 U3), and the datastore's
+  Clustered VMDK flag. Use the physical SCSI-bus-sharing controller for the
+  WSFC/SQL FCI reservation model.
+- **vSAN native shared VMDK.** This path is provisioned through the vSAN
+  storage policy, including Object Space Reservation where required. Any disk
+  type is allowed; there is no VMFS-style datastore Clustered VMDK flag to
+  set on vSAN.
+
+The shared operational recipe is the same after selecting the applicable
+mechanism: create the OS separately (or clone from a template), give each node
+a dedicated `physical`-bus-sharing controller, create the shared disks on the
+first node with that mechanism's provisioning requirements, then
+`vm.disk.attach` the same VMDKs onto the second node at identical
+`controller_key`/`unit_number`. Leave `sharing="none"` for WSFC — reach for
+`multi_writer` only when the guest application, rather than SCSI-3 PR, owns
+locking. (`vm.create` currently folds shared disks at create time; adding a
+newly-created shared disk to an *already-provisioned* VM is a follow-up, not
+in this task's scope.)
 
 The `vm.disk.attach` park-time preview is a param-echo (`{vm, vmdk_path,
 controller_key, unit_number, sharing}`) — the params fully name the blast
@@ -1955,7 +2018,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
-| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
+| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |

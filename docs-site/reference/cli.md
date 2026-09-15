@@ -910,6 +910,25 @@ Manage broadcast-detail overrides (overrides list / set / remove)
 meho broadcast
 ```
 
+### `meho broadcast announce`
+
+Publish a governed broadcast announcement
+
+```
+meho broadcast announce <activity> [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit JSON
+- `--phase` — start, update, or completion
+- `--planned-op-class` — declared operation class
+- `--run-id` — agent run UUID
+- `--scope` — announcement scope
+- `--target` — target name
+- `--targets` — target names
+- `--ttl-minutes` — claim TTL in minutes (1-1440)
+- `--work-ref` — external work reference
+
 ### `meho broadcast overrides`
 
 List, create, and delete broadcast-detail override rules
@@ -955,6 +974,39 @@ meho broadcast overrides set [flags]
 - `--op-id-pattern` — op_id glob (e.g. "vault.kv.*" or "k8s.configmap.info"); regex chars are rejected
 - `--scope-field` — scope field (one of: namespace, target_name); leave empty for an op-wide rule
 - `--scope-value` — scope value (e.g. "kube-system"); required when --scope-field is set
+
+### `meho broadcast recent`
+
+Read recent broadcast events for the operator's tenant
+
+```
+meho broadcast recent [flags]
+```
+
+- `--active-only` — exclude expired TTL claims
+- `--actor-sub` — exact delegated-agent filter
+- `--backplane` — backplane URL
+- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--json` — emit JSON
+- `--limit` — maximum events (1-1000)
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
+- `--work-ref` — exact work-reference filter
+
+### `meho broadcast watch`
+
+Tail the tenant broadcast SSE feed
+
+```
+meho broadcast watch [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit each event as JSON
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
 
 ## `meho connector`
 
@@ -1265,7 +1317,7 @@ meho docs
 
 ### `meho docs collections`
 
-List, create, delete, and probe / toggle doc collections
+List, create, update, delete, and probe / toggle doc collections
 
 ```
 meho docs collections
@@ -1346,6 +1398,23 @@ meho docs collections probe <collection-key> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw BackendReadiness JSON
+
+#### `meho docs collections update`
+
+Repoint / update an existing doc collection in place (tenant_admin)
+
+```
+meho docs collections update <collection-key> [flags]
+```
+
+- `--backend-ref` — replacement backend config as a JSON object (e.g. '{"endpoint":"https://corpus/v1/search"}'); requires --backend-type; '{}' clears the ref
+- `--backend-type` — replacement search-backend type (e.g. corpus-http); the backend is replaced as a whole
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--description` — replacement free-text description
+- `--from-file` — read the update body (fields to change) from a JSON file instead of the flags
+- `--json` — emit the updated collection as JSON instead of a confirmation line
+- `--product` — replacement product list (repeatable, e.g. --product vsphere --product nsx)
+- `--when-to-use` — replacement 'pick this collection when…' blurb surfaced to agents
 
 ### `meho docs search`
 
@@ -3137,6 +3206,7 @@ meho operation call <connector_id> <op_id> [flags]
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
 - `--preview-hash` — preview_hash from a prior `meho operation preview` — required for a destructive-tier op
 - `--target` — target slug to dispatch against (required for ops that read a target)
+- `--work-ref` — external change-ticket reference for this dispatch's audit and approval rows
 
 ### `meho operation groups`
 
@@ -4181,6 +4251,17 @@ meho tenants flight-recorder-policy set [flags]
 - `--enabled` — per-tenant capture default (F1); send true or false
 - `--json` — emit the resolved policy as JSON instead of the human summary
 - `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
+
+#### `meho tenants flight-recorder-policy show`
+
+Show effective and raw flight-recorder capture policy (tenant_admin)
+
+```
+meho tenants flight-recorder-policy show [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the effective and raw policy as JSON instead of the human summary
 
 ### `meho tenants mail-recipient-policy`
 

@@ -27,6 +27,7 @@ from meho_backplane.docs_collections.schemas import (
     DocCollectionCreate,
     DocCollectionCreateResponse,
     DocCollectionSummary,
+    DocCollectionUpdate,
     project_doc_collection,
     project_doc_collection_create_response,
     project_doc_collection_to_summary,
@@ -36,11 +37,13 @@ from meho_backplane.docs_collections.service import (
     DocCollectionConflictError,
     DocCollectionEndpointError,
     DocCollectionGlobalError,
+    DocCollectionGlobalUpdateForbiddenError,
     DocCollectionNotDisabledError,
     create_doc_collection,
     delete_doc_collection,
     probe_collection,
     set_collection_enabled,
+    update_doc_collection,
 )
 
 __all__ = [
@@ -51,10 +54,12 @@ __all__ = [
     "DocCollectionCreateResponse",
     "DocCollectionEndpointError",
     "DocCollectionGlobalError",
+    "DocCollectionGlobalUpdateForbiddenError",
     "DocCollectionNotDisabledError",
     "DocCollectionNotFoundError",
     "DocCollectionStateError",
     "DocCollectionSummary",
+    "DocCollectionUpdate",
     "create_doc_collection",
     "delete_doc_collection",
     "probe_collection",
@@ -63,4 +68,5 @@ __all__ = [
     "project_doc_collection_to_summary",
     "resolve_doc_collection",
     "set_collection_enabled",
+    "update_doc_collection",
 ]

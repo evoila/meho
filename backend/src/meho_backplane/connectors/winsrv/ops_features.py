@@ -299,6 +299,7 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
                 "{'name', 'action': 'install', 'success', 'exit_code', "
                 "'restart_needed', 'features_changed': [names], 'op_class': 'write'}."
             ),
+            "result_scalars": {"keys": ["success"]},
         },
     ),
     WinsrvOp(
@@ -351,6 +352,7 @@ FEATURE_OPS: tuple[WinsrvOp, ...] = (
                 "{'name', 'action': 'remove', 'success', 'exit_code', "
                 "'restart_needed', 'features_changed': [names], 'op_class': 'write'}."
             ),
+            "result_scalars": {"keys": ["success"]},
         },
     ),
 )

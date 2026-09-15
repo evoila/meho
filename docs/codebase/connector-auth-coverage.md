@@ -31,7 +31,7 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 | 4 | vcf_operations | `vcf_operations/connector.py` `auth_headers` | HTTP Basic + optional `?auth-source=` query | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 5 | hetzner_robot | `hetzner_robot/connector.py` `_basic_auth_header` | HTTP Basic (hard-fail on first 401, IP-block guard) | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 6 | argocd | `argocd/connector.py` `auth_headers` | Static pre-issued token → `Authorization: Bearer <token>` | `token` | `dict[str,str]` | **`static_header`** (`value_kind=bearer`) |
-| 7 | keycloak | `keycloak/connector.py` `auth_headers` | OAuth2 client-credentials form grant `POST /realms/{r}/protocol/openid-connect/token` → cached Bearer | `client_id`, `client_secret` | `dict[str,str]` (Bearer) | **`oauth2_mint`** |
+| 7 | keycloak | `keycloak/connector.py` `auth_headers` | OAuth2 client-credentials form grant `POST /realms/{r}/protocol/openid-connect/token` → cached Bearer (target-relative by default; an optional external `token_url` + `scope`/`audience` covers an issuer on a separate host, #3571) | `client_id`, `client_secret` | `dict[str,str]` (Bearer) | **`oauth2_mint`** |
 | 8 | vcf_logs (vRLI) | `vcf_logs/connector.py` `auth_headers` | Session login `POST /api/v2/sessions` (JSON `{username,password,provider}`) → `sessionId` → cached Bearer | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login`** |
 | 9 | vmware_rest | `vmware_rest/connector.py` `_establish_session` | Session login `POST /api/session` (HTTP Basic, no body) → raw JSON-string token from body → cached, sent in `vmware-api-session-id` header | `username`, `password` | `dict[str,str]` (raw `vmware-api-session-id`) | **`session_login_basic`** |
 | 10 | github | `github/connector.py` `auth_headers` | App-JWT: mint RS256 JWT → exchange for installation token (or PAT passthrough) | `app_id`, `private_key_pem`, `installation_id` (or `token`) | `dict[str,str]` (Bearer) | **RESERVED** `github_app_jwt` |
@@ -152,6 +152,101 @@ resolve the right secret shape through the one fail-closed reader.
 NSX stays typed (the `cookie_jar_session` reserved scheme): its
 `JSESSIONID` Set-Cookie jar cannot be modeled by the `dict[str, str]`
 `auth_headers` return contract.
+
+## `oauth2_mint` — external token issuer (#3571)
+
+The base `oauth2_mint` scheme mints its client-credentials token
+**target-relative**: the login POSTs to `/realms/master/...` on the target
+host itself (keycloak's admin realm). That models an API whose token endpoint
+lives on the same host as the API. It does not model a target whose OAuth2
+token issuer is a **separate host** — an identity provider distinct from the
+target API. `AuthSpec` therefore carries three **optional** fields, valid only
+for `scheme="oauth2_mint"` and forbidden on every other scheme:
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| `token_url` | `None` → target-relative `/realms/master/...` | Absolute URL of the token endpoint. When set, the mint dials it directly (the pooled client resolves an absolute URL as-is, so the target `base_url` is bypassed for the mint only). |
+| `scope` | `None` → no `scope` form param | Forwarded verbatim as the `scope` form parameter of the grant. |
+| `audience` | `None` → no `audience` form param | Forwarded verbatim as the `audience` form parameter (Keycloak / RFC 8693-style). |
+
+**Defaults preserve parity.** With all three omitted, the minted request is
+byte-identical to the pre-#3571 keycloak shape (target-relative endpoint,
+`grant_type`/`client_id`/`client_secret` only). The existing keycloak
+`oauth2_mint` regression is unchanged; only a profile that opts in gets the
+external issuer.
+
+**`token_url` is not a DSL field.** It names a single absolute endpoint (and
+`scope`/`audience` are two opaque strings forwarded verbatim) — never a
+path/template/expression the substrate interprets — so the three stay on the
+right side of the #1177 rejected-DSL line, alongside `value_kind`.
+
+**Security note — widening the vetted auth catalog.** These fields extend a
+closed, security-reviewed auth catalog, so the defaults are chosen to keep the
+catalog's existing behaviour fixed and to fail closed on the new surface:
+
+- **`https` rule (fail-closed).** A `token_url` must use `https` for a public
+  host; plaintext `http` is accepted **only** for a cluster-internal /
+  private-address issuer (a loopback / RFC-1918 / link-local / unique-local IP
+  literal, a dotless single-label Service name, or a
+  `.svc`/`.cluster.local`/`.local`/`.internal` host). This matches the
+  established east-west in-cluster posture (services already dial each other
+  plaintext behind a NetworkPolicy) while refusing to ship a client secret to
+  a public host over cleartext. Enforced at profile validation
+  (`_validate_token_url` in `profile.py`) and re-asserted by the boot-time
+  scheme-load guard, which is transparent to the optional fields.
+- **No secret / token in logs or spans.** `client_id`/`client_secret` still
+  resolve from the Vault-backed target credential; the mint's login POST goes
+  through the pooled `httpx.AsyncClient` **directly**, bypassing the recorded
+  `_post_json` flight-recorder span, so neither the grant body nor the minted
+  access token enters a vendor-call span. The only emitted event
+  (`profiled_session_established`) carries the login path — never a secret or
+  the token.
+- **SSRF screening still applies to the issuer.** The pooled client's pinned
+  transport screens whatever host it dials at the socket boundary, so a mint
+  to an external issuer is subject to the same SSRF allowlist / private-range
+  guard as a dispatch to the target. An internal issuer must therefore be
+  admitted by the deploy-side SSRF allowlist, exactly like the target.
+- **Known limitation.** A target's `tls_server_name` SNI override (#2398) is
+  still threaded onto the login POST; it is meaningful only for a
+  target-relative mint. A target that sets it *and* points at an external
+  `https` issuer would offer the target's SNI to the issuer — an unusual
+  combination outside the intended cluster-internal (`http`, no TLS) shape.
+  The default (no override) is byte-identical to today.
+
+### `token_url` from the per-target credential (external-issuer extension)
+
+When the external issuer is a **per-deployment** value (each deployment mints
+against its own realm), the token endpoint is not a reviewable constant that
+belongs in a shipped, public profile. `oauth2_mint` therefore also sources
+`token_url` from the resolved **secret bundle**: name `token_url` in
+`auth.secret_fields` and the operator stores it in the target's Vault
+credential alongside `client_id` / `client_secret`. At dispatch,
+`_oauth2_login_path_from_secret` (`connectors/_shared/profile_auth.py`)
+resolves the endpoint with precedence **credential `token_url` → profile
+`auth.token_url` (#3571) → target-relative `/realms/master/...`**, wired onto
+the scheme through the additive `SessionSchemeSpec.login_path_with_secret`
+hook (the profile-only `login_path` signature the typed session connectors
+call at import is untouched). A credential-sourced value clears the **same**
+fail-closed `_validate_token_url` rule the profile field does (`https` for a
+public host; plaintext `http` only for a cluster-internal / private issuer),
+so a fat-fingered Vault value can never ship the client secret to a public
+host over cleartext. A credential bundle with no `token_url` (keycloak) falls
+straight through — the override is invisible to every existing `oauth2_mint`
+user.
+
+| Profiled connector | Scheme | Secret-bundle fields | `token_url` source | Non-secret profile knobs |
+|---|---|---|---|---|
+| meho-automation add-on (`mehoauto-rest`) | `oauth2_mint` | `client_id`, `client_secret`, `token_url` | per-target Vault credential (`token_url` field) | `audience: meho-automation` |
+
+This is the meho-automation add-on connector's shape — see
+`docs/codebase/connectors-meho-automation.md` for the full registration
+recipe and the operator decision that launch / validate / gate all ride
+`caution` without a backplane approval park (validate is a read-side dry-run
+that still rides `caution` because an ingested POST never sits below the
+caution floor). The connector's op set is **closed** to exactly those three
+ops even though the add-on's `/openapi.json` publishes its full API: a
+declarative catalog `op_allowlist` drops every other route before persistence
+(see that doc's "Ingest op allowlist" section).
 
 ## References
 

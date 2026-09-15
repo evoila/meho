@@ -824,6 +824,17 @@ Both arms share the same bearer-token resolution path and the same
 `--backplane` override, so the operator's expectation of "the URL
 in `meho login`" stays consistent.
 
+### Broadcast working-surface verbs (#3470)
+
+`meho broadcast recent` reads a bounded, filterable history page through
+`GET /api/v1/broadcast/recent`; the route delegates to the same strict
+history helper as `meho_broadcast_recent`. `meho broadcast announce
+<activity>` posts to `/api/v1/broadcast/announce`, which rate-limits and
+then uses the same durable-before-stream publisher as
+`meho_broadcast_announce`. `meho broadcast watch` consumes the existing
+authenticated `/api/v1/feed` SSE endpoint, so it inherits its tenant scope,
+backlog prelude, and event format. All three accept `--backplane` and `--json`.
+
 ### SSE wire format
 
 The backplane (`backend/src/meho_backplane/api/v1/feed.py`, G6.1-T4)
@@ -1025,7 +1036,7 @@ narrow-waist contract.
   RRF over `endpoint_descriptor` rows scoped to the connector
   (optionally narrowed to one `group_key`) and renders the top hits
   with `fused_score`. `--limit` is clamped by the API at 50.
-- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--preview-hash <hash>]`
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...] [--work-ref gh:<owner>/<repo>#<n>] [--preview-hash <hash>]`
   — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
   end-to-end (parameter validation, policy gate, audit, JSONFlux,
   broadcast). The dispatcher always returns a structured
@@ -1069,6 +1080,14 @@ narrow-waist contract.
   `api.CallOperationBody.PreviewHash`; left nil when unset so a bare
   call is byte-identical to the pre-#3197 wire shape. Ignored by the
   dispatcher for every non-destructive op.
+- Reduced set-shaped call results retain their envelope-level `handle` in both
+  render modes. The human renderer labels it `result handle`; its
+  `handle_id` is the UUID accepted by `meho operation result-query`. This is
+  distinct from any `flight_recorder_trace_handle` in `extras`.
+- `--work-ref gh:<owner>/<repo>#<n>` (call only) — an external change-ticket
+  reference for this dispatch. The CLI rejects malformed values before issuing
+  the request, then threads a valid reference into `CallOperationBody.WorkRef`
+  so the dispatch's approval and audit rows retain their change-ticket linkage.
 
 ### HTTP shape
 

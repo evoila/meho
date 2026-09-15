@@ -284,6 +284,7 @@ async def vm_info_impl(
         _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
         json=build_vm_info_retrieve_params(vm_moid),
+        promote_managed_object_not_found=True,
     )
     props = _extract_vm_props(props_result)
 

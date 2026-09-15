@@ -67,6 +67,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     vm_resize_composite,
     vm_snapshot_revert_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
@@ -427,8 +428,7 @@ async def test_full_registration_produces_thirty_three_composite_rows(
             .scalars()
             .all()
         )
-    assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 51
+    assert {row.op_id for row in rows} == {spec.op_id for spec in _COMPOSITES}
 
 
 @pytest.mark.asyncio
@@ -721,7 +721,12 @@ async def test_write_composite_response_schemas_persist_with_status_enums(
         },
         "vmware.composite.cluster.patch": {"completed", "stopped"},
         "vmware.composite.vm.resize": {"resized", "requires_power_off", "no_change", "partial"},
-        "vmware.composite.vm.nic.repoint": {"repointed", "not_found", "ambiguous"},
+        "vmware.composite.vm.nic.repoint": {
+            "repointed",
+            "not_found",
+            "ambiguous",
+            "invalid_request",
+        },
         "vmware.composite.vm.device.cdrom": {
             "removed",
             "updated",
@@ -788,7 +793,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
     """Running the registrar twice -> 45 rows total, embedding called 45x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 51
+    assert first_count == len(_COMPOSITES)
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
@@ -806,7 +811,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_thirty_
             .scalars()
             .all()
         )
-    assert len(rows) == 51
+    assert {row.op_id for row in rows} == {spec.op_id for spec in _COMPOSITES}
 
 
 # ---------------------------------------------------------------------------

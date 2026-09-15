@@ -3,7 +3,8 @@
 Operator-facing real-time view of every audited operation, plus
 agent-authored announcements, scoped per tenant. The substrate is a
 Valkey 9.x Stream (`meho:feed:{tenant_id}`); the SSE surface
-(`/api/v1/feed` and `/ui/broadcast/stream`) and the MCP tools
+(`/api/v1/feed` and `/ui/broadcast/stream`), the CLI verbs
+(`meho broadcast recent`, `announce`, and `watch`), and the MCP tools
 (`meho_broadcast_recent`, `meho_broadcast_watch`,
 `meho_broadcast_announce`) all read or write to that single substrate.
 MEHO-hosted agent runs reach the same substrate through the agent
@@ -43,6 +44,9 @@ Three layers, separated for traceability:
    | SSE bridge | `GET /ui/broadcast/stream` (session cookie) | `XREAD BLOCK` | `$` (live tail) | **Last 50 on `$` connections** |
    | MCP recent | `meho_broadcast_recent` | `XRANGE` | 30-min window | All entries in window |
    | MCP watch | `meho_broadcast_watch` | `XREAD BLOCK` | caller-supplied `since_cursor` (required) | None — caller pins |
+   | CLI recent | `meho broadcast recent` → `GET /api/v1/broadcast/recent` | shared `XRANGE` history helper | 30-min window | All entries in window |
+   | CLI announce | `meho broadcast announce` → `POST /api/v1/broadcast/announce` | shared durable announcement publisher | n/a | n/a |
+   | CLI watch | `meho broadcast watch` → `GET /api/v1/feed` | `XREAD BLOCK` | `$` (live tail) | Last 50 on fresh connections |
    | MCP resource | `tenant_feed` snapshot | `XREVRANGE + COUNT 50` | n/a | Latest 50 |
    | UI history | `GET /ui/broadcast/history` | `XRANGE` | 30-min window | All entries in window |
    | Agent bridge | `broadcast_recent` / `broadcast_watch` meta-tools (#2548) | reuse the MCP recent/watch handlers | as MCP recent/watch | as MCP recent/watch |

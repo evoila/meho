@@ -165,6 +165,18 @@ docs = [
     "mkdocs-material>=9.7.7",
     "mike>=2.2.0",
 ]
+# Build backend, pinned into the lock so the image build fetches it through
+# uv's reliable locked-download path (direct wheel URLs) instead of a fresh
+# build-isolation resolution. That fresh resolve — an index query plus a PEP
+# 658 `.whl.metadata` fetch — fails with `client error (Connect)` from the CI
+# runner cluster whenever the buildkit uv-cache mount is cold, on both native
+# amd64 and emulated arm64 (evoila/meho#3626), while locked full-wheel
+# downloads from the same host succeed. Non-default group: neither the Docker
+# image (`--no-dev`) nor a plain `uv sync` installs it; the wheel-builder stage
+# uses `uv sync --locked --only-group build` + `uv build --no-build-isolation`.
+build = [
+    "hatchling",
+]
 
 [tool.uv]
 # Transitive-version floors the resolver MUST honour without promoting the

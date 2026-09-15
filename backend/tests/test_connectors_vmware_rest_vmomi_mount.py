@@ -33,12 +33,14 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector, VsphereTargetLike
 from meho_backplane.connectors.vmware_rest._mount import (
     vmomi_mounted_path,
     vmomi_release_from_version,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import object_collect_impl
 
 _RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _RETRIEVE_BODY: dict[str, Any] = {"specSet": [], "options": {}}
@@ -133,6 +135,17 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
 _BASE = "https://vc-8.test.invalid"
 _VIJSON_URL = "/sdk/vim25/8.0.3.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 _API_URL = "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+_MANAGED_OBJECT_NOT_FOUND_FAULT = """<?xml version="1.0"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:vim="urn:vim25"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soapenv:Body><soapenv:Fault>
+    <faultcode>ServerFaultCode</faultcode>
+    <faultstring>The object has already been deleted.</faultstring>
+    <detail><vim:ManagedObjectNotFound xsi:type="vim:ManagedObjectNotFound" /></detail>
+  </soapenv:Fault></soapenv:Body>
+</soapenv:Envelope>"""
 
 
 @pytest.mark.asyncio
@@ -231,6 +244,58 @@ async def test_non_404_on_vijson_propagates_without_fallback() -> None:
                 )
         # No fallback on a 5xx.
         assert not api.called
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vijson_managed_object_fault_promotes_only_when_read_opted_in() -> None:
+    """The real VI-JSON transport parses the 500 SOAP fault and preserves the MoID."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    body = {"specSet": [{"objectSet": [{"obj": {"type": "VirtualMachine", "value": "vm-42"}}]}]}
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            vijson = mock.post(_VIJSON_URL).respond(500, text=_MANAGED_OBJECT_NOT_FOUND_FAULT)
+            with pytest.raises(ConnectorResourceNotFoundError) as raised:
+                await connector._post_vmomi_json(
+                    _StubTarget(),
+                    _RETRIEVE_PROPERTIES_PATH,
+                    operator=_make_operator(),
+                    json=body,
+                    promote_managed_object_not_found=True,
+                )
+        assert vijson.called
+        assert raised.value.resource_ids == ["vm-42"]
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_object_collect_promotes_missing_moid_through_vijson_transport() -> None:
+    """An authorized sibling read inherits the real HTTP fault mapping."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            vijson = mock.post(_VIJSON_URL).respond(500, text=_MANAGED_OBJECT_NOT_FOUND_FAULT)
+            with pytest.raises(ConnectorResourceNotFoundError) as raised:
+                await object_collect_impl(
+                    connector,
+                    _make_operator(),
+                    _StubTarget(),
+                    {
+                        "type": "Datastore",
+                        "moid": "datastore-42",
+                        "properties": ["summary.capacity"],
+                    },
+                )
+        assert vijson.called
+        assert raised.value.resource_ids == ["datastore-42"]
     finally:
         await connector.aclose()
 

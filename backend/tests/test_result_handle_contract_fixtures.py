@@ -117,7 +117,9 @@ async def test_late_and_final_fields_are_advertised_by_the_handle_schema() -> No
     [([{"enabled": False}], "false"), ([{"count": 1}], "1")],
     ids=["string-false-against-boolean", "string-one-against-integer"],
 )
-@pytest.mark.xfail(reason="A5/A6 literal-family validation", strict=True)
+@pytest.mark.xfail(
+    reason="A5/A6 literal-family validation", strict=True, raises=pytest.fail.Exception
+)
 async def test_string_literals_are_rejected_for_non_string_columns(
     rows: list[dict[str, Any]], value: str
 ) -> None:
@@ -205,7 +207,7 @@ async def test_integer_overflow_is_preserved_and_explicitly_raw_only(number: int
         )
 
 
-@pytest.mark.xfail(reason="A2/A6 mixed numeric rehydration", strict=True)
+@pytest.mark.xfail(reason="A2/A6 mixed numeric rehydration", strict=True, raises=AssertionError)
 async def test_large_integer_mixed_with_float_keeps_its_exact_value() -> None:
     """A number above JavaScript-safe precision must not be rounded through float."""
     large = 2**53 + 1
@@ -219,7 +221,7 @@ async def test_large_integer_mixed_with_float_keeps_its_exact_value() -> None:
     assert large in [row["number"] for row in result]
 
 
-@pytest.mark.xfail(reason="A2/A6 case-preserving rehydration", strict=True)
+@pytest.mark.xfail(reason="A2/A6 case-preserving rehydration", strict=True, raises=AssertionError)
 async def test_case_distinct_keys_remain_independently_queryable() -> None:
     """A DuckDB registration must not rename one of two case-distinct JSON keys."""
     result, _, _ = await _run_compiled_query(
@@ -232,7 +234,7 @@ async def test_case_distinct_keys_remain_independently_queryable() -> None:
     assert set(result[0]) == {"Foo", "foo"}
 
 
-@pytest.mark.xfail(reason="A5 group output collision", strict=True)
+@pytest.mark.xfail(reason="A5 group output collision", strict=True, raises=pytest.fail.Exception)
 def test_group_key_named_count_is_rejected_before_query_execution() -> None:
     """A group identity cannot be overwritten by COUNT(*)'s public alias."""
     with pytest.raises(QueryContractError):

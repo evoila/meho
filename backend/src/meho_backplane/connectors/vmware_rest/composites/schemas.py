@@ -5386,6 +5386,241 @@ STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
 
 
 # ===========================================================================
+# Governed vSphere Namespace create/delete composites (#3502)
+# ===========================================================================
+
+
+#: ``vmware.composite.namespace.create`` parameter schema.
+#:
+#: The ``Namespaces.Instances.CreateSpecV2`` body: ``supervisor`` (the enabled
+#: Supervisor id, #3281) + ``namespace`` (the DNS-1123 name) are required; the
+#: ``access_list`` / ``storage_specs`` (SPBM policy ids from #3494) /
+#: ``vm_service_spec`` (content-library ids from #3495 + VM classes) are
+#: optional pass-through sub-objects with vendor sub-fields left open
+#: (``additionalProperties: True``), so a valid CreateSpecV2 is not rejected by
+#: an over-tight schema before it reaches vCenter.
+NAMESPACE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "supervisor": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Supervisor id the namespace is created on (CreateSpecV2.supervisor "
+                "-- the id supervisor.enable returns / GET "
+                "/vcenter/namespaces/instances/v2 lists). Rides the POST body, not "
+                "the path."
+            ),
+        },
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "vSphere Namespace name (a DNS-1123 label; becomes the Kubernetes "
+                "namespace a VKS guest cluster is created into)."
+            ),
+        },
+        "access_list": {
+            "type": "array",
+            "description": (
+                "Namespaces.Instances.Access entries granting subjects access to "
+                "the namespace (subject_type / subject / domain / role). Optional; "
+                "passed through verbatim."
+            ),
+            "items": {"type": "object", "additionalProperties": True},
+        },
+        "storage_specs": {
+            "type": "array",
+            "description": (
+                "Namespaces.Instances.StorageSpec entries binding SPBM storage "
+                "policies (each entry's ``policy`` is a policy id, typically the "
+                "NFS tag-based policy from storage_policy.create / #3494). Optional; "
+                "passed through verbatim."
+            ),
+            "items": {"type": "object", "additionalProperties": True},
+        },
+        "vm_service_spec": {
+            "type": "object",
+            "description": (
+                "Namespaces.Instances.VMServiceSpec -- the VM Service binding: "
+                "``content_libraries`` (the TKr/VKr content-library ids from "
+                "content_library.subscribed.create / #3495) and ``vm_classes`` (the "
+                "builtin Supervisor VM class names). Optional; passed through verbatim."
+            ),
+            "properties": {
+                "content_libraries": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "vm_classes": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+            },
+            "additionalProperties": True,
+        },
+    },
+    "required": ["supervisor", "namespace"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.namespace.create`` response schema.
+NAMESPACE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created"],
+            "description": (
+                "``created`` -- the create POST was accepted (asynchronous; the "
+                "namespace converges CONFIGURING -> RUNNING)."
+            ),
+        },
+        "namespace": {"type": "string", "description": "The created namespace name."},
+        "supervisor": {"type": "string", "description": "The Supervisor id it was created on."},
+        "config_status": {
+            "type": ["string", "null"],
+            "description": (
+                "Read-back Namespaces.Instances.Info.config_status "
+                "(CONFIGURING / RUNNING / ERROR); ``null`` when the read-back is not "
+                "yet visible or faulted."
+            ),
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "namespace", "supervisor"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.namespace.delete`` parameter schema.
+NAMESPACE_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "vSphere Namespace name to delete. Rides the ``{namespace}`` path "
+                "segment of DELETE /vcenter/namespaces/instances/{namespace}. "
+                "Deleting a namespace cascades -- it destroys every workload inside "
+                "it (VKS guest clusters, pods, PVCs)."
+            ),
+        },
+    },
+    "required": ["namespace"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.namespace.delete`` response schema.
+NAMESPACE_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "removing", "still_present"],
+            "description": (
+                "``deleted`` -- the read-back GET 404s (the namespace is gone); "
+                "``removing`` -- the read-back reports config_status='REMOVING' "
+                "(delete accepted, asynchronous teardown draining); "
+                "``still_present`` -- the DELETE was accepted but the read-back "
+                "still reports a non-REMOVING status."
+            ),
+        },
+        "namespace": {"type": "string"},
+        "config_status": {
+            "type": ["string", "null"],
+            "description": "Read-back config_status when the namespace is still present.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "namespace"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.namespace.status`` parameter schema. Reads a single
+#: namespace by name; ``messages_limit`` caps the inline ``messages`` array.
+NAMESPACE_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "vSphere Namespace name to read status for (rides the "
+                "``{namespace}`` segment of "
+                "GET /vcenter/namespaces/instances/{namespace})."
+            ),
+        },
+        "messages_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Optional cap on the inline ``messages`` array (default 25). "
+                "``message_count`` always carries the uncapped size."
+            ),
+        },
+    },
+    "required": ["namespace"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.namespace.status`` response schema. Shaped for inline
+#: polling: the scalar ``config_status`` / ``ready`` / ``exists`` stay
+#: top-level so a runbook OperationCallVerify step or a Sensor assertion reads
+#: them without a JSONFlux handle -- the governed, boot-enabled poll op the
+#: namespace.create / .delete composites hand the caller (symmetric with
+#: ``vmware.composite.supervisor.status``).
+NAMESPACE_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "namespace": {"type": "string", "description": "Input namespace name."},
+        "exists": {
+            "type": "boolean",
+            "description": (
+                "False when the read-back GET 404s (namespace not yet visible "
+                "mid-create, or gone after delete) -- a normal poll answer, not "
+                "a fault; the other fields are then null / empty."
+            ),
+        },
+        "config_status": {
+            "type": ["string", "null"],
+            "description": (
+                "Namespaces.Instances.ConfigStatus: CONFIGURING / REMOVING / "
+                "RUNNING / ERROR. ``null`` when the namespace is absent or the "
+                "field is missing from the vCenter payload."
+            ),
+        },
+        "ready": {
+            "type": "boolean",
+            "description": (
+                "True iff config_status == 'RUNNING' -- the single poll "
+                "predicate a runbook / Sensor waits on before creating a VKS "
+                "guest cluster into the namespace."
+            ),
+        },
+        "stats": {
+            "type": ["object", "null"],
+            "description": (
+                "Namespaces.Instances.Stats (cpu_used / memory_used / "
+                "storage_used); ``null`` when absent."
+            ),
+        },
+        "description": {
+            "type": ["string", "null"],
+            "description": "The namespace description; ``null`` when absent.",
+        },
+        "messages": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Namespaces.Instances.Message rows (severity + details).",
+        },
+        "message_count": {"type": "integer", "description": "Uncapped message count."},
+    },
+    "required": ["namespace", "exists", "config_status", "ready"],
+}
+
+
+# ===========================================================================
 # Content-library SUBSCRIBED-library composites (#3495)
 # ===========================================================================
 

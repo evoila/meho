@@ -33,6 +33,7 @@ from typing import Final
 from meho_backplane.connectors.vmware_rest.composites import (
     _host,
     _library,
+    _namespace,
     _storage_policy,
     _supervisor,
     _write,
@@ -97,6 +98,11 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.supervisor.disable": _supervisor._SUB_OPS_SUPERVISOR_DISABLE,
     "vmware.composite.storage_policy.create": _storage_policy._SUB_OPS_STORAGE_POLICY_CREATE,
     "vmware.composite.storage_policy.delete": _storage_policy._SUB_OPS_STORAGE_POLICY_DELETE,
+    # #3502 governed vSphere Namespace create/delete. The delete child is a
+    # DELETE op_id -- the discovery surface flags it un-grantable (delete-shaped),
+    # so a namespace delete always needs a human.
+    "vmware.composite.namespace.create": _namespace._SUB_OPS_NAMESPACE_CREATE,
+    "vmware.composite.namespace.delete": _namespace._SUB_OPS_NAMESPACE_DELETE,
     # #3495 content-library SUBSCRIBED writes (the two reads auto-execute for
     # a service principal and need no grant, so they are not listed here).
     "vmware.composite.content_library.subscribed.create": (

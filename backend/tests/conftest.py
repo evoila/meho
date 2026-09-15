@@ -44,6 +44,7 @@ from typing import Any, Final
 import httpx
 import pytest
 import respx
+from cryptography.fernet import Fernet
 
 from meho_backplane.settings import get_settings
 
@@ -238,6 +239,25 @@ def _default_database_url(
     except Exception:
         pass
     reset_engine_for_testing()
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _default_approval_handoff_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Provide disposable custody for tests that park credential writes.
+
+    Production intentionally denies a credential-write park without this key:
+    the approval request must never retain replayable inputs in plaintext.
+    Broad dispatch tests predate that custody requirement and only assert the
+    normal ``awaiting_approval`` branch, so give each test an independent
+    Fernet key. Tests for the fail-closed path explicitly delete the setting
+    and clear :func:`get_settings`' cache before exercising it.
+    """
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    yield
     get_settings.cache_clear()
 
 

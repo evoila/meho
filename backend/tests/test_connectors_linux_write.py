@@ -1052,18 +1052,23 @@ async def test_script_run_preview_echoes_secret_env_refs_never_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_park_persists_secret_env_mapping_only_never_value(
+async def test_park_custodies_secret_env_mapping_only_never_value(
     linux_write_registered: None,
 ) -> None:
-    """AC: a parked script.run stores only the ENV -> path#field mapping on the
-    approval row (and its proposed_effect); the resolved value appears nowhere
-    -- at park time it is not even resolved. Broadcast is aggregate-clamped for
-    this credential_write op (see test_credential_bearing_writes_are_pinned_*)."""
+    """AC: a parked script.run keeps its mapping in encrypted handoff custody.
+
+    The durable approval row carries no replayable params; its opaque handle
+    decrypts to the original ENV -> path#field mapping only during the
+    approved-resume path. The resolved value appears nowhere because park time
+    never resolves it. Broadcast is aggregate-clamped for this
+    credential_write op (see test_credential_bearing_writes_are_pinned_*).
+    """
     from sqlalchemy import select
 
     from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.db.models import ApprovalRequest
     from meho_backplane.operations import dispatch
+    from meho_backplane.operations.approval_handoff import consume
     from meho_backplane.targets.resolver import resolve_target
 
     sessionmaker = get_sessionmaker()
@@ -1089,9 +1094,20 @@ async def test_park_persists_secret_env_mapping_only_never_value(
             )
         ).scalar_one()
 
-    # The mapping is persisted verbatim so the approved call can re-resolve it.
-    assert row.params["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}
-    # The resolved value is absent everywhere durable (it is never resolved at park).
+    # The approval row itself has no replayable input; only an opaque custody
+    # handle remains. The approved-resume path decrypts the original reference
+    # mapping, without resolving the credential value at park time.
+    assert row.params is None
+    assert row.execution_handle is not None
+    async with sessionmaker() as session:
+        recovered = await consume(
+            session,
+            row.execution_handle,
+            row.id,
+            row.tenant_id,
+        )
+    assert recovered["params"]["secret_env"] == {"APP_DB_CRED": _SECRET_ENV_REF}
+    # The resolved value is absent from every non-custody surface.
     assert _SECRET_ENV_VALUE_CANARY not in str(row.params)
     assert _SECRET_ENV_VALUE_CANARY not in str(row.proposed_effect)
     assert _SECRET_ENV_VALUE_CANARY not in str(dumped)

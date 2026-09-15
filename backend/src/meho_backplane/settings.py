@@ -1521,6 +1521,9 @@ class Settings(BaseModel):
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
+    # Dedicated custody key for encrypted credential-write approval handoffs.
+    # Unlike the optional UI key this is required only when such an approval parks.
+    approval_handoff_encryption_key: str = ""
     # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
     # wall-monitor's long-display requirement. The sliding extension
     # keeps an actively-viewed session alive past its login-time
@@ -2433,6 +2436,9 @@ def get_settings() -> Settings:
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
+        approval_handoff_encryption_key=os.environ.get(
+            "APPROVAL_HANDOFF_ENCRYPTION_KEY", ""
+        ).strip(),
         ui_session_sliding_extension_seconds=int(
             os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
         ),

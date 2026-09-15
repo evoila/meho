@@ -2316,6 +2316,7 @@ async def _handle_needs_approval(
     # approval request links back to the paused run.
     from meho_backplane.agent.invoke import current_agent_run_id_var
     from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations.approval_handoff import ApprovalHandoffKeyError
     from meho_backplane.operations.approval_queue import (
         create_pending_request,
         publish_approval_event,
@@ -2394,6 +2395,13 @@ async def _handle_needs_approval(
             audit_id=request._audit_id,  # type: ignore[attr-defined]
         )
         return result_awaiting_approval(op_id, request.id, duration_ms)
+    except ApprovalHandoffKeyError:
+        return result_denied(
+            op_id,
+            "credential-write approval custody is unavailable; configure a valid "
+            "APPROVAL_HANDOFF_ENCRYPTION_KEY before parking this operation",
+            duration_ms,
+        )
     except Exception:
         import structlog as _structlog
 

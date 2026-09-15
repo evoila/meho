@@ -89,6 +89,45 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## Credential-write execution custody (#3537)
+
+For every operation classified as `credential_write`, the parked
+`approval_request` stores no raw dispatch params and no raw composite-parent
+params. It retains the existing `params_hash` swap defence plus an opaque
+`execution_handle`. The original execution input is encrypted with the
+dedicated `APPROVAL_HANDOFF_ENCRYPTION_KEY` in the one-to-one,
+tenant-bound `approval_execution_payload` table. Approval read surfaces only
+read the request row, so the ciphertext and plaintext stay out of REST, MCP,
+CLI, UI, audit, and broadcast views.
+
+Parking fails closed before its transaction commits if the key is missing or
+not a valid Fernet key. The key is deliberately independent of
+`UI_SESSION_ENCRYPTION_KEY`: console enablement must never decide credential
+custody. Configure Helm with an existing Kubernetes Secret:
+
+```yaml
+approvalHandoff:
+  enabled: true
+  secretName: meho-approval-handoff
+  secretKey: approval_handoff_encryption_key
+```
+
+The chart uses `secretKeyRef`; never place the key in `values.yaml`. Rotate by
+creating a new Fernet key in the referenced Secret and restarting all
+backplane pods together. Existing unexecuted credential-write approvals were
+encrypted with the old key, so reject or let them expire before rotation; they
+cannot be magically backfilled or decrypted by a new key. Rows parked before
+this migration remain historical rows and use their existing compatibility
+path; the migration deliberately does not copy legacy plaintext into the new
+custody table.
+
+Only the winner of the durable `resumed_at` claim can decrypt and delete the
+payload. A loser never reads it. Reject and expiry delete the custody row in
+the same transaction as the terminal state; successful claimed execution
+deletes it in the claim winner's transaction. A dispatch failure after a
+claim is intentionally not retried, preserving the existing exactly-once
+write rule.
+
 ## Transactional decision transitions + decision-time deadline (F12 / #274)
 
 The TTL sweep above is a *background* safety net; it is not the only

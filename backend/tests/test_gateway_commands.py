@@ -22,6 +22,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import func, select, update
 from structlog.testing import capture_logs
@@ -47,6 +48,8 @@ from meho_backplane.gateway.queue import (
     enqueue_command,
 )
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
+from meho_backplane.operations.approval_queue import create_pending_request
 from meho_backplane.operations.gateway_commands import (
     GatewayCommandAlreadyConsumedError,
     MintRefusalCode,
@@ -85,6 +88,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
     # Provision the central signing key so an approval-bound remote-write mint
     # can sign (the no-approval / no-key refusals are asserted explicitly).
     monkeypatch.setenv("SATELLITE_WRITE_SIGNING_KEY", _SIGNING_KEY_B64)
@@ -381,6 +385,34 @@ async def _approval_resumed_at(approval_id: uuid.UUID) -> datetime | None:
         return row.resumed_at
 
 
+async def _seed_credential_write_approval() -> ApprovalRequest:
+    """Create an approved custody-backed approval for the gateway lifecycle tests."""
+    await _seed_tenant()
+    params: dict[str, object] = {"value": "test-only-credential-value"}
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        request = await create_pending_request(
+            session,
+            operator=Operator(
+                sub="credential-requester",
+                raw_jwt="",
+                tenant_id=_TENANT,
+                tenant_role=TenantRole.OPERATOR,
+                principal_kind=PrincipalKind.AGENT,
+            ),
+            connector_id=_CONNECTOR_ID,
+            op_id="vault.kv.put",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        request.status = ApprovalRequestStatus.APPROVED.value
+        request.decided_at = datetime.now(UTC)
+        await session.commit()
+    assert request.execution_handle is not None
+    return request
+
+
 async def test_mint_remote_write_binds_approval_and_signs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -425,6 +457,60 @@ async def test_mint_remote_write_binds_approval_and_signs(
         ).scalar_one()
     assert audit.payload["approval_request_id"] == str(approval_id)
     assert audit.payload["signed"] is True
+
+
+async def test_mint_remote_write_discards_credential_handoff_on_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed gateway mint consumes the matching encrypted custody row."""
+    request = await _seed_credential_write_approval()
+    await _seed_write_allowlist(op_pattern="vault.kv.put")
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vault.kv.put",
+            target=None,
+            params={"value": "test-only-credential-value"},
+            runner_id=_RUNNER,
+        )
+        await session.commit()
+
+    assert result.minted
+    async with sessionmaker() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is None
+
+
+async def test_mint_remote_write_rollback_preserves_credential_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed mint rolls back its claim and custody cleanup together."""
+    request = await _seed_credential_write_approval()
+    await _seed_write_allowlist(op_pattern="vault.kv.put")
+    _patch_lookup(monkeypatch, _descriptor(safety_level="caution"))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await mint_gateway_command(
+            session,
+            operator=_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="vault.kv.put",
+            target=None,
+            params={"value": "test-only-credential-value"},
+            runner_id=_RUNNER,
+        )
+        assert result.minted
+        await session.rollback()
+
+    async with sessionmaker() as fresh:
+        approval = await fresh.get(ApprovalRequest, request.id)
+        assert approval is not None and approval.resumed_at is None
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is not None
 
 
 async def test_mint_remote_write_refused_on_params_swap(

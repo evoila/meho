@@ -46,6 +46,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,7 +59,8 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import reset_broadcast_client_for_testing
 from meho_backplane.broadcast.events import BroadcastEvent
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
+from meho_backplane.operations.approval_handoff import ApprovalExecutionPayload
 from meho_backplane.settings import get_settings
 
 pytestmark = pytest.mark.asyncio
@@ -89,6 +91,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
     # Short wait timeout so the timeout-path test doesn't slow the suite.
     monkeypatch.setenv("AGENT_APPROVAL_WAIT_TIMEOUT_SECONDS", "0.5")
@@ -869,6 +872,56 @@ async def test_wait_skips_malformed_entry(monkeypatch: pytest.MonkeyPatch) -> No
 # ---------------------------------------------------------------------------
 
 
+async def test_credential_write_agent_claim_winner_discards_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent winner deletes its ciphertext after claiming the resume."""
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.agent.approval_wait import _resume_approved_or_already_resumed
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    secret = "test-only-credential-value"
+    params = {"value": secret}
+    requester = _make_operator(sub="agent-credential-winner")
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="vault-1.x",
+            op_id="vault.kv.put",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            run_id=uuid.uuid4(),
+        )
+        request.status = ApprovalRequestStatus.APPROVED.value
+        request.decided_at = datetime.now(UTC)
+        await session.commit()
+    assert request.execution_handle is not None
+
+    async def _redispatch(_operator: Operator, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert arguments["params"] == params
+        return {"status": "ok"}
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _redispatch)
+    resumed = await _resume_approved_or_already_resumed(
+        operator=requester,
+        call_arguments={
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.put",
+            "params": params,
+            "target": None,
+        },
+        awaiting_envelope={"op_id": "vault.kv.put", "extras": {}},
+        approval_request_id=request.id,
+    )
+
+    assert resumed == {"status": "ok"}
+    async with get_sessionmaker()() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is None
+
+
 @pytest.mark.asyncio
 async def test_resume_no_ops_when_operator_surface_already_claimed(
     monkeypatch: pytest.MonkeyPatch,
@@ -891,14 +944,14 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     )
 
     requester = _make_operator(sub="agent-double-dispatch")
-    params = {"x": 7}
+    params = {"value": "test-only-credential-value"}
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
         request = await create_pending_request(
             s,
             operator=requester,
-            connector_id="apprestest-1.x",
-            op_id="apprestest.op",
+            connector_id="vault-1.x",
+            op_id="vault.kv.put",
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
@@ -912,8 +965,6 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     # required because ``claim_resume`` now (F12 / #274) only latches an
     # ``approved`` row; without it the claim would fail closed on a pending
     # row rather than modelling the winning operator-surface resumer.
-    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
-
     async with sessionmaker() as s:
         row = await s.get(ApprovalRequest, approval_request_id)
         assert row is not None
@@ -945,14 +996,14 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
 
     awaiting_envelope: dict[str, Any] = {
         "status": "awaiting_approval",
-        "op_id": "apprestest.op",
+        "op_id": "vault.kv.put",
         "extras": {"approval_request_id": str(approval_request_id)},
     }
     resumed = await resume_or_surface_awaiting_approval(
         operator=requester,
         call_arguments={
-            "connector_id": "apprestest-1.x",
-            "op_id": "apprestest.op",
+            "connector_id": "vault-1.x",
+            "op_id": "vault.kv.put",
             "params": params,
             "target": None,
         },
@@ -964,3 +1015,6 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
     assert resumed["extras"]["decision"] == "approved"
     assert resumed["extras"]["error_code"] == "already_resumed"
     assert redispatched == 0
+    assert request.execution_handle is not None
+    async with sessionmaker() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is not None

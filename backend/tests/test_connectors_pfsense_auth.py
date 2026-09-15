@@ -51,6 +51,7 @@ import pytest
 
 import meho_backplane.connectors.pfsense  # noqa: F401 -- import for registry side-effects
 from meho_backplane.connectors import all_connectors_v2
+from meho_backplane.connectors.adapters.ssh import SshHostKeyUnpinnedError
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.connector import parse_pfsense_version
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -113,10 +114,22 @@ def _vault_secrets() -> Iterator[None]:
 
 
 def _target_with_secret(
-    name: str, secret: dict[str, Any], *, host: str | None = None, port: int | None = 22
+    name: str,
+    secret: dict[str, Any],
+    *,
+    host: str | None = None,
+    port: int | None = 22,
+    pin_host_key: bool = True,
 ) -> _StubTarget:
     secret_path = f"meho/testing/pfsense/{name}"
-    _VAULT_SECRETS[secret_path] = secret
+    merged = dict(secret)
+    # PfSenseConnector._auth_config inherits the base fail-closed host-key
+    # contract (#270); these auth-focused tests opt the throwaway targets
+    # out of verification so the key-only *credential* policy is what is
+    # exercised. Pass ``pin_host_key=False`` for the unpinned case.
+    if pin_host_key and "known_hosts" not in merged and "known_hosts_insecure" not in merged:
+        merged["known_hosts_insecure"] = True
+    _VAULT_SECRETS[secret_path] = merged
     return _StubTarget(
         name=name,
         host=host if host is not None else "pfsense.test.invalid",
@@ -263,6 +276,20 @@ async def test_auth_config_defaults_username_to_admin() -> None:
     connector = PfSenseConnector()
     auth = await connector._auth_config(target)
     assert auth["username"] == "admin"
+
+
+async def test_auth_config_fails_closed_when_host_key_unconfigured() -> None:
+    """An unpinned secret refuses before auth even with a valid key (#270)."""
+    private_key = asyncssh.generate_private_key("ssh-ed25519")
+    pem = private_key.export_private_key().decode()
+    target = _target_with_secret(
+        "pfsense-unpinned",
+        {"username": "admin", "ssh_private_key": pem},
+        pin_host_key=False,
+    )
+    connector = PfSenseConnector()
+    with pytest.raises(SshHostKeyUnpinnedError):
+        await connector._auth_config(target)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +654,7 @@ async def test_per_target_connection_isolation() -> None:
         patch.object(
             connector,
             "_auth_config",
-            AsyncMock(return_value={"username": "admin", "client_keys": []}),
+            AsyncMock(return_value={"username": "admin", "known_hosts": None, "client_keys": []}),
         ),
     ):
         got_a = await connector._connect(target_a)

@@ -203,6 +203,7 @@ class ReferenceAddon:
             self.tenant_id,
             self.name,
             DeclareCapabilitiesRequest(capabilities=capabilities),
+            service_account_sub=self.service_account_sub,
         )
 
     async def produce_step_event(

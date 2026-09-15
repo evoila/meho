@@ -70,10 +70,22 @@ class PendingFlow:
     callback should redirect to on success. ``created_at`` is the
     monotonic-clock value at registration so the reaper can drop
     abandoned entries without depending on wall-clock skew.
+
+    ``browser_binding`` is the login-CSRF defence (F10, #272): a random
+    per-flow secret handed to the initiating browser in a short-lived
+    ``HttpOnly`` cookie at login time. The callback replays it from the
+    cookie and :func:`exchange_code_for_tokens` rejects the flow when it
+    is absent or mismatched -- so an attacker who starts their own login
+    and induces a victim to follow the unconsumed callback URL cannot
+    complete it in the victim's browser (the victim never holds the
+    matching cookie). It is a distinct random value from ``state``
+    precisely because ``state`` travels on the callback URL the attacker
+    controls; the binding value lives only in the browser cookie.
     """
 
     code_verifier: str
     return_to: str
+    browser_binding: str
     created_at: float
 
 
@@ -96,11 +108,20 @@ class PKCEVerifierStore:
         self._flows: dict[str, PendingFlow] = {}
         self._lock = asyncio.Lock()
 
-    async def put(self, state: str, *, code_verifier: str, return_to: str) -> None:
+    async def put(
+        self,
+        state: str,
+        *,
+        code_verifier: str,
+        return_to: str,
+        browser_binding: str,
+    ) -> None:
         """Register a fresh flow.
 
         Runs a bounded expired-entry sweep before the insert so the
-        map never grows beyond the live-flow set.
+        map never grows beyond the live-flow set. ``browser_binding`` is
+        the per-flow secret the callback cross-checks against the
+        initiating browser's cookie (F10, #272).
         """
         now = time.monotonic()
         async with self._lock:
@@ -116,6 +137,7 @@ class PKCEVerifierStore:
             self._flows[state] = PendingFlow(
                 code_verifier=code_verifier,
                 return_to=return_to,
+                browser_binding=browser_binding,
                 created_at=now,
             )
 

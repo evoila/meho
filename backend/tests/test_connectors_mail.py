@@ -43,6 +43,7 @@ from __future__ import annotations
 import re
 import smtplib
 import socket
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from email.message import EmailMessage
 from pathlib import Path
@@ -62,10 +63,14 @@ from meho_backplane.connectors.mail.allowlist import (
     parse_recipient_allowlist,
 )
 from meho_backplane.connectors.mail.ops import register_mail_typed_operations
+from meho_backplane.connectors.mail.tenant_policy import (
+    reset_tenant_mail_policy_cache_for_testing,
+    resolve_tenant_recipient_allowlist,
+)
 from meho_backplane.connectors.mail.transport import MailSendResult, send_email
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, Tenant
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._lookup import parse_connector_id
 from meho_backplane.settings import get_settings
@@ -103,9 +108,11 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         monkeypatch.delenv(var, raising=False)
     get_settings.cache_clear()
     reset_dispatcher_caches()
+    reset_tenant_mail_policy_cache_for_testing()
     yield
     get_settings.cache_clear()
     reset_dispatcher_caches()
+    reset_tenant_mail_policy_cache_for_testing()
 
 
 def _configure_mail_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
@@ -134,10 +141,24 @@ class _RecordingSMTP:
 
     instances: ClassVar[list[_RecordingSMTP]]
 
-    def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        *,
+        context: object | None = None,
+    ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        # The implicit-TLS (SMTP_SSL) constructor receives the validating
+        # context; the plaintext SMTP constructor gets None and the context
+        # arrives later on ``starttls``. Both are captured so tests can
+        # assert the transport hands a verifying context to every TLS path
+        # (#270).
+        self.init_context = context
+        self.starttls_context: object | None = None
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.sent_messages: list[EmailMessage] = []
         type(self).instances.append(self)
@@ -152,6 +173,7 @@ class _RecordingSMTP:
         self.calls.append(("ehlo", ()))
 
     def starttls(self, *, context: object | None = None) -> None:
+        self.starttls_context = context
         self.calls.append(("starttls", ()))
 
     def login(self, user: str, password: str) -> None:
@@ -173,6 +195,66 @@ class _ExplodingSMTP:
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         raise AssertionError("smtplib.SMTP must not be constructed when the send is refused")
+
+
+def _self_signed_ca_pem() -> str:
+    """Build a throwaway self-signed CA certificate as PEM text.
+
+    Used only to prove ``_build_tls_context`` loads a pinned bundle as a
+    trust anchor; the key is discarded — nothing is signed with it.
+    """
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "meho-mail-test-ca")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM).decode()
+
+
+def _assert_validating_context(ctx: object) -> None:
+    """Assert *ctx* is an SSL context that verifies the peer (#270).
+
+    The whole point of the fix is that neither TLS path is handed
+    ``None`` (which makes smtplib fall back to the unverified
+    ``ssl._create_stdlib_context``). A verifying context has hostname
+    checking on and ``CERT_REQUIRED``.
+    """
+    assert isinstance(ctx, ssl.SSLContext), f"expected an ssl.SSLContext, got {ctx!r}"
+    assert ctx.check_hostname is True
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+class _TLSFailingSMTPSSL:
+    """``SMTP_SSL`` stand-in whose constructor raises a cert-verify error."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise ssl.SSLCertVerificationError("certificate verify failed: self-signed")
+
+
+class _STARTTLSFailingSMTP(_RecordingSMTP):
+    """Plaintext ``SMTP`` stand-in whose ``starttls`` raises a cert-verify error."""
+
+    instances: ClassVar[list[_RecordingSMTP]] = []
+
+    def starttls(self, *, context: object | None = None) -> None:
+        raise ssl.SSLCertVerificationError("certificate verify failed: unknown CA")
 
 
 @pytest.fixture
@@ -375,6 +457,9 @@ async def test_starttls_and_login_run_in_sequence_when_configured(
     (client,) = recording_smtp.instances
     assert (client.host, client.port) == ("smtp.internal", 587)
     assert client.timeout == mail_transport._SMTP_TIMEOUT_SECONDS
+    # STARTTLS receives an explicit validating context (#270): hostname
+    # checking on, CERT_REQUIRED — not the unverified stdlib fallback.
+    _assert_validating_context(client.starttls_context)
     assert [name for name, _ in client.calls] == [
         "ehlo",
         "starttls",
@@ -423,7 +508,76 @@ async def test_port_465_uses_implicit_tls_without_starttls(
     assert result == MailSendResult(sent=True, reason=None)
     (client,) = recording_smtp.instances
     assert client.port == 465
+    # Implicit TLS: the validating context is handed to the SMTP_SSL
+    # constructor, so the handshake verifies the cert before any data (#270).
+    _assert_validating_context(client.init_context)
     assert [name for name, _ in client.calls] == ["ehlo", "send_message", "quit"]
+
+
+async def test_implicit_tls_cert_verification_failure_refuses_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 465 handshake against an untrusted cert refuses with smtp_tls_error.
+
+    The failure is raised by ``SMTP_SSL``'s constructor — before any AUTH
+    or message data — and maps to the dedicated TLS reason code rather
+    than a misleading connect error (#270).
+    """
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP", _ExplodingSMTP)
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP_SSL", _TLSFailingSMTPSSL)
+    _configure_mail_env(monkeypatch, MAIL_SMTP_PORT="465")
+
+    result = await send_email(to=["oncall@example.com"], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="smtp_tls_error")
+
+
+async def test_starttls_cert_verification_failure_refuses_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STARTTLS upgrade against an untrusted cert refuses with smtp_tls_error.
+
+    The upgrade raises before ``login`` / ``send_message``, so no
+    credential or message reaches the unverified peer.
+    """
+    _STARTTLSFailingSMTP.instances = []
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP", _STARTTLSFailingSMTP)
+    monkeypatch.setattr(mail_transport.smtplib, "SMTP_SSL", _ExplodingSMTP)
+    _configure_mail_env(
+        monkeypatch,
+        MAIL_SMTP_USERNAME="meho-mailer",
+        MAIL_SMTP_PASSWORD="s3cret",
+    )
+
+    result = await send_email(to=["oncall@example.com"], subject="s", body="b")
+
+    assert result == MailSendResult(sent=False, reason="smtp_tls_error")
+    (client,) = _STARTTLSFailingSMTP.instances
+    call_names = [name for name, _ in client.calls]
+    assert "login" not in call_names
+    assert "send_message" not in call_names
+    assert not client.sent_messages
+
+
+def test_build_tls_context_defaults_to_system_trust() -> None:
+    """No CA bundle ⇒ a verifying context over the system trust store."""
+    ctx = mail_transport._build_tls_context("")
+    _assert_validating_context(ctx)
+
+
+def test_build_tls_context_pins_ca_bundle(tmp_path: Path) -> None:
+    """A CA-bundle path ⇒ a verifying context that loads that bundle (#270)."""
+    ca_pem = _self_signed_ca_pem()
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text(ca_pem)
+
+    ctx = mail_transport._build_tls_context(str(bundle))
+
+    _assert_validating_context(ctx)
+    # The pinned CA is loaded as a trust anchor (it replaces the system
+    # roots, matching the target-level tls_ca_pin posture).
+    subjects = [dict(ca["subject"][0]) for ca in ctx.get_ca_certs()]
+    assert any(s.get("commonName") == "meho-mail-test-ca" for s in subjects)
 
 
 async def test_plaintext_channel_refuses_auth_instead_of_logging_in(
@@ -847,3 +1001,198 @@ def test_parse_recipient_allowlist_accepts_the_documented_shapes(
 
     assert addresses == frozenset({"oncall@ops.test"})
     assert domains == frozenset({"example.com", "example.org", "corp.test"})
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant recipient allowlist (#3499) — narrows on top of the instance floor
+# ---------------------------------------------------------------------------
+
+#: The operator ``_make_operator`` dispatches as; the seeded tenant row's id.
+_TENANT_ID = UUID(int=0)
+
+
+async def _seed_tenant_mail_allowlist(value: str | None) -> None:
+    """Insert the dispatch tenant row carrying *value* in ``mail_recipient_allowlist``.
+
+    ``value=None`` leaves the column NULL (inherit); ``""`` is deny; a string is
+    the tenant's own allowlist. The row id matches ``_make_operator``'s
+    ``tenant_id`` so the dispatch resolver reads exactly this policy.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            Tenant(
+                id=_TENANT_ID,
+                slug="dispatch-tenant",
+                name="Dispatch Tenant",
+                mail_recipient_allowlist=value,
+            )
+        )
+        await session.commit()
+
+
+async def test_tenant_allowlist_unset_inherits_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """No tenant row (or NULL column) ⇒ inherit: the instance floor governs.
+
+    Instance allowlist admits ``example.com``; with no per-tenant override the
+    send goes through (sent=True), proving the tenant screen did not interpose.
+    """
+    _configure_mail_env(monkeypatch)  # instance MAIL_RECIPIENT_ALLOWLIST=example.com
+    # No _seed_tenant_mail_allowlist call -> the resolver sees no row -> inherit.
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is True
+    assert result.result["reason"] is None
+
+
+async def test_tenant_empty_allowlist_denies_before_any_smtp_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """An empty tenant allowlist denies every recipient before any connection.
+
+    The instance floor would admit ``oncall@example.com``, but the tenant's
+    empty allowlist refuses first — proving tenant-empty ⇒ deny, evaluated
+    ahead of the (exploding) transport.
+    """
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist("")
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result == {
+        "sent": False,
+        "reason": "not_in_recipient_allowlist",
+        "to": ["oncall@example.com"],
+        "subject": "s",
+    }
+
+
+async def test_tenant_allowlist_narrows_within_the_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A tenant address-entry refuses another mailbox the instance domain admits.
+
+    Instance floor admits the whole ``example.com`` domain; the tenant narrows
+    to the single address ``oncall@example.com``. A send to
+    ``other@example.com`` is refused by the tenant screen even though the
+    instance floor would allow it — the narrowing is real and comes first.
+    """
+    _configure_mail_env(monkeypatch)  # instance = example.com (domain)
+    await _seed_tenant_mail_allowlist("oncall@example.com")
+
+    result = await _dispatch_send({"to": ["other@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+    assert result.result["reason"] == "not_in_recipient_allowlist"
+
+
+async def test_tenant_allowlist_admits_a_listed_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+    recording_smtp: type,
+    _registered_mail_op: None,
+) -> None:
+    """A recipient in both the tenant allowlist and the instance floor sends."""
+    _configure_mail_env(monkeypatch)  # instance = example.com
+    await _seed_tenant_mail_allowlist("oncall@example.com")
+
+    result = await _dispatch_send({"to": ["oncall@example.com"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is True
+    assert result.result["reason"] is None
+
+
+async def test_tenant_allowlist_cannot_widen_past_the_instance_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A recipient the tenant lists but the instance floor does not is refused.
+
+    The tenant screen passes ``x@evil.test`` (it is in the tenant allowlist),
+    but the instance floor — applied by the transport afterwards — does not
+    list ``evil.test``, so the send is still refused. The tenant can only
+    narrow, never widen. (Exploding SMTP proves no connection opened.)
+    """
+    _configure_mail_env(monkeypatch)  # instance = example.com only
+    await _seed_tenant_mail_allowlist("evil.test")
+
+    result = await _dispatch_send({"to": ["x@evil.test"], "subject": "s", "body": "b"})
+
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+    assert result.result["reason"] == "not_in_recipient_allowlist"
+
+
+async def test_resolver_returns_none_for_unknown_tenant() -> None:
+    """An absent tenant row resolves to None (inherit), not deny."""
+    assert await resolve_tenant_recipient_allowlist(UUID(int=123)) is None
+
+
+async def test_resolver_parses_a_set_value() -> None:
+    """A non-null column parses to the ``(addresses, domains)`` tuple."""
+    await _seed_tenant_mail_allowlist("oncall@ops.test,example.com")
+    resolved = await resolve_tenant_recipient_allowlist(_TENANT_ID)
+    assert resolved == (frozenset({"oncall@ops.test"}), frozenset({"example.com"}))
+
+
+async def test_resolver_fails_closed_to_deny_on_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB read error resolves to deny (empty allowlist), never to inherit."""
+
+    def _boom() -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(
+        "meho_backplane.connectors.mail.tenant_policy.get_sessionmaker",
+        _boom,
+    )
+    resolved = await resolve_tenant_recipient_allowlist(UUID(int=7))
+    assert resolved == (frozenset(), frozenset())
+
+
+async def test_tenant_denied_send_writes_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+    exploding_smtp: None,
+    _registered_mail_op: None,
+) -> None:
+    """A tenant-denied ``mail.send`` is audited synchronously (sent=false).
+
+    The empty tenant allowlist refuses the send before any SMTP connection,
+    and the durable ``audit_log`` row records the refusal (``sent=false``,
+    ``reason=not_in_recipient_allowlist``) with recipients/subject and never
+    the body — the #3499 "denied delivery is audited" acceptance criterion.
+    """
+    _configure_mail_env(monkeypatch)
+    await _seed_tenant_mail_allowlist("")  # tenant deny
+
+    result = await _dispatch_send(
+        {"to": ["oncall@example.com"], "subject": "blocked", "body": "secret body"}
+    )
+    assert result.status == "ok", result.error
+    assert result.result["sent"] is False
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+    mail_rows = [r for r in rows if r.path == _OP_ID]
+    assert len(mail_rows) == 1
+    raw = mail_rows[0].raw_payload
+    assert raw is not None
+    assert raw["sent"] is False
+    assert raw["reason"] == "not_in_recipient_allowlist"
+    assert raw["to"] == ["oncall@example.com"]
+    assert "body" not in raw

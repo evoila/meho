@@ -844,6 +844,42 @@ class Settings(BaseModel):
         retention is policy-driven); ``enabled=False`` skips starting
         the loop entirely (no audit-row noise, no log line). Read once
         at lifespan startup; toggling post-start requires a pod restart.
+    raw_payload_retention_days:
+        Maximum age (in days) of the pre-redaction connector response
+        captured in ``audit_log.raw_payload`` (security review S19 #307).
+        Rows whose ``occurred_at`` is older than ``now() -
+        raw_payload_retention_days`` have **only** ``raw_payload`` NULLed by
+        the age-off sweeper (:mod:`meho_backplane.audit_retention`); the
+        redacted ``payload`` (carrying ``redaction_policy_id``), the
+        ``redaction_manifest`` and every other column -- the governance
+        record of account -- are left intact. Default 90 mirrors
+        ``topology_history_retention_days`` (auditor reconstruction stays
+        available for a quarter, then the un-redacted body ages off). ``0``
+        is the opt-out "keep forever" sentinel: **un-redacted pre-redaction
+        bodies then live in ``raw_payload`` and every DB backup forever** --
+        the security tradeoff flagged in the Helm values comment and
+        ``docs/architecture/audit.md``. Range ``[0, 3650]`` (10y ceiling is
+        functionally permanent for a v0.2 chassis). Read once per tick.
+    raw_payload_prune_interval_seconds:
+        Cadence of the #307 raw-payload age-off loop, in seconds. The task
+        (registered in the FastAPI lifespan) sleeps this long between sweeps.
+        Default 604800 (7d / weekly) matches the topology-history prune.
+        Range ``[60, 604800]``: below one minute competes with write load;
+        the ceiling is the weekly cadence -- operators wanting a tighter
+        exposure window lower ``raw_payload_retention_days`` instead (it pulls
+        the age-off horizon in without changing the sweep cadence). Tests
+        override to sub-second values via env-var monkeypatch +
+        :func:`get_settings` cache-clear.
+    raw_payload_prune_enabled:
+        Whether to start the #307 raw-payload age-off task in the FastAPI
+        lifespan. Default ``True``: the in-process ``asyncio`` loop is the
+        shipped age-off mechanism. Operators running a different mechanism
+        (k8s CronJob, archive-then-scrub) flip
+        ``RAW_PAYLOAD_PRUNE_ENABLED=false`` so the chassis does not race the
+        external job. Distinct from ``raw_payload_retention_days=0``: ``0``
+        keeps the loop running but every tick is a no-op (heartbeat proving
+        the age-off surface is alive); ``enabled=False`` skips starting the
+        loop entirely. Read once at lifespan startup.
     anthropic_api_key:
         Anthropic API key the G11.1 agent runtime's bounded tool-use loop
         authenticates with. Empty (the default) is fail-closed: the seam's
@@ -1194,6 +1230,14 @@ class Settings(BaseModel):
         default="redis://localhost:6379",
         min_length=1,
     )
+    #: Optional ``requirepass`` for the broadcast Valkey store. The Helm
+    #: chart enables Valkey auth by default and injects this via
+    #: ``BROADCAST_REDIS_PASSWORD`` (secretKeyRef), keeping the password out
+    #: of the plaintext ``BROADCAST_REDIS_URL``. ``None`` (unset) means the
+    #: client connects without auth — the pre-auth default and the local-dev
+    #: ``redis://localhost:6379`` path. Applied as the ``password`` kwarg on
+    #: :func:`redis.asyncio.from_url` in :mod:`meho_backplane.broadcast.client`.
+    broadcast_redis_password: str | None = Field(default=None)
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
     #: Default per-source fixed-window cap for the inbound event-ingest
@@ -1204,6 +1248,48 @@ class Settings(BaseModel):
     #: a source may override the cap per-source via
     #: ``event_source.extras["rate_per_minute"]``.
     events_ingest_rate_per_minute: int = Field(default=60, ge=0)
+    #: #3500 -- per-principal dispatch rate limit (requests per minute).
+    #: Applied on the shared dispatch path (``call_operation`` /
+    #: ``search_operations`` / ``preview_operation`` / ``result_query``,
+    #: on CLI, MCP and the REST dispatch route alike), keyed
+    #: ``meho:ratelimit:dispatch:{tenant}:{principal}`` on the broadcast
+    #: Valkey. ``0`` (the default) disables the limit entirely -- no
+    #: Valkey round-trip -- so existing tenants are unaffected until an
+    #: operator opts in. Set via ``DISPATCH_RATE_LIMIT_PER_MINUTE``.
+    dispatch_rate_limit_per_minute: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for ``dispatch_rate_limit_per_minute``.
+    #: CSV of ``<tenant-uuid>=<int>`` pairs (case-insensitive UUID,
+    #: whitespace ignored); a tenant absent from the map uses the global
+    #: default. Lets a shared instance hold an untrusted-visitor tenant to
+    #: a tight cap while production tenants keep headroom. Set via
+    #: ``DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES``.
+    dispatch_rate_limit_per_minute_overrides: str = ""
+    #: #3500 -- per-principal cap on concurrent in-flight top-level
+    #: dispatches, keyed ``meho:concurrency:dispatch:{tenant}:{principal}``.
+    #: ``0`` (the default) disables the cap. Set via
+    #: ``DISPATCH_MAX_CONCURRENT_OPS``.
+    dispatch_max_concurrent_ops: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for ``dispatch_max_concurrent_ops``
+    #: (same ``<tenant-uuid>=<int>`` CSV shape). Set via
+    #: ``DISPATCH_MAX_CONCURRENT_OPS_OVERRIDES``.
+    dispatch_max_concurrent_ops_overrides: str = ""
+    #: #3500 -- safety TTL (seconds) armed on a concurrency slot so a slot
+    #: leaked by a crashed worker self-heals rather than wedging a
+    #: principal forever. The normal path releases the slot when the op
+    #: finishes; this only bounds the crash case, so it is set generously
+    #: (an hour) to avoid expiring a genuinely long-running op's slot
+    #: early. Set via ``DISPATCH_CONCURRENCY_SLOT_TTL_SECONDS``.
+    dispatch_concurrency_slot_ttl_seconds: int = Field(default=3600, gt=0)
+    #: #3500 -- per-tenant cap on new MCP sessions per minute. MEHO holds
+    #: no session store, so this bounds ``initialize`` handshakes per
+    #: window (each is one new session) -- the cheap, deterministic proxy
+    #: for a "concurrent sessions" cap. ``0`` (the default) disables it.
+    #: Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE``.
+    mcp_session_start_limit_per_minute: int = Field(default=0, ge=0)
+    #: #3500 -- per-tenant overrides for
+    #: ``mcp_session_start_limit_per_minute`` (same ``<tenant-uuid>=<int>``
+    #: CSV shape). Set via ``MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES``.
+    mcp_session_start_limit_per_minute_overrides: str = ""
     #: Look-back window (minutes) for the dispatch-time target-activity
     #: advisory (#2550). A write-class dispatch on a target with peer
     #: activity inside this window carries a compact
@@ -1446,6 +1532,15 @@ class Settings(BaseModel):
     topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
     topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     topology_history_prune_enabled: bool = True
+    # Security review S19 #307 — audit_log.raw_payload age-off knobs. Same
+    # opt-out shape as the topology-history prune: ``days=0`` keeps the loop
+    # as a heartbeat (un-redacted pre-redaction bodies then live forever, the
+    # documented security tradeoff), while ``enabled=False`` skips the loop for
+    # operators running an external age-off. NULLs only ``raw_payload``; the
+    # redacted ``payload`` record of account is left intact (see field docstring).
+    raw_payload_retention_days: int = Field(default=90, ge=0, le=3650)
+    raw_payload_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    raw_payload_prune_enabled: bool = True
     # G11.1-T1 #808 — agent runtime LLM access. The bounded tool-use loop
     # (``meho_backplane.agent``) runs against Anthropic for the G11
     # initiative; multi-provider routing is G11.5. ``anthropic_api_key``
@@ -1629,10 +1724,41 @@ class Settings(BaseModel):
     mail_smtp_host: str = Field(default="")
     mail_smtp_port: int = Field(default=587, gt=0, le=65535)
     mail_smtp_starttls: bool = True
+    # F08 (#270) — both TLS paths (implicit ``SMTP_SSL`` and ``STARTTLS``)
+    # verify the MTA's certificate against a validating
+    # ``ssl.create_default_context`` with hostname checking on. Empty (the
+    # default) trusts the system CA bundle; set to a PEM CA-bundle path to
+    # pin an internal relay's CA instead (the file's CAs *replace* the
+    # system trust, matching the target-level ``tls_ca_pin`` posture). There
+    # is deliberately no blanket "skip verification" knob — an internal
+    # relay with a private CA is trusted by pointing this at its CA, never
+    # by disabling verification.
+    mail_smtp_ca_bundle: str = Field(default="")
     mail_smtp_username: str = Field(default="")
     mail_smtp_password: str = Field(default="", repr=False)
     mail_from: str = Field(default="")
     mail_recipient_allowlist: str = Field(default="")
+    # #3499 — opt-in bearer-token guard for the operational exposition
+    # endpoints ``GET /metrics`` (:mod:`meho_backplane.main`) and
+    # ``GET /ready`` (:mod:`meho_backplane.health`). Both are served on the
+    # shared ingress and, unauthenticated, leak operational metrics and the
+    # effective four-eyes / feature-gate posture to anyone who can reach it.
+    # Empty ("", the default) leaves both endpoints **open** — behaviour is
+    # unchanged, so the in-cluster scraper and the kubelet readiness probe
+    # keep working with no config change. Set it to a shared secret to
+    # require ``Authorization: Bearer <token>`` on both endpoints
+    # (constant-time compared in :mod:`meho_backplane.metrics_access`); a
+    # deployment that turns it on must then hand the same token to the
+    # scraper (Prometheus ``bearer_token`` / ServiceMonitor
+    # ``bearerTokenSecret``) and to the readiness probe (``httpHeaders``).
+    # ``/healthz`` (pure liveness, no posture) is deliberately never guarded,
+    # so a bearer-less liveness path always exists. A **source-CIDR** allow
+    # was considered and rejected: behind the shared ingress the app sees the
+    # proxy's IP, not the real client's, so a peer-IP CIDR check cannot
+    # distinguish a booth visitor from the scraper without trusting a
+    # spoofable ``X-Forwarded-For``. ``repr=False`` keeps the token out of
+    # ``Settings`` reprs / structured logs.
+    metrics_auth_token: str = Field(default="", repr=False)
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -1702,8 +1828,20 @@ class Settings(BaseModel):
     #: at the T3 route) rather than returning a silent empty result.
     corpus_url: str = ""
     #: Optional RFC 8707 resource indicator (``aud``) the corpus binds
-    #: the forwarded token to. Empty ("") forwards no audience.
+    #: the downstream token to. Empty ("") forwards no audience.
     corpus_audience: str = ""
+    #: Deployment-configured bearer credential the corpus federation
+    #: client (:func:`~meho_backplane.auth.corpus.search_corpus`) presents
+    #: to the corpus. This is a dedicated, corpus-scoped service credential
+    #: owned by the deployment — NOT the caller's inbound operator JWT.
+    #: Replaying the operator's raw bearer to a tenant-configurable corpus
+    #: URL leaked a Vault-capable credential to an attacker-controlled sink
+    #: (evoila-bosnia/meho-internal#290), so the operator JWT is never
+    #: forwarded. Empty ("") sends no ``Authorization`` header — a corpus
+    #: that requires auth then fails closed (401 → ``CorpusUnavailable`` →
+    #: 503) rather than receiving the operator bearer. ``repr=False`` keeps
+    #: the secret out of ``Settings`` reprs / structured logs.
+    corpus_service_token: str = Field(default="", repr=False)
     #: Bound on the corpus HTTP request (connect / read / write), in
     #: seconds. A slow corpus raises ``CorpusUnavailable`` rather than
     #: blocking the event loop.
@@ -2089,6 +2227,10 @@ def get_settings() -> Settings:
             "BROADCAST_REDIS_URL",
             "redis://localhost:6379",
         ),
+        # ``or None`` collapses an empty-string env to no-auth, so an
+        # accidentally-blank BROADCAST_REDIS_PASSWORD does not send a
+        # zero-length password on the AUTH command.
+        broadcast_redis_password=os.environ.get("BROADCAST_REDIS_PASSWORD") or None,
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
@@ -2098,6 +2240,30 @@ def get_settings() -> Settings:
         events_ingest_rate_per_minute=int(
             os.environ.get("EVENTS_INGEST_RATE_PER_MINUTE", "60"),
         ),
+        dispatch_rate_limit_per_minute=int(
+            os.environ.get("DISPATCH_RATE_LIMIT_PER_MINUTE", "0"),
+        ),
+        dispatch_rate_limit_per_minute_overrides=os.environ.get(
+            "DISPATCH_RATE_LIMIT_PER_MINUTE_OVERRIDES",
+            "",
+        ).strip(),
+        dispatch_max_concurrent_ops=int(
+            os.environ.get("DISPATCH_MAX_CONCURRENT_OPS", "0"),
+        ),
+        dispatch_max_concurrent_ops_overrides=os.environ.get(
+            "DISPATCH_MAX_CONCURRENT_OPS_OVERRIDES",
+            "",
+        ).strip(),
+        dispatch_concurrency_slot_ttl_seconds=int(
+            os.environ.get("DISPATCH_CONCURRENCY_SLOT_TTL_SECONDS", "3600"),
+        ),
+        mcp_session_start_limit_per_minute=int(
+            os.environ.get("MCP_SESSION_START_LIMIT_PER_MINUTE", "0"),
+        ),
+        mcp_session_start_limit_per_minute_overrides=os.environ.get(
+            "MCP_SESSION_START_LIMIT_PER_MINUTE_OVERRIDES",
+            "",
+        ).strip(),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),
@@ -2267,6 +2433,15 @@ def get_settings() -> Settings:
         topology_history_prune_enabled=parse_bool_env(
             os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
         ),
+        raw_payload_retention_days=int(
+            os.environ.get("RAW_PAYLOAD_RETENTION_DAYS", "90"),
+        ),
+        raw_payload_prune_interval_seconds=int(
+            os.environ.get("RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        raw_payload_prune_enabled=parse_bool_env(
+            os.environ.get("RAW_PAYLOAD_PRUNE_ENABLED", "true"),
+        ),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
@@ -2341,10 +2516,12 @@ def get_settings() -> Settings:
         mail_smtp_starttls=parse_bool_env(
             os.environ.get("MAIL_SMTP_STARTTLS", "true"),
         ),
+        mail_smtp_ca_bundle=os.environ.get("MAIL_SMTP_CA_BUNDLE", "").strip(),
         mail_smtp_username=os.environ.get("MAIL_SMTP_USERNAME", "").strip(),
         mail_smtp_password=os.environ.get("MAIL_SMTP_PASSWORD", "").strip(),
         mail_from=os.environ.get("MAIL_FROM", "").strip(),
         mail_recipient_allowlist=os.environ.get("MAIL_RECIPIENT_ALLOWLIST", ""),
+        metrics_auth_token=os.environ.get("METRICS_AUTH_TOKEN", "").strip(),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
             "MEHO_AGENT_SECRET_{tenant_id}_{client_id}",
@@ -2364,6 +2541,7 @@ def get_settings() -> Settings:
         ),
         corpus_url=os.environ.get("CORPUS_URL", "").strip(),
         corpus_audience=os.environ.get("CORPUS_AUDIENCE", "").strip(),
+        corpus_service_token=os.environ.get("CORPUS_SERVICE_TOKEN", "").strip(),
         corpus_timeout_seconds=float(
             os.environ.get("CORPUS_TIMEOUT_SECONDS", "10.0"),
         ),

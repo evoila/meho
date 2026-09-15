@@ -58,7 +58,7 @@ from meho_backplane.operations.addon_capability_schemas import (
     CapabilityRead,
     DeclareCapabilitiesRequest,
 )
-from meho_backplane.operations.addon_pairing import AddonNotPairedError
+from meho_backplane.operations.addon_pairing import resolve_owned_pairing
 from meho_backplane.operations.addon_pairing_contract import is_contract_compatible
 
 __all__ = ["AddonCapabilityService"]
@@ -86,6 +86,8 @@ class AddonCapabilityService:
         tenant_id: uuid.UUID,
         addon_name: str,
         request: DeclareCapabilitiesRequest,
+        *,
+        service_account_sub: str,
     ) -> CapabilityDeclarationResponse:
         """Persist an add-on's complete surface set (replace-all).
 
@@ -94,23 +96,26 @@ class AddonCapabilityService:
         version — all in one transaction. Returns the persisted declaration
         with its live ``active`` state.
 
+        Object-level authorization runs in-transaction via
+        :func:`~meho_backplane.operations.addon_pairing.resolve_owned_pairing`:
+        the pairing is resolved by the caller's ``service_account_sub``, and
+        *addon_name* must be that pairing's own name, so one paired service can
+        never replace another add-on's advertised surfaces.
+
         Raises
         ------
         AddonNotPairedError
-            When no pairing matches ``(tenant_id, addon_name)``.
+            When the caller owns no pairing named ``addon_name`` in
+            ``tenant_id``.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            pairing = (
-                await session.execute(
-                    select(AddonPairing).where(
-                        AddonPairing.tenant_id == tenant_id,
-                        AddonPairing.name == addon_name,
-                    )
-                )
-            ).scalar_one_or_none()
-            if pairing is None:
-                raise AddonNotPairedError(addon_name)
+            pairing = await resolve_owned_pairing(
+                session,
+                tenant_id=tenant_id,
+                service_account_sub=service_account_sub,
+                requested_name=addon_name,
+            )
 
             await session.execute(
                 delete(AddonCapability).where(AddonCapability.pairing_id == pairing.id)

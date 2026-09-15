@@ -251,23 +251,26 @@ import hvac.exceptions
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.announce_gate import announce_gate_blocks
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
-from meho_backplane.broadcast.history import build_target_activity_advisory
+from meho_backplane.broadcast.history import WRITE_OP_CLASSES, build_target_activity_advisory
 from meho_backplane.broadcast.reflex import build_reflex_advisory
 from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
     ResultHandle,
+    get_connector_v2,
     resolve_connector_or_label,
     resolve_target_version,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
-from meho_backplane.connectors.base import Connector, shim_kind
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.flight_recorder import attach_agent_trace_handle
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 from meho_backplane.operations._audit import (
+    AuditCommitError,
     audit_and_broadcast_safe,
+    audit_rejection_safe,
     parent_audit_id_var,
     policy_decision_var,
     reveal_secret_var,
@@ -288,7 +291,9 @@ from meho_backplane.operations._errors import (
     result_connector_error,
     result_connector_http_403,
     result_connector_http_422,
+    result_connector_not_found,
     result_connector_probe_refused,
+    result_connector_timeout,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
@@ -300,8 +305,10 @@ from meho_backplane.operations._errors import (
     result_no_connector,
     result_preview_binding_required,
     result_preview_hash_mismatch,
+    result_rate_limited,
     result_target_required,
     result_unknown_op,
+    result_unqualified_target_version,
     wrap_ok_result,
 )
 from meho_backplane.operations._handler_resolve import (
@@ -331,13 +338,23 @@ from meho_backplane.operations._request_preview import (
 from meho_backplane.operations._validate import (
     InvalidOpSchemaError,
     compute_params_hash,
+    ingested_schema_for_validation,
     policy_gate,
     validate_params,
 )
 from meho_backplane.operations.composite import (
+    COMPOSITE_DEPTH_TOP_LEVEL,
     CompositeRecursionLimitExceeded,
     DispatchChild,
+    composite_depth_var,
     get_dispatch_child,
+)
+from meho_backplane.operations.dispatch_limits import (
+    acquire_dispatch_slot,
+    check_dispatch_rate_limit,
+    release_dispatch_slot,
+    resolve_dispatch_concurrency_cap,
+    resolve_dispatch_rate_limit,
 )
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
@@ -348,6 +365,7 @@ from meho_backplane.redaction import (
     apply_connector_boundary_redaction,
     manifest_to_audit_payload,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CompositeRecursionLimitExceeded",
@@ -834,6 +852,22 @@ async def _execute_and_audit_inner(
     )
 
 
+def _requires_durable_audit(descriptor: EndpointDescriptor) -> bool:
+    """Whether a failed DISPATCH audit commit must fail the operation.
+
+    True for write-class ops (:data:`WRITE_OP_CLASSES` via
+    :func:`classify_op`) and for any op above the ``safe`` tier -- the
+    superset that also covers every post-approval / needs-approval-resumed
+    dispatch (approval is gated on ``caution`` or higher). For these the
+    durable audit row is a hard precondition of a successful return
+    (CLAUDE.md postulate 7 / v0.1-spec §6), so the success path fails
+    closed into a ``connector_error`` when the row cannot commit. Safe
+    read-class ops keep the historical fail-open posture -- S07 (#295)
+    scopes this pass to the write / post-approval path.
+    """
+    return classify_op(descriptor.op_id) in WRITE_OP_CLASSES or descriptor.safety_level != "safe"
+
+
 async def _reduce_and_audit_success(
     *,
     op_id: str,
@@ -885,20 +919,32 @@ async def _reduce_and_audit_success(
         return reduced
     summary, handle = reduced
     duration_ms = _elapsed_ms(started)
-    await audit_and_broadcast_safe(
-        audit_id=audit_id,
-        operator=operator,
-        descriptor=descriptor,
-        target=target,
-        params=params,
-        params_hash=params_hash,
-        result_status="ok",
-        duration_ms=duration_ms,
-        raw_payload=redaction.raw,
-        redaction_manifest=serialised_manifest,
-        redaction_policy_id=redaction.policy_id,
-        handle_metadata=_handle_metadata_for_audit(handle),
-    )
+    try:
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="ok",
+            duration_ms=duration_ms,
+            raw_payload=redaction.raw,
+            redaction_manifest=serialised_manifest,
+            redaction_policy_id=redaction.policy_id,
+            handle_metadata=_handle_metadata_for_audit(handle),
+            require_audit=_requires_durable_audit(descriptor),
+        )
+    except AuditCommitError as exc:
+        # The mutation already ran against the vendor, but the durable
+        # DISPATCH row -- the only record carrying raw_payload,
+        # redaction_manifest, policy_decision, target_id and
+        # agent_session_id -- did not commit. For a write-class /
+        # post-approval op that row is a precondition of a successful
+        # return (postulate 7 / v0.1-spec §6), so surface a distinct
+        # connector_error instead of status=ok. No broadcast was emitted
+        # (audit_and_broadcast_safe skips it when the audit fails).
+        return result_connector_error(op_id, exc, duration_ms)
     activity_advisory = await build_target_activity_advisory(
         operator,
         op_id=descriptor.op_id,
@@ -1149,6 +1195,30 @@ async def _run_branch_with_error_handling(
             params_hash=params_hash,
             duration_ms=duration_ms,
         )
+    except httpx.TimeoutException as timeout_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, timeout_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except httpx.TransportError as transport_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_timeout(op_id, transport_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
@@ -1256,6 +1326,18 @@ async def _run_branch_with_error_handling(
         duration_ms = _elapsed_ms(started)
         return await _audit_error_and_return(
             result_connector_auth_failed(op_id, auth_exc, target, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
+    except ConnectorResourceNotFoundError as not_found_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_not_found(op_id, not_found_exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
@@ -1785,6 +1867,23 @@ def _result_scalars_from_descriptor(descriptor: EndpointDescriptor) -> dict[str,
     return None
 
 
+def _result_objects_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
+    """Extract a bounded ``result_objects`` projection from an operation.
+
+    Connectors use ``{"objects": {"leaf": ["subject", "san"]}}`` when a
+    collection reduction needs to keep selected fields from a top-level object
+    inline. The reducer validates and bounds the projection; this layer only
+    keeps descriptor access out of the reducer, mirroring ``result_scalars``.
+    """
+    instructions = descriptor.llm_instructions
+    if not isinstance(instructions, dict):
+        return None
+    raw = instructions.get("result_objects")
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
 def _result_digest_from_descriptor(descriptor: EndpointDescriptor) -> dict[str, Any] | None:
     """Extract ``result_digest`` from a descriptor's ``llm_instructions``.
 
@@ -1898,6 +1997,9 @@ async def _reduce_or_error(
     result_scalars = _result_scalars_from_descriptor(descriptor)
     if result_scalars is not None:
         reducer_context["result_scalars"] = result_scalars
+    result_objects = _result_objects_from_descriptor(descriptor)
+    if result_objects is not None:
+        reducer_context["result_objects"] = result_objects
     # #3122: forward the op's row-digest hint (when the connector author
     # registered one via ``llm_instructions``) so the reducer reduces the
     # named collection even in the presence of a sibling array and writes the
@@ -2385,8 +2487,18 @@ async def dispatch(
         return result_unknown_op(op_id, known_op_count, _elapsed_ms(started))
 
     # --- Step 3: parameter_schema validation ------------------------------
+    # #293 (security review S05): for an ingested (generic-connector) op,
+    # validate against a schema that forbids undeclared params. Freshly
+    # ingested descriptors already carry ``additionalProperties: false``
+    # (openapi._build_parameter_schema); this backstop applies the same
+    # clause to descriptors ingested before that fix, so an undeclared
+    # param is rejected as ``invalid_params`` here rather than defaulting
+    # onto the vendor query string in ``_split_ingested_params``.
+    schema_to_validate = descriptor.parameter_schema
+    if descriptor.source_kind == "ingested":
+        schema_to_validate = ingested_schema_for_validation(descriptor.parameter_schema)
     try:
-        validation_errors = validate_params(descriptor.parameter_schema, params)
+        validation_errors = validate_params(schema_to_validate, params)
     except InvalidOpSchemaError as exc:
         # #3095: the stored schema itself is broken (dangling $ref) --
         # the descriptor is at fault, not the caller. Structured error
@@ -2394,6 +2506,112 @@ async def dispatch(
         return result_invalid_op_schema(op_id, exc.missing_ref, _elapsed_ms(started))
     if validation_errors:
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
+
+    # A connector may opt an ingested catalog into a target-compatibility
+    # guard. The owner lookup is exact: it names the catalog the caller
+    # selected, while the resolver answers which connector class the target
+    # would use. Resolve only for an advertised guard so existing descriptor
+    # kinds retain their policy and targetless dispatch behaviour.
+    pre_resolved_connector_class: type[Connector] | None = None
+    owner_class = get_connector_v2(descriptor.product, descriptor.version, descriptor.impl_id)
+    if (
+        descriptor.source_kind == "ingested"
+        and owner_class is not None
+        and owner_class.enforces_catalog_target_compatibility
+    ):
+        pre_resolved_connector_class, _resolution_label, _resolution_message = (
+            resolve_connector_or_label(target)
+        )
+        target_product = getattr(target, "product", None)
+        if not isinstance(target_product, str) or not target_product:
+            target_product = None
+        target_version = resolve_target_version(target)
+        incompatibility = owner_class.catalog_target_incompatibility(
+            descriptor_source_kind=descriptor.source_kind,
+            target_product=target_product,
+            target_version=target_version,
+            selected_target_connector=pre_resolved_connector_class,
+        )
+        if incompatibility is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="unqualified_target_version",
+                duration_ms=duration_ms,
+            )
+            return result_unqualified_target_version(
+                op_id,
+                reason=incompatibility,
+                target_product=target_product,
+                target_version=target_version,
+                duration_ms=duration_ms,
+            )
+
+    # --- Step 3.5: dispatch limits (#3500) --------------------------------
+    # Per-principal rate limit + per-principal concurrent-op cap, enforced
+    # here so CLI, MCP and the REST dispatch route are all covered by one
+    # seam (they all funnel through this function). Applied to TOP-LEVEL
+    # client requests only: a composite's internal ``dispatch_child`` fan-out
+    # (``composite_depth_var > 0``) is one client request, not many, and
+    # counting it would both misattribute volume and risk a self-deadlock
+    # against the cap; an approval-resume (``_approved``) is the continuation
+    # of a request already counted at park time. Both are exempt. Every limit
+    # defaults to disabled (0), so an unconfigured tenant reaches Step 4
+    # unchanged with no Valkey round-trip. A rejection is audited
+    # synchronously (``result_status='rate_limited'``) before any vendor
+    # traffic and surfaced as a structured 429-shaped envelope.
+    _dispatch_slot_key: str | None = None
+    if composite_depth_var.get() == COMPOSITE_DEPTH_TOP_LEVEL and not _approved:
+        _limit_settings = get_settings()
+        _rate_limit = resolve_dispatch_rate_limit(_limit_settings, operator.tenant_id)
+        _rate_retry = await check_dispatch_rate_limit(operator.tenant_id, operator.sub, _rate_limit)
+        if _rate_retry is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="rate_limited",
+                duration_ms=duration_ms,
+            )
+            return result_rate_limited(
+                op_id,
+                kind="rate",
+                limit=_rate_limit,
+                retry_after_seconds=_rate_retry,
+                duration_ms=duration_ms,
+            )
+        _conc_cap = resolve_dispatch_concurrency_cap(_limit_settings, operator.tenant_id)
+        _conc_retry, _dispatch_slot_key = await acquire_dispatch_slot(
+            operator.tenant_id,
+            operator.sub,
+            _conc_cap,
+            _limit_settings.dispatch_concurrency_slot_ttl_seconds,
+        )
+        if _conc_retry is not None:
+            duration_ms = _elapsed_ms(started)
+            await audit_rejection_safe(
+                audit_id=uuid.uuid4(),
+                operator=operator,
+                descriptor=descriptor,
+                target=target,
+                params_hash=params_hash,
+                result_status="rate_limited",
+                duration_ms=duration_ms,
+            )
+            return result_rate_limited(
+                op_id,
+                kind="concurrency",
+                limit=_conc_cap,
+                retry_after_seconds=_conc_retry,
+                duration_ms=duration_ms,
+            )
 
     # --- Step 4: policy gate ---------------------------------------------
     # Skipped on the approval-queue resume path (``_approved``): a human
@@ -2517,9 +2735,21 @@ async def dispatch(
             policy_decision_var.set(PermissionVerdict.NEEDS_APPROVAL.value)
 
         # --- Step 5: connector resolution ---------------------------------
-        connector_instance, resolution_error, exception_message = await _resolve_connector_instance(
-            descriptor, target
-        )
+        connector_instance: Connector | None
+        resolution_error: ResolutionLabel | None
+        exception_message: str | None
+        if pre_resolved_connector_class is not None:
+            connector_instance, resolution_error, exception_message = (
+                get_or_create_connector_instance(pre_resolved_connector_class),
+                None,
+                None,
+            )
+        else:
+            (
+                connector_instance,
+                resolution_error,
+                exception_message,
+            ) = await _resolve_connector_instance(descriptor, target)
         if resolution_error == "target_required":
             # G0.20-T6 (#1506): a connector-bound (self-first) typed/composite
             # handler invoked with ``target=None``. Clean usage error before
@@ -2587,3 +2817,17 @@ async def dispatch(
     finally:
         policy_decision_var.reset(_verdict_token)
         reveal_secret_var.reset(_reveal_token)
+        # #3500: release the concurrency slot (no-op when none was taken --
+        # the disabled / non-top-level / approved paths). Best-effort: a
+        # release hiccup must not turn a decided result into an exception,
+        # and the slot's safety TTL is the backstop if the DECR never lands.
+        try:
+            await release_dispatch_slot(_dispatch_slot_key)
+        except Exception:
+            import structlog as _structlog
+
+            _structlog.get_logger(__name__).exception(
+                "dispatch_slot_release_failed",
+                op_id=op_id,
+                operator_sub=operator.sub,
+            )

@@ -58,6 +58,7 @@ from meho_backplane.connectors.secret.ops import (
     secret_move,
 )
 from meho_backplane.connectors.secret.vault_endpoint import VaultKvSecretEndpoint
+from meho_backplane.connectors.vault.tenant_scope import VaultTenantScopeError
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
@@ -68,6 +69,11 @@ from ._vault_fakes import install_fake_client
 
 _SECRET_VALUE = "hunter2"
 _SECRET_SHA256 = hashlib.sha256(_SECRET_VALUE.encode()).hexdigest()
+
+#: The Nil-UUID system tenant, exempt from the tenant-scope guard. A
+#: module-level singleton (not an inline ``UUID(int=0)`` default) so the
+#: default arg of ``_make_operator`` doesn't trip ruff B008.
+_SYSTEM_TENANT_ID = UUID(int=0)
 
 
 # ---------------------------------------------------------------------------
@@ -111,14 +117,19 @@ async def _registered_secret_broker_op(
     yield
 
 
-def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
-    """A request-scoped operator carrying the JWT the vault adapter forwards."""
+def _make_operator(jwt: str = "fake.jwt.value", *, tenant_id: UUID = _SYSTEM_TENANT_ID) -> Operator:
+    """A request-scoped operator carrying the JWT the vault adapter forwards.
+
+    ``tenant_id`` defaults to the Nil-UUID system tenant (exempt from the
+    tenant-scope guard) so the pre-existing end-to-end tests keep passing
+    unchanged; the S08 guard tests pass a real tenant to exercise it.
+    """
     return Operator(
         sub="test-operator",
         name=None,
         email=None,
         raw_jwt=jwt,
-        tenant_id=UUID(int=0),
+        tenant_id=tenant_id,
         tenant_role=TenantRole.OPERATOR,
     )
 
@@ -487,3 +498,117 @@ async def test_secret_move_invalid_params_returns_dispatcher_error(
 
     assert result.status == "error"
     assert result.extras.get("error_code") == "invalid_params"
+
+
+# ---------------------------------------------------------------------------
+# Tenant-scope guard (S08 #296) — the vault-kv adapter is a second KV-v2
+# read/write path, so it enforces the same default-on per-tenant subtree as
+# the ``vault.kv.*`` handlers, before any Vault round-trip.
+# ---------------------------------------------------------------------------
+
+_TENANT_A = UUID("11111111-1111-1111-1111-111111111111")
+_TENANT_B = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def _enable_tenant_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the shipped default-on per-tenant prefix so the guard enforces.
+
+    The broker suite's autouse ``_settings_env`` does not touch
+    ``VAULT_KV_TENANT_SCOPE_PREFIX``; a dev/CI shell that emptied it (the
+    #282 lab-config opt-out) would silently disable the guard, so set it
+    explicitly to the shipped default and clear the settings cache.
+    """
+    monkeypatch.setenv("VAULT_KV_TENANT_SCOPE_PREFIX", "secret/tenants/{tenant_id}/")
+    get_settings.cache_clear()
+
+
+async def test_secret_move_denies_cross_tenant_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-tenant SOURCE ref is denied before any Vault round-trip.
+
+    Operator in tenant A moves ``from`` a path under tenant B's subtree.
+    ``read_secret``'s ``enforce_tenant_scope`` raises
+    ``VaultTenantScopeError`` before ``vault_client_for_operator`` is
+    entered, so the fake hvac client records neither a read nor a write.
+    """
+    _enable_tenant_scope(monkeypatch)
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    with pytest.raises(VaultTenantScopeError):
+        await secret_move(
+            operator,
+            None,
+            {
+                "from": f"vault:tenants/{_TENANT_B}/db#password",
+                "to": f"vault:tenants/{_TENANT_A}/replica#password",
+            },
+        )
+
+    # No Vault round-trip on either side — the guard fired before login.
+    assert fake.secrets.kv.v2.read_calls == []
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+async def test_secret_move_denies_cross_tenant_sink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-tenant SINK ref is denied by the write-side guard.
+
+    The in-namespace source read runs, but ``write_secret``'s
+    ``enforce_tenant_scope(read_only=False)`` raises before the sink write,
+    so no ``create_or_update_secret`` reaches the foreign-tenant path.
+    """
+    _enable_tenant_scope(monkeypatch)
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    with pytest.raises(VaultTenantScopeError):
+        await secret_move(
+            operator,
+            None,
+            {
+                "from": f"vault:tenants/{_TENANT_A}/db#password",
+                "to": f"vault:tenants/{_TENANT_B}/replica#password",
+            },
+        )
+
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+async def test_secret_move_in_namespace_ref_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-namespace move passes the guard and round-trips server-side.
+
+    Both refs live under the operator's ``secret/tenants/<A>/`` subtree, so
+    the guard is a no-op and the value is read from the source and written
+    to the sink through the existing ``install_fake_client`` seam.
+    """
+    _enable_tenant_scope(monkeypatch)
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    operator = _make_operator(tenant_id=_TENANT_A)
+
+    result = await secret_move(
+        operator,
+        None,
+        {
+            "from": f"vault:tenants/{_TENANT_A}/db#password",
+            "to": f"vault:tenants/{_TENANT_A}/replica#password",
+        },
+    )
+
+    assert result == {
+        "status": "moved",
+        "value_sha256": _SECRET_SHA256,
+        "length": len(_SECRET_VALUE.encode()),
+    }
+    assert fake.secrets.kv.v2.put_calls == [
+        {
+            "path": f"tenants/{_TENANT_A}/replica",
+            "secret": {"password": _SECRET_VALUE},
+            "cas": None,
+            "mount_point": "secret",
+        }
+    ]

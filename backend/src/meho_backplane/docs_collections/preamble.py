@@ -33,11 +33,15 @@ Untrusted-content isolation
 The collection metadata (``vendor`` / ``when_to_use`` / ``description``)
 is operator-curated registry data, but the same OWASP LLM01 discipline the
 conventions + priming bands use applies: the block is wrapped in hard-coded
-:data:`BLOCK_START` / :data:`BLOCK_END` delimiters emitted by the wrapper,
-never interpolated from row content, so a ``when_to_use`` blurb containing
-the literal terminator cannot escape the block. A :data:`GUARD_PREFIX`
-reminds the model this is a *catalogue* — reference data the agent reads to
-pick a collection — not a system directive.
+:data:`BLOCK_START` / :data:`BLOCK_END` delimiters emitted by the wrapper.
+Those field values ARE interpolated verbatim, though, and the write-side
+schema constrains them by length only (no pattern), so a ``when_to_use``
+blurb carrying the literal terminator would plant a second boundary inside
+the block. :func:`_neutralise_delimiters` rewrites any delimiter substring
+found in the interpolated field values before wrapping, so the assembled
+band carries exactly one delimiter pair. A :data:`GUARD_PREFIX` reminds the
+model this is a *catalogue* — reference data the agent reads to pick a
+collection — not a system directive.
 
 Token cap
 ---------
@@ -78,13 +82,41 @@ _log = structlog.get_logger(__name__)
 
 
 #: Opening delimiter for the catalogue band. Hard-coded; the wrapper emits
-#: the literal — it is never substituted from collection metadata, so a
-#: ``when_to_use`` blurb containing the terminator cannot escape the block
-#: (the positional-wrapper discipline the conventions + priming bands use).
+#: the literal. :func:`_neutralise_delimiters` strips this substring from the
+#: interpolated collection metadata first, so the assembled band carries
+#: exactly one opening delimiter -- the wrapper's.
 BLOCK_START: Final[str] = "<<DOC_COLLECTIONS_AVAILABLE>>"
 
 #: Closing delimiter for the catalogue band. Pairs with :data:`BLOCK_START`.
+#: A metadata field containing this literal is neutralised by
+#: :func:`_neutralise_delimiters` before wrapping, so it cannot plant a
+#: second terminator inside the block.
 BLOCK_END: Final[str] = "<<END_DOC_COLLECTIONS_AVAILABLE>>"
+
+
+#: Replacement swapped in for any band delimiter found inside interpolated
+#: collection metadata. It contains neither :data:`BLOCK_START` nor
+#: :data:`BLOCK_END` as a substring, so the rewrite is idempotent.
+_NEUTRALISED_DELIMITER: Final[str] = "[delimiter neutralised]"
+
+
+def _neutralise_delimiters(text: str) -> str:
+    """Defang embedded catalogue-band delimiters in collection metadata.
+
+    ``vendor`` / ``when_to_use`` / ``description`` are operator-curated
+    free text constrained by length only (no write-time pattern). A field
+    carrying the literal :data:`BLOCK_START` / :data:`BLOCK_END` would
+    otherwise plant a second band boundary inside the wrapped catalogue,
+    promoting the text after the embedded terminator out of the block.
+    Rewriting the delimiter substrings to :data:`_NEUTRALISED_DELIMITER`
+    before the positional wrapper runs guarantees the assembled band
+    carries exactly one delimiter pair. Legitimate metadata never contains
+    these MEHO-internal sentinels, so it renders unchanged.
+    """
+    for delimiter in (BLOCK_START, BLOCK_END):
+        text = text.replace(delimiter, _NEUTRALISED_DELIMITER)
+    return text
+
 
 #: Guard prefix reminding the model the wrapped catalogue is reference data
 #: (which collections it may search), not a system directive. Mirrors the
@@ -224,15 +256,16 @@ def _render_entry(row: DocCollectionORM) -> str:
     ``- <key> (<vendor>): <when_to_use|description>``. The ``when_to_use``
     blurb is the agent-facing "pick this collection when…" signal; it falls
     back to ``description`` and then to the products list so an entry always
-    carries enough to disambiguate. Fields come from row content; the
-    wrapper (not this line) emits the guard delimiters, so nothing here can
-    break out of the block.
+    carries enough to disambiguate. Every interpolated component is
+    operator-curated free text, so the rendered line is passed through
+    :func:`_neutralise_delimiters` -- a field carrying the band terminator
+    cannot forge a second boundary once wrapped.
     """
     hint = row.when_to_use or row.description
     if not hint:
         products = ", ".join(row.products) if row.products else "—"
         hint = f"covers {products}"
-    return f"- {row.collection_key} ({row.vendor}): {hint}"
+    return _neutralise_delimiters(f"- {row.collection_key} ({row.vendor}): {hint}")
 
 
 def _render_summary_entry(count: int) -> str:
@@ -249,9 +282,10 @@ def _render_catalogue_block(entries: list[str]) -> str:
 
     Header (guard prefix) + a blank line + the newline-joined entries,
     bounded by the hard-coded :data:`BLOCK_START` / :data:`BLOCK_END`
-    delimiters. The delimiters are wrapper-emitted, never interpolated from
-    row content, so an entry containing the terminator string cannot escape
-    the block (the positional-wrapper discipline the sibling bands use).
+    delimiters. The entries reach here already passed through
+    :func:`_neutralise_delimiters` (see :func:`_render_entry`), so no
+    interpolated field value carries a copy of these delimiters and the
+    wrapped band holds exactly one delimiter pair.
     """
     body = GUARD_PREFIX + "\n\n" + "\n".join(entries)
     return f"{BLOCK_START}\n{body}\n{BLOCK_END}"

@@ -26,7 +26,36 @@ func newFlightRecorderPolicyCmd() *cobra.Command {
 		Long:         "Read/write the operator's own tenant flight-recorder capture policy.",
 		SilenceUsage: true,
 	}
+	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newSetCmd())
+	return cmd
+}
+
+type showOptions struct {
+	jsonOut           bool
+	backplaneOverride string
+}
+
+// newShowCmd returns `meho tenants flight-recorder-policy show`.
+func newShowCmd() *cobra.Command {
+	var opts showOptions
+	cmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show effective and raw flight-recorder capture policy (tenant_admin)",
+		Long: "show GETs /api/v1/tenants/flight-recorder-policy for the operator's own " +
+			"tenant. It prints both the effective policy used by dispatch (global defaults " +
+			"resolved) and the raw tenant values, where null means inherit/default.",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runShow(cmd, opts)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false,
+		"emit the effective and raw policy as JSON instead of the human summary")
+	cmd.Flags().StringVar(&opts.backplaneOverride, "backplane", "",
+		"backplane URL (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
 }
 
@@ -171,6 +200,30 @@ func runSet(cmd *cobra.Command, opts setOptions) error {
 	return nil
 }
 
+func runShow(cmd *cobra.Command, opts showOptions) error {
+	backplaneURL, err := backplane.Resolve(opts.backplaneOverride)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.jsonOut)
+	}
+	resp, err := getPolicy(cmd.Context(), backplaneURL)
+	if err != nil {
+		return renderRequestError(cmd, backplaneURL, err, opts.jsonOut)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode, resp.Body, opts.jsonOut)
+	}
+	var policy api.TenantFlightRecorderPolicyRead
+	if err := json.Unmarshal(resp.Body, &policy); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("decode policy response: %v", err)), opts.jsonOut)
+	}
+	if opts.jsonOut {
+		return output.PrintJSON(cmd.OutOrStdout(), policy)
+	}
+	printPolicyReadSummary(cmd.OutOrStdout(), &policy)
+	return nil
+}
+
 func patchPolicy(ctx context.Context, backplaneURL string, payload []byte) (*rawResponse, error) {
 	authed, err := newAuthedClient(ctx, backplaneURL)
 	if err != nil {
@@ -182,6 +235,19 @@ func patchPolicy(ctx context.Context, backplaneURL string, payload []byte) (*raw
 			&api.UpdateFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyPatchParams{},
 			"application/json",
 			bytes.NewReader(payload),
+		)
+	})
+}
+
+func getPolicy(ctx context.Context, backplaneURL string) (*rawResponse, error) {
+	authed, err := newAuthedClient(ctx, backplaneURL)
+	if err != nil {
+		return nil, err
+	}
+	return doRequest(ctx, authed, func(ctx context.Context) (*http.Response, error) {
+		return authed.GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGet(
+			ctx,
+			&api.GetFlightRecorderPolicyApiV1TenantsFlightRecorderPolicyGetParams{},
 		)
 	})
 }
@@ -203,6 +269,36 @@ func printPolicySummary(w io.Writer, p *api.TenantFlightRecorderPolicy) {
 	}
 	fmt.Fprintln(w, "updated flight-recorder policy")
 	fmt.Fprintf(w, "%-16s %s\n", "tenant_id:", p.TenantId.String())
+	fmt.Fprintf(w, "%-16s %t\n", "capture:", p.FlightRecorderEnabled)
+	fmt.Fprintf(w, "%-16s %s\n", "agent-readable:", agent)
+	fmt.Fprintf(w, "%-16s %s\n", "retention:", retention)
+}
+
+func printPolicyReadSummary(w io.Writer, p *api.TenantFlightRecorderPolicyRead) {
+	if p == nil {
+		return
+	}
+	fmt.Fprintln(w, "effective flight-recorder policy")
+	fmt.Fprintf(w, "%-16s %s\n", "tenant_id:", p.Effective.TenantId.String())
+	fmt.Fprintf(w, "%-16s %t\n", "capture:", p.Effective.FlightRecorderEnabled)
+	fmt.Fprintf(w, "%-16s %t\n", "agent-readable:", p.Effective.FlightRecorderAgentReadable)
+	fmt.Fprintf(w, "%-16s %d days\n", "retention:", p.Effective.FlightRecorderRetentionDays)
+	fmt.Fprintln(w, "raw tenant values")
+	printPolicyValues(w, &p.Raw)
+}
+
+func printPolicyValues(w io.Writer, p *api.TenantFlightRecorderPolicy) {
+	if p == nil {
+		return
+	}
+	agent := "inherit (follows capture default)"
+	if p.FlightRecorderAgentReadable != nil {
+		agent = fmt.Sprintf("%t", *p.FlightRecorderAgentReadable)
+	}
+	retention := "default (global)"
+	if p.FlightRecorderRetentionDays != nil {
+		retention = fmt.Sprintf("%d days", *p.FlightRecorderRetentionDays)
+	}
 	fmt.Fprintf(w, "%-16s %t\n", "capture:", p.FlightRecorderEnabled)
 	fmt.Fprintf(w, "%-16s %s\n", "agent-readable:", agent)
 	fmt.Fprintf(w, "%-16s %s\n", "retention:", retention)

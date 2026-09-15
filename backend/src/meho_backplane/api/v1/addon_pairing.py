@@ -219,8 +219,11 @@ async def heartbeat_pairing(
     """Record an add-on liveness heartbeat (paired service principal only).
 
     The paired add-on authenticates as its own service principal and stamps
-    ``last_seen_at``. A non-service principal is 403; an unpaired add-on is
-    404. Audited via the audit middleware.
+    ``last_seen_at``. A non-service principal is 403. The pairing is resolved
+    by the caller's service-account ``sub`` and must be ``{name}``'s own
+    pairing, so a paired service cannot heartbeat another add-on's pairing; a
+    caller that owns no pairing named ``{name}`` is 404 (indistinguishable from
+    an absent one). Audited via the audit middleware.
     """
     if operator.principal_kind is not PrincipalKind.SERVICE:
         raise HTTPException(
@@ -234,7 +237,7 @@ async def heartbeat_pairing(
     )
     service = AddonPairingService()
     try:
-        return await service.heartbeat(operator.tenant_id, name)
+        return await service.heartbeat(operator.tenant_id, name, service_account_sub=operator.sub)
     except AddonNotPairedError as exc:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,

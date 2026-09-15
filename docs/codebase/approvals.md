@@ -89,6 +89,58 @@ terminal, so it cannot be approved (the pending guard raises
 `ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
 never be claimed or re-dispatched (#2293).
 
+## Transactional decision transitions + decision-time deadline (F12 / #274)
+
+The TTL sweep above is a *background* safety net; it is not the only
+guard. Two hardening properties make the decision paths correct
+independently of the sweep and under concurrency (security review finding
+F12):
+
+1. **Decision-time deadline gate.** `approve_request` re-checks the
+   deadline on the row it is about to approve (`_load_pending_for_approval`
+   → `_deadline_has_passed`, the Python mirror of the sweep's
+   `_deadline_passed_clause`, same legacy null-expiry coalesce). An overdue
+   pending row is refused with `ApprovalRequestExpiredError` (mapped to HTTP
+   409 `approval_request_expired` on REST and the console) **even if the
+   sweeper is delayed or failing** — the sweep's default cadence is 300s and
+   its per-tick failures are swallowed to keep the loop alive, so trusting it
+   alone would leave an overdue intent approvable for a whole tick. The gate
+   only *refuses* the approval; the row stays `pending` for the sweep to
+   transition to `expired` with its decision audit row. `reject_request`
+   does **not** apply the gate — rejecting an overdue request is harmless
+   (both are non-executing terminal states).
+
+2. **Row-locked transitions — exactly one winner.** `approve_request` and
+   `reject_request` load the row `SELECT ... FOR UPDATE`
+   (`_load_for_tenant(..., for_update=True)`), and the sweep selects
+   `FOR UPDATE SKIP LOCKED`. A competing approve / reject / expiry on one
+   row therefore serialises on the row lock: the winner commits its
+   transition and its single decision audit row in one transaction; the
+   loser blocks on the lock, re-reads the committed terminal state, and hits
+   the pending guard (`ApprovalRequestAlreadyDecidedError`) or, for the
+   sweep, skips the locked row. The result is one winning transition, one
+   consistent decision record, and no conflicting overwrite. The
+   notification publishes only **after** commit (unchanged), so a phantom
+   event cannot outlive a rolled-back decision.
+
+The **execution claim** carries the same discipline: `claim_resume`'s
+conditional `UPDATE ... WHERE resumed_at IS NULL AND status = 'approved'`
+now requires the `approved` state in the same statement as the
+single-resumer latch (previously it checked only `resumed_at IS NULL`). So
+no execution can follow a losing / rejected / expired transition — a
+request another decision won cannot be claimed for dispatch — while the
+exactly-one-resumer latch (#2293) is preserved. Every resume surface already
+reaches the claim only after the decision committed `approved`, so this
+tightens the invariant without changing the live control flow; it fails
+closed if a resume is ever attempted against a non-approved row.
+
+On SQLite (the unit-test driver) `FOR UPDATE` / `SKIP LOCKED` are silent
+no-ops, so the concurrency guarantee is proven against real Postgres in
+`tests/integration/test_approval_transactional_transitions_e2e.py`
+(concurrent approve/reject and reject/expiry races, one-winner + one
+decision-row + no-execution-for-the-loser), alongside the sibling
+exactly-one-resumer suite.
+
 ## Subject + actor attribution on the request row (#1481)
 
 The `approval_request` row carries the RFC 8693 two-claim attribution
@@ -610,6 +662,19 @@ The per-op preview is opt-in via a builder registry in
   returns `None` — and the caller stores its own bare identifier-only
   default — only when connector resolution / hook execution itself raises.
 
+Two park points stamp through this same `_build_proposed_effect` seam: the
+dispatcher's `_handle_needs_approval` (above) and the composite direct-seam
+`enforce_subop_policy` (`operations/composite.py`), which re-applies the
+policy gate around a direct-session write sub-op. Before #294 (security
+review S06) only the dispatcher path stamped it — the composite seam parked
+with the bare identifier-only default, so a parked `dangerous` sub-op's row
+carried no `safety_level` and the #3290 no-self-approval-under-break-glass
+carve-out silently did not fire for it (nor did the reviewer row show its
+severity or blast radius). The seam now builds the same envelope and, for a
+`destructive`-tier sub-op, routes through `_destructive_binding_refusal` to
+**fail closed** when no `preview_hash` + blast-radius binding is present
+(#3197) — identical to the dispatcher.
+
 Three invariants make the hook safe to wire on the park path:
 
 1. **Generic echo default, opt-in bespoke builder (#1856); safety_level
@@ -1000,6 +1065,30 @@ line. The `/result` read is deliberately **not** on this gate: it is
 principal-scoped on `principal_sub`, so an approver deciding a request it
 did not park gains no result-read rights.
 
+**Human-only on every transport (meho-internal#289).** `require_approvals_access`
+gates on *role/capability*, not on *what authenticated the request* — and an
+agent principal is minted `tenant_admin` with the REST audience
+(`auth/agent_principals.py`), so its client-credentials token clears that gate.
+The three decision verbs (`approve` / `reject` / `decide`) therefore carry a
+second, transport-independent dependency — `require_human_principal`
+(`auth/rbac.py`) — evaluated **before** the role floor: it refuses any machine
+`principal_kind` (`agent` / `service` / `runner`, the `MACHINE_PRINCIPAL_KINDS`
+frozenset in `auth/operator.py`, via the shared `is_human_principal` split) with
+403 `human_principal_required` and a remediation naming the console / CLI human
+path. This is the REST peer of the MCP transport's human-only block
+(`mcp/human_only.py`): removing the decision verbs from the agent surface there
+and refusing the machine kind here are **one** policy — approval is a human
+decision (v0.1-spec §7) — not two per-transport rules, and both consult the same
+`is_human_principal` split. The service-layer twin `_check_reviewer_role`
+enforces the same refusal for direct queue callers, raising `NonHumanApprovalError`
+(a `UnauthorizedApprovalError` subclass, so the routes still map it to 403), so
+the guard holds even for a caller that reaches the queue below the REST
+dependency. The **read** plane is deliberately unchanged — `GET` list/show stay
+on `require_approvals_access` alone — so a `service` principal (the
+meho-automation approval bridge) still lists the tenant queue. The gate removes
+only machine kinds: the `approver` capability model (#3243) and the seniority
+self-approval rules are preserved unchanged for **human** principals.
+
 The realm-side provisioning path for the `approver` claim — a group-based
 Keycloak protocol-mapper recipe (`kcadm.sh` primary, Admin Console
 secondary), claim-name alignment with `JWT_APPROVER_CLAIM_NAME`,
@@ -1011,9 +1100,9 @@ token-decode + live decouple verification, and a rollback note — lives in
 | `GET` | `/api/v1/approvals` | operator **or** approver | List, filtered by `status` (default: `pending`). |
 | `GET` | `/api/v1/approvals/{id}` | operator **or** approver | **Inspect one request** (T5). 404 on cross-tenant. |
 | `GET` | `/api/v1/approvals/{id}/result` | **request owner** (any role) | **Read the approved dispatch's result** (#3209). Principal-scoped: only `principal_sub` reads it; any other principal gets 403 `not_request_owner`. Writes an `approval.result` audit row. |
-| `POST` | `/api/v1/approvals/{id}/approve` | operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1). |
-| `POST` | `/api/v1/approvals/{id}/decide` | operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). |
-| `POST` | `/api/v1/approvals/{id}/reject` | operator **or** approver | Reject. The op never executes. |
+| `POST` | `/api/v1/approvals/{id}/approve` | **human** operator **or** approver | Approve. Requires `params` (hash-verified). Re-hydrates the target by id, then re-dispatches with `dispatch(..., _approved=True)`. 403 `self_approval_forbidden` when the approver is the requester and break-glass is off (G11.7-T1); 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/decide` | **human** operator **or** approver | Decide (`approved` / `rejected`) by id alone. For an approved **direct** op (`run_id IS NULL`) re-dispatches with the **stored** params (#1503) and returns the outcome in `dispatch_*`; for an agent-run request records the decision only (the agent runtime resumes). 403 `human_principal_required` for a machine `principal_kind` (#289). |
+| `POST` | `/api/v1/approvals/{id}/reject` | **human** operator **or** approver | Reject. The op never executes. 403 `human_principal_required` for a machine `principal_kind` (#289). |
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 

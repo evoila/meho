@@ -59,6 +59,7 @@ from datetime import UTC, datetime
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminClient,
@@ -80,6 +81,7 @@ __all__ = [
     "AddonAlreadyPairedError",
     "AddonNotPairedError",
     "AddonPairingService",
+    "resolve_owned_pairing",
 ]
 
 #: Add-on name alphabet: letters, digits, hyphen, underscore, dot. Mirrors
@@ -121,6 +123,52 @@ class AddonNotPairedError(Exception):
     def __init__(self, name: str) -> None:
         self.name = name
         super().__init__(f"add-on {name!r} is not paired")
+
+
+async def resolve_owned_pairing(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    service_account_sub: str,
+    requested_name: str,
+) -> AddonPairing:
+    """Resolve the caller's own pairing by subject, requiring name *requested_name*.
+
+    The shared object-level authorization guard for an add-on's **self-service
+    writes** — the liveness heartbeat (#3025) and the capability declaration
+    (#3026). Both are the paired add-on's own action, so the pairing is
+    resolved by the caller's Keycloak service-account ``sub`` (captured at pair
+    time as :attr:`~meho_backplane.db.models.AddonPairing.service_account_sub`),
+    never by the ``{name}`` in the request path. The requested name must be the
+    caller's own pairing name; a mismatch is refused indistinguishably from an
+    absent pairing, so one paired service can neither act on another's pairing
+    nor probe which add-on names exist. This is the write-side counterpart of
+    the step-event subscription bind
+    (:meth:`~meho_backplane.operations.addon_step_events.AddonStepEventService.resolve_pairing_for_sub`).
+
+    The guard takes the caller's *session* so it runs inside the mutation's own
+    transaction: the authorization and the write commit as one unit and a
+    concurrent unpair cannot slip between the check and the mutation.
+
+    Raises
+    ------
+    AddonNotPairedError
+        When *service_account_sub* binds to no pairing in *tenant_id* — a
+        non-add-on service principal, or a pre-#3027 pairing whose
+        ``service_account_sub`` is ``NULL`` (fails closed until it re-pairs) —
+        or binds to a pairing whose name is not *requested_name*.
+    """
+    pairing = (
+        await session.execute(
+            select(AddonPairing).where(
+                AddonPairing.tenant_id == tenant_id,
+                AddonPairing.service_account_sub == service_account_sub,
+            )
+        )
+    ).scalar_one_or_none()
+    if pairing is None or pairing.name != requested_name:
+        raise AddonNotPairedError(requested_name)
+    return pairing
 
 
 class AddonPairingService:
@@ -471,24 +519,27 @@ class AddonPairingService:
         self,
         tenant_id: uuid.UUID,
         name: str,
+        *,
+        service_account_sub: str,
     ) -> PairedAddonRead:
         """Stamp the add-on's liveness ``last_seen_at`` to now.
 
         Called by the paired add-on itself (authenticating as its service
-        principal). Raises :class:`AddonNotPairedError` when no pairing
-        matches ``(tenant_id, name)``.
+        principal). Object-level authorization runs in-transaction via
+        :func:`resolve_owned_pairing`: the pairing is resolved by the caller's
+        ``service_account_sub``, and *name* must be that pairing's own name, so
+        one paired service can never heartbeat another add-on's pairing. Raises
+        :class:`AddonNotPairedError` when the caller owns no pairing named
+        *name*.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
-            result = await session.execute(
-                select(AddonPairing).where(
-                    AddonPairing.tenant_id == tenant_id,
-                    AddonPairing.name == name,
-                )
+            row = await resolve_owned_pairing(
+                session,
+                tenant_id=tenant_id,
+                service_account_sub=service_account_sub,
+                requested_name=name,
             )
-            row = result.scalar_one_or_none()
-            if row is None:
-                raise AddonNotPairedError(name)
             row.last_seen_at = datetime.now(UTC)
             row.updated_at = datetime.now(UTC)
             await session.flush()

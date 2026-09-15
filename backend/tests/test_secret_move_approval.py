@@ -668,13 +668,19 @@ async def test_decide_run_bound_no_ops_when_waiter_already_claimed(
     ``dispatch_status="already_resumed"`` — ``write_secret`` must not fire a
     second time.
     """
-    from meho_backplane.operations.approval_queue import claim_resume
-
     fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
     request_id = await _park_run_bound_move(requester_sub="agent:requester")
 
-    # The in-process waiter won the claim first (and executed the op).
-    assert await claim_resume(request_id) is True
+    # The in-process waiter won the claim first (and executed the op). Stamp
+    # ``resumed_at`` directly rather than via ``claim_resume``: the claim now
+    # (F12 / #274) requires the ``approved`` state that ``/decide`` is about
+    # to apply, so the "already claimed" precondition is modelled straight on
+    # the latch column, exactly the state a prior winner would have left.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        row.resumed_at = datetime.now(UTC)
+        await s.commit()
 
     body = _decide_approved(request_id, decider_sub="operator:decider")
 

@@ -907,6 +907,20 @@ async def test_resume_no_ops_when_operator_surface_already_claimed(
         await s.commit()
     approval_request_id = request.id
 
+    # The operator surface approved the request (matching the ``approved``
+    # decision broadcast below) and then won the claim. The approve flip is
+    # required because ``claim_resume`` now (F12 / #274) only latches an
+    # ``approved`` row; without it the claim would fail closed on a pending
+    # row rather than modelling the winning operator-surface resumer.
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+
+    async with sessionmaker() as s:
+        row = await s.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        row.status = ApprovalRequestStatus.APPROVED.value
+        row.decided_at = datetime.now(UTC)
+        await s.commit()
+
     # An operator surface won the claim first (and re-dispatched).
     assert await claim_resume(approval_request_id) is True
 

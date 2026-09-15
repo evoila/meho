@@ -840,6 +840,33 @@ header values, declared and undeclared nested body paths, oversized bodies
 truncated mid-token, malformed JSON, and binary bodies — none survive, and
 uncertainty fires wherever proof is impossible.
 
+## Per-connector structural redactors
+
+The Tier-1 engine keys on **labelled** secret shapes inside string leaves
+(`password=…`, `Bearer …`). A structured payload whose secret is an
+arbitrary, operator-chosen value with no in-leaf label slips through by
+design — a Kubernetes `Secret`'s base64 `data` map, an ArgoCD repository
+`sshPrivateKey`. Those are closed at the **connector boundary** by small,
+pure, structural redactors the read handlers apply to their own output
+before it reaches the JSONFlux reducer / result handle, the audit row, or
+the broadcast feed. Each is the same shape: a recursive walk returning a
+new structure, matched to that connector's payload contract.
+
+| Connector | Module | What it scrubs |
+| --- | --- | --- |
+| keycloak | `connectors/keycloak/redaction.py` | `ClientRepresentation.secret`, `UserRepresentation.credentials`, and the generic credential key names, recursively (#1394). |
+| rabbitmq | `connectors/rabbitmq/redact.py` | `amqp://user:pass@` URI userinfo + any `*password*` / `*secret*` key (#2233). |
+| kubernetes | `connectors/kubernetes/redaction.py` | Every `data` / `stringData` value of a `kind: Secret` object — replaced with a fixed placeholder + a `sha256:` digest, key names kept — in single-object, list, and dynamic `k8s.cr.*` reads (#3501). |
+| argocd | `connectors/argocd/redaction.py` | Repository credential fields (`password` / `sshPrivateKey` / `tlsClientCertKey` / `bearerToken` / `githubAppPrivateKey`) on `argocd.repo.list` (#3501). ArgoCD destination-cluster creds are dropped separately by `argocd.cluster.list`'s whole-`config` strip (#2855). |
+
+The kubernetes redactor is deliberately **structural, not pattern-based**:
+it redacts every Secret value regardless of whether the value matches a
+named credential pattern, keeping the key inventory + a per-value digest
+so a read still answers "which keys does this Secret carry?" without ever
+returning the bytes. It leaves `k8s.secret.read_to_ref` (#3496) untouched
+— that op returns only a Vault `secret_ref` + a SHA-256, never a `data`
+map, so there is nothing for the walk to match.
+
 ## References
 
 - Parent goal: [#800](https://github.com/evoila/meho/issues/800)

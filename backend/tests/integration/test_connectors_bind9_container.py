@@ -111,10 +111,20 @@ def _container_vault_secrets() -> Iterator[None]:
 
     The container lane exercises the real SSH pool but has no Vault; the
     stub returns the same ``{username, password}`` the pre-#2155 embedded
-    ``secret_ref`` dict carried.
+    ``secret_ref`` dict carried. ``known_hosts_insecure`` opts this
+    ephemeral testcontainer out of host-key verification (#270): the
+    container's host key is regenerated on every image build, so there is
+    nothing stable to pin — the opt-out is the correct choice here, and
+    the base adapter now fails closed without it.
     """
     with stub_ssh_vault_secrets(
-        {_CONTAINER_SECRET_PATH: {"username": "root", "password": _CONTAINER_PASSWORD}}
+        {
+            _CONTAINER_SECRET_PATH: {
+                "username": "root",
+                "password": _CONTAINER_PASSWORD,
+                "known_hosts_insecure": True,
+            }
+        }
     ):
         yield
 

@@ -8,17 +8,25 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 38 hand-authored composites
-that orchestrate cross-spec workflows: 9 read composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 51 hand-authored composites
+that orchestrate cross-spec workflows: 13 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`; plus the four guest-operations reads `#3100`) and 29 write
+in `#2258`; plus the four guest-operations reads `#3100` and the
+Supervisor status read `#3281` + the storage-policy list read `#3494` +
+the two SUBSCRIBED content-library reads `content_library.subscribed.status` +
+`content_library.subscribed.items.list` / `#3495`) and 38 write
 composites (G3.1-T6 / `#509`, incl. the destructive-tier `vm.destroy` / `#3198`, the
+governed NFS tag-based SPBM `storage_policy.create` (caution) +
+`storage_policy.delete` (destructive) / `#3494`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893` + the WSFC/FCI shared-attach
 `vm.disk.attach` / `#3256`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
-`cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
+`cluster.drs_rule.create` + `folder.create` / `#2895`, the governed
+resource-pool allocation writes `resource_pool.create` (`caution`) +
+`resource_pool.delete` (`dangerous`) and the VM-Host affinity
+`cluster.drs_vm_host_rule.create` (`caution`) / `#3505`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
 `vm.device.cdrom`, the two guest-customization (GOSC) composites
 `guest.customization_spec.create` + `vm.customize` / `#2892`, the
@@ -27,10 +35,16 @@ the three host-domain writes `host.datastore_mount_nfs` /
 `host.disk_mark_flash` / `host.service_control` / `#3182`, the two vim
 distributed-portgroup writes `network.portgroup.create` +
 `network.portgroup.security.set` / `#3091`, the content-library import
-`vm.import_from_library` / `#3229`, plus the two governed
+`vm.import_from_library` / `#3229`, the two governed
 guest-operations writes `vm.guest.file.write` / `#3100` +
 `vm.guest.program.run` / `#3255` (see
-`connectors-vmware-rest-guest-ops.md`)). The
+`connectors-vmware-rest-guest-ops.md`), plus the two Supervisor (WCP)
+namespace-management writes `supervisor.enable` + `supervisor.disable`
+/ `#3281` (see the **Supervisor (WCP) namespace-management composites**
+subsection under Control flow), and the two SUBSCRIBED content-library
+caution writes `content_library.subscribed.create` +
+`content_library.subscribed.sync` / `#3495` (see the **Content-library
+SUBSCRIBED composites** subsection)). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -43,6 +57,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
+- **Missing managed objects on typed PropertyCollector reads (`#3481`)** — vCenter reports
+  an addressed, deleted vim object as the `ManagedObjectNotFound` SOAP-shaped
+  fault inside an HTTP 500. The addressed read operations `vmware.vm.info`,
+  `vmware.host.usage`, `vmware.host.storage_devices`,
+  `vmware.host.network_uplinks`, and `vmware.object.collect` explicitly opt
+  into promotion on their `PropertyCollector.RetrievePropertiesEx` calls, so the connector
+  parses that fault on either the VI-JSON or ESXi SOAP transport and raises
+  `ConnectorResourceNotFoundError` with the requested MoID(s). The dispatcher
+  returns `status="not_found"` with `extras.error_code="not_found"`,
+  `extras.resource_ids`, and the singular `extras.resource_id` when one object
+  was addressed. A different fault, a non-PropertyCollector vmomi method, or
+  a transport-only 5xx remains `connector_error`; the mapping never infers
+  absence from the status code. Promotion defaults off on the shared seam, so
+  task polls and destructive-composite preflight/execute reads retain their
+  existing failure semantics; #3479 owns those paths.
 - **Read composites** (`composites/_read.py`) — seven module-level
   `async def` handlers (`cluster_drs_recommendations_composite`,
   `event_tail_composite`, `performance_summary_composite`,
@@ -85,7 +114,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — eighteen module-level
+- **Write composites** (`composites/_write.py`) — the module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_deploy_from_library_composite`, `vm_import_from_library_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
@@ -96,7 +125,25 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `network_portgroup_create_composite`,
   `network_portgroup_security_set_composite`,
   `cluster_patch_composite`, `guest_customization_spec_create_composite`,
-  `vm_customize_composite`). The `vm_resize` / `vm_nic_repoint` /
+  `vm_customize_composite`, and the `#3505` governed-allocation writes
+  `resource_pool_create_composite` / `resource_pool_delete_composite` /
+  `cluster_drs_vm_host_rule_create_composite`). The `resource_pool.create`
+  handler issues the REST `POST:/vcenter/resource-pool` through the same
+  governed `_write_sub_op` seam the other REST writes use, resolving the
+  parent either from an explicit `parent` moid or (the estate convenience)
+  from a `cluster` moid whose root resource pool it reads via one vim
+  `RetrievePropertiesEx` of `ClusterComputeResource.resourcePool`;
+  `resource_pool.delete` counts the pool's child pools + VMs first and
+  refuses (`not_empty`) a populated pool unless `force=true` (the REST
+  `DELETE` reparents children up to the parent). The VM-Host affinity
+  `cluster.drs_vm_host_rule.create` is a **sibling** of
+  `cluster.drs_rule.create` (which stays VM-VM only, contract unchanged):
+  one `ReconfigureComputeResource_Task` carries a `ClusterConfigSpecEx`
+  `groupSpec` delta (adds a `ClusterVmGroup` + `ClusterHostGroup`) plus a
+  `rulesSpec` delta (adds a `ClusterVmHostRuleInfo` referencing those groups
+  by name, with a `mandatory` must/should flag), riding the governed
+  `_write_vmomi_sub_op` seam + `poll_vim_task` like the VM-VM rule. The
+  `vm_resize` / `vm_nic_repoint` /
   `vm_device_cdrom` trio (`#2891`) is the post-clone hardware reconfigure
   trio — see the **Hardware write composites** subsection under Control
   flow. Since
@@ -268,13 +315,66 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   safety model live in `connectors-vmware-rest-guest-ops.md`; the freeform
   in-guest program-exec tier `StartProgramInGuest` #3100 deferred is now
   lifted as `guest.program.run` (#3255).
+- **Supervisor (WCP) namespace-management composites** (`#3281`, group
+  `namespace_management`, `composites/_supervisor.py`) — the governed
+  replacement for out-of-band `govc` / `kubectl-vsphere` Supervisor
+  enablement. Two `dangerous` / approval-gated writes,
+  `supervisor_enable_composite`
+  (`POST:/vcenter/namespace-management/supervisors/{cluster}?action=enable_on_compute_cluster`,
+  the current 9.x path — the `clusters/{cluster}?action=enable` form is
+  deprecated as of vSphere 9.0) and `supervisor_disable_composite`
+  (`POST:/vcenter/namespace-management/clusters/{cluster}?action=disable`),
+  plus one `safe` read, `supervisor_status_composite`
+  (`GET:/vcenter/namespace-management/clusters/{cluster}`). See the
+  **Supervisor (WCP) namespace-management composites** subsection under
+  Control flow.
+- **Content-library SUBSCRIBED composites** (`composites/_library.py`,
+  `#3495`, group `content_library`) — four
+  `vmware.composite.content_library.subscribed.*` composites that create and
+  drive a **SUBSCRIBED** content library through the backplane: the governed
+  source for a vSphere Supervisor's Tanzu Kubernetes release (TKr / VKr)
+  images. On Supervisor enable, `wcpsvc` otherwise auto-creates a subscribed
+  library pointed at the fleet offline-depot content-gateway, which cannot
+  serve the `VKR` component on a VCF-Installer fleet → activation hangs
+  `CONFIGURING`; the governed path is to **pre-create** a subscribed library
+  subscribed straight to the upstream VMware repo
+  (`https://wp-content.vmware.com/v2/latest/lib.json`) and assign it as the
+  Supervisor's TKr library via `#3281`'s enable spec
+  `default_kubernetes_service_content_library` field. Two writes —
+  `subscribed.create` (`POST:/content/subscribed-library`, resolves the
+  `datastore` name to a `DATASTORE` storage backing, returns the new library
+  id) and `subscribed.sync`
+  (`POST:/content/subscribed-library/{libraryId}?action=sync`, respects
+  `on_demand`, asynchronous) — registered **`caution` + `requires_approval=True`**
+  (the issue's "write" tier: a write that always needs an approval decision,
+  but not the `dangerous` intrinsic-risk of a VM/host mutation, and the first
+  `caution` composites on this connector). Two reads — `subscribed.status`
+  (`GET:/content/subscribed-library/{libraryId}`, surfaces `last_sync_time`,
+  the readiness signal) and `subscribed.items.list`
+  (item ids via `POST:/content/library/item?action=find`, then per-item
+  `GET:/content/library/item/{libraryItemId}`, JSONFlux-reduced) — registered
+  `safe`. Both writes ride the same `_write._write_sub_op` governance seam the
+  other write composites use (`dangerous` / `requires_approval=False` sub-op
+  posture) and both reads use `_write._read_sub_op` /
+  `_find_content_library_ids` (un-gated). **Delivery shape — thin typed
+  composites, not the generic-ingested row:** the subscribe body carries a
+  `subscription_info.password` (BASIC auth) needing credential hygiene the raw
+  ingested row cannot provide (broadcast aggregate-only via the
+  `_CREDENTIAL_WRITE_OPS` pin on `subscribed.create`, a park-time preview that
+  echoes identity fields only — never the password / username, `params_hash`-only
+  audit), and the connector's governed ops must dispatch on a fresh boot with
+  zero catalog ingest (a generic row requires a runtime spec-ingest +
+  `edit_op` enable). The naming nests under the sibling `#3331` LOCAL-library
+  family (`content_library.create`) via the `subscribed` infix, so the two do
+  not collide. `_SUB_OPS_*` manifests are reconciled against the pinned
+  `vcenter.yaml` by `test_connectors_vmware_rest_library_reconcile.py`.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 37
-  `_CompositeSpec` rows (9 read + 24 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 51
+  `_CompositeSpec` rows (13 read + 36 dangerous/destructive writes + 2
+  caution content-library subscribed writes); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
-  implied by the spec, not by global defaults. Idempotent on re-run
-  via the body-hash skip path.
+  implied by the spec, not by global defaults. The derived registration-coverage guard uses explicit, closed exceptions only for write operations whose existing semantics intentionally omit a preview or governed-suboperation discovery entry; every other registry id must be represented. `test_reference_docs_drift.py` remains the single total-set drift gate for generated `docs-site/reference/connectors.md`; regenerate it with `cd backend && uv run python scripts/generate_reference_docs.py` when the registry changes. Idempotent on re-run via the body-hash skip path.
 - **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
   `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
   typed op is a **bound method** on `VmwareRestConnector`
@@ -427,6 +527,30 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 2. Importing `meho_backplane.connectors.vmware_rest` triggers the
    module-level `register_connector_v2(product="vmware", version="9.0",
    impl_id="vmware-rest", cls=VmwareRestConnector)` call.
+2b. The same import also registers the **second versioned catalog**
+   `register_connector_v2(product="vmware", version="8.0",
+   impl_id="vmware-rest", cls=VmwareRest80Connector)` (#3569, dual-impl
+   #3038) plus the shared product wildcard `(vmware, "", "")` owned by
+   `VmwareRestConnector`. `VmwareRest80Connector` is a thin subclass of
+   `VmwareRestConnector` (`version="8.0"`,
+   `supported_version_range=">=8.0,<8.1"`, and the ingested-catalog guard
+   boundary narrowed to the 8.0.x line via the
+   `_catalog_version_floor`/`_catalog_version_ceiling`/`_catalog_version_band_label`
+   attributes). The bands are disjoint (8.0 catalog `>=8.0,<8.1`; 9.0
+   catalog `>=8.5,<10.0`), so a fingerprinted 8.0.x target resolves to
+   `vmware-rest-8.0` (versioned beats the wildcard) and a 9.x target to
+   `vmware-rest-9.0`. Ingested rows for the 8.0 U3 catalog land under
+   `connector_id="vmware-rest-8.0"`; the shared `(product, impl_id)` safety
+   floor covers them identically. See
+   [vcf-api-compatibility.md](vcf-api-compatibility.md). Both shipped minimal
+   specs (`vmware_rest_8_0_minimal.yaml` and `vmware_rest_minimal.yaml`) carry
+   the `/api` mount on `servers[0].url` and key their inventory paths bare, so
+   the ingested op_ids read `GET:/vcenter/vm` — byte-identical to the vendor
+   `vcenter.yaml` catalog and to the spec-relative form `_mount.py` re-mounts
+   onto `/api` (modern) or `/rest` (legacy) per target; only the `/api/about`
+   fingerprint-probe path is keyed literally (`GET:/api/about`). The reconcile
+   lane `test_connectors_vmware_rest_8_0_spec_reconcile.py` pins the two specs
+   to an identical served-op_id set, so they are re-keyed in lock-step (#3614).
 3. The same import triggers the side-effect import of
    `meho_backplane.connectors.vmware_rest.composites`, whose
    `__init__` calls
@@ -440,11 +564,14 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 32 `vmware.composite.*` rows with
+   queued registrar and upserts: the 41 `vmware.composite.*` rows with
    `source_kind="composite"` (9 reads with `safety_level="safe"` +
-   `requires_approval=False`; 23 writes with `safety_level="dangerous"`
-   + `requires_approval=True`, and the destructive-tier `vm.destroy` with
-   `safety_level="destructive"` + `requires_approval=True` / `#3198`),
+   `requires_approval=False`; 29 writes with `safety_level="dangerous"`
+   + `requires_approval=True`; the two #3505 governed-allocation writes
+   `resource_pool.create` + `cluster.drs_vm_host_rule.create` with
+   `safety_level="caution"` + `requires_approval=True`; and the
+   destructive-tier `vm.destroy` with `safety_level="destructive"` +
+   `requires_approval=True` / `#3198`),
    plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -694,7 +821,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 38 composites (9 reads + 29 writes) land as `source_kind="composite"`
+The 51 composites (13 reads + 38 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -761,7 +888,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 38 composites are hand-authored aggregators the connector ships as
+The 42 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -884,11 +1011,14 @@ enum) are:
 | `host.detach_from_vds` | `detached`, `incomplete`, `timeout` (the detach is the vim `ReconfigureDvs_Task` host-member remove, polled, #2970) |
 | `cluster.patch` | `completed`, `stopped` (per-host vim maintenance `*_Task`s + the vLCM `software?action=apply&vmw-task=true` cis task, every task polled before the next step, #2970) |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `cluster.drs_vm_host_rule.create` | `created`, `rule_exists`, `group_exists`, `insufficient_vms`, `insufficient_hosts`, `timeout` (#3505 VM-Host rule; rule + group names are idempotence keys refused before any write; `insufficient_*` when no VM / host name resolves in the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `resource_pool.create` | `created`, `cluster_root_pool_unresolved`, `no_parent` (#3505; the REST `POST:/vcenter/resource-pool` create — `cluster_root_pool_unresolved` when the `cluster` convenience cannot read the cluster's root pool, `no_parent` when neither `parent` nor `cluster` is given, both before any write; read-back confirms the pool under the resolved parent) |
+| `resource_pool.delete` | `deleted`, `not_empty`, `delete_unverified` (#3505; `not_empty` refuses a pool with child pools / VMs unless `force=true` — the REST `DELETE` reparents children up to the parent; `delete_unverified` when the read-back still lists the pool) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
 | `network.portgroup.create` | `created`, `invalid_vlan_spec`, `timeout` (vim `CreateDVPortgroup_Task` polled, #3091; `invalid_vlan_spec` refuses a trunk+access clash before any write; `timeout` when the poll gives up; a task *fault* — e.g. `DuplicateName` — raises `connector_error`. The `created` envelope carries a read-back `observed` = `{name, vlan}` off the new portgroup's `config`. The trunk / access VLAN specs are `InheritablePolicy` subtypes, so each wire body carries `inherited: false` — without it vCenter defaults `inherited: true` and drops the `vlanId`, silently creating an untagged (VLAN 0) portgroup, #3356) |
 | `network.portgroup.security.set` | `updated`, `no_change_requested`, `timeout` (vim `ReconfigureDVPortgroup_Task` polled, #3091; `no_change_requested` refuses when none of the three booleans is supplied, before any read/write; `timeout` when the poll gives up; a task *fault* raises `connector_error`. Carries `previous` (pre-write security triple) + `observed` (post-write triple) read-backs) |
 | `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
-| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
+| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous`, `invalid_request` |
 | `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 
 `vm.create` is the only composite that issues a compensating
@@ -919,12 +1049,23 @@ a host-pinning ISO:
   the operator gets a typed status instead of a raw vCenter 400.
 - **`vm.nic.repoint`** reads the NIC's current backing + MAC via
   `GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, resolves the target
-  distributed portgroup by display name via
-  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`, then PATCHes
+  portgroup by display name via
+  `GET:/vcenter/network?filter.types=<backing_type>`, then PATCHes
   `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}` with
-  `{backing: {type: DISTRIBUTED_PORTGROUP, network: <moid>}}`. A name
-  that matches zero / many portgroups refuses the repoint
-  (`not_found` / `ambiguous`) with no PATCH issued.
+  `{backing: {type: backing_type, network: <moid>}}` — the same internal
+  sub-op the `host.detach_from_vds` fallback path uses. `backing_type` is
+  `DISTRIBUTED_PORTGROUP` (default, back-compatible) or
+  `STANDARD_PORTGROUP`; the latter moves a NIC onto a host-local
+  standard-switch portgroup (e.g. to repair a NIC stranded on an L2 that
+  cannot reach its gateway). Standard portgroups are host-scoped, so one
+  display name routinely resolves to several `Network` moids (one per
+  host) and the REST Automation API exposes no reliable VM->host mapping,
+  so an ambiguous name fails closed (`ambiguous`, candidate moids listed)
+  and the operator supplies the exact moid via the `network` param. An
+  explicit `network` moid skips name resolution and is validated for
+  existence + type-consistency with `backing_type` (`invalid_request` on
+  mismatch); a name matching zero portgroups returns `not_found`. No PATCH
+  is issued on any non-`repointed` status.
 - **`vm.device.cdrom`** reads the device's current backing + state via
   `GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}` (surfacing a host-local
   ISO path the approver needs to see), then dispatches the `action`:
@@ -1149,16 +1290,30 @@ different vim fields for two different clustering models:
   its own locking (e.g. Oracle RAC, or a clustered filesystem). It is a disk
   property, independent of the controller's bus-sharing.
 
-Both require `eagerzeroedthick` disks. For a WSFC/FCI node: create the OS
-separately (or clone from a template), give each node a dedicated
-`physical`-bus-sharing controller with the EZT shared disks (`vm.create`
-`scsi_bus_sharing="physical"` + `provisioning="eagerzeroedthick"` on the first
-node), then `vm.disk.attach` the same VMDKs onto the second node at the
-identical `controller_key`/`unit_number`. Leave `sharing="none"` for WSFC —
-reach for `multi_writer` only when the guest application (not SCSI-3 PR) owns
-the locking. (`vm.create` currently folds shared disks at create time; adding
-a newly-created EZT shared disk to an *already-provisioned* VM is a follow-up,
-not in this task's scope.)
+**Choose the storage mechanism before applying those knobs.** The VMware
+guidance distinguishes two shared-disk paths; they do not share a universal
+EZT or datastore-flag requirement (vSAN 8.0 documentation; vSphere 8.0,
+Table 568).
+
+- **VMFS clustered VMDK.** This path requires `eagerzeroedthick` shared disks,
+  FC or NVMe-FC connectivity (and NVMe-TCP on 8.0 U3), and the datastore's
+  Clustered VMDK flag. Use the physical SCSI-bus-sharing controller for the
+  WSFC/SQL FCI reservation model.
+- **vSAN native shared VMDK.** This path is provisioned through the vSAN
+  storage policy, including Object Space Reservation where required. Any disk
+  type is allowed; there is no VMFS-style datastore Clustered VMDK flag to
+  set on vSAN.
+
+The shared operational recipe is the same after selecting the applicable
+mechanism: create the OS separately (or clone from a template), give each node
+a dedicated `physical`-bus-sharing controller, create the shared disks on the
+first node with that mechanism's provisioning requirements, then
+`vm.disk.attach` the same VMDKs onto the second node at identical
+`controller_key`/`unit_number`. Leave `sharing="none"` for WSFC — reach for
+`multi_writer` only when the guest application, rather than SCSI-3 PR, owns
+locking. (`vm.create` currently folds shared disks at create time; adding a
+newly-created shared disk to an *already-provisioned* VM is a follow-up, not
+in this task's scope.)
 
 The `vm.disk.attach` park-time preview is a param-echo (`{vm, vmdk_path,
 controller_key, unit_number, sharing}`) — the params fully name the blast
@@ -1205,6 +1360,66 @@ snapshots via the vim snapshot read (`_read_vm_snapshots_best_effort` — a
 fault yields "no snapshots enumerated", never sinks the park). It declines
 (`None` → the park is refused `blast_radius_required`, fail-closed) when the
 VM cannot be read.
+
+### Governed NFS tag-based SPBM storage policy (`storage_policy.*`, #3494)
+
+NFS-principal datastores have **no default VM storage policy** (`vSAN Default
+Storage Policy` is vSAN-only), so a tag-based SPBM policy must be minted before
+a vSphere Supervisor can be enabled (its `EnableSpec` requires
+`master_storage_policy` / `ephemeral_storage_policy` / `image_storage`, all
+policy ids) and before a vSphere Namespace / VKS guest cluster can bind
+storage. Creating it out of band (`govc` / PowerCLI `New-SpbmStoragePolicy`) is
+exactly the escape from policy / audit / approval the dogfooding story cannot
+have, so three composites (`group_key="storage"`) close the gap:
+
+- **`storage_policy.list`** — a read (`safe`, no approval) over
+  `GET /vcenter/storage/policies`; the set-shaped `policies` list is
+  JSONFlux-reduced to a result handle by the dispatcher when large.
+- **`storage_policy.create`** (`safety_level="caution"`, `requires_approval=True`)
+  — the first link in the Supervisor-enable chain. Fans out, each child
+  gated through `enforce_subop_policy`: resolve every `datastore_names` entry
+  to a moid (`GET /vcenter/datastore`, fail-closed `datastore_not_found`
+  before any write if one resolves to zero / many) → create the tag
+  **category** (`POST /cis/tagging/category`, MULTIPLE cardinality, associable
+  to `Datastore`) → create the **tag** in it (`POST /cis/tagging/tag`) →
+  **attach** the tag to each datastore
+  (`POST /cis/tagging/tag-association/{tagId}?action=attach`, `object_id` =
+  `{id: <datastore-moid>, type: "Datastore"}`) → create the **PBM policy**
+  whose one rule requires the tag → read-back `GET /vcenter/storage/policies`.
+  Returns the policy id (the vCenter `StoragePolicy` identifier). No implicit
+  rollback: a PBM create that returns no id reports the created category / tag
+  ids for cleanup (`policy_create_failed`).
+- **`storage_policy.delete`** (`safety_level="destructive"`,
+  `requires_approval=True`) — issues PBM `PbmDelete` for the id, then read-backs
+  the policies list; a per-id `PbmDelete` fault (e.g. the policy is in use)
+  returns `delete_failed` with the fault type (an in-use policy must be freed
+  first — no force). Deletes only the policy; the tag / category are left in
+  place (they may be shared).
+
+**Two transports, one op.** The tag substrate rides the generic REST sub-op
+seam (`_write_sub_op` → `connector._post_json`, the tag rows are ingested
+`vcenter.yaml` paths). Policy **creation has no vCenter REST equivalent** — the
+spec exposes only `GET /vcenter/storage/policies` (read) — so it rides the
+**PBM SOAP** API (`PbmProfileProfileManager.PbmCreate` / `PbmDelete` on `/pbm`,
+namespace `urn:pbm`). PBM is a distinct SOAP service from the vim25 `/sdk`
+codec: `soap_pbm.py` carries its envelope builders + parsers (reusing the
+vim25 codec's namespace-agnostic low-level helpers), and the connector's
+`_ensure_pbm` mints a **separate** vim SOAP session — a `SessionManager.Login`
+on `/sdk` for the `vmware_soap_session` cookie, then `PbmRetrieveServiceContent`
+on `/pbm` for the `profileManager` moid — because PBM authenticates with the
+vim SOAP cookie, not the vAPI `vmware-api-session-id` token the REST/VI-JSON
+path uses (`_soap_post` gained a `path` argument so the same span-recording,
+credential-free wire helper serves both `/sdk` and `/pbm`). The tag-rule
+create-spec shape (namespace `http://www.vmware.com/storage/tag`, property id
+`com.vmware.storage.tag.<category>.property`, subprofile "Tag based placement",
+`category=REQUIREMENT`, `resourceType=STORAGE`, with the `xsi:type`
+discriminators vmomi requires on the polymorphic `constraints` / `value` /
+`values` slots) is grounded on govmomi `pbm` + `govc storage.policy.create` +
+the community `vmware_vm_storage_policy` Ansible module. The `storage_policy.*`
+group's REST paths are pinned against the vendor spec by
+`test_connectors_vmware_rest_storage_policy_reconcile.py` (the tag / datastore /
+policies paths must be served; the `/pbm` keys must **not** be — proving they
+have no REST equivalent).
 
 ### Two clone ops: content-library vs folder-template (`vm.clone_from_template`, #2894)
 
@@ -1604,6 +1819,72 @@ connector; only `vm.destroy` is `destructive`). Neither composite registers a
 park-time preview builder (matching `vm.import_from_library`); the read-back
 `previous` / `observed` rows in the response are the verification surface.
 
+### Supervisor (WCP) namespace-management composites (`supervisor.enable` / `supervisor.disable` / `supervisor.status`, #3281)
+
+`composites/_supervisor.py` (group `namespace_management`) governs vSphere
+Supervisor (Workload Control Plane) lifecycle on a cluster — the governed
+replacement for out-of-band `govc` / `kubectl-vsphere` enablement. Three ops:
+
+**`supervisor.enable`** (`dangerous` / `requires_approval=True`) issues
+`POST:/vcenter/namespace-management/supervisors/{cluster}?action=enable_on_compute_cluster`
+— the current 9.x path. The 7.x `clusters/{cluster}?action=enable` form is
+**deprecated as of vSphere 9.0** and is not used. The body is the nested
+`EnableOnComputeClusterSpec` (`name` + `control_plane` + `workloads` +
+optional `zone`), passed as the **top-level** POST body verbatim (the
+top-level-`*Spec` envelope convention documented above — never wrapped in
+`{"spec": {...}}`); `{cluster}` is the only path var, so the composite's
+`params` carry `cluster` plus the spec sub-objects and `_split_sub_op` lifts
+the remainder into the body. The handler validates the spec **server-side
+before any write**: `control_plane` must carry a management `network` and a
+`storage_policy` (on NFS there is no default SPBM policy), and the workload
+network stack — `workloads.network.network_type` (`VSPHERE` / `NSXT` /
+`NSX_VPC`) paired with `workloads.edge.provider` (`VSPHERE_FOUNDATION` / `NSX`
+/ `NSX_VPC` / `NSX_ADVANCED` / `HAPROXY`) — is checked against the
+authoritative 9.x enums and an unknown value is **refused loudly**
+(`status='unknown_network_provider'`, nothing reaches the wire, the gate is
+never consulted). The VDS + Foundation LB model is `VSPHERE` +
+`VSPHERE_FOUNDATION` (no separate NSX edge cluster required); the NSX VPC
+model is `NSX_VPC` + `NSX_VPC`. Enable is **asynchronous**: vCenter returns
+the new Supervisor id immediately (the handler returns
+`status='enabling'`), and the composite deliberately does **not** block the
+dispatcher polling the 30–60 min `CONFIGURING` → `RUNNING` convergence —
+readiness is the separate `supervisor.status` op.
+
+**`supervisor.disable`** (`dangerous` / `requires_approval=True`) issues
+`POST:/vcenter/namespace-management/clusters/{cluster}?action=disable`
+(`DELETE clusters/{cluster}` 404s — the action form is the documented
+teardown). No request body; removes the control-plane VMs + worker nodes but
+leaves the cluster's networking / zone intact for a fresh re-enable.
+Asynchronous (`status='disabling'`; poll `supervisor.status`, `config_status`
+moves through `REMOVING`).
+
+Both writes ride the standard governed REST sub-op seam
+(`_write._write_sub_op` → `enforce_subop_policy` → `_post_json`): the
+top-level composite's own `dangerous` / `requires_approval=True` posture pops
+the human approval park at dispatch, and the governed child POST re-applies
+policy under the shared `dangerous` / `requires_approval=False` sub-op posture
+(`_governed_subops._GOVERNED_SUBOP_MANIFEST` publishes each write's grant set).
+Both register echo-only park-time preview builders (`_write_preview`) — enable
+echoes cluster / name / size / count / network stack, disable echoes the
+cluster + an irreversibility marker.
+
+**`supervisor.status`** (`safe` / `requires_approval=False`) reads
+`GET:/vcenter/namespace-management/clusters/{cluster}` and reshapes
+`Clusters.Info` into a **poll-friendly, inline** envelope: the scalar
+`config_status` (`CONFIGURING` / `REMOVING` / `RUNNING` / `ERROR`),
+`kubernetes_status` (`READY` / `WARNING` / `ERROR`), and a derived `ready`
+flag (`RUNNING` AND `READY`) stay top-level so a runbook `OperationCallVerify`
+step or a Sensor assertion can poll `ready == true` / `config_status ==
+'RUNNING'` **directly**, never behind a JSONFlux handle. The `messages` +
+`conditions` arrays (which can grow during `CONFIGURING`) are capped inline
+(`messages_limit`, default 25); `message_count` / `condition_count` carry the
+uncapped sizes.
+
+The three op_ids are byte-for-byte the strings the ingest parser emits from
+the pinned `vcenter.yaml`; the reconcile guard
+`tests/acceptance/test_supervisor_op_id_reconcile.py` pins them (always-on
+string test + spec-backed parse).
+
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
 Read composites distinguish **load-bearing** sub-ops from **optional
@@ -1737,7 +2018,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, resolved, total_resolved}` | live read (`GET:/vcenter/host?clusters=...`) |
 | `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
-| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
+| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to (`requested_backing` carries `backing_type`, so distributed and standard previews are identical) | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
 | `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, placement pins — folder_name, folder (#3115), resource_pool, datastore, host (#3096) — sizing, networks, disks_gb (#3117), nested_hv, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
@@ -1985,6 +2266,18 @@ they never park.
   `vcenter-9.0/vcenter.yaml`, vmomi POST legs vs
   `vcenter-9.0/vi-json.yaml` — skipping uniformly without the shelf,
   running for real in CI.
+- **PBM SOAP path (`storage_policy.*`, #3494) is mock-validated only** —
+  the `/pbm` envelope builders + parsers (`soap_pbm.py`) and the
+  `_ensure_pbm` vim-SOAP-session-then-`/pbm` establish are unit-tested
+  against synthetic `urn:pbm` envelopes grounded on the govmomi / govc /
+  Ansible reference shapes, and the REST tag paths are spec-reconciled, but
+  the SOAP wire has **not** been exercised against a live vCenter at build
+  time (no lab access) — the mock-vs-hardware trap the ESXi SOAP codec
+  (#3363) documents. Live-appliance validation (probe → `storage_policy.create`
+  on the NFS WLD → Supervisor-enable consumes the id → `storage_policy.delete`)
+  is deferred; treat the SOAPAction posture (empty, matching the bootstrap
+  posts) and the `xsi:type` discriminators as the first things to re-check if
+  a live PbmCreate faults.
 
 ## References
 

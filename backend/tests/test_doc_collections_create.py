@@ -236,6 +236,78 @@ def test_unknown_backend_type_is_422_listing_registered_types(client: TestClient
 
 
 # ---------------------------------------------------------------------------
+# SSRF: a non-https / non-public corpus endpoint → 422 (never persisted, #290)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_endpoint",
+    [
+        "http://corpus.internal/v1/search",  # plaintext scheme
+        "https://127.0.0.1/v1/search",  # loopback
+        "https://169.254.169.254/latest/meta-data",  # cloud metadata
+        "https://10.0.0.5/v1/search",  # RFC 1918
+    ],
+)
+def test_non_public_corpus_endpoint_is_rejected_at_create(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, bad_endpoint: str
+) -> None:
+    """A tenant_admin cannot register a collection pointing at an internal / http host.
+
+    The credential-capture + SSRF path (#290): the ``backend.ref`` endpoint
+    is later dialed with a credential, so a non-https or private/link-local/
+    metadata destination is refused at create — a structured 422 — and the
+    row is never persisted.
+    """
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    key = make_rsa_keypair("kid-A")
+    body = _valid_body(backend={"type": "corpus-http", "ref": {"endpoint": bad_endpoint}})
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["kind"] == "endpoint_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_rejected_endpoint_persists_no_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A create rejected on its endpoint writes no ``doc_collections`` row (#290)."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    key = make_rsa_keypair("kid-A")
+    body = _valid_body(
+        collection_key="ssrf-probe",
+        backend={"type": "corpus-http", "ref": {"endpoint": "https://169.254.169.254/x"}},
+    )
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 422, resp.text
+
+    sm = get_sessionmaker()
+    async with sm() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(DocCollectionORM).where(DocCollectionORM.collection_key == "ssrf-probe")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
+def test_url_alias_endpoint_is_also_screened(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``url`` alias for the endpoint is screened, not just ``endpoint`` (#290)."""
+    monkeypatch.delenv("MEHO_TARGET_SSRF_ALLOWLIST", raising=False)
+    key = make_rsa_keypair("kid-A")
+    body = _valid_body(backend={"type": "corpus-http", "ref": {"url": "https://127.0.0.1/s"}})
+    resp = _post(client, key, _admin_token(key), body)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["kind"] == "endpoint_not_allowed"
+
+
+# ---------------------------------------------------------------------------
 # Conflict: duplicate key in the same scope → 409 (not an opaque 500)
 # ---------------------------------------------------------------------------
 

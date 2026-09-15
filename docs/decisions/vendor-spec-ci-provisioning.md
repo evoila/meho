@@ -226,6 +226,35 @@ OSS-licensed-spec form in
 [`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
 extension mechanics.
 
+### Extension: sddc-manager / sddc-manager-9.1 (#3497)
+
+The same secret-gated checkout additionally fetches the shelf's
+`docs/sddc-manager-9.1/` directory (`sddc-manager-openapi.json`, OpenAPI
+3.0.1, `info.version 9.1.0.0`, ~1.8 MB, 320 paths) for the **9.1**
+sddc-manager write-path reconcile lane
+(`backend/tests/test_connectors_sddc_manager_91_spec_reconcile.py`),
+under the identical ephemeral-use conditions recorded above (sparse
+read-only checkout, workspace destroyed at job end, never committed,
+never in artifacts or logs, secret withheld from fork PRs and the
+Dependabot store). No vendor-license attestation is needed for this
+extension: the spec is published by VMware in the **public, Apache-2.0**
+[`vmware/vcf-api-specs`](https://github.com/vmware/vcf-api-specs/blob/3949fc33339fc5ea1b77eadb258f1cf49aa88e26/specifications/sddc-manager/sddc-manager-openapi.json)
+repo (pinned at `3949fc33`, retrieved 2026-08-20 — matching the VCF 9.1
+estate the curated workload-domain write ops are authored for) — the
+provenance note of record is the shelf's `sddc-manager-9.1/MANIFEST.md`,
+per the OSS-licensed-spec form in
+[`spec-reconcile-guards-standard.md`](spec-reconcile-guards-standard.md)'s
+extension mechanics (the sibling `sddc-manager-9.0` OSS precedent above).
+The **9.0** lane (#2982) is retained unchanged — a 9.1 target resolves to
+the same `sddc-rest-9.0` connector (range `>=9.0,<10.0`; no path was
+removed 9.0 → 9.1), so the connector's read paths stay guarded against
+`sddc-manager-9.0` while the new write paths are guarded against
+`sddc-manager-9.1`. **Sequencing:** the spec already ships on the shelf
+(consumer-repo PRs #2602 / #2608), so this extension arms with **no new
+consumer-repo PR** — this repo change adds only the sparse-checkout
+widening (`docs/sddc-manager-9.1` in both Python jobs' checkout list +
+fail-loud verify step) and the lane.
+
 ### Signoff extension — NSX (nsx-9.0, 2026-08-18, #2981 / PR #3007)
 
 The nsx spec-reconcile lane

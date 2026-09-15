@@ -30,7 +30,13 @@ from __future__ import annotations
 
 from typing import Final
 
-from meho_backplane.connectors.vmware_rest.composites import _host, _write
+from meho_backplane.connectors.vmware_rest.composites import (
+    _host,
+    _library,
+    _storage_policy,
+    _supervisor,
+    _write,
+)
 
 #: Connector the vmware-rest composites dispatch against. The composites are
 #: registered for vCenter 9.0 (``vmware-rest-9.0``); the discovery surface
@@ -69,6 +75,13 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
         _write._SUB_OPS_CLUSTER_PATCH + _write._VIM_SUB_OPS_CLUSTER_PATCH
     ),
     "vmware.composite.cluster.drs_rule.create": _write._VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE,
+    "vmware.composite.cluster.drs_vm_host_rule.create": (
+        _write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE
+    ),
+    "vmware.composite.resource_pool.create": (
+        _write._SUB_OPS_RESOURCE_POOL_CREATE + _write._VIM_SUB_OPS_RESOURCE_POOL_CREATE
+    ),
+    "vmware.composite.resource_pool.delete": _write._SUB_OPS_RESOURCE_POOL_DELETE,
     "vmware.composite.folder.create": _write._VIM_SUB_OPS_FOLDER_CREATE,
     "vmware.composite.vm.resize": _write._SUB_OPS_VM_RESIZE,
     "vmware.composite.vm.nic.repoint": _write._SUB_OPS_VM_NIC_REPOINT,
@@ -80,6 +93,18 @@ _GOVERNED_SUBOP_MANIFEST: Final[dict[str, tuple[str, ...]]] = {
     "vmware.composite.host.datastore_mount_nfs": _host._VIM_SUB_OPS_HOST_DATASTORE_MOUNT_NFS,
     "vmware.composite.host.disk_mark_flash": _host._VIM_SUB_OPS_HOST_DISK_MARK_FLASH,
     "vmware.composite.host.service_control": _host._VIM_SUB_OPS_HOST_SERVICE_CONTROL,
+    "vmware.composite.supervisor.enable": _supervisor._SUB_OPS_SUPERVISOR_ENABLE,
+    "vmware.composite.supervisor.disable": _supervisor._SUB_OPS_SUPERVISOR_DISABLE,
+    "vmware.composite.storage_policy.create": _storage_policy._SUB_OPS_STORAGE_POLICY_CREATE,
+    "vmware.composite.storage_policy.delete": _storage_policy._SUB_OPS_STORAGE_POLICY_DELETE,
+    # #3495 content-library SUBSCRIBED writes (the two reads auto-execute for
+    # a service principal and need no grant, so they are not listed here).
+    "vmware.composite.content_library.subscribed.create": (
+        _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_CREATE
+    ),
+    "vmware.composite.content_library.subscribed.sync": (
+        _library._SUB_OPS_CONTENT_LIBRARY_SUBSCRIBED_SYNC
+    ),
 }
 
 

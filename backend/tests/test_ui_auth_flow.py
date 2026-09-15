@@ -69,7 +69,11 @@ from meho_backplane.ui.auth.middleware import require_ui_session
 from meho_backplane.ui.auth.revalidation import (
     reset_read_revalidation_cache_for_testing,
 )
-from meho_backplane.ui.auth.routes import AUTHORIZATION_STATE_EXPIRED_DETAIL
+from meho_backplane.ui.auth.routes import (
+    AUTHORIZATION_STATE_EXPIRED_DETAIL,
+    LOGIN_BINDING_COOKIE_PREFIX,
+    login_binding_cookie_name,
+)
 from meho_backplane.ui.auth.session_store import (
     create_session,
     load_session,
@@ -192,6 +196,23 @@ def _build_app(*, include_dummy_ui_route: bool = True) -> FastAPI:
     return app
 
 
+def _https_client(app: FastAPI | None = None) -> TestClient:
+    """A ``TestClient`` over HTTPS so ``Secure`` cookies survive the round-trip.
+
+    The BFF cookies -- the ``meho_session`` cookie and the F10 (#272)
+    login-binding cookie -- are ``Secure``, and the default
+    ``http://testserver`` transport silently drops ``Secure`` cookies (a
+    production deploy is HTTPS-only). Any login->callback flow that must
+    replay the login-binding cookie the login response set uses this
+    client instead of a plain ``TestClient``.
+    """
+    return TestClient(
+        app if app is not None else _build_app(),
+        base_url="https://testserver",
+        follow_redirects=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # /ui/auth/login -- builds the PKCE authorization URL (AC 1)
 # ---------------------------------------------------------------------------
@@ -230,17 +251,29 @@ def test_login_persists_verifier_in_server_side_store_not_cookie() -> None:
     """The PKCE verifier MUST NOT live in the client cookie.
 
     Defends decision #11's "tokens stay server-side" contract: a
-    verifier in a cookie would defeat the property PKCE protects.
+    verifier in a cookie would defeat the property PKCE protects. Login
+    does set the F10 (#272) login-binding cookie, but that carries a
+    *separate* opaque per-flow secret -- never the ``code_verifier`` --
+    so the PKCE property is intact.
     """
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
         client = TestClient(_build_app(), follow_redirects=False)
         response = client.get("/ui/auth/login")
-    # No cookies set on the login redirect -- the verifier is in
-    # the server-side store, not on the client.
-    assert response.cookies == {}
     # The store has exactly one pending flow now.
-    assert get_verifier_store().size() == 1
+    store = get_verifier_store()
+    assert store.size() == 1
+    pending = next(iter(store._flows.values()))
+    # The only cookie the login redirect sets is the login-binding
+    # cookie, and it does NOT carry the session cookie or the PKCE
+    # verifier -- both stay server-side.
+    raw_set_cookie = response.headers["set-cookie"]
+    assert LOGIN_BINDING_COOKIE_PREFIX in raw_set_cookie
+    assert SESSION_COOKIE_NAME not in response.cookies
+    assert pending.code_verifier not in raw_set_cookie
+    # The binding cookie's value is the per-flow secret stored server
+    # side -- it is what the callback cross-checks, not the verifier.
+    assert pending.browser_binding in raw_set_cookie
 
 
 def test_login_503s_when_client_secret_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,7 +390,7 @@ def test_callback_creates_session_and_sets_cookie() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = _https_client()
         # Step 1: login mints a state + verifier.
         login_response = client.get("/ui/auth/login?return_to=/ui/dashboard")
         login_location = login_response.headers["location"]
@@ -549,7 +582,7 @@ def test_callback_502s_when_token_endpoint_unreachable() -> None:
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
         mock_router.post(_TOKEN_ENDPOINT).mock(side_effect=httpx.ConnectError("boom"))
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = _https_client()
         login_response = client.get("/ui/auth/login")
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
         response = client.get(
@@ -575,13 +608,221 @@ def test_callback_rejects_replayed_state_after_first_consumption() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = _https_client()
         login_response = client.get("/ui/auth/login")
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
         first = client.get(f"/ui/auth/callback?code=code-1&state={state}")
         second = client.get(f"/ui/auth/callback?code=code-2&state={state}")
     assert first.status_code == 302
     assert second.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /ui/auth login-CSRF browser binding (F10, #272)
+# ---------------------------------------------------------------------------
+
+
+def _token_json(access_token: str) -> dict[str, Any]:
+    """Minimal Keycloak token-endpoint body for the binding tests."""
+    return {
+        "access_token": access_token,
+        "refresh_token": "rt",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+    }
+
+
+def test_login_sets_browser_binding_cookie_with_lax_httponly_secure() -> None:
+    """F10 (#272): login sets a short-lived HttpOnly/Secure/SameSite=Lax cookie.
+
+    ``SameSite=Lax`` (not ``Strict``) is the callback-compatible policy:
+    the callback is a top-level GET the IdP initiates, cross-site for a
+    separately hosted Keycloak, and ``Strict`` would drop the cookie.
+    The cookie is scoped to ``/ui/auth`` and its value is the per-flow
+    secret the store holds.
+    """
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/auth/login")
+    state = parse_qs(urlparse(response.headers["location"]).query)["state"][0]
+    name = login_binding_cookie_name(state)
+    binding_header = next(
+        h for h in response.headers.get_list("set-cookie") if h.startswith(f"{name}=")
+    )
+    lowered = binding_header.lower()
+    assert "httponly" in lowered
+    assert "secure" in lowered
+    assert "samesite=lax" in lowered
+    assert "path=/ui/auth" in lowered
+    assert f"max-age={AUTHORIZATION_FLOW_TTL_SECONDS}" in lowered
+    # The cookie value is the per-flow secret the store stashed -- not
+    # the PKCE verifier, and distinct from the OAuth ``state``.
+    pending = next(iter(get_verifier_store()._flows.values()))
+    assert response.cookies[name] == pending.browser_binding
+    assert pending.browser_binding != state
+
+
+def test_callback_from_second_browser_without_binding_cookie_is_rejected() -> None:
+    """F10 (#272): the headline attack -- A's unconsumed callback in B fails.
+
+    Browser A starts login; browser B (a fresh client that never started
+    the flow, so it holds none of A's cookies) follows A's callback URL.
+    No session is created and the token endpoint is never reached -- the
+    binding is checked before token exchange.
+    """
+    access_token, jwks = _mint_access_token()
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(200, json=_token_json(access_token)),
+        )
+        browser_a = TestClient(_build_app(), follow_redirects=False)
+        login = browser_a.get("/ui/auth/login")
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        # Browser B: separate cookie jar -> no binding cookie for `state`.
+        browser_b = TestClient(_build_app(), follow_redirects=False)
+        response = browser_b.get(
+            f"/ui/auth/callback?code=attacker-code&state={state}",
+            headers=_JSON_ACCEPT,
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == AUTHORIZATION_STATE_EXPIRED_DETAIL
+    # Rejected before the token exchange -- no session, no token POST.
+    assert not token_route.called
+    assert SESSION_COOKIE_NAME not in response.cookies
+
+
+def test_callback_same_browser_succeeds_and_clears_binding_cookie() -> None:
+    """F10 (#272): the initiating browser completes login; the cookie is cleared.
+
+    Same-browser success is the legitimate path -- it must still work --
+    and the single-use binding cookie is expired on the success response.
+    """
+    access_token, jwks = _mint_access_token()
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(200, json=_token_json(access_token)),
+        )
+        client = _https_client()
+        login = client.get("/ui/auth/login?return_to=/ui/dashboard")
+        state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+        callback = client.get(f"/ui/auth/callback?code=test-code&state={state}")
+    assert callback.status_code == 302
+    assert callback.headers["location"] == "/ui/dashboard"
+    assert SESSION_COOKIE_NAME in callback.cookies
+    # The binding cookie is expired (Max-Age=0) on the success response.
+    name = login_binding_cookie_name(state)
+    binding_header = next(
+        h for h in callback.headers.get_list("set-cookie") if h.startswith(f"{name}=")
+    )
+    assert "max-age=0" in binding_header.lower()
+
+
+def test_concurrent_logins_bind_independently_and_both_complete() -> None:
+    """F10 (#272): concurrent logins in one browser must not break binding.
+
+    Two logins from one browser get distinct per-``state`` cookie names,
+    so the second does not clobber the first's binding, and both
+    callbacks complete.
+    """
+    access_token, jwks = _mint_access_token()
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        mock_router.post(_TOKEN_ENDPOINT).mock(
+            return_value=httpx.Response(200, json=_token_json(access_token)),
+        )
+        client = _https_client()
+        login1 = client.get("/ui/auth/login?return_to=/ui/one")
+        state1 = parse_qs(urlparse(login1.headers["location"]).query)["state"][0]
+        login2 = client.get("/ui/auth/login?return_to=/ui/two")
+        state2 = parse_qs(urlparse(login2.headers["location"]).query)["state"][0]
+        # Distinct per-flow cookie names -- login2 did not overwrite the
+        # login1 binding cookie.
+        assert login_binding_cookie_name(state1) != login_binding_cookie_name(state2)
+        cb1 = client.get(f"/ui/auth/callback?code=c1&state={state1}")
+        cb2 = client.get(f"/ui/auth/callback?code=c2&state={state2}")
+    assert cb1.status_code == 302
+    assert cb1.headers["location"] == "/ui/one"
+    assert cb2.status_code == 302
+    assert cb2.headers["location"] == "/ui/two"
+
+
+def test_exchange_code_rejects_missing_browser_binding() -> None:
+    """F10 (#272): the flow primitive fails closed when no binding is presented."""
+    from meho_backplane.ui.auth.flow import OAuthFlowError
+
+    async def _go() -> None:
+        with respx.mock(assert_all_called=False) as mock_router:
+            _mock_oidc_metadata(mock_router)
+            _url, state, _binding = await build_authorization_request(
+                redirect_uri=_REDIRECT_URI,
+                return_to="/ui/",
+            )
+            with pytest.raises(OAuthFlowError):
+                await exchange_code_for_tokens(
+                    redirect_uri=_REDIRECT_URI,
+                    authorization_response=f"{_REDIRECT_URI}?code=c&state={state}",
+                    state=state,
+                    browser_binding=None,
+                )
+
+    asyncio.run(_go())
+
+
+def test_exchange_code_rejects_mismatched_browser_binding() -> None:
+    """F10 (#272): a binding value that is not the stored secret fails closed.
+
+    No token-endpoint mock is registered, so a regression that let the
+    exchange proceed past the mismatch would raise a respx "not mocked"
+    error rather than silently pass.
+    """
+    from meho_backplane.ui.auth.flow import OAuthFlowError
+
+    async def _go() -> None:
+        with respx.mock(assert_all_called=False) as mock_router:
+            _mock_oidc_metadata(mock_router)
+            _url, state, binding = await build_authorization_request(
+                redirect_uri=_REDIRECT_URI,
+                return_to="/ui/",
+            )
+            with pytest.raises(OAuthFlowError):
+                await exchange_code_for_tokens(
+                    redirect_uri=_REDIRECT_URI,
+                    authorization_response=f"{_REDIRECT_URI}?code=c&state={state}",
+                    state=state,
+                    browser_binding=f"{binding}-tampered",
+                )
+
+    asyncio.run(_go())
+
+
+def test_exchange_code_rejects_non_ascii_browser_binding() -> None:
+    """F10 (#272): a hostile non-ASCII binding fails closed, not 500.
+
+    ``hmac.compare_digest`` refuses non-ASCII ``str`` operands; the
+    guard must map that to the recoverable ``OAuthFlowError`` rather
+    than let a ``TypeError`` escape as a 500.
+    """
+    from meho_backplane.ui.auth.flow import OAuthFlowError
+
+    async def _go() -> None:
+        with respx.mock(assert_all_called=False) as mock_router:
+            _mock_oidc_metadata(mock_router)
+            _url, state, _binding = await build_authorization_request(
+                redirect_uri=_REDIRECT_URI,
+                return_to="/ui/",
+            )
+            with pytest.raises(OAuthFlowError):
+                await exchange_code_for_tokens(
+                    redirect_uri=_REDIRECT_URI,
+                    authorization_response=f"{_REDIRECT_URI}?code=c&state={state}",
+                    state=state,
+                    browser_binding="bindïng-with-nön-ascii",
+                )
+
+    asyncio.run(_go())
 
 
 # ---------------------------------------------------------------------------
@@ -1035,7 +1276,7 @@ def test_pkce_verifier_store_pop_is_single_use() -> None:
 
     async def _go() -> None:
         store = PKCEVerifierStore()
-        await store.put("state-1", code_verifier="v", return_to="/ui/")
+        await store.put("state-1", code_verifier="v", return_to="/ui/", browser_binding="b1")
         first = await store.pop("state-1")
         second = await store.pop("state-1")
         assert first is not None
@@ -1053,7 +1294,7 @@ def test_pkce_verifier_store_expires_past_ttl(
     async def _go() -> None:
         store = PKCEVerifierStore()
         # First put -- normal.
-        await store.put("state-stale", code_verifier="v1", return_to="/ui/")
+        await store.put("state-stale", code_verifier="v1", return_to="/ui/", browser_binding="bs")
         assert store.size() == 1
         # Fast-forward monotonic time past the TTL by patching the
         # store's internal time reference.
@@ -1066,7 +1307,7 @@ def test_pkce_verifier_store_expires_past_ttl(
             lambda: original() + AUTHORIZATION_FLOW_TTL_SECONDS + 1,
         )
         # A fresh put triggers the reap and drops the stale entry.
-        await store.put("state-fresh", code_verifier="v2", return_to="/ui/")
+        await store.put("state-fresh", code_verifier="v2", return_to="/ui/", browser_binding="bf")
         assert store.size() == 1
         assert await store.pop("state-stale") is None
         fresh = await store.pop("state-fresh")
@@ -1086,7 +1327,7 @@ def test_build_authorization_request_carries_state_and_resource() -> None:
     async def _go() -> None:
         with respx.mock(assert_all_called=False) as mock_router:
             _mock_oidc_metadata(mock_router)
-            url, state = await build_authorization_request(
+            url, state, _binding = await build_authorization_request(
                 redirect_uri=_REDIRECT_URI,
                 return_to="/ui/dashboard",
             )
@@ -1110,6 +1351,7 @@ def test_exchange_code_rejects_unknown_state() -> None:
                     redirect_uri=_REDIRECT_URI,
                     authorization_response=(f"{_REDIRECT_URI}?code=c&state=forged"),
                     state="forged",
+                    browser_binding=None,
                 )
 
     asyncio.run(_go())
@@ -1136,7 +1378,7 @@ def test_full_login_round_trip_lets_authenticated_page_through() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = _https_client()
         # 1. Unauthenticated -> redirect to login.
         deep_link = client.get("/ui/sentinel")
         assert deep_link.status_code == 302

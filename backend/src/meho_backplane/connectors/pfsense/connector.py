@@ -62,7 +62,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     CredentialsReadError,
     strip_credential_value,
 )
-from meho_backplane.connectors.adapters.ssh import SshConnector
+from meho_backplane.connectors.adapters.ssh import (
+    SshConnector,
+    _known_hosts_from_secret,
+)
 from meho_backplane.connectors.pfsense.ops import PFSENSE_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -285,10 +288,15 @@ class PfSenseConnector(SshConnector):
         """
         secret = await self._resolve_secret(target, operator)
         username = strip_credential_value(secret.get("username", "admin"))
+        # Host-key trust is resolved by the shared SSH-adapter helper so the
+        # fail-closed pin / opt-out contract is identical to the base
+        # connector — the key-only *auth* policy is the only pfSense-specific
+        # narrowing here.
+        known_hosts = _known_hosts_from_secret(getattr(target, "name", str(target)), secret)
         private_key_raw = secret.get("ssh_private_key")
         if private_key_raw:
             key = asyncssh.import_private_key(strip_credential_value(private_key_raw))
-            return {"username": username, "client_keys": [key]}
+            return {"username": username, "known_hosts": known_hosts, "client_keys": [key]}
         raise ValueError(
             f"target '{getattr(target, 'name', target)!r}': pfSense connector requires "
             f"ssh_private_key in the target's Vault secret — password auth is not "

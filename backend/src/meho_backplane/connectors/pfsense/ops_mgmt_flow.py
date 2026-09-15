@@ -165,15 +165,39 @@ def _compile_leg_nets(mgmt_nets: Any) -> list[tuple[Any, str]]:
 
 
 def _server_client_split(
-    src: tuple[str, int], dst: tuple[str, int], ports: set[int]
+    src: tuple[str, int],
+    dst: tuple[str, int],
+    ports: set[int],
+    direction: str | None,
 ) -> tuple[str, int, str] | None:
-    """Pick the server side (endpoint whose port is a management port).
+    """Pick the server side of a ``pfctl -ss`` state.
 
-    Returns ``(server_ip, server_port, client_ip)`` or ``None`` when
-    neither endpoint's port is a management port.
+    Returns ``(server_ip, server_port, client_ip)`` or ``None`` when the
+    state is not a management-plane flow (the resolved server side does not
+    carry a management port).
+
+    The ``pfctl -ss`` direction arrow points from the connection initiator
+    (the client) toward the listener (the server): for ``ep1 -> ep2`` the
+    server is ``ep2`` (``dst``); for ``ep1 <- ep2`` it is ``ep1`` (``src``).
+    Honouring the arrow -- instead of picking whichever endpoint's port
+    happens to be in ``ports`` -- is what stops an **outbound** connection
+    whose local client ephemeral source port coincidentally lands in the
+    management-port set from being inverted into a phantom inbound hit on a
+    local management port (#3471): only the arrow-resolved server side is
+    tested for a management port, so a coincidental client-side management
+    port no longer flips the roles.
+
+    ``<->`` (or a missing / unrecognised arrow) carries no initiator
+    information, so the port heuristic (``dst`` first) is used as a fallback.
+    Real ``pfctl -ss`` TCP states always carry a directional arrow, so that
+    path is defensive only.
     """
     src_ip, src_port = src
     dst_ip, dst_port = dst
+    if direction == "->":
+        return (dst_ip, dst_port, src_ip) if dst_port in ports else None
+    if direction == "<-":
+        return (src_ip, src_port, dst_ip) if src_port in ports else None
     if dst_port in ports:
         return dst_ip, dst_port, src_ip
     if src_port in ports:
@@ -250,8 +274,10 @@ def classify_mgmt_flows(
     """Classify parsed ``pfctl -ss`` rows into a compact governance summary.
 
     A state is *classified* when it is TCP, both endpoints parse, its
-    server side (the management-port endpoint) sits in one of ``mgmt_nets``,
-    and the client side is therefore the source under scrutiny. The client
+    server side -- resolved from the ``pfctl -ss`` direction arrow, not a
+    port guess (see :func:`_server_client_split`) -- carries a management
+    port and sits in one of ``mgmt_nets``, and the client side is therefore
+    the source under scrutiny. The client
     is **sanctioned** when it is in ``sanctioned_src``, else
     **non-sanctioned**; a non-sanctioned client that is also not in
     ``baseline_src`` is **unexpected** -- the new-source signal a Sensor
@@ -295,7 +321,7 @@ def classify_mgmt_flows(
         dst_hp = _split_host_port(row.get("dst"))
         if not src_hp or not dst_hp:
             continue
-        split = _server_client_split(src_hp, dst_hp, ports)
+        split = _server_client_split(src_hp, dst_hp, ports, row.get("direction"))
         if split is None:
             continue
         server_ip_s, server_port, client_ip_s = split

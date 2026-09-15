@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "broadcast.fullname" . }}
+  labels:
+    {{- include "broadcast.labels" . | nindent 4 }}
+spec:
+  # Select the broadcast Pod itself. In Kubernetes a Pod is ingress-isolated
+  # only when *some* NetworkPolicy selects it; the parent chart's policy
+  # selects the backplane Pods, not this store, so without this policy the
+  # Valkey port stays reachable from every Pod in the cluster even at
+  # `networkPolicy.enabled=true`. This is the subchart's own ingress guard
+  # so the store's isolation does not depend on the umbrella chart.
+  podSelector:
+    matchLabels:
+      {{- include "broadcast.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Admit tcp/<service.port> (default 6379) only from the backplane Pods.
+    # The backplane carries `app.kubernetes.io/name: meho` (the umbrella
+    # chart's `meho.selectorLabels`) — `networkPolicy.backplanePodLabels`
+    # holds those labels so the selectors line up. `.Release.Name` scopes
+    # the instance so co-tenant MEHO installs in one namespace stay
+    # partitioned.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.backplanePodLabels | nindent 14 }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- range .Values.networkPolicy.extraAllowedSelectors }}
+        # Explicitly-listed additional in-cluster consumers (label maps).
+        # Default empty — only the backplane reaches the store.
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+{{- end }}

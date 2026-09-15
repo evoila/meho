@@ -42,6 +42,7 @@ from meho_backplane.connectors.keycloak import KeycloakConnector
 from meho_backplane.connectors.keycloak.secret_endpoint import (
     KeycloakCredentialSecretEndpoint,
     KeycloakSecretRefError,
+    build_keycloak_secret_endpoint,
 )
 from meho_backplane.connectors.keycloak.session import (
     KeycloakAdminCredentials,
@@ -192,8 +193,15 @@ async def _fetch_move_audit_rows() -> list[AuditLog]:
 
 
 def test_keycloak_kind_registered_in_secret_registry() -> None:
-    """The keycloak sink registers under kind ``"keycloak"`` at import time."""
-    assert SECRET_ENDPOINT_REGISTRY.get("keycloak") is KeycloakCredentialSecretEndpoint
+    """The keycloak dual-dispatch factory registers under kind ``"keycloak"``.
+
+    The registered callable is the dispatch factory (#3619); a
+    user-password sink ref still resolves to the unchanged
+    :class:`KeycloakCredentialSecretEndpoint` sink.
+    """
+    assert SECRET_ENDPOINT_REGISTRY.get("keycloak") is build_keycloak_secret_endpoint
+    sink = SECRET_ENDPOINT_REGISTRY["keycloak"](f"{_TARGET_NAME}/{_REALM}/{_USERNAME}#password")
+    assert isinstance(sink, KeycloakCredentialSecretEndpoint)
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +258,10 @@ async def test_vault_to_keycloak_move_writes_credential_server_side(
     install_fake_client(monkeypatch, secret={"password": _SENTINEL})
 
     params = {
-        "from": "vault:secret/db/prod#password",
+        # Source lives in the operator's own tenant subtree so it passes the
+        # default-on vault-kv tenant-scope guard the broker now runs on its
+        # read path (S08 #296); the sink is a Keycloak-admin path, unguarded.
+        "from": f"vault:tenants/{_OPERATOR_TENANT_ID}/db/prod#password",
         "to": f"keycloak:{_TARGET_NAME}/{_REALM}/{_USERNAME}#password",
         "reason": "provision keycloak operator credential",
     }

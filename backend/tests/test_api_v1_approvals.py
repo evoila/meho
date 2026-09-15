@@ -287,6 +287,21 @@ async def test_resume_dispatches_when_no_target_was_pinned(
         )
         await session.commit()
 
+    # The resume path runs only after the decision committed ``approved``.
+    # ``claim_resume`` (F12 / #274) now latches only an approved row, so flip
+    # the committed row to approved before resuming — the same ordering the
+    # real ``/approve`` → resume flow produces.
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus
+
+    async with get_sessionmaker()() as session:
+        row = await session.get(ApprovalRequest, request.id)
+        assert row is not None
+        row.status = ApprovalRequestStatus.APPROVED.value
+        row.decided_at = datetime.now(UTC)
+        await session.commit()
+
     seen: dict[str, Any] = {}
 
     async def _dispatch_spy(**kwargs: Any) -> Any:

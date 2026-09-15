@@ -189,6 +189,50 @@ async def test_service_principal_safe_read_auto_executes() -> None:
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_client_credentials_shape_principal_parks_caution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-credentials token classified via the S11 shape test parks a caution op.
+
+    Ties the auth-layer classification (:func:`_extract_principal_kind`) to
+    the dispatch consequence: with the #3178 username-prefix marker disabled
+    (empty prefix), a client-credentials token — ``azp`` present, no
+    interactive-session claim — classifies ``service`` on the
+    marker-independent shape test, so a mutating ``caution`` op it dispatches
+    parks for a human decision instead of auto-executing (the S11 fail-open
+    this Task closes). Before the fix the same token defaulted to ``user``
+    and this op auto-executed (``enforce_subop_policy`` returning ``None``).
+    """
+    from meho_backplane.auth.jwt import _extract_principal_kind
+
+    monkeypatch.setenv("JWT_SERVICE_ACCOUNT_USERNAME_PREFIX", "")
+    get_settings.cache_clear()
+    settings = get_settings()
+    claims = {
+        "azp": "deploy-bot",
+        "client_id": "deploy-bot",
+        # Prefix disabled: the #3178 username marker cannot fire on this
+        # username, so only the shape test can classify it as a service token.
+        "preferred_username": "service-account-deploy-bot",
+    }
+    kind = _extract_principal_kind(claims, settings)
+    assert kind is PrincipalKind.SERVICE
+
+    result = await enforce_subop_policy(
+        operator=_operator(principal_kind=kind),
+        connector_id=_CONNECTOR,
+        op_id=_OP,
+        safety_level="caution",
+        requires_approval=False,
+        target=None,
+        params=_PARAMS,
+    )
+    assert result is not None
+    assert result.status == "awaiting_approval"
+    assert not await _grant_use_rows()
+
+
 # ---------------------------------------------------------------------------
 # standing grant clears the gate + records grant-use audit (#3151)
 # ---------------------------------------------------------------------------
@@ -481,11 +525,20 @@ def test_service_safety_gate_reason_destructive_parks_always(method: str | None)
 
 
 @pytest.mark.asyncio
-async def test_service_principal_destructive_parks_and_grant_never_satisfies() -> None:
-    """A ``destructive`` op parks for a service principal **even with a live
-    matching grant** — the tier is non-grantable (#3183), so
-    ``consult_and_record_grant`` refuses it before any lookup and no
-    grant-use audit row is written.
+async def test_service_principal_destructive_refused_and_grant_never_satisfies() -> None:
+    """A ``destructive`` op fails closed for a service principal **even with a
+    live matching grant** — the tier is non-grantable (#3183), so no grant-use
+    audit row is written.
+
+    Since #294 (security review S06) the composite seam refuses to *park* a
+    ``destructive`` sub-op that carries no ``preview_hash`` + blast-radius
+    binding — the same fail-closed rule the dispatcher enforces (#3197,
+    ``_destructive_binding_refusal``). The seam presents no ``preview_hash``,
+    so the op is **denied** (``preview_binding_required``) rather than parked
+    with an identifier-only row the tier guards would misread. This supersedes
+    the pre-#294 contract where a destructive service-principal sub-op parked
+    (``awaiting_approval``); the non-grantable property is unchanged and is now
+    enforced by the refusal itself.
     """
     grant_id = await _seed_grant()
     result = await enforce_subop_policy(
@@ -498,7 +551,10 @@ async def test_service_principal_destructive_parks_and_grant_never_satisfies() -
         params=_PARAMS,
     )
     assert result is not None
-    assert result.status == "awaiting_approval"
+    # Fail-closed: no bindable preview was presented, so the destructive sub-op
+    # is refused rather than parked with a weak identifier-only row (#294).
+    assert result.status == "denied"
+    assert result.extras["error_code"] == "preview_binding_required"
     # The live grant did NOT clear the gate — no auto-approval was recorded.
     assert not await _grant_use_rows(grant_id)
 

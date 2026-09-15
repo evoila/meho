@@ -51,6 +51,11 @@ at the call site; the helper would default to those values anyway). The
 ``safety_level="destructive"`` op (still ``requires_approval=True``) — the
 governed-delete tier (decision
 ``docs/decisions/governed-delete-operations.md``).
+The #3505 governed-allocation writes add the first two ``caution`` rows —
+``resource_pool.create`` and the VM-Host affinity
+``cluster.drs_vm_host_rule.create`` — plus one more ``dangerous`` row,
+``resource_pool.delete`` (a reparent, not a destroy); all three still
+``requires_approval=True``.
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -78,6 +83,12 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library import (
+    content_library_subscribed_create_composite,
+    content_library_subscribed_items_list_composite,
+    content_library_subscribed_status_composite,
+    content_library_subscribed_sync_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -85,8 +96,19 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    storage_policy_create_composite,
+    storage_policy_delete_composite,
+    storage_policy_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._supervisor import (
+    supervisor_disable_composite,
+    supervisor_enable_composite,
+    supervisor_status_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
+    cluster_drs_vm_host_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
     guest_customization_spec_create_composite,
@@ -94,6 +116,8 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     network_portgroup_create_composite,
     network_portgroup_security_set_composite,
+    resource_pool_create_composite,
+    resource_pool_delete_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
@@ -116,8 +140,18 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA,
     CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA,
+    CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
+    CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
     CLUSTER_PATCH_PARAMETER_SCHEMA,
     CLUSTER_PATCH_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
+    CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
@@ -156,6 +190,22 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_SECURITY_SET_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
+    RESOURCE_POOL_CREATE_RESPONSE_SCHEMA,
+    RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,
+    RESOURCE_POOL_DELETE_RESPONSE_SCHEMA,
+    STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
+    STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
+    STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
+    STORAGE_POLICY_DELETE_RESPONSE_SCHEMA,
+    STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
+    STORAGE_POLICY_LIST_RESPONSE_SCHEMA,
+    SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
+    SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
+    SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
+    SUPERVISOR_ENABLE_RESPONSE_SCHEMA,
+    SUPERVISOR_STATUS_PARAMETER_SCHEMA,
+    SUPERVISOR_STATUS_RESPONSE_SCHEMA,
     VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
     VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA,
     VM_CLONE_PARAMETER_SCHEMA,
@@ -218,11 +268,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "cluster": (
         "Use for cluster-level reads and orchestrated cluster ops "
         "that aggregate across hosts: DRS state + active "
-        "recommendations (read), and sequential cluster patch (write, "
-        "approval-gated). The right group when the question is "
-        "'what is DRS suggesting?' or 'patch every host in this "
-        "cluster in order'. Pair with the 'host' group when the "
-        "follow-up drills into one host's lifecycle (evacuate, "
+        "recommendations (read); sequential cluster patch (write, "
+        "approval-gated); the two DRS-rule writes — a VM-VM affinity / "
+        "anti-affinity rule by explicit VM list (drs_rule.create) and a "
+        "VM-Host rule pinning a VM group onto an (anti-)affine host group "
+        "(drs_vm_host_rule.create); and the governed resource-pool "
+        "allocation writes (resource_pool.create under a parent pool or a "
+        "cluster's root pool, and resource_pool.delete with a "
+        "refuse-then-force guard). The right group when the question is "
+        "'what is DRS suggesting?', 'patch every host in this cluster in "
+        "order', 'pin these VMs to these hosts', or 'carve out / tear down "
+        "a resource pool for this estate'. Pair with the 'host' group when "
+        "the follow-up drills into one host's lifecycle (evacuate, "
         "maintenance), and with 'vm' when DRS recommendations need "
         "to translate into actual VM migrations."
     ),
@@ -341,6 +398,42 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "guest', 'what does the guest think its network is?', 'drop this config "
         "file into the guest', or 'run Install-WindowsFeature inside the guest'. "
         "Requires VMware Tools in the guest."
+    ),
+    "namespace_management": (
+        "Use for governed vSphere Supervisor (Workload Control Plane / WCP) "
+        "lifecycle on a cluster -- the governed replacement for out-of-band "
+        "'govc'/'kubectl-vsphere' enablement. Writes (dangerous / "
+        "approval-required): enable the Supervisor on a single compute cluster "
+        "(supervisor.enable -- takes the nested EnableOnComputeClusterSpec: "
+        "control_plane + workloads with a network stack the composite validates, "
+        "VSPHERE+VSPHERE_FOUNDATION for the VDS + Foundation LB model or NSX_VPC "
+        "for NSX VPC), and disable/tear it down (supervisor.disable). Both are "
+        "asynchronous -- they return immediately and you poll for convergence. "
+        "Read (safe): supervisor.status -- read a cluster's config_status "
+        "(CONFIGURING -> RUNNING / ERROR) + kubernetes_status (READY) shaped so a "
+        "runbook OperationCallVerify step or a Sensor can poll ready==true. The "
+        "right group for 'stand up Kubernetes on this cluster', 'tear the "
+        "Supervisor down', or 'has the Supervisor come up yet?'. Pair with "
+        "'storage' for the SPBM policy id the enable spec needs and 'networking' "
+        "for the workload / management network context."
+    ),
+    "content_library": (
+        "Use for the governed SUBSCRIBED content-library surface -- create a "
+        "content library subscribed to a remote publisher, force / confirm its "
+        "synchronisation, and list its items. The right group for standing up "
+        "the Tanzu Kubernetes release (TKr / VKr) image source a vSphere "
+        "Supervisor needs: pre-create a SUBSCRIBED library pointed at the "
+        "upstream VMware repo (subscribed.create, approval-gated, returns the "
+        "library id #3281's Supervisor enable spec consumes as "
+        "default_kubernetes_service_content_library), trigger a sync "
+        "(subscribed.sync, approval-gated, asynchronous), and read readiness "
+        "back -- subscribed.status (last_sync_time) and subscribed.items.list "
+        "(the synchronised TKr versions, JSONFlux-reduced). The right group for "
+        "'create the TKr content library', 'sync the Kubernetes release "
+        "library', or 'which TKr images are available?'. Distinct from the "
+        "content-library *item* deploy/import (the 'vm' group's "
+        "deploy_from_library / import_from_library) -- this group is the "
+        "library-container lifecycle, not the VM deploy."
     ),
 }
 
@@ -973,6 +1066,77 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_vm_host_rule.create",
+        handler=cluster_drs_vm_host_rule_create_composite,
+        summary="Add a DRS VM-Host affinity rule (VM group + host group + run-on rule).",
+        description=(
+            "Pins the VMs of a named VM group onto (affine) or away from "
+            "(anti-affine) the hosts of a named host group — a VM-Host DRS "
+            "rule (ClusterVmHostRuleInfo), the placement primitive that binds "
+            "an estate's nested ESXi to a chosen subset of a cluster's hosts. "
+            "A sibling of cluster.drs_rule.create (which is VM-VM only, by "
+            "explicit VM list) that leaves that op's contract unchanged. No "
+            "REST path exists, so one vim "
+            "ClusterComputeResource.ReconfigureComputeResource_Task carries "
+            "both a ClusterConfigSpecEx.groupSpec delta (adds the VM + host "
+            "groups) and a rulesSpec delta (adds the rule), polled to a "
+            "terminal state. VM + host names resolve to MoRefs scoped to the "
+            "cluster; rule + group names are the idempotence keys "
+            "(status='rule_exists' / 'group_exists' before any write). "
+            "'mandatory' picks a 'must' vs a 'should' rule."
+        ),
+        parameter_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "drs", "vi-json"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.resource_pool.create",
+        handler=resource_pool_create_composite,
+        summary="Create a resource pool under a parent pool or a cluster's root pool.",
+        description=(
+            "Creates a resource pool via the REST POST /vcenter/resource-pool "
+            "(Vcenter.ResourcePool.CreateSpec: name + parent + optional cpu / "
+            "memory allocation) and returns the new pool moid — the governed "
+            "allocation step a nested-lab estate is built on. Parent selection "
+            "is either an explicit 'parent' ResourcePool moid (nesting) or a "
+            "'cluster' moid whose root resource pool is resolved for you "
+            "(ClusterComputeResource.resourcePool) — the estate convenience, "
+            "since operators have a cluster, not a root-pool moid. Read-back "
+            "confirms the new pool lists under the resolved parent. Equivalent "
+            "of 'govc pool.create'."
+        ),
+        parameter_schema=RESOURCE_POOL_CREATE_PARAMETER_SCHEMA,
+        response_schema=RESOURCE_POOL_CREATE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "resource-pool"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.resource_pool.delete",
+        handler=resource_pool_delete_composite,
+        summary="Delete a resource pool; refuse a non-empty pool unless force.",
+        description=(
+            "Deletes a resource pool via the REST DELETE "
+            "/vcenter/resource-pool/{resourcePool}, which reparents the pool's "
+            "child pools + VMs up to its parent (it does not destroy them). A "
+            "non-empty pool is refused (status='not_empty') unless force=true "
+            "is passed; the delete then read-backs through the listing to "
+            "confirm the pool is absent (status='deleted'). safety_level="
+            "'dangerous' — the reparent, not a destroy. Equivalent of 'govc "
+            "pool.destroy'."
+        ),
+        parameter_schema=RESOURCE_POOL_DELETE_PARAMETER_SCHEMA,
+        response_schema=RESOURCE_POOL_DELETE_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "resource-pool"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.folder.create",
         handler=folder_create_composite,
         summary="Create a VM folder under a named parent (synchronous vim CreateFolder).",
@@ -1021,18 +1185,25 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
     _CompositeSpec(
         op_id="vmware.composite.vm.nic.repoint",
         handler=vm_nic_repoint_composite,
-        summary="Repoint a vNIC to a different distributed portgroup.",
+        summary="Repoint a vNIC onto a distributed or standard portgroup.",
         description=(
             "Reads the NIC's current backing + MAC via "
             "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}, resolves the "
             "target portgroup by display name via "
-            "GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP (there "
-            "is no dedicated portgroup list resource), then PATCHes the NIC "
-            "backing to {type: DISTRIBUTED_PORTGROUP, network}. A name that "
-            "resolves to zero / many portgroups refuses the repoint "
-            "(status='not_found' / 'ambiguous') with no PATCH issued. The "
-            "from->to network pair is what the four-eyes reviewer needs. "
-            "Equivalent of 'govc vm.network.change'."
+            "GET:/vcenter/network?filter.types=<backing_type> (there is no "
+            "dedicated portgroup list resource), then PATCHes the NIC "
+            "backing to {type: backing_type, network}. backing_type is "
+            "DISTRIBUTED_PORTGROUP (default) or STANDARD_PORTGROUP -- the "
+            "latter moves a NIC onto a host-local standard-switch portgroup "
+            "(e.g. to repair a VM whose NIC landed on an L2 that cannot "
+            "reach its gateway). Standard portgroups are host-scoped, so a "
+            "name can match one moid per host (status='ambiguous'); pass an "
+            "explicit 'network' moid to pick one. An explicit 'network' moid "
+            "skips name resolution and is type-checked against backing_type "
+            "(status='invalid_request' on mismatch); a name matching zero "
+            "portgroups returns status='not_found'. No PATCH is issued on "
+            "any non-repointed status. The from->to network pair is what the "
+            "four-eyes reviewer needs. Equivalent of 'govc vm.network.change'."
         ),
         parameter_schema=VM_NIC_REPOINT_PARAMETER_SCHEMA,
         response_schema=VM_NIC_REPOINT_RESPONSE_SCHEMA,
@@ -1431,6 +1602,242 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
             ),
         },
     ),
+    # ----------------------------------------------------------------
+    # namespace-management -- Supervisor (WCP) lifecycle (#3281).
+    # 2 dangerous / approval-required writes + 1 safe status read.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.enable",
+        handler=supervisor_enable_composite,
+        summary="Enable a vSphere Supervisor (WCP) on a single compute cluster.",
+        description=(
+            "Enables the vSphere Supervisor on a cluster via "
+            "POST /vcenter/namespace-management/supervisors/{cluster}"
+            "?action=enable_on_compute_cluster (the current 9.x path; the "
+            "clusters/{cluster}?action=enable form is deprecated as of vSphere "
+            "9.0). Takes the nested EnableOnComputeClusterSpec (name + "
+            "control_plane + workloads + optional zone). Validates the spec "
+            "server-side -- the control-plane essentials (management network + "
+            "SPBM storage policy) and the workload network stack -- and refuses "
+            "an unknown network_type / edge provider loudly "
+            "(status='unknown_network_provider') before any write. The VDS + "
+            "Foundation LB model is network_type=VSPHERE + edge "
+            "provider=VSPHERE_FOUNDATION (no separate NSX edge cluster); NSX VPC "
+            "is NSX_VPC/NSX_VPC. Asynchronous: returns the new Supervisor id "
+            "immediately (status='enabling') and does NOT block on the 30-60 min "
+            "convergence -- poll vmware.composite.supervisor.status. Governed "
+            "replacement for out-of-band 'govc'/'kubectl-vsphere' enablement."
+        ),
+        parameter_schema=SUPERVISOR_ENABLE_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_ENABLE_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.disable",
+        handler=supervisor_disable_composite,
+        summary="Disable / tear down the vSphere Supervisor on a cluster.",
+        description=(
+            "Tears the Supervisor down via "
+            "POST /vcenter/namespace-management/clusters/{cluster}?action=disable "
+            "(DELETE clusters/{cluster} 404s -- the action form is the documented "
+            "teardown). No request body; removes the control-plane VMs and worker "
+            "nodes but leaves the cluster's networking / zone intact for a fresh "
+            "re-enable. Asynchronous: returns status='disabling' immediately "
+            "-- poll vmware.composite.supervisor.status (config_status moves "
+            "through 'REMOVING'). Governed replacement for out-of-band teardown."
+        ),
+        parameter_schema=SUPERVISOR_DISABLE_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_DISABLE_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "write", "namespace-management", "supervisor", "wcp"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.supervisor.status",
+        handler=supervisor_status_composite,
+        summary="Read a cluster's Supervisor config + kubernetes status (poll-friendly).",
+        description=(
+            "Reads GET /vcenter/namespace-management/clusters/{cluster} and "
+            "reshapes Clusters.Info into a compact, inline-pollable envelope: the "
+            "scalar config_status (CONFIGURING/REMOVING/RUNNING/ERROR) + "
+            "kubernetes_status (READY/WARNING/ERROR) + a derived ready flag stay "
+            "top-level so a runbook OperationCallVerify step or a Sensor assertion "
+            "can poll config_status=='RUNNING' / ready==true directly. The "
+            "messages + conditions arrays are capped inline (messages_limit). "
+            "Read-only -- never mutates cluster state. The status op enable/disable "
+            "hand the caller for the asynchronous convergence poll."
+        ),
+        parameter_schema=SUPERVISOR_STATUS_PARAMETER_SCHEMA,
+        response_schema=SUPERVISOR_STATUS_RESPONSE_SCHEMA,
+        group_key="namespace_management",
+        tags=["composite", "read-only", "namespace-management", "supervisor", "wcp"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    # storage_policy.* — governed NFS tag-based SPBM policy (#3494)
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.list",
+        handler=storage_policy_list_composite,
+        summary="List the visible vCenter storage policies (JSONFlux-reduced).",
+        description=(
+            "Reads GET /vcenter/storage/policies and returns the visible "
+            "storage policies; the set-shaped list is JSONFlux-reduced to a "
+            "result handle by the dispatcher when large (drill in via "
+            "result_query). Optional policy_ids narrows the scan. The "
+            "companion read for storage_policy.create/delete — confirms a "
+            "minted policy is visible or a deleted one is gone. Read-only."
+        ),
+        parameter_schema=STORAGE_POLICY_LIST_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_LIST_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "policy", "spbm"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.create",
+        handler=storage_policy_create_composite,
+        summary="Create a tag-based NFS VM storage policy (tag substrate + PBM SOAP).",
+        description=(
+            "Mints a tag-based requirement storage policy for NFS-principal "
+            "datastores (which have no default policy — vSAN Default Storage "
+            "Policy is vSAN-only), the first link in the Supervisor-enable "
+            "chain (#3494). Creates the tag category + tag over vCenter REST "
+            "(POST /cis/tagging/category / /tag), attaches the tag to each "
+            "named datastore (/tag-association?action=attach), then creates "
+            "the policy over the PBM SOAP API (PbmProfileProfileManager."
+            "PbmCreate on /pbm — there is no vCenter REST for policy creation) "
+            "whose one rule requires the tag, and returns the new policy id. "
+            "safety_level='caution' + requires_approval=True: parked for human "
+            "approval before any write; each child write flows through the "
+            "governed sub-op seam (its own audit row + grant point). "
+            "Fail-closed if a datastore name resolves to zero / many. "
+            "Equivalent of the out-of-band 'New-SpbmStoragePolicy' / "
+            "'govc storage.policy.create -category -tag', governed."
+        ),
+        parameter_schema=STORAGE_POLICY_CREATE_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_CREATE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "write", "storage", "policy", "spbm", "tagging", "nfs"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.storage_policy.delete",
+        handler=storage_policy_delete_composite,
+        summary="Delete a storage policy by id (PBM SOAP) and read-back verify absent.",
+        description=(
+            "The teardown counterpart of storage_policy.create (#3494). Issues "
+            "PbmProfileProfileManager.PbmDelete for the policy id over the PBM "
+            "SOAP API, then read-backs GET /vcenter/storage/policies to confirm "
+            "the id is gone. safety_level='destructive' + requires_approval="
+            "True. A per-id PbmDelete fault (e.g. the policy is still in use by "
+            "a VM / Supervisor) returns status='delete_failed' with the fault "
+            "type — an in-use policy must be freed first (no force). Deletes "
+            "only the policy; the tag / category are left in place (may be "
+            "shared). Equivalent of 'govc storage.policy.rm', governed."
+        ),
+        parameter_schema=STORAGE_POLICY_DELETE_PARAMETER_SCHEMA,
+        response_schema=STORAGE_POLICY_DELETE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "write", "storage", "policy", "spbm", "destroy", "destructive"],
+        safety_level="destructive",
+        requires_approval=True,
+    ),
+    # Content-library SUBSCRIBED-library composites (#3495) -- the
+    # governed TKr/VKr image source for a vSphere Supervisor. Two
+    # caution + approval writes (create / sync) and two safe reads
+    # (status / items.list). Naming nests under the sibling #3331
+    # LOCAL-library family via the ``subscribed`` infix.
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.create",
+        handler=content_library_subscribed_create_composite,
+        summary="Create a SUBSCRIBED content library (e.g. the Supervisor TKr/VKr image source).",
+        description=(
+            "Resolves the ``datastore`` name to a moid, then POSTs a "
+            "``Content.LibraryModel`` to POST:/content/subscribed-library with a "
+            "DATASTORE storage backing and a subscription to the given publisher "
+            "URL (e.g. https://wp-content.vmware.com/v2/latest/lib.json for the "
+            "upstream VMware Tanzu Kubernetes release repo). Returns the new "
+            "library id — the value #3281's Supervisor enable spec consumes as "
+            "``default_kubernetes_service_content_library``. The create is "
+            "asynchronous vCenter-side (metadata syncs in the background; item "
+            "content lazily when ``on_demand``). The optional BASIC-auth "
+            "``password`` is kept off every preview / broadcast / audit-hash "
+            "surface. Approval-gated (caution)."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "content-library", "subscribed", "tkr", "vks"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.sync",
+        handler=content_library_subscribed_sync_composite,
+        summary="Force synchronisation of a SUBSCRIBED content library.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, then forces a sync via "
+            "POST:/content/subscribed-library/{libraryId}?action=sync. "
+            "Asynchronous: returns as soon as the sync is accepted (a no-op if "
+            "one is already running); it respects the library's ``on_demand`` "
+            "setting. Confirm completion with content_library.subscribed.status "
+            "(last_sync_time) / .items.list. Approval-gated (caution)."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "content-library", "subscribed", "sync"],
+        safety_level="caution",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.status",
+        handler=content_library_subscribed_status_composite,
+        summary="Read a SUBSCRIBED content library's model + subscription state.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, then reads the "
+            "Content.LibraryModel via GET:/content/subscribed-library/{libraryId}. "
+            "Surfaces name / type / subscription URL / sync mode and "
+            "``last_sync_time`` — the readiness signal, populated once the first "
+            "metadata sync completes. The API omits the subscription password "
+            "from the GET response, so this read carries no secret. Read-only."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "read-only", "content-library", "subscribed"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.content_library.subscribed.items.list",
+        handler=content_library_subscribed_items_list_composite,
+        summary="List the items (synchronised TKr images) in a SUBSCRIBED library.",
+        description=(
+            "Resolves ``library_id`` / ``library_name``, finds every item id "
+            "scoped to the library via POST:/content/library/item?action=find, "
+            "then reads each item's metadata. Each row carries the TKr-triage "
+            "fields — ``name`` (the TKr version), ``type``, ``version``, "
+            "``cached`` (whether the multi-GB image content is downloaded), "
+            "``size``, ``last_sync_time``. The set-shaped ``items`` list is "
+            "JSONFlux-reduced automatically once it crosses the dispatcher's "
+            "50-row / 4 KB threshold (drill in with result_query). Read-only."
+        ),
+        parameter_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA,
+        response_schema=CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA,
+        group_key="content_library",
+        tags=["composite", "read-only", "content-library", "subscribed", "tkr"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
 )
 
 
@@ -1447,9 +1854,11 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 38 composites total -- 9 read (T5 / #508 + the 4 guest-ops
-    reads / #3100) + 29 write (T6 / #509 + the destructive-tier
-    ``vm.destroy`` / #3198,
+    Scope: 41 composites total -- 9 read (T5 / #508 + the 4 guest-ops
+    reads / #3100) + 32 write (T6 / #509 + the destructive-tier
+    ``vm.destroy`` / #3198, the governed resource-pool allocation writes
+    ``resource_pool.create`` / ``resource_pool.delete`` + the VM-Host
+    affinity ``cluster.drs_vm_host_rule.create`` / #3505,
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893 + the WSFC/FCI shared-attach
     ``vm.disk.attach`` / #3256, the folder-template

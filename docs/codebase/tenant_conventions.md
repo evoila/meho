@@ -235,10 +235,13 @@ the conventions budget. Behaviour for the conventions band:
   a fixed `GUARD_PREFIX` reminding the model that the wrapped
   content is admin-authored tenant guidance, not system directives,
   bounded by MEHO's policy / audit / approval enforcement. The
-  wrapper is **positional** (the terminator is emitted by the
-  assembler, not substituted from user content) so a body
-  containing `END_TENANT_CONVENTIONS>>` literally cannot escape
-  the block.
+  wrapper emits the delimiters positionally, but the field values
+  are interpolated verbatim and constrained by length only, so
+  `_neutralise_delimiters` rewrites any `BLOCK_START` /
+  `BLOCK_END` substring in `conv.title` / `conv.body` **before**
+  wrapping. The assembled band therefore carries exactly one
+  delimiter pair -- a body containing `END_TENANT_CONVENTIONS>>`
+  cannot plant a second terminator inside the block.
 
 The token-budget arithmetic uses
 [`conventions.schemas.estimate_tokens`](../../backend/src/meho_backplane/conventions/schemas.py)
@@ -266,12 +269,17 @@ the block, not above it.
 The pattern mirrors the OWASP LLM Top-10 recommendation: delimit
 untrusted content, prefix with a guard reminder, scope the trust
 boundary inside the system prompt where the model evaluates
-instruction precedence. The
-[`test_conventions_preamble.test_injection_body_stays_inside_delimiter`](../../backend/tests/test_conventions_preamble.py)
-test pins the structural invariant: even when the body contains
-both an "ignore prior instructions" string AND the literal
-terminator, the wrapper's terminator is positioned AFTER all
-malicious content.
+instruction precedence. Because the delimiter alone does not stop a
+field value from carrying its own copy of the terminator,
+`_neutralise_delimiters` defangs any embedded `BLOCK_START` /
+`BLOCK_END` substring in the interpolated `title` / `body` before
+the wrapper runs -- the same field-constraint discipline the
+runbook-priming band enforces via its slug/step-id regex. The
+[`test_conventions_preamble.test_injection_body_terminator_neutralised_exactly_one`](../../backend/tests/test_conventions_preamble.py)
+test pins the structural invariant: a body containing the literal
+terminator yields an assembled preamble with exactly one occurrence
+of it (the wrapper's), so the trailing injected line stays inside
+the block.
 
 ## Conditional `notifications/resources/updated` emit (T4)
 

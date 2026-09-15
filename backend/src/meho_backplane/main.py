@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from typing import Final
 
 import structlog
-from fastapi import FastAPI, Response
+from fastapi import Depends, FastAPI, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -78,6 +78,7 @@ from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.audit_reflex import router as api_v1_audit_reflex_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.automation import router as api_v1_automation_router
+from meho_backplane.api.v1.broadcast import router as api_v1_broadcast_router
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
@@ -120,6 +121,10 @@ from meho_backplane.api.v1.tenants import router as api_v1_tenants_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
+from meho_backplane.audit_retention import (
+    start_audit_raw_payload_reaper,
+    stop_audit_raw_payload_reaper,
+)
 from meho_backplane.auth.jwt import (
     AUDIENCE_NOT_CONFIGURED_REMEDIATION,
     keycloak_readiness_probe,
@@ -169,6 +174,7 @@ from meho_backplane.memory import (
     stop_memory_expiry_sweeper,
 )
 from meho_backplane.metrics import render_metrics
+from meho_backplane.metrics_access import verify_metrics_access
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
 from meho_backplane.operations.approval_expiry import (
@@ -479,6 +485,7 @@ class _BackgroundTasks:
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
     evidence_retention: asyncio.Task[None] | None
+    audit_raw_payload_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
@@ -538,6 +545,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     evidence_retention: asyncio.Task[None] | None = None
     if settings.checks_evidence_prune_enabled:
         evidence_retention = start_evidence_retention_sweeper()
+    # Security review S19 #307 — audit_log.raw_payload age-off. Gated on
+    # RAW_PAYLOAD_PRUNE_ENABLED so operators with an external age-off can skip
+    # the loop. ``RETENTION_DAYS=0`` keeps the loop running as a no-op
+    # heartbeat (un-redacted pre-redaction bodies then live forever); NULLs
+    # only ``raw_payload`` — the redacted record of account is never touched.
+    audit_raw_payload_retention: asyncio.Task[None] | None = None
+    if settings.raw_payload_prune_enabled:
+        audit_raw_payload_retention = start_audit_raw_payload_reaper()
     # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     grant_expiry: asyncio.Task[None] | None = None
@@ -622,6 +637,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_history=topology_history,
         announcement_retention=announcement_retention,
         evidence_retention=evidence_retention,
+        audit_raw_payload_retention=audit_raw_payload_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
@@ -666,6 +682,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
+    if tasks.audit_raw_payload_retention is not None:
+        await stop_audit_raw_payload_reaper(tasks.audit_raw_payload_retention)
     if tasks.evidence_retention is not None:
         await stop_evidence_retention_sweeper(tasks.evidence_retention)
     if tasks.announcement_retention is not None:
@@ -899,6 +917,10 @@ app.include_router(api_v1_topology_router)
 # from the JWT's tenant_id claim so cross-tenant subscription is
 # impossible by construction.
 app.include_router(api_v1_feed_router)
+# #3470 -- REST adapters for the broadcast working surface. The JSON history
+# and announce routes share the strict MCP reader/publisher seams; watch uses
+# the existing /api/v1/feed SSE route above.
+app.include_router(api_v1_broadcast_router)
 # #3079 -- async governed dispatch handle surface at
 # /api/v1/operations/runs*. Registered BEFORE the operations router so the
 # literal ``/runs`` list route wins over that router's ``/{descriptor_id}``
@@ -1333,7 +1355,7 @@ async def root() -> dict[str, str]:
     return {"name": _APP_NAME, "version": __version__}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(verify_metrics_access)])
 async def metrics() -> Response:
     """Prometheus exposition endpoint.
 
@@ -1341,6 +1363,11 @@ async def metrics() -> Response:
     the ``http_requests_total`` counter the middleware increments) in
     the legacy ``text/plain; version=0.0.4`` format that every
     Prometheus scraper understands.
+
+    Guarded by :func:`~meho_backplane.metrics_access.verify_metrics_access`
+    (#3499): open by default, but when ``METRICS_AUTH_TOKEN`` is set the
+    caller must present a matching bearer token or the request is refused
+    401 before any registry content is rendered.
     """
     body, content_type = render_metrics()
     return Response(content=body, media_type=content_type)

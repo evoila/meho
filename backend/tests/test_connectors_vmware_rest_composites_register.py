@@ -51,6 +51,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     performance_summary_composite,
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._register import _COMPOSITES
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
@@ -71,6 +72,13 @@ _EXPECTED_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.guest.env.read",
     "vmware.composite.vm.guest.net.show",
     "vmware.composite.vm.guest.file.read",
+    # Supervisor (WCP) status read (#3281).
+    "vmware.composite.supervisor.status",
+    # Storage-policy list read (#3494).
+    "vmware.composite.storage_policy.list",
+    # Content-library SUBSCRIBED reads (#3495).
+    "vmware.composite.content_library.subscribed.status",
+    "vmware.composite.content_library.subscribed.items.list",
 )
 
 
@@ -103,6 +111,21 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.file.read": (
         "meho_backplane.connectors.vmware_rest.composites._guest.guest_file_read_composite"
     ),
+    "vmware.composite.supervisor.status": (
+        "meho_backplane.connectors.vmware_rest.composites._supervisor.supervisor_status_composite"
+    ),
+    "vmware.composite.storage_policy.list": (
+        "meho_backplane.connectors.vmware_rest.composites._storage_policy."
+        "storage_policy_list_composite"
+    ),
+    "vmware.composite.content_library.subscribed.status": (
+        "meho_backplane.connectors.vmware_rest.composites._library."
+        "content_library_subscribed_status_composite"
+    ),
+    "vmware.composite.content_library.subscribed.items.list": (
+        "meho_backplane.connectors.vmware_rest.composites._library."
+        "content_library_subscribed_items_list_composite"
+    ),
 }
 
 
@@ -116,6 +139,10 @@ _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.guest.env.read": "guest_ops",
     "vmware.composite.vm.guest.net.show": "guest_ops",
     "vmware.composite.vm.guest.file.read": "guest_ops",
+    "vmware.composite.supervisor.status": "namespace_management",
+    "vmware.composite.storage_policy.list": "storage",
+    "vmware.composite.content_library.subscribed.status": "content_library",
+    "vmware.composite.content_library.subscribed.items.list": "content_library",
 }
 
 
@@ -196,8 +223,11 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 38 total: 9 reads
-    # (T5 #508's 5 + the 4 guest-ops reads #3100) + 29 writes (T6 #509 +
+    # Embedding service called once per composite -- 47 total: 11 reads
+    # (T5 #508's 5 + the 4 guest-ops reads #3100 + storage_policy.list
+    # #3494) + 36 writes (T6 #509 +
+    # the #3505 resource_pool.create / .delete + cluster.drs_vm_host_rule.create +
+    # the #3494 storage_policy.create / .delete +
     # single-VM vm.power #2301 + mutating VI-JSON vm.disk.grow #2893 +
     # WSFC/FCI shared-attach vm.disk.attach #3256 +
     # folder-template vm.clone_from_template #2894 + vim cluster/inventory
@@ -212,7 +242,7 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
     # network.portgroup.security.set + the content-library import
     # vm.import_from_library #3229). (The former host.network_uplinks /
     # host.vsan_health reads were re-shipped as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 38
+    assert stub_embedding_service.encode_one.call_count == len(_COMPOSITES)
 
 
 @pytest.mark.asyncio
@@ -463,8 +493,9 @@ async def test_register_vmware_composite_operations_is_idempotent(
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
-    persist after the combined registrar (9 reads incl. the 4 guest-ops
-    reads #3100 + 29 writes / T6 + single-VM vm.power #2301 + mutating
+    persist after the combined registrar (11 reads incl. the 4 guest-ops
+    reads #3100 + 36 writes / T6 + the #3505 governed-allocation writes +
+    the #3494 storage_policy.create / .delete + single-VM vm.power #2301 + mutating
     VI-JSON vm.disk.grow #2893 + WSFC/FCI vm.disk.attach #3256 +
     folder-template vm.clone_from_template
     #2894 + vim cluster/inventory writes cluster.drs_rule.create +
@@ -475,11 +506,12 @@ async def test_register_vmware_composite_operations_is_idempotent(
     vm.guest.program.run #3255 + the destructive-tier vm.destroy #3198 + the
     #3091 vim distributed-portgroup writes network.portgroup.create +
     network.portgroup.security.set + the content-library import
-    vm.import_from_library #3229).
+    vm.import_from_library #3229 + the Supervisor writes supervisor.enable +
+    supervisor.disable + the supervisor.status read #3281).
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 38
+    assert first_count == len(_COMPOSITES)
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding
@@ -497,7 +529,7 @@ async def test_register_vmware_composite_operations_is_idempotent(
             .scalars()
             .all()
         )
-    assert len(rows) == 9
+    assert len(rows) == 13
 
 
 # ---------------------------------------------------------------------------

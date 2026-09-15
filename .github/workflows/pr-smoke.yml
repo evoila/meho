@@ -212,12 +212,19 @@ jobs:
           build-args: |
             GIT_SHA=${{ env.PR_HEAD_SHA }}
             BUILD_DATE=${{ github.event.pull_request.updated_at }}
-          # GHA-backed remote cache. Shared scope with image.yml means the
-          # PR build reuses every layer the main-push cache already has,
-          # dropping cold-build wall-clock to a handful of seconds when
-          # only application code changed.
+          # GHA-backed remote cache. cache-from reads the default
+          # `buildkit` scope, so the PR build still reuses every layer the
+          # main-push (image.yml) cache already has — a warm-cache read that
+          # drops cold-build wall-clock to a handful of seconds when only
+          # application code changed. cache-to exports to an ISOLATED
+          # `pr-smoke` scope, never the default scope image.yml restores
+          # from. This job runs under pull_request_target with GITHUB_REF
+          # pinned to `main`; without the separate export scope an unmerged
+          # PR-head build could write cache that the cosign-signed release
+          # build in image.yml later restores, letting unmerged code enter
+          # the signed artefact by cache reuse.
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,scope=pr-smoke,mode=max
           # No provenance / sbom / cosign here: PR images are transient
           # (deleted after teardown OR garbage-collected after the chart
           # is uninstalled; we don't promise immutable retention). The

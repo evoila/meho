@@ -37,11 +37,44 @@ spec:
         - name: broadcast
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.auth.enabled }}
+          # With auth on, the Secret-sourced password must reach Valkey
+          # without landing in the ConfigMap OR on the process command line
+          # (a `--requirepass "$VAR"` arg would be visible in `ps` /
+          # /proc/<pid>/cmdline). So the entrypoint copies the ConfigMap
+          # config into the writable emptyDir at `dir /data` and appends
+          # `requirepass <password>` from the env var (sourced via
+          # secretKeyRef below), then execs Valkey against that runtime
+          # file. readOnlyRootFilesystem stays true — only the /data
+          # emptyDir is written.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              cat /etc/valkey/valkey.conf > /data/valkey-runtime.conf
+              printf '\nrequirepass %s\n' "$VALKEY_REQUIREPASS" >> /data/valkey-runtime.conf
+              exec valkey-server /data/valkey-runtime.conf
+          {{- else }}
           # Valkey loads the operator-supplied config from /etc/valkey/valkey.conf
           # mounted from the ConfigMap. The image's entrypoint takes the path as
           # the first positional argument; no `redis-server` shim is needed.
           args:
             - /etc/valkey/valkey.conf
+          {{- end }}
+          {{- if .Values.auth.enabled }}
+          env:
+            # Valkey `requirepass` password, sourced from the chart-managed
+            # (or operator-supplied `existingSecret`) Secret. Consumed by the
+            # start-up command above; the same Secret + key is referenced by
+            # the backplane client (umbrella chart Deployment) so both sides
+            # authenticate with one value.
+            - name: VALKEY_REQUIREPASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default (printf "%s-auth" (include "broadcast.fullname" .)) }}
+                  key: {{ .Values.auth.existingSecretPasswordKey }}
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379

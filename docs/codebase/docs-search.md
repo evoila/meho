@@ -7,8 +7,9 @@
 `search_knowledge` — which read MEHO's own Postgres+pgvector substrate
 (see [retrieval.md](retrieval.md)) — `search_docs` does **not** ingest
 the vendor corpus. It proxies each query through the backplane to the
-**external** corpus service the ops team runs, forwarding the operator's
-JWT so the corpus authenticates and audits the call as the operator.
+**external** corpus service the ops team runs, presenting a
+deployment-configured corpus service credential (never the caller's
+operator JWT — see the SSRF + credential note below, #290).
 
 Routing through the backplane (rather than letting clients hit the
 corpus directly) is what buys three properties in one place:
@@ -16,8 +17,9 @@ corpus directly) is what buys three properties in one place:
 - **Central audit.** Every query lands one `audit_log` row under the
   named op `meho.docs.search`, so `query_audit` / who-touched surface
   it (the raw query is hashed, never stored).
-- **JWT federation handled once.** The operator JWT forwarding lives in
-  the T2 client, not in every consumer.
+- **Downstream federation handled once.** The screened-`https` dial and
+  the corpus service credential live in the T2 client, not in every
+  consumer.
 - **Mandatory collection scope + per-collection entitlement enforced
   centrally.** A docs query without a `collection` is rejected —
   fail-closed — and a tenant may only search collections it holds the
@@ -63,9 +65,11 @@ every face (no `collections` fan-out field).
 
 ### `search_corpus(...)` (`meho_backplane.auth.corpus`, T2 #1520)
 
-The transport. An async `httpx` client that POSTs a search request to a
-corpus URL carrying `Authorization: Bearer <operator.raw_jwt>`, bounded
-by `settings.corpus_timeout_seconds`. The URL and RFC 8707 audience are
+The transport. An async `httpx` client that screens the corpus URL
+(`https` + a public, allowlist-aware host) and then POSTs a search
+request to it carrying the deployment-configured corpus service
+credential (`settings.corpus_service_token`), bounded by
+`settings.corpus_timeout_seconds`. The URL and RFC 8707 audience are
 optional overrides (`corpus_url=` / `audience=`); `None` falls back to
 the global `settings.corpus_url` / `settings.corpus_audience` — the
 seam the `corpus-http` backend uses to pass a per-collection endpoint
@@ -91,6 +95,27 @@ non-2xx, or malformed-response corpus all collapse to one typed
 `CorpusUnavailable`. The exception carries the upstream HTTP status (when
 the failure was a non-2xx response) but **never** the response body — a
 corpus error page cannot leak through.
+
+**Destination screen + downstream credential (#290).** The corpus URL is
+read from a *tenant-configurable* `backend.ref`, so two controls stop a
+`tenant_admin` from turning it into a credential-capture + SSRF sink:
+
+- Every dial (search **and** the `corpus_status` readiness probe) requires
+  the `https` scheme and screens the resolved host through the shared
+  target SSRF guard (`assert_public_destination_async`, the same guard the
+  connector target dial uses), so a corpus endpoint cannot be pointed at
+  `http://`, loopback, RFC 1918 space, or `169.254.169.254`. An on-prem
+  corpus on private space is opted in via `MEHO_TARGET_SSRF_ALLOWLIST`. The
+  same endpoint is also screened at collection **create** time
+  (`docs_collections.service`) so a bad endpoint is a 422, never persisted.
+- The bearer presented to the corpus is `settings.corpus_service_token` —
+  a deployment-owned, corpus-scoped service credential, **not** the
+  caller's inbound operator JWT. Replaying the operator's Vault-capable
+  bearer to the tenant-configurable URL was the capture vector; the JWT is
+  no longer forwarded. An empty token sends no `Authorization` header (a
+  corpus requiring auth then fails closed). Tradeoff: the corpus's own
+  audit attributes the call to the service principal, not the operator;
+  MEHO's central `audit_log` is unaffected.
 
 ### Backend-agnostic search router (`meho_backplane.docs_search.backends`, T2 #1551)
 
@@ -792,6 +817,30 @@ Because the divergence is invisible without help, every surface now emits an
 - **MCP `search_docs` / `ask_docs`** — the `-32602` message names the missing
   capability + identity, and `error.data` carries
   `{"reason": "not_entitled", "required_capability"}` for self-correction.
+
+## Untrusted read-boundary guard (#304)
+
+Corpus `chunk.content` is **federated, externally-controlled** text — a
+third party's KB article can carry planted instructions. Every LLM-facing
+read boundary wraps it in the positional
+`<<UNTRUSTED_AGENT_TEXT … END_UNTRUSTED_AGENT_TEXT>>` envelope
+(`meho_backplane.untrusted_text.wrap_untrusted_text`), matching the kb /
+memory surfaces (evoila-bosnia/meho-internal#154, extended here by #304):
+
+- `search_docs` payload — `_search_chunk_payload` (`mcp/tools/docs.py`).
+- `ask_docs` citations — `_citation_payload` (`mcp/tools/docs.py`).
+- `ask_docs` synthesis prompt — `_render_chunks_for_prompt`
+  (`docs_search/synthesis.py`); `_SYNTHESIS_SYSTEM_PROMPT` carries the
+  matching provenance advisory.
+- `meho://docs/...` resource — `_docs_chunk_handler`
+  (`mcp/resources/docs.py`).
+
+The wrap is applied only at these boundaries, **never** at the shared
+`_project_chunk` projection (`docs_search/service.py`) — that projection
+also feeds non-LLM sinks (the CLI `meho docs search` and REST faces render
+to a human/HTTP caller), which must not inherit the envelope. The guard is
+structural (delimit + label), not content-based: no filtering, scoring, or
+injection detection. See `docs/codebase/untrusted-text-envelope.md`.
 
 ## Known issues / boundaries
 

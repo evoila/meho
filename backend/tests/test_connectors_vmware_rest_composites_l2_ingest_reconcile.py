@@ -134,11 +134,12 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Fifteen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
+    Seventeen ``_SUB_OPS_*`` module constants today (the T6/#509 + vm.power
     writes, the #2891 hardware trio, the two GOSC composites / #2892, the
-    OVF/OVA content-library deploy / #2909, plus the typed HttpNfcLease import
+    OVF/OVA content-library deploy / #2909, the typed HttpNfcLease import
     / #3229 — whose REST sub-ops ride the content-library find + download-session
-    actions, all served by the pinned vcenter.yaml).
+    actions — and the #3505 governed-allocation resource-pool create + delete,
+    all served by the pinned vcenter.yaml).
     ``vm.snapshot.revert`` no longer appears: both of its sub-ops moved to
     the vim surface in #2970 (the pinned vcenter.yaml serves no snapshot
     REST resource), so its manifest lives in
@@ -153,6 +154,8 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE",
         "_SUB_OPS_HOST_DETACH_FROM_VDS",
         "_SUB_OPS_HOST_EVACUATE",
+        "_SUB_OPS_RESOURCE_POOL_CREATE",
+        "_SUB_OPS_RESOURCE_POOL_DELETE",
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
         "_SUB_OPS_VM_CUSTOMIZE",
@@ -201,6 +204,23 @@ def test_vm_import_from_library_sub_op_manifest_is_expected() -> None:
         "POST:/content/library/item/download-session/{downloadSessionId}?action=keep-alive",
         "POST:/content/library/item/download-session/{downloadSessionId}?action=cancel",
         "POST:/vcenter/vm/{vm}/power?action=start",
+    }
+
+
+def test_resource_pool_create_sub_op_manifest_is_expected() -> None:
+    """Pin the #3505 resource_pool.create REST manifest (create write + read-back list)."""
+    assert set(_write._SUB_OPS_RESOURCE_POOL_CREATE) == {
+        "POST:/vcenter/resource-pool",
+        "GET:/vcenter/resource-pool",
+    }
+
+
+def test_resource_pool_delete_sub_op_manifest_is_expected() -> None:
+    """Pin the #3505 resource_pool.delete REST manifest (emptiness reads + delete write)."""
+    assert set(_write._SUB_OPS_RESOURCE_POOL_DELETE) == {
+        "GET:/vcenter/resource-pool",
+        "GET:/vcenter/vm",
+        "DELETE:/vcenter/resource-pool/{resourcePool}",
     }
 
 
@@ -733,6 +753,21 @@ def test_folder_create_vi_json_sub_op_manifest_is_the_expected_single() -> None:
     """Pin the folder.create vi-json manifest — one synchronous CreateFolder, no poll."""
     assert set(_write._VIM_SUB_OPS_FOLDER_CREATE) == {
         "POST:/Folder/{moId}/CreateFolder",
+    }
+
+
+def test_cluster_drs_vm_host_rule_create_vi_json_manifest_is_the_expected_pair() -> None:
+    """Pin the #3505 VM-Host rule vi-json manifest — same shape as drs_rule.create."""
+    assert set(_write._VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE) == {
+        "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+    }
+
+
+def test_resource_pool_create_vi_json_manifest_is_the_expected_single() -> None:
+    """Pin the #3505 resource_pool.create vi-json manifest — the cluster root-pool read."""
+    assert set(_write._VIM_SUB_OPS_RESOURCE_POOL_CREATE) == {
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
     }
 
 

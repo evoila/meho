@@ -61,6 +61,7 @@ from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
 from meho_backplane.operations.ingest import LlmJsonResult
 from meho_backplane.operations.ingest.pipeline import LlmClientUnavailable
+from meho_backplane.untrusted_text import BLOCK_END, BLOCK_START, wrap_untrusted_text
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -512,6 +513,53 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_wraps_citation_content_in_untrusted_envelope(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """#304: each returned citation's ``content`` is served inside the envelope.
+
+    A citation carries the federated corpus chunk text into the ``ask_docs``
+    response, so it is wrapped in the positional ``<<UNTRUSTED_AGENT_TEXT``
+    envelope — parity with ``search_docs`` and the kb / memory surfaces. The
+    citation's provenance fields (``source_url`` / ``link`` / ``chunk_id``)
+    are left unwrapped.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    corpus = _fake_corpus(_SAMPLE_CHUNK, _SECOND_CHUNK)
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0007"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {"query": "How many logical switches?", "collection": "vmware"},
+                call_id=9,
+            ),
+        )
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    citation = payload["citations"][0]
+    assert citation["content"] == wrap_untrusted_text(_SAMPLE_CHUNK.content)
+    assert citation["content"].startswith(BLOCK_START)
+    assert citation["content"].endswith(BLOCK_END)
+    assert _SAMPLE_CHUNK.content in citation["content"]
+    # Provenance fields are untouched by the wrap.
+    assert citation["chunk_id"] == "nsx-9.0-maximums-0007"
+    assert citation["source_url"].endswith("/maximums")
+    assert citation["link"]["clickable"] is True
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

@@ -36,12 +36,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Final
 
+import structlog
+
+from meho_backplane.connectors.mail.allowlist import recipient_allowed
+from meho_backplane.connectors.mail.tenant_policy import resolve_tenant_recipient_allowlist
 from meho_backplane.connectors.mail.transport import send_email
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
     from meho_backplane.auth.operator import Operator
     from meho_backplane.retrieval.embedding import EmbeddingService
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "MAIL_SEND_PARAMETER_SCHEMA",
@@ -184,14 +190,44 @@ async def mail_send(operator: Operator, target: Any, params: dict[str, Any]) -> 
 
     Delegates to
     :func:`~meho_backplane.connectors.mail.transport.send_email` (the
-    allowlist floor and refusal mapping live there) and adapts the
-    :class:`~meho_backplane.connectors.mail.transport.MailSendResult`
+    instance-floor allowlist and refusal mapping live there) and adapts
+    the :class:`~meho_backplane.connectors.mail.transport.MailSendResult`
     into the audit-visible payload: the returned dict carries the
     literal ``to``/``subject`` — the durable audit row's ``raw_payload``
     answer to "who was mailed" — and never the body.
+
+    **Per-tenant screen (#3499).** Before the transport runs, every
+    recipient is screened against the caller's per-tenant allowlist
+    (:func:`~meho_backplane.connectors.mail.tenant_policy.resolve_tenant_recipient_allowlist`).
+    A tenant that set no override inherits the instance floor unchanged
+    (resolver returns ``None`` → screen skipped). A tenant with an empty
+    override denies every recipient; a tenant with a narrower list admits
+    only those recipients — always still intersected with the instance
+    floor at the transport, so the screen can only narrow. A refused
+    recipient returns the same ``not_in_recipient_allowlist`` product the
+    instance floor uses, so the dispatch stays ``status="ok"`` and the
+    denial is audited synchronously through the normal path. This screen
+    is only on the **dispatch** path; the checks notifier's direct
+    ``send_email`` import is not tenant-scoped and keeps the instance
+    floor alone.
     """
     to = [str(address) for address in params["to"]]
     subject = str(params["subject"])
+    tenant_allowlist = await resolve_tenant_recipient_allowlist(operator.tenant_id)
+    if tenant_allowlist is not None:
+        addresses, domains = tenant_allowlist
+        if not all(recipient_allowed(address, addresses, domains) for address in to):
+            _log.info(
+                "mail_tenant_recipient_refused",
+                tenant_id=str(operator.tenant_id),
+                recipient_count=len(to),
+            )
+            return {
+                "sent": False,
+                "reason": "not_in_recipient_allowlist",
+                "to": to,
+                "subject": subject,
+            }
     result = await send_email(to=to, subject=subject, body=str(params["body"]))
     return {
         "sent": result.sent,

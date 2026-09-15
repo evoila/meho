@@ -317,6 +317,7 @@ async def host_storage_devices_impl(
             _RETRIEVE_PROPERTIES_PATH,
             operator=operator,
             json=build_host_storage_devices_retrieve_params(host_moid),
+            promote_managed_object_not_found=True,
         )
     except (httpx.HTTPError, RuntimeError) as exc:
         return {

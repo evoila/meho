@@ -105,6 +105,7 @@ var typedOpCLICoverage = map[string]string{
 	"sddc.cluster.list":      "cluster list",
 	"sddc.host.list":         "host list",
 	"sddc.task.list":         "workflow list",
+	"sddc.task.get":          "", // agent surface only (the #3497 WLD-write poll primitive: agents/automation poll a single Task by id; workflow list covers the list surface, no per-id get verb — the sddc.domain.status precedent)
 	"sddc.credential.list":   "", // agent surface only
 	"sddc.license.list":      "", // agent surface only
 	"sddc.nsxt_cluster.list": "", // agent surface only

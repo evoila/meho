@@ -356,6 +356,7 @@ def test_migration_installs_tenant_table_and_indexes(
                 "flight_recorder_enabled",  # #3212 F1 per-tenant capture default
                 "flight_recorder_retention_days",  # #3212 F4 per-tenant retention
                 "flight_recorder_agent_readable",  # #3216 F5 per-tenant agent-read gate
+                "mail_recipient_allowlist",  # #3499 per-tenant mail recipient allowlist
             }
 
             audit_columns = {col["name"] for col in inspector.get_columns("audit_log")}

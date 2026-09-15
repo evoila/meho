@@ -68,23 +68,82 @@ boundary redaction:
   field). Reads via `read_secret_version` + the KV-v2 `data.data`
   double-unwrap + `strip_credential_value`; writes via
   `create_or_update_secret` (a single-field body, `cas=None`). Both
-  through `vault_client_for_operator`.
-- **`KeycloakCredentialSecretEndpoint`**
-  (`connectors/keycloak/secret_endpoint.py`) — the second adapter (#1578),
-  registered under kind `"keycloak"`. **Sink-only**: keycloak credentials
-  are write-only (Keycloak hashes them; the plaintext is unrecoverable),
-  so `read_secret` raises `NotImplementedError`. Addresses one user
-  credential as `<target>/<realm>/<username>#password` (the `#password`
-  field is the only writable one). `write_secret` resolves the target by
-  name (tenant-scoped `resolve_target`), gets the `KeycloakConnector`
-  instance from the dispatcher's instance cache, resolves username→UUID
-  via `_find_user_uuid`, and PUTs `.../users/{id}/reset-password` with a
-  permanent password CredentialRepresentation via `_write_admin` — it
-  opens no HTTP client of its own. The value is `strip_credential_value`-d
-  before the PUT. This is the broker's **second kind**, so a cross-kind
-  `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
+  through `vault_client_for_operator`. Because this is a **second** KV-v2
+  read/write path alongside the `vault.kv.*` handlers, both methods call
+  the default-on `enforce_tenant_scope` guard
+  ([`vault/tenant_scope.py`](connectors-vault-tenant-scope.md), `read_only=True`
+  on read, `read_only=False` on write) **before** the Vault login, so a
+  cross-tenant `secret.move` is denied at the app layer before any Vault
+  round-trip (S08, #296).
+- **Kind `"keycloak"`** (`connectors/keycloak/secret_endpoint.py`) — the
+  broker's second kind (#1578), carrying **two** ref shapes.
+  `build_keycloak_secret_endpoint` is the callable registered under the
+  kind; it dual-dispatches on the ref's **structure** (not its `#field`):
+  a `<target>/<realm>/clients/<clientId>` ref (four address segments whose
+  third is the literal `clients`) → the client-secret **source**; any
+  other ref → the user-password **sink**. A user literally named `clients`
+  is three segments, so it still routes to the sink.
+  - **`KeycloakCredentialSecretEndpoint`** (sink, #1578). **Sink-only**:
+    Keycloak user credentials are write-only (Keycloak hashes them; the
+    plaintext is unrecoverable), so `read_secret` raises
+    `NotImplementedError`. Addresses one user credential as
+    `<target>/<realm>/<username>#password` (the `#password` field is the
+    only writable one). `write_secret` resolves the target by name
+    (tenant-scoped `resolve_target`), gets the `KeycloakConnector`
+    instance from the dispatcher's instance cache, resolves username→UUID
+    via `_find_user_uuid`, and PUTs `.../users/{id}/reset-password` with a
+    permanent password CredentialRepresentation via `_write_admin` — it
+    opens no HTTP client of its own. The value is `strip_credential_value`-d
+    before the PUT. This is the broker's second kind, so a cross-kind
+    `vault:` → `keycloak:` move proves the initiative's "≥2 kinds" DoD.
+  - **`KeycloakClientSecretSourceEndpoint`** (source, #3619). **Source-only**:
+    unlike a user password, a confidential client's secret IS served by
+    the Admin REST API (`GET .../clients/{uuid}/client-secret` →
+    `{"type":"secret","value":…}`), so a broker source is legitimate;
+    `write_secret` raises `NotImplementedError`. Addresses one client
+    secret as `<target>/<realm>/clients/<clientId>#secret` (the `#secret`
+    field is the only readable one; any other `#field` on a `clients/`
+    ref is rejected with a value-free error). `read_secret` resolves the
+    target by name, gets the `KeycloakConnector` from the instance cache,
+    resolves clientId→UUID via `_find_client_uuid` (the `?clientId=<id>`
+    exact lookup), and reads the secret via `_get_admin_json` — reusing
+    the connector's admin session-cache and Bearer mint, opening no HTTP
+    client of its own. The value is `strip_credential_value`-d before it
+    is wrapped in `SecretMaterial`. This lets a move land a confidential
+    realm client's secret in Vault without the value transiting a human
+    or agent context (the governed add-on launch path).
 - **`secret_move`** + **`register_secret_broker_operations`**
   (`ops.py`) — the module-level handler and its lifespan registrar.
+
+## Ops example — move a Keycloak client secret into Vault
+
+An approved flow provisions a confidential realm client and needs its
+generated secret in Vault, without any human or agent ever observing the
+value (the governed add-on launch path). Both endpoints are addressed by
+declarative `<kind>:<ref>` strings; the value is read and written entirely
+server-side:
+
+```
+meho secret move \
+  --from 'keycloak:my-keycloak/example-realm/clients/launcher-app#secret' \
+  --to   'vault:tenants/<tenant-id>/launcher-app#client_secret' \
+  --reason 'seed launcher confidential-client secret'
+```
+
+- `--from` reads the `launcher-app` client's secret from the
+  `example-realm` realm on the `my-keycloak` target (clientId→UUID via the
+  `?clientId=` exact lookup, then `GET .../clients/{uuid}/client-secret`).
+- `--to` writes it into the `client_secret` field of the KV-v2 secret at
+  `tenants/<tenant-id>/launcher-app` (under the deployment's default
+  `secret` mount, inside the operator's tenant subtree).
+- The op is `requires_approval=True`, so the move parks at
+  `awaiting_approval` and a human approves it before it runs. The response
+  is only `{status: "moved", value_sha256, length}` — the value never
+  appears in the CLI/MCP output, a log event, or the audit row.
+
+The same move over MCP is `call_operation(connector_id="secret-broker-1.x",
+op_id="secret.move", params={"from": "keycloak:…#secret", "to": "vault:…#client_secret",
+"reason": "…"})`.
 
 ## Control flow
 
@@ -173,12 +232,19 @@ the posture and relies on the existing gate). The policy refinement
 
 ## Known issues / scope boundaries
 
-- vault-kv (source+sink) and keycloak (sink-only, #1578) are the
+- vault-kv (source+sink) and keycloak (user-password sink #1578 +
+  client-secret source #3619, dual-dispatched under the one kind) are the
   registered adapter kinds; further kinds are separate tasks reusing the
   `SecretEndpoint` contract.
 - The vault adapter forwards the `ref` to hvac's `path=` and defaults the
   mount to `"secret"`; a non-default mount is a richer-ref-grammar
   follow-up, not wired here.
+- **Tenant scope (S08, #296):** the vault-kv adapter enforces the same
+  default-on per-tenant subtree as the `vault.kv.*` handlers via
+  `enforce_tenant_scope` before each Vault call. The keycloak sink and
+  source are Keycloak-admin paths (not KV-v2) and are out of that guard's
+  scope — they already resolve their target through the tenant-scoped
+  `resolve_target`.
 - The `reason` param is recorded for the approver/audit trail but is not
   read by the handler; it is surfaced to the approver in the ref-only
   `proposed_effect` summary (#1579).
@@ -196,6 +262,10 @@ the posture and relies on the existing gate). The policy refinement
 - `backend/src/meho_backplane/connectors/secret/ops.py`
 - `backend/src/meho_backplane/connectors/secret/move_preview.py`
 - `backend/src/meho_backplane/connectors/secret/__init__.py`
+- `backend/src/meho_backplane/connectors/keycloak/secret_endpoint.py`
 - `backend/tests/test_connectors_secret_broker.py`
+- `backend/tests/test_secret_broker_keycloak_sink.py`
+- `backend/tests/test_secret_broker_keycloak_client_secret_source.py`
 - `backend/tests/test_secret_move_approval.py`
-- Initiative #581 (G0.22 Secret broker), Goal #221.
+- Initiative #581 (G0.22 Secret broker), Goal #221; #1578 (keycloak
+  user-password sink); #3619 (keycloak client-secret source).

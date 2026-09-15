@@ -93,6 +93,31 @@ instead, row by row in the cold-start checklist.
 — the MCP-audience row for the example, the rest of the table for what
 surfaces later.)
 
+### The hardening baseline every production shape inherits
+
+The chart ships secure defaults, but a handful of controls decide
+whether a deployment is a real boundary between mutually-untrusted
+tenants or only a convenience. State the baseline once, here, so every
+shape below inherits it; the per-shape sections call out only where a
+control is load-bearing or where the setting differs.
+
+| Control | Baseline (secure default or must-set) | Where it lives |
+|---|---|---|
+| **Network isolation** | `networkPolicy.enabled: true` (default-deny ingress + egress) is the baseline for any multi-tenant or production install. Enabling it makes the schema *require* the three egress CIDRs, so it refuses to ship a wide subnet by accident. Staging it off is a first-install convenience only, and a documented downgrade for anything past bring-up. | [`install/index.md` § Step 6](install/index.md#step-6-write-your-values-file) `networkPolicy` block |
+| **Tenant credential scope** | `VAULT_KV_TENANT_SCOPE_PREFIX` defaults to `secret/tenants/{tenant_id}/` — on by default, so one tenant can never read another's Vault credentials. Keep it set on any multi-tenant deploy; emptying it (`VAULT_KV_TENANT_SCOPE_PREFIX=""`) removes the cross-tenant guard and is a documented downgrade, valid only mid-migration or on a genuinely single-tenant install. | [`install/credential-backends.md`](install/credential-backends.md#vault) |
+| **Reverse-proxy trust** | `config.forwardedAllowIps` names *only* the reverse proxy / ingress controller the backplane should trust `X-Forwarded-*` from — narrow it to the controller's source address, not the whole pod CIDR. Over-wide trust lets any in-cluster workload forge the client address. | [`install/tls-ingress.md` § Reverse-proxy trust](install/tls-ingress.md#reverse-proxy-trust-forwardedallowips) |
+| **Self-approval** | `config.approvalAllowSelfApproval` defaults to `"false"` — four-eyes is enforced and the requester of a gated write may not approve it. Leave it off; `"true"` is an audited emergency break-glass that never reaches a `dangerous`/`destructive` operation. | [`guides/approvals-and-break-glass.md`](guides/approvals-and-break-glass.md) |
+| **Realm claim mappers** | On a shared, multi-user public client, derive `tenant_role` from group or user membership — never install a hardcoded privileged `tenant_role` (e.g. `tenant_admin`) mapper that every user authenticating through that client inherits. A hardcoded claim is acceptable only on a single-identity lab client. | [`install/keycloak-realm.md`](install/keycloak-realm.md) |
+| **Outbound peer authentication** | No verification-disabled defaults on credential-bearing outbound paths. The SSH connector verifies the target host key fail-closed (an unpinned target is refused until its `known_hosts` line is provisioned on the secret); SMTP validates its TLS peer; bootstrap scripts trust a real CA rather than `curl -k`. Per-target opt-outs (`known_hosts_insecure`, `verify_tls: false`) are loud, audited, and never the default. | [`install/tls-ingress.md` § Outbound peer authentication](install/tls-ingress.md#outbound-peer-authentication-for-credential-bearing-connections) |
+| **CI / fork-PR isolation** | Untrusted pull-request code runs on disposable GitHub-hosted runners, never the internal `meho-runners-ci` pool, and the repository's fork-PR approval policy is `all_external_contributors` (a maintainer must approve any external fork run). Signing and deployment identities are separated from PR-triggered jobs. | [`docs/RELEASING.md` § Supply-chain and CI baseline](https://github.com/evoila/meho/blob/main/docs/RELEASING.md) |
+| **Deploy by digest + verify signature** | Pin `image.digest` (`sha256:…`) so the Deployment renders the exact content-addressed, scanned, cosign-signed digest the pipeline promoted, and `cosign verify` it (against the keyless workflow identity) before `helm upgrade` — ideally enforced at admission. The pipeline's quarantine → scan → promote ordering guarantees a promoted digest was scanned first. | [`install/index.md` § Step 7](install/index.md#step-7-install-the-chart), [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures) |
+| **Automation API placement** | When the automation add-on is deployed alongside the backplane, expose `/ui`-only at the ingress; its REST `/api` stays cluster-internal and is never ingress-exposed. | Per-shape notes below |
+
+Every control above is stated as the *secure* state — the deployment
+inherits the hardened posture without an operator having to reconstruct
+it. Where a shape empties or widens one of these on purpose, name it in
+the values file as a documented downgrade, not a silent default.
+
 ---
 
 ## Flat LAN

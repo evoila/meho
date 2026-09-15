@@ -70,20 +70,26 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections import (
+    DocCollection,
     DocCollectionBackendTypeError,
     DocCollectionConflictError,
     DocCollectionCreate,
     DocCollectionCreateResponse,
+    DocCollectionEndpointError,
     DocCollectionGlobalError,
+    DocCollectionGlobalUpdateForbiddenError,
     DocCollectionNotDisabledError,
     DocCollectionSummary,
+    DocCollectionUpdate,
     create_doc_collection,
     delete_doc_collection,
     probe_collection,
+    project_doc_collection,
     project_doc_collection_create_response,
     project_doc_collection_to_summary,
     resolve_doc_collection,
     set_collection_enabled,
+    update_doc_collection,
 )
 from meho_backplane.docs_search import collection_capability_key
 from meho_backplane.docs_search.backends.base import BackendReadiness
@@ -257,12 +263,92 @@ async def create_doc_collection_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.detail,
         ) from exc
+    except DocCollectionEndpointError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.detail,
+        ) from exc
     except DocCollectionConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
     return project_doc_collection_create_response(row)
+
+
+@router.patch(
+    "/{collection_key}",
+    response_model=DocCollection,
+    responses={
+        403: {
+            "description": (
+                "The resolved collection is a global (``tenant_id IS NULL``) "
+                "platform-catalogue row and the operator lacks "
+                "``platform_admin`` (structured "
+                "``detail.error='global_collection_update_forbidden'``); a "
+                "tenant_admin may update only their own tenant's rows."
+            ),
+        },
+        404: {"description": "No collection with this key is visible to the tenant."},
+        422: {
+            "description": (
+                "A supplied ``backend.type`` is not a registered search "
+                "backend, or a ``corpus-http`` ``backend.ref`` endpoint is "
+                "not an ``https`` public destination — the same registry + "
+                "SSRF/``https`` screen the create path applies."
+            ),
+        },
+    },
+)
+async def update_doc_collection_endpoint(
+    collection_key: str,
+    body: DocCollectionUpdate,
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_session),
+) -> DocCollection:
+    """Repoint a doc collection's backend ref (and other mutable fields) in place.
+
+    The in-place update the registry lacked (#3601): a migration-seeded
+    collection carrying its own ``backend.ref["endpoint"]`` could be created,
+    probed, enabled, disabled, and deleted — but never *repointed*, so when a
+    deployment moved its corpus endpoint the collection kept dialing the old
+    one and ``search_docs`` failed closed. ``tenant_admin``-gated like create
+    / delete; tenant-first resolution. Only the fields present in the body
+    are changed.
+
+    A **global** (platform-owned) row is the shared catalogue: editing it
+    additionally requires ``platform_admin`` (403
+    ``global_collection_update_forbidden``) — the same platform seat a
+    cross-tenant claim uses — so a tenant admin is never silently widened to
+    the all-tenant catalogue. A supplied ``backend`` runs the SAME
+    ``backend.type`` registry validation + ``https`` / SSRF-allowlist
+    endpoint screen the create route runs (422 on failure), and a backend
+    change resets the collection to ``provisioning`` (clearing the stale
+    probe-written liveness) so a follow-up
+    ``POST /api/v1/doc_collections/{collection_key}/probe`` re-validates it —
+    mirroring the create → probe → ready flow. The change binds
+    ``op_id="meho.docs.collections.update"`` so it joins the ``meho.docs.*``
+    who-touched trail.
+    """
+    collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
+    try:
+        row = await update_doc_collection(session, operator, collection, body)
+    except DocCollectionGlobalUpdateForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
+    except DocCollectionBackendTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.detail,
+        ) from exc
+    except DocCollectionEndpointError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.detail,
+        ) from exc
+    return project_doc_collection(row)
 
 
 @router.post(

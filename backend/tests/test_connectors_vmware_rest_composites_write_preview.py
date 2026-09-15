@@ -90,6 +90,9 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
         "vmware.composite.cluster.drs_rule.create",
+        "vmware.composite.cluster.drs_vm_host_rule.create",
+        "vmware.composite.resource_pool.create",
+        "vmware.composite.resource_pool.delete",
         "vmware.composite.folder.create",
         "vmware.composite.guest.customization_spec.create",
         "vmware.composite.vm.customize",
@@ -98,6 +101,15 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.service_control",
         "vmware.composite.vm.guest.file.write",
         "vmware.composite.vm.guest.program.run",
+        "vmware.composite.supervisor.enable",
+        "vmware.composite.supervisor.disable",
+        "vmware.composite.storage_policy.create",
+        "vmware.composite.storage_policy.delete",
+        # Content-library SUBSCRIBED writes (#3495): caution + approval, so
+        # they park and carry a bespoke park-time preview builder (create's is
+        # secret-hygienic — it never echoes the subscription password).
+        "vmware.composite.content_library.subscribed.create",
+        "vmware.composite.content_library.subscribed.sync",
     }
 )
 
@@ -309,14 +321,13 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 26 write composites register a builder (criterion 4)
+# Wiring — all 35 preview-carrying write composites register a builder (criterion 4)
 # ===========================================================================
 
 
 def test_all_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 26
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -371,6 +382,18 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
         (
             _write_preview._vm_device_cdrom_preview,
             {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+        ),
+        (_write_preview._resource_pool_delete_preview, {"resource_pool": "resgroup-9"}),
+        (
+            _write_preview._cluster_drs_vm_host_rule_create_preview,
+            {
+                "cluster": "domain-c1",
+                "rule_name": "pin-nested",
+                "vm_group_name": "nested-esxi",
+                "host_group_name": "gold-hosts",
+                "vms": ["esxi-nested-01"],
+                "hosts": ["esx-dc19-a"],
+            },
         ),
     ):
         assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
@@ -728,6 +751,89 @@ async def test_vm_customize_preview_declines_on_malformed() -> None:
     assert await _write_preview._cluster_patch_preview(_make_preview_ctx({})) is None
     assert await _write_preview._folder_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._cluster_drs_rule_create_preview(_make_preview_ctx({})) is None
+    # #3505: resource_pool.create declines without a name; the two live-read
+    # #3505 builders decline without a resolved connector / required params.
+    assert await _write_preview._resource_pool_create_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._resource_pool_delete_preview(_make_preview_ctx({})) is None
+    assert (
+        await _write_preview._cluster_drs_vm_host_rule_create_preview(_make_preview_ctx({})) is None
+    )
+
+
+async def test_resource_pool_create_preview_echoes_params() -> None:
+    """#3505: resource_pool.create is a param echo (no I/O) naming the pool + parent."""
+    preview = await _write_preview._resource_pool_create_preview(
+        _make_preview_ctx(
+            {
+                "name": "estate-rp",
+                "cluster": "domain-c1",
+                "cpu_allocation": {"reservation": 4000, "shares": {"level": "HIGH"}},
+            }
+        )
+    )
+    assert preview == {
+        "name": "estate-rp",
+        "parent": None,
+        "cluster": "domain-c1",
+        "cpu_allocation": {"reservation": 4000, "shares": {"level": "HIGH"}},
+    }
+
+
+async def test_resource_pool_delete_preview_counts_reparented_children() -> None:
+    """#3505: resource_pool.delete previews the child pool + VM counts the delete reparents."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/resource-pool"] = {
+        "value": [{"resource_pool": "resgroup-child-1"}]
+    }
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": "vm-1", "name": "a"}, {"vm": "vm-2", "name": "b"}]
+    }
+    preview = await _write_preview._resource_pool_delete_preview(
+        _make_preview_ctx(
+            {"resource_pool": "resgroup-9", "force": True}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "resource_pool": "resgroup-9",
+        "force": True,
+        "child_pool_count": 1,
+        "child_vm_count": 2,
+    }
+
+
+async def test_cluster_drs_vm_host_rule_create_preview_resolves_groups() -> None:
+    """#3505: the VM-Host rule preview resolves the VM + host group member sets."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm"] = {"value": [{"vm": "vm-7", "name": "esxi-nested-01"}]}
+    recorder.responses["/vcenter/host"] = {"value": [{"host": "host-3", "name": "esx-dc19-a"}]}
+    recorder.responses["/vcenter/cluster/domain-c1"] = {"value": {"name": "cluster3"}}
+    preview = await _write_preview._cluster_drs_vm_host_rule_create_preview(
+        _make_preview_ctx(
+            {
+                "cluster": "domain-c1",
+                "rule_name": "pin-nested",
+                "vm_group_name": "nested-esxi",
+                "host_group_name": "gold-hosts",
+                "vms": ["esxi-nested-01"],
+                "hosts": ["esx-dc19-a"],
+                "affine": True,
+                "mandatory": True,
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["cluster"] == "domain-c1"
+    assert preview["cluster_name"] == "cluster3"
+    assert preview["rule_name"] == "pin-nested"
+    assert preview["vm_group_name"] == "nested-esxi"
+    assert preview["host_group_name"] == "gold-hosts"
+    assert preview["affine"] is True
+    assert preview["mandatory"] is True
+    assert preview["resolved_vms"] == [{"vm": "vm-7", "name": "esxi-nested-01"}]
+    assert preview["total_vms"] == 1
+    assert preview["resolved_hosts"] == [{"host": "host-3", "name": "esx-dc19-a"}]
+    assert preview["total_hosts"] == 1
 
 
 # ===========================================================================
@@ -1273,13 +1379,111 @@ async def test_vm_nic_repoint_preview_reads_backing_and_resolves_portgroup() -> 
             "network": "dvportgroup-1",
             "network_name": "old-net",
         },
-        "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+        "requested_backing": {
+            "portgroup_id": "dvportgroup-9",
+            "portgroup_name": "prod-net",
+            "backing_type": "DISTRIBUTED_PORTGROUP",
+        },
     }
     assert recorder.specs == [
         "/vcenter/vm/vm-1",
         "/vcenter/vm/vm-1/hardware/ethernet/4000",
         "/vcenter/network",
     ]
+
+
+async def test_vm_nic_repoint_preview_standard_portgroup_resolves_name() -> None:
+    """The NIC preview reflects backing_type=STANDARD_PORTGROUP and resolves the name."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {
+                        "type": "DISTRIBUTED_PORTGROUP",
+                        "network": "dvportgroup-1",
+                        "network_name": "old-net",
+                    },
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "network-1001",
+                        "name": "mgmt-standard-pg",
+                        "type": "STANDARD_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "nic": "4000",
+                "portgroup_name": "mgmt-standard-pg",
+                "backing_type": "STANDARD_PORTGROUP",
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["current_backing"]["network"] == "dvportgroup-1"
+    assert preview["requested_backing"] == {
+        "portgroup_id": "network-1001",
+        "portgroup_name": "mgmt-standard-pg",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_nic_repoint_preview_explicit_network_moid() -> None:
+    """The preview honours an explicit network moid (validate-by-moid, no name resolve)."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-1"},
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {"network": "network-1002", "name": "svc-net", "type": "STANDARD_PORTGROUP"}
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {
+                "vm": "vm-1",
+                "nic": "4000",
+                "portgroup_name": "svc-net",
+                "backing_type": "STANDARD_PORTGROUP",
+                "network": "network-1002",
+            },
+            connector_instance=recorder,
+        )
+    )
+    assert preview is not None
+    assert preview["requested_backing"] == {
+        "portgroup_id": "network-1002",
+        "portgroup_name": "svc-net",
+        "backing_type": "STANDARD_PORTGROUP",
+    }
+    # The network read filtered by moid (filter.networks -> bare on /api), never by name.
+    net_read = next(q for spec, q in recorder.read_calls if spec == "/vcenter/network")
+    assert net_read == {"networks": ["network-1002"]}
 
 
 async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
@@ -1412,7 +1616,11 @@ async def test_vm_nic_repoint_park_carries_network_from_to_pair(
             "nic": "4000",
             "mac_address": "aa:bb",
             "current_backing": {"type": "STANDARD_PORTGROUP"},
-            "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+            "requested_backing": {
+                "portgroup_id": "dvportgroup-9",
+                "portgroup_name": "prod-net",
+                "backing_type": "DISTRIBUTED_PORTGROUP",
+            },
         },
         "preview_populated": True,
         "safety_level": "dangerous",

@@ -71,12 +71,13 @@ _DOCS_CAPABILITY = "meho-docs"
 _DOCS_WORKING_TOOLS: frozenset[str] = frozenset({"search_docs", "ask_docs", "list_doc_collections"})
 
 #: Every ``meho-docs``-capability-gated tool across BOTH surfaces: the
-#: three working docs tools plus the two operator-surface doc-collection
+#: three working docs tools plus the three operator-surface doc-collection
 #: lifecycle tools. All drop out when the capability is absent, so an
-#: elevated session without ``meho-docs`` loses all five.
+#: elevated session without ``meho-docs`` loses all six.
 _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
     "create_doc_collections",
     "delete_doc_collections",
+    "update_doc_collections",
 }
 
 #: The **pairing-gated** automation family (Task #3029). Unlike the docs
@@ -90,6 +91,15 @@ _DOCS_CAP_GATED: frozenset[str] = _DOCS_WORKING_TOOLS | {
 #: unpaired working/operator listings stay byte-identical to a build that never
 #: carried the family.
 _AUTOMATION_GATED_TOOLS: frozenset[str] = frozenset({"meho_automation_list"})
+
+# The broadcast working surface has a one-to-one operator CLI counterpart.
+# Keep this explicit manifest beside the MCP listing pin so a broadcast tool
+# cannot be added or renamed without its matching `meho broadcast` verb.
+_BROADCAST_WORKING_SURFACE_CLI_VERBS: dict[str, str] = {
+    "meho_broadcast_recent": "meho broadcast recent",
+    "meho_broadcast_announce": "meho broadcast announce",
+    "meho_broadcast_watch": "meho broadcast watch",
+}
 
 #: The default working surface, as the exact sorted listing a ``tools/list``
 #: response carries for a session that clears role + capability but is NOT
@@ -179,6 +189,7 @@ OPERATOR_SURFACE_SORTED: tuple[str, ...] = (
     "meho_topology_delete_node",
     "meho_topology_unannotate",
     "query_audit",
+    "update_doc_collections",
 )
 
 #: The full elevated listing (working + operator), sorted — what an
@@ -242,6 +253,17 @@ def test_pinned_surfaces_are_sorted_and_unique() -> None:
     for pinned in (WORKING_SURFACE_SORTED, OPERATOR_SURFACE_SORTED, FULL_SURFACE_SORTED):
         assert list(pinned) == sorted(pinned)
         assert len(pinned) == len(set(pinned))
+
+
+def test_broadcast_working_surface_has_cli_parity() -> None:
+    """Every broadcast working-surface tool has its documented CLI verb."""
+    broadcast_tools = {
+        name for name in WORKING_SURFACE_SORTED if name.startswith("meho_broadcast_")
+    }
+    assert set(_BROADCAST_WORKING_SURFACE_CLI_VERBS) == broadcast_tools
+    assert all(
+        verb.startswith("meho broadcast ") for verb in _BROADCAST_WORKING_SURFACE_CLI_VERBS.values()
+    )
 
 
 def test_pinned_surfaces_partition_the_live_registry() -> None:

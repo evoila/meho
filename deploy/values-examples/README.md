@@ -82,6 +82,32 @@ request.
     kubectl -n meho logs deploy/meho --tail=50
     ```
 
+### Security baseline these values carry
+
+`values-rdc-example.yaml` ships the hardened posture as its default; the
+inline comments mark each control. When you copy it, keep these at their
+secure state (each is stated once, in full, on the published docs site's
+[deployment-shapes baseline table](https://evoila.github.io/meho/latest/deployment-shapes/#the-hardening-baseline-every-production-shape-inherits)):
+
+- **`networkPolicy.enabled: true`** — default-deny network isolation is
+  the baseline for any multi-tenant / production install; `false` is a
+  first-install-only convenience and a documented downgrade.
+- **`config.forwardedAllowIps` narrowed to the ingress controller's
+  source** (a `/32`), not the whole pod CIDR — over-wide trust lets any
+  in-cluster workload forge the client address.
+- **`VAULT_KV_TENANT_SCOPE_PREFIX` left at its default**
+  (`secret/tenants/{tenant_id}/`) — the per-tenant credential guard is on
+  by default; emptying it is a documented downgrade for single-tenant /
+  mid-migration only.
+- **`config.approvalAllowSelfApproval` left at `"false"`** — four-eyes
+  enforced; `"true"` is an audited emergency break-glass only.
+- **Deploy by digest + verify signature** — pin `image.digest`
+  (`sha256:…`) and `cosign verify` it before rollout, beyond the immutable
+  `image.tag`.
+- **Realm mappers** — on a shared public client derive `tenant_role` from
+  group membership; never hardcode a privileged `tenant_role` (see the
+  auth-onramp section below).
+
 ## ESO sync patterns
 
 The MEHO chart references operator-provisioned Kubernetes Secrets *by
@@ -818,6 +844,19 @@ tenant/role on the user (group attribute, custom user-attribute,
 identity-provider mapping) can swap these for `oidc-usermodel-*`
 mappers — keep the **claim names** identical (`tenant_id`,
 `tenant_role`) because that's what the backplane validates against.
+
+> **Security baseline — no hardcoded privileged `tenant_role` on a
+> shared client.** A hardcoded-claim mapper is safe only on a
+> **single-identity** client (the dogfood lab, where one operator
+> authenticates). On any **shared, multi-user** public client, do **not**
+> hardcode a privileged `tenant_role` such as `tenant_admin`: every user
+> who can authenticate through that client would inherit it, and the
+> backplane correctly trusts the signed claim. Derive `tenant_role` from
+> controlled **group or user membership** (`oidc-usermodel-*` /
+> group-membership mappers), fail closed when no assignment exists, and
+> restrict which realm users may use the client. Keep service-account
+> claim issuance on separate confidential clients. Cryptographically valid
+> JWTs do not correct an over-privileged identity-provider mapper.
 
 Validator-side errors at the decode stage are made specific by
 [#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12) and

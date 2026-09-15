@@ -90,9 +90,15 @@ allowlist layers:
    :data:`_SHELL_METACHARS_RE` and refuses on hit, then (b) tokenises
    via :func:`shlex.split`, (c) checks for a 2-token verb prefix
    against :data:`_K8S_MULTIWORD_READ_VERBS` first, and (d) falls
-   through to the single-word :data:`_K8S_READ_VERBS` safelist. Any
-   rejected step raises :exc:`KubectlSafetyError`, which the
-   dispatcher's exception path turns into a
+   through to the single-word :data:`_K8S_READ_VERBS` safelist, and
+   (e) validates **every** flag token -- before and after the verb,
+   attached and separated -- against the positive
+   :data:`_K8S_ALLOWED_FLAGS` allowlist so endpoint/TLS/credential/
+   context overrides, the raw credential view (``--raw``) and
+   file-writing options (``--output-directory``) are rejected even
+   though they carry no shell metacharacter and sit behind a
+   read-only verb. Any rejected step raises :exc:`KubectlSafetyError`,
+   which the dispatcher's exception path turns into a
    ``result_connector_error`` envelope. The metacharacter reject is
    **load-bearing**: ``shlex.split`` in POSIX mode does not treat
    shell separators as token boundaries, so a chained payload like
@@ -269,6 +275,121 @@ _K8S_MULTIWORD_READ_VERBS: dict[str, frozenset[str]] = {
 #: * ``\\`` -- line continuation / escape into the next char
 _SHELL_METACHARS_RE: re.Pattern[str] = re.compile(r"[;&|<>`$()\\\n\r]")
 
+#: Positive allowlist of ``kubectl`` flags accepted anywhere in a
+#: read invocation -- both the "global" position before the verb and
+#: the argument position after it. Every flag **not** in this set is
+#: rejected, which closes the argument-level injection class that a
+#: verb safelist plus a shell-metacharacter reject leave open:
+#:
+#: * **Endpoint / TLS-trust / credential overrides** -- ``--server`` /
+#:   ``-s``, ``--kubeconfig``, ``--token``, ``--username`` /
+#:   ``--password``, ``--client-certificate`` / ``--client-key``,
+#:   ``--certificate-authority``, ``--insecure-skip-tls-verify``,
+#:   ``--tls-server-name``, ``--as`` / ``--as-group`` / ``--as-uid``.
+#:   These would let the caller point the appliance's bearer
+#:   credentials at an endpoint of their choosing or disable TLS
+#:   verification. Endpoint, context, credential and TLS trust are
+#:   owned by the appliance's own kubeconfig, never by the caller.
+#: * **Context / cluster / user selection** -- ``--context`` /
+#:   ``--cluster`` / ``--user`` pick a different identity out of the
+#:   kubeconfig; the appliance's default context is the only one the
+#:   caller may exercise.
+#: * **Raw credential view** -- ``--raw`` on ``config view`` prints
+#:   client certs / bearer tokens verbatim.
+#: * **File-writing options** -- ``--output-directory`` (``cluster-info
+#:   dump``), ``--output-file``, ``--cache-dir``, ``--profile-output``
+#:   write on the appliance filesystem.
+#:
+#: The allowlisted flags are all read-scoping / output-formatting
+#: options that neither redirect the connection nor touch disk. See
+#: the kubectl reference for the read/global flag split:
+#: https://kubernetes.io/docs/reference/kubectl/.
+_K8S_ALLOWED_FLAGS: frozenset[str] = frozenset(
+    {
+        # Scoping.
+        "-n",
+        "--namespace",
+        "-A",
+        "--all-namespaces",
+        "-l",
+        "--selector",
+        "--field-selector",
+        # Output formatting -- read-only, never writes to disk.
+        "-o",
+        "--output",
+        "--sort-by",
+        "-L",
+        "--label-columns",
+        "--show-labels",
+        "--show-kind",
+        "--no-headers",
+        "--ignore-not-found",
+        "--chunk-size",
+        # get / explain.
+        "--recursive",
+        "--api-version",
+        "--subresource",
+        # logs.
+        "-c",
+        "--container",
+        "--all-containers",
+        "--tail",
+        "--since",
+        "--since-time",
+        "--timestamps",
+        "-p",
+        "--previous",
+        "--prefix",
+        "--limit-bytes",
+        "--max-log-requests",
+        # describe.
+        "--show-events",
+        # top.
+        "--containers",
+        # auth can-i.
+        "--list",
+        "-q",
+        "--quiet",
+    }
+)
+
+#: Subset of :data:`_K8S_ALLOWED_FLAGS` that consume a following value
+#: token when written in the **separated** form (``--namespace
+#: holodeck`` rather than ``--namespace=holodeck``). The walk needs
+#: this to step over the value while locating the verb -- otherwise a
+#: value like ``holodeck`` in ``kubectl -n holodeck get pods`` would be
+#: mistaken for the verb. Boolean flags (``-A``, ``--show-labels``,
+#: ...) are absent, so the token after them is treated as the verb /
+#: a positional. A separated value is only swallowed when it does not
+#: itself start with ``-`` (so ``--namespace --server=evil`` does not
+#: hide ``--server`` as a value -- the ``--server`` token is then
+#: validated and rejected on the next step; negative numeric values
+#: must use the attached form, e.g. ``--tail=-1``).
+_K8S_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "-n",
+        "--namespace",
+        "-l",
+        "--selector",
+        "--field-selector",
+        "-o",
+        "--output",
+        "--sort-by",
+        "-L",
+        "--label-columns",
+        "--chunk-size",
+        "--api-version",
+        "--subresource",
+        "-c",
+        "--container",
+        "--tail",
+        "--since",
+        "--since-time",
+        "--limit-bytes",
+        "--max-log-requests",
+    }
+)
+
 
 class KubectlSafetyError(ValueError):
     """Raised by :func:`parse_kubectl_command` when the verb is not read-only.
@@ -285,22 +406,74 @@ class KubectlSafetyError(ValueError):
     """
 
 
+def _validate_flag(token: str) -> bool:
+    """Validate one ``-``-prefixed *token* against :data:`_K8S_ALLOWED_FLAGS`.
+
+    The flag name is the part before an ``=`` (``--namespace`` for both
+    ``--namespace=x`` and ``--namespace x``). A name absent from the
+    allowlist raises :exc:`KubectlSafetyError` -- this is the gate that
+    rejects endpoint / TLS / credential / context overrides, the raw
+    credential view and file-writing options that a verb safelist alone
+    lets through.
+
+    Returns ``True`` when the flag takes a value in the **separated**
+    form (name is in :data:`_K8S_VALUE_FLAGS` and the token carried no
+    attached ``=value``), so the caller knows a following value token
+    may need to be stepped over. The returned message never echoes a
+    flag value -- only the flag name, which is not sensitive.
+    """
+    name = token.split("=", 1)[0]
+    if name not in _K8S_ALLOWED_FLAGS:
+        raise KubectlSafetyError(
+            f"kubectl flag {name!r} is not on the read-only allowlist; "
+            "endpoint (--server), TLS-trust, credential (--token, "
+            "--kubeconfig), context/cluster/user, raw-credential "
+            "(--raw) and file-writing (--output-directory) overrides "
+            "are rejected -- those are owned by the appliance config"
+        )
+    return "=" not in token and name in _K8S_VALUE_FLAGS
+
+
 def _skip_global_flags(tokens: list[str]) -> int:
     """Return the index of the first non-flag token after ``kubectl``.
 
-    Walks past leading flag tokens. Attached-value flags
-    (``--context=foo``) consume one token; separated-value flags
-    (``--context foo``) consume two. The returned index points at the
-    verb -- or off the end of ``tokens`` when there is no verb.
+    Walks past leading flag tokens, **validating each against
+    :data:`_K8S_ALLOWED_FLAGS`** (via :func:`_validate_flag`) so a
+    global-position credential/endpoint override is refused before the
+    verb is even reached. Attached-value flags (``--namespace=foo``)
+    consume one token; separated-value flags (``--namespace foo``)
+    consume two -- but a separated value that itself starts with ``-``
+    is not swallowed, so it is validated as its own flag on the next
+    iteration rather than hiding a rejected flag as a value. The
+    returned index points at the verb -- or off the end of ``tokens``
+    when there is no verb. Raises :exc:`KubectlSafetyError` on the
+    first disallowed flag.
     """
     idx = 1
     while idx < len(tokens) and tokens[idx].startswith("-"):
-        token = tokens[idx]
+        consumes_value = _validate_flag(tokens[idx])
         idx += 1
-        if "=" not in token and idx < len(tokens) and not tokens[idx].startswith("-"):
-            # Separated flag value (``--context foo``); consume.
+        if consumes_value and idx < len(tokens) and not tokens[idx].startswith("-"):
+            # Separated flag value (``--namespace foo``); step over it.
             idx += 1
     return idx
+
+
+def _reject_disallowed_arg_flags(args: list[str]) -> None:
+    """Validate every ``-``-prefixed token among post-verb *args*.
+
+    Positional tokens (resource kinds / names) pass untouched -- they
+    were already screened for shell metacharacters in
+    :func:`parse_kubectl_command`. Flag tokens go through
+    :func:`_validate_flag`, so an argument-position override
+    (``kubectl get pods --server=… --insecure-skip-tls-verify``,
+    ``kubectl config view --raw``, ``kubectl cluster-info dump
+    --output-directory=/tmp``) is rejected exactly like a global-position
+    one. Raises :exc:`KubectlSafetyError` on the first disallowed flag.
+    """
+    for token in args:
+        if token.startswith("-"):
+            _validate_flag(token)
 
 
 def _check_multiword_verb(tokens: list[str], idx: int, verb: str) -> tuple[str, list[str]]:
@@ -330,9 +503,21 @@ def _check_multiword_verb(tokens: list[str], idx: int, verb: str) -> tuple[str, 
 def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     """Parse ``command`` into ``(verb, args)``; enforce the read-only safelist.
 
-    The first whitespace-separated token must be ``kubectl``. After
-    walking past any global flags via :func:`_skip_global_flags`, the
-    verb is matched against two safelists in order:
+    The first whitespace-separated token must be ``kubectl``. Every
+    flag -- in the global position before the verb (validated while
+    :func:`_skip_global_flags` locates the verb) and in the argument
+    position after it (validated by :func:`_reject_disallowed_arg_flags`)
+    -- is checked against the positive :data:`_K8S_ALLOWED_FLAGS`
+    allowlist. Endpoint (``--server``), TLS-trust
+    (``--insecure-skip-tls-verify``, ``--certificate-authority`` …),
+    credential (``--token``, ``--kubeconfig`` …), context/cluster/user
+    selection, the raw credential view (``--raw``) and file-writing
+    (``--output-directory``, ``--output-file`` …) flags are all
+    off-list and rejected, in both attached (``--flag=value``) and
+    separated (``--flag value``) forms; those settings are owned by the
+    appliance's own kubeconfig, not the caller's command line. After
+    walking past the (now-validated) global flags, the verb is matched
+    against two safelists in order:
 
     1. **Multi-word prefix first** (:func:`_check_multiword_verb`).
        If ``tokens[idx]`` is a key in :data:`_K8S_MULTIWORD_READ_VERBS`
@@ -353,21 +538,14 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     (``"config view"``).
 
     Tokenisation runs via :func:`shlex.split` so quoted resource names
-    (``"my pod"``) survive the parse. Before tokenisation the function
-    scans for POSIX-shell metacharacters (:data:`_SHELL_METACHARS_RE`)
-    and refuses the call if any are found. This is **load-bearing**:
-    ``shlex.split`` in POSIX mode does not treat ``;`` / ``&&`` /
-    ``|`` / ``$(...)`` / backticks / ``>`` / ``<`` / newlines as token
-    boundaries, so a chained payload like ``kubectl get pods; rm -rf /``
-    would tokenise to ``['kubectl', 'get', 'pods;', ...]``, the verb
-    check would approve ``get``, and the handler would forward the
-    **raw string** verbatim to ``asyncssh.SSHClientConnection.run`` --
-    which delegates to the remote login shell where the metacharacters
-    are interpreted. The metachar reject closes that hole before
-    tokenisation runs.
-
-    Empty / metachar-bearing / non-``kubectl`` / safelist-misses raise
-    :exc:`KubectlSafetyError` before any SSH traffic happens.
+    (``"my pod"``) survive the parse. POSIX-shell metacharacters
+    (:data:`_SHELL_METACHARS_RE`) are rejected *before* tokenisation --
+    load-bearing, since ``shlex.split`` does not split on shell
+    separators, so an un-scanned ``kubectl get pods; rm -rf /`` would
+    reach the remote login shell verbatim (see the module docstring).
+    Empty / metachar-bearing / non-``kubectl`` / safelist- or
+    allowlist-misses all raise :exc:`KubectlSafetyError` before any SSH
+    traffic happens.
 
     Examples
     --------
@@ -381,11 +559,8 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     """
     if not command or not command.strip():
         raise KubectlSafetyError("kubectl command is empty")
-    # Metacharacter rejection -- load-bearing security gate (see
-    # docstring above and :data:`_SHELL_METACHARS_RE`). Don't echo the
-    # offending character back in the message: that's an
-    # operator-visible surface and the rejected verbatim character
-    # set is auditable through the audit_log row's ``params_hash``.
+    # Metacharacter rejection -- load-bearing security gate. Don't echo
+    # the offending character back (operator-visible surface).
     if _SHELL_METACHARS_RE.search(command):
         raise KubectlSafetyError(
             "kubectl command rejected: shell metacharacter detected; "
@@ -414,13 +589,17 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     # safelist does NOT include the multi-word parents, so a missing
     # sub-verb fails closed via ``_check_multiword_verb``.
     if verb in _K8S_MULTIWORD_READ_VERBS:
-        return _check_multiword_verb(tokens, idx, verb)
+        canonical, args = _check_multiword_verb(tokens, idx, verb)
+        _reject_disallowed_arg_flags(args)
+        return canonical, args
     if verb not in _K8S_READ_VERBS:
         raise KubectlSafetyError(
             f"kubectl verb {verb!r} is not on the read-only safelist; "
             f"allowed: {sorted(_K8S_READ_VERBS)}"
         )
-    return verb, tokens[idx + 1 :]
+    args = tokens[idx + 1 :]
+    _reject_disallowed_arg_flags(args)
+    return verb, args
 
 
 # ---------------------------------------------------------------------------
@@ -861,10 +1040,12 @@ async def holodeck_k8s_exec(
     string starting with ``kubectl <read-verb> ...``). The handler:
 
     1. Parses the command via :func:`parse_kubectl_command`; shell
-       metacharacters and mutating verbs raise
-       :exc:`KubectlSafetyError` **before** any SSH transport is
-       touched. The exception is folded into a ``result_connector_
-       error`` envelope by the structured-error path below.
+       metacharacters, mutating verbs and off-allowlist flags
+       (endpoint/TLS/credential/context overrides, ``--raw``,
+       file-writing options) raise :exc:`KubectlSafetyError`
+       **before** any SSH transport is touched. The exception is
+       folded into a ``result_connector_error`` envelope by the
+       structured-error path below.
     2. Runs the parsed command verbatim over plain SSH (no ``pwsh``;
        the in-appliance K8s is reached through the appliance's
        ``kubectl`` binary, not through PowerShell).
@@ -1443,10 +1624,20 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "``config get-contexts``, ``config get-clusters``, "
             "``config get-users``, ``config current-context``, "
             "``auth can-i``, ``auth whoami``. Use to inspect cluster "
-            "state without mutating it. The schema pattern enforces "
-            "the ``kubectl <read-verb> ...`` shape at the validator "
-            "layer; the handler re-checks the verb as a belt-and-braces "
-            "safety gate. Because the command line is operator-supplied, "
+            "state without mutating it. Flags are constrained to a "
+            "positive read-only allowlist (namespace / selector / "
+            "output-format / logs-scoping options): endpoint "
+            "(``--server``), TLS-trust (``--insecure-skip-tls-verify``), "
+            "credential (``--token``, ``--kubeconfig``), "
+            "context/cluster/user, raw-credential (``--raw``) and "
+            "file-writing (``--output-directory``) flags are rejected, "
+            "so the caller cannot redirect the appliance's credentials, "
+            "disable TLS verification, dump the raw kubeconfig or write "
+            "files -- those are owned by the appliance's own kubeconfig. "
+            "The schema pattern enforces the ``kubectl <read-verb> ...`` "
+            "shape at the validator layer; the handler is the "
+            "authoritative gate that re-checks the verb and the flag "
+            "allowlist. Because the command line is operator-supplied, "
             "this op is approval-gated: a dispatch parks for human "
             "approval before the command runs, rather than executing "
             "unattended."
@@ -1524,7 +1715,16 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                         "restricted to ``[A-Za-z0-9._/=:,@-]`` -- shell "
                         "metacharacters (``;``, ``&``, ``|``, ``$``, "
                         "backticks, ``>``, ``<``, parens, ``\\``) are "
-                        "rejected before the handler is reached."
+                        "rejected before the handler is reached. Flags "
+                        "are limited to a positive read-only allowlist "
+                        "(``-n``/``--namespace``, ``-o``/``--output``, "
+                        "``-l``/``--selector``, logs-scoping options, "
+                        "...); endpoint/TLS/credential/context overrides "
+                        "(``--server``, ``--insecure-skip-tls-verify``, "
+                        "``--token``, ``--kubeconfig``, ``--context``), "
+                        "the raw credential view (``--raw``) and "
+                        "file-writing options (``--output-directory``) "
+                        "are rejected by the handler."
                     ),
                 },
             },
@@ -1560,7 +1760,17 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "<verb> <resource>`` / ``kubectl auth whoami`` for "
                 "authorization inspection. Mutating verbs and "
                 "mutating sub-verbs (``config set-context``, "
-                "``auth reconcile``, etc.) fail closed. This op is "
+                "``auth reconcile``, etc.) fail closed. Flags are "
+                "limited to read-only scoping/formatting options "
+                "(``-n``, ``-o``, ``-l``, ``--field-selector``, "
+                "logs-scoping options, ...); endpoint/TLS/credential/"
+                "context overrides (``--server``, "
+                "``--insecure-skip-tls-verify``, ``--token``, "
+                "``--kubeconfig``, ``--context``), the raw credential "
+                "view (``--raw``) and file-writing options "
+                "(``--output-directory``) are rejected -- endpoint, "
+                "context, credential and TLS trust are owned by the "
+                "appliance's own kubeconfig. This op is "
                 "approval-gated: a dispatch parks for human approval "
                 "before the command runs, rather than executing "
                 "unattended. " + _SSH_TRANSPORT_NOTE
@@ -1578,7 +1788,7 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "``{stdout: '<text>', stderr: '<truncated text>', "
                 "exit_status: <int|null>}``. ``stderr`` is capped at "
                 "4096 chars. ``error`` is set when the safety check "
-                "rejected the verb or the SSH call failed."
+                "rejected the verb or a flag, or the SSH call failed."
             ),
         },
     ),

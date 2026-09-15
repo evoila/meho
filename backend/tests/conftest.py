@@ -342,6 +342,34 @@ def _reset_checks_watchdog_state() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_jwks_module_state() -> Iterator[None]:
+    """Reset the JWKS decoder's per-process state around every test.
+
+    :mod:`meho_backplane.auth.jwt` keeps module-level state the JWT
+    decoder shares across requests: the fetched-keyset cache, and — as of
+    S22 / #310 — the forced-refresh cooldown stamp and the negative
+    ``kid`` cache that together bound an unknown-``kid`` token to at most
+    one Keycloak round-trip per window. Any authenticated-edge test fills
+    the keyset cache and, on a fresh ``kid``, trips the forced-refresh
+    cooldown; without this sweep a later same-worker test that mints a
+    *new* ``kid`` finds the cooldown still live, its forced re-fetch
+    refused, and authentication fails closed with a spurious 401 — the
+    #310 cooldown made a previously benign keyset-cache leak observable
+    (``test_api_v1_feed``'s third kid-rotating edge case being the first
+    to trip it). Both brackets, so a test neither inherits nor bequeaths
+    JWKS state. ``clear_jwks_cache`` resets all four globals in one call
+    and is the same test-only reset several suites already invoke by hand;
+    making it autouse generalises those local fixtures process-wide
+    (mirrors the ``_isolate_global_registries`` #540 generalisation).
+    """
+    from meho_backplane.auth.jwt import clear_jwks_cache
+
+    clear_jwks_cache()
+    yield
+    clear_jwks_cache()
+
+
+@pytest.fixture(autouse=True)
 def _stub_descriptor_embedding(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,

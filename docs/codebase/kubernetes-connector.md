@@ -27,10 +27,27 @@ copy this pattern in G3.x).
   -- the connector class. Inherits from `Connector` (the ABC in
   `meho_backplane.connectors.base`). Class-level attrs `product` /
   `version` / `impl_id` advertise the registry-v2 key. Caches one
-  `kubernetes_asyncio.client.ApiClient` per target keyed on
-  `target.secret_ref` (the Vault path holding the kubeconfig); the
-  cache key is intentionally the secret_ref, not `target.name`, so two
-  tenants holding same-named targets get distinct ApiClients.
+  `kubernetes_asyncio.client.ApiClient` (REST) and, lazily, one
+  `WsApiClient` (exec/websocket) per target, both keyed on the
+  tenant-unique `(tenant_id, id)` tuple from the shared
+  `target_cache_key` helper (`connectors/_shared/cache_key.py`). Keying
+  on the target-row primary key — not `target.name` and not
+  `target.secret_ref` — is a cross-tenant isolation requirement
+  (security F04, #266): two targets in different tenants that share a
+  name *or* a Vault `secret_ref` must never collapse onto one cached
+  client, or the second tenant is served the first tenant's
+  authenticated client without passing its own credential-store
+  authorization. Both cache fast-paths also apply the
+  `is_system_operator` guard (#1008): a system/operator-less caller
+  (reachable through the operator-less `k8s.ls` forwarder) always falls
+  through to the fail-closed credential loader and is never served a
+  warm client a real operator primed. `invalidate_credentials(target)`
+  is the duck-typed eviction hook (#2396) the dispatcher's
+  establish-auth-failure arm calls and the seam that lets credential
+  rotation / target mutation / revocation drop *both* cached client
+  types for the target; a WCP Supervisor's normal mid-session token
+  expiry is still handled in place by the cached `Configuration`'s
+  refresh hook, not by eviction.
 
 * `KubernetesOp` (`backend/src/meho_backplane/connectors/kubernetes/ops.py`)
   -- frozen dataclass describing one op's metadata. Each field mirrors
@@ -53,9 +70,10 @@ copy this pattern in G3.x).
   against this same tuple.
 
 * `KubernetesTargetLike` (`backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py`)
-  -- Protocol the connector reads against. Only four attributes:
-  `name`, `host`, `port`, `secret_ref`. The G0.3 `Target` model
-  satisfies it structurally once G0.3 lands.
+  -- Protocol the connector reads against: `name`, `host`, `port`,
+  `secret_ref`, plus `id` / `tenant_id` (the `(tenant_id, id)` cache
+  key components, #266). The G0.3 `Target` model carries all of them as
+  UUIDs, so it satisfies the Protocol structurally.
 
 * `ops_logs.py` (the `k8s.logs` handler)
   -- contains the module-level `k8s_logs(connector, target, params)`
@@ -120,8 +138,8 @@ copy this pattern in G3.x).
 2. `KubernetesConnector.logs(target, params)` delegates to
    `ops_logs.k8s_logs(connector, target, params)`.
 3. `k8s_logs` resolves the `ApiClient` for the target via
-   `connector._get_api_client(target)` (cached on secret_ref) and
-   builds a `client.CoreV1Api(api_client)`.
+   `connector._get_api_client(target)` (cached on the tenant-unique
+   `(tenant_id, id)` key) and builds a `client.CoreV1Api(api_client)`.
 4. `resolve_pod_and_container()` lists pods in the namespace, picks
    the exact match if present, falls back to prefix match. Multi-
    container pods without `container` raise

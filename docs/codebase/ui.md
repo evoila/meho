@@ -83,8 +83,8 @@ Sanctioned exceptions:
 | `meho_backplane.ui.security_headers` | Pure-ASGI `UIFramingHeadersMiddleware` (clickjacking-defence hardening, #101 row L12). Stamps every `/ui/*` response with `Content-Security-Policy: frame-ancestors 'none'` + `X-Frame-Options: DENY` (the two OWASP-recommended anti-framing headers; both are sent for defence-in-depth + legacy-browser support). Registered **outermost** in `main.py` (last `add_middleware`) so the headers land even on `UISessionMiddleware`'s 302-to-login -- a framed login page is itself a clickjacking surface. `/ui/`-scoped by construction: out-of-prefix `/api/*` / `/mcp` JSON responses pass through unstamped. The CSP is `frame-ancestors`-only -- deliberately NOT a full content-security policy (broadening to `script-src`/`style-src` would risk breaking the HTMX + Alpine + inline-script render). Uses `MutableHeaders(scope=message).setdefault(...)` on `http.response.start` (Starlette's own header-stamping recipe) so a route that ever sets its own `frame-ancestors` CSP keeps its value. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware; G0.25 (#1694) wires the rotation primitive into the request path (`refresh` + `errors` modules). |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `load_session_for_update` (side-effect-free `SELECT ... FOR UPDATE` variant for the refresh path, G0.25 #1694), `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. `rotate_refresh` optionally extends `expires_at` by a refreshed token's lifetime (`new_lifetime=`), monotonic and clamped to `created_at + ui_session_absolute_lifetime_seconds`, and accepts a caller-supplied clock (`now=`, default wall clock) so a caller that pre-checks `expires_at` (the inline refresh path) shares one reading with the internal replay gate -- two independent clock reads would leave a microsecond gap where the gate's "expired" branch self-deadlocks on the caller's own row lock. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. `list_active_sessions(operator_sub, tenant_id)` returns the caller's own live sessions (own `operator_sub` + `tenant_id`, `revoked_at IS NULL`, `expires_at > now()`, ordered `last_seen_at DESC`) as token-free `ActiveSessionRow` projections (the Fernet ciphertext columns are never read for a metadata listing) and `revoke_other_sessions(operator_sub, tenant_id, keep_session_id)` soft-deletes every own active session except the current one -- both back the Account surface (G10.11-T1 #1892) and take their `(operator_sub, tenant_id)` from the validated session context, never a form field. |
-| `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
-| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
+| `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter), mints a second per-flow `browser_binding` secret (login-CSRF defence, F10 #272), and registers the verifier + binding + `return_to` in a server-side `PKCEVerifierStore`; it returns `(url, state, browser_binding)`. `exchange_code_for_tokens` pops the pending flow, **rejects it (`browser_binding_mismatch`) when the callback's replayed binding is missing or does not match — before the token exchange** (constant-time `hmac.compare_digest`), then exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
+| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Login sets the short-lived `browser_binding` cookie (`login_binding_cookie_name(state)` = `meho_ob_<sha256(state)[:32]>`; `HttpOnly; Secure; SameSite=Lax; Path=/ui/auth; Max-Age=<flow TTL>`) — `Lax`, not `Strict`, so it survives the cross-site top-level callback navigation from a separately hosted Keycloak; the per-`state` name lets concurrent logins from one browser bind independently. Callback reads that cookie, passes it to `exchange_code_for_tokens` for the binding check, verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks, sets `meho_session` (`HttpOnly; Secure; SameSite=Strict; Path=/`), and clears the single-use binding cookie on success. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
 | `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`, plus `tenant_slug` + `tenant_name` populated from a same-transaction `tenant` PK lookup added by G0.15-T9 #1217) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. `require_ui_admin` (the write-route RBAC gate) loads + verifies the stored access token through `meho_backplane.ui.auth.refresh`, so expired tokens silently refresh instead of 401ing (G0.25 #1694). After every successful row load the middleware also runs the drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation.revalidate_read_session`): past `ui_session_read_revalidation_seconds` (default 300; `0` = every request) without a validation, the stored token is re-presented to the JWKS-cached JWT chain -- an in-memory check on a cache hit, escalating to one reactive refresh only once the token is past `exp` -- and a terminal failure collapses to the same redirect-to-login as a missing session. This bounds IdP revocation / role-demotion lag on read renders to ~(access-token TTL + threshold) instead of the 12 h absolute session lifetime; the anchor is a process-local last-validated map (not `last_seen_at`, which active sessions bump every request, so a gap-based gate would never fire for exactly the sessions that matter). |
 | `meho_backplane.ui.auth.refresh` | Inline token-refresh lifecycle (G0.25 #1694). `load_fresh_session` (proactive: refresh when the row is within 60 s of `expires_at`), `verify_access_token_with_refresh` (reactive: refresh once on the JWT chain's `token_expired`, re-verify), both funnelling into `refresh_session_tokens` -- the `SELECT ... FOR UPDATE`-serialised chokepoint that POSTs the RFC 6749 § 6 refresh grant (single attempt, 5 s timeout) and rotates the row via `rotate_refresh` (RFC 9700 § 4.14). Concurrent refreshes: first wins; the loser observes the rotated pair under the lock and skips its network call. Failures log `ui_auth_token_refresh_failed` (reason: `invalid_grant` / `network_error` / `timeout` / `malformed_response`) and raise `401 session_expired`; successes log `ui_auth_token_refresh_succeeded` (session_id, old/new expires_at, time_cost_ms). No token material in logs. The refresh performs zero `Set-Cookie` operations -- `meho_session` and `meho_csrf` stay byte-identical, so in-flight pages and their CSRF tokens survive a rotation (no #1706-class cookie desync). The seam serves **token-presenting** dependencies: `require_ui_admin`, the session middleware's drift-gated read-path revalidation (`meho_backplane.ui.auth.revalidation`), plus (G10.x #121) every per-route operator lift that re-verifies the stored access token to surface `tenant_role` / `sub` — `agents.operator`, `connectors.operator` (and the topology write gates that reuse its `lift_operator_from_session`), `memory.operator`, and the `kb` / `runbooks` / `operations` / `audit` / `keycloak` / `vault` route resolvers. Each calls `load_fresh_session` then `verify_access_token_with_refresh` (mirroring the `approvals` / `corpus` / `retrieval` precedent) rather than bare `load_session` + `verify_jwt_for_audience`, so no token-consuming `/ui/*` route 401s on an expired-but-refreshable token. The soft-fail role probes (`runbooks` / `audit` `_resolve_role`, the `agents` / `connectors` `resolve_role_probe`) keep their `try/except` → "no privileges" floor: a terminal `session_expired` from an unavailable refresh is absorbed there, never a 5xx. The dashboard-feed fix (#1696) needed no caller here — it re-pointed the tray at the existing session-gated `/ui/broadcast/stream` bridge, which reads Valkey directly under `require_ui_session` and never presents the access token. |
 | `meho_backplane.ui.auth.errors` | App-level `HTTPException` handler registered in `main.py` for the whole app (G0.25 #1694). Intercepts two recoverable shapes, both only for HTML navigations (`Accept: text/html`): (1) `401 session_expired` on `/ui/*` (G0.25 #1694) -> `302 /ui/auth/login?return_to=<path>` + `meho_session` cookie clear; (2) `400 authorization_state_expired` on `/ui/auth/callback` (G0.29 #2089, Leg 1) -> `303 /ui/auth/login` (no cookie touched -- pre-session; no `return_to` -- it died with the expired verifier). Non-HTML callers on either shape keep the structured JSON body (the `session_expired` case also clears the dead cookie). Every other HTTPException -- including the callback's genuine IdP `authorization_failed` and its token-endpoint `502` -- delegates byte-for-byte to FastAPI's stock `http_exception_handler`, so `/api/*` 401 codes and the non-recoverable callback errors are untouched. |
@@ -206,23 +206,30 @@ Round-trip shape:
    `UISessionMiddleware` finds no usable session and 302s to
    `/ui/auth/login?return_to=<original-path>`.
 2. **`/ui/auth/login`.** `build_authorization_request` generates a
-   per-flow PKCE `code_verifier`, asks authlib to build the
-   authorization URL (carries `code_challenge`,
+   per-flow PKCE `code_verifier` **and an independent per-flow
+   `browser_binding` secret** (login-CSRF defence, F10 #272), asks
+   authlib to build the authorization URL (carries `code_challenge`,
    `code_challenge_method=S256`, and the RFC 8707 `resource` parameter
    set to `<backplane_url>/api`), and registers the verifier +
-   `return_to` in the `PKCEVerifierStore` keyed on `state`. The
-   verifier never leaves the server.
+   `browser_binding` + `return_to` in the `PKCEVerifierStore` keyed on
+   `state`. The verifier and binding secret never leave the server
+   except that the binding is *also* set as a short-lived `HttpOnly;
+   Secure; SameSite=Lax` cookie on the initiating browser, scoped to
+   `/ui/auth`, under a per-`state` name.
 3. **Keycloak authenticates the operator.** Browser arrives at
    `/ui/auth/callback?code=...&state=...`.
 4. **`/ui/auth/callback`.** `exchange_code_for_tokens` pops the
-   verifier from the store (single-use), POSTs
-   `code+code_verifier+client_secret` to Keycloak's token endpoint,
-   and returns the access + refresh tokens. The callback then
-   validates the access token through the chassis JWT chain
-   (`verify_jwt_for_audience`) so the BFF inherits issuer / audience
-   / sub / tenant_id / tenant_role defences; on success it calls
-   `create_session` to write the encrypted row and sets the
-   `meho_session` cookie.
+   pending flow from the store (single-use), then **rejects it before
+   any token exchange when the browser did not replay the matching
+   `browser_binding` cookie** (constant-time compare) — this is what
+   defeats login CSRF, below. On a good binding it POSTs
+   `code+code_verifier+client_secret` to Keycloak's token endpoint and
+   returns the access + refresh tokens. The callback then validates the
+   access token through the chassis JWT chain (`verify_jwt_for_audience`)
+   so the BFF inherits issuer / audience / sub / tenant_id / tenant_role
+   defences; on success it calls `create_session` to write the encrypted
+   row, sets the `meho_session` cookie, and clears the now-consumed
+   binding cookie.
 5. **302 to the original `return_to`.** Operator lands on the page
    they were originally bounced from.
 
@@ -248,6 +255,7 @@ Per-flow state custody:
 | --- | --- | --- |
 | `code_verifier` | Server-side `PKCEVerifierStore` keyed on `state` | One authorization round-trip (≤10 min) |
 | `state` (CSRF) | On the IdP's authorization URL + echoed in callback | Same one round-trip |
+| `browser_binding` (login-CSRF) | Server-side `PKCEVerifierStore` **and** a per-`state` browser cookie (`meho_ob_<hash>`, `HttpOnly` + `Secure` + `SameSite=Lax` + `Path=/ui/auth`) | Same one round-trip; cookie `Max-Age` = flow TTL; cleared on callback success |
 | `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (seeded at login from access-token expiry minus 60s margin; extended by the sliding window #869 and by every successful token refresh #1694, both capped at `created_at + ui_session_absolute_lifetime_seconds`) |
 | Access + refresh tokens | `web_session` row, Fernet-encrypted | Rotated in place on every silent refresh (#1694); the row -- and therefore the cookie value -- survives rotation unchanged |
 
@@ -255,6 +263,40 @@ The `code_verifier` deliberately does NOT live in a cookie -- a
 verifier alongside the code on the redirect URI would defeat the
 property PKCE protects (an attacker capturing one captures both).
 Server-side custody is the whole point.
+
+Login-CSRF browser binding (F10, #272): `state` + PKCE + the
+server-side verifier map do not, by themselves, tie the flow to the
+browser that started it. An attacker can authenticate their **own**
+account, capture the resulting `code`+`state` callback URL, and induce
+a victim to follow it; because the verifier map is keyed only on
+`state` (which travels on that URL), the victim's browser would
+complete the flow and receive a session for the **attacker's**
+identity (login CSRF / session confusion -- the victim then works in
+the wrong account). The fix binds each flow to its initiating
+user-agent: login mints a second random `browser_binding` secret,
+stores it in the pending flow, and hands it to the browser as the
+short-lived cookie above; the callback must replay it, and
+`exchange_code_for_tokens` rejects a missing or mismatched value
+(constant-time `hmac.compare_digest`) **before the token exchange and
+before any session is created**. The victim never holds the attacker's
+binding cookie, so the induced callback fails closed. A binding
+mismatch surfaces as the same recoverable `400
+authorization_state_expired` as an expired `state` (it never
+telegraphs the specific cause), so an HTML navigation still gets the
+one-click login restart. The binding value is independent of `state`
+(which is public on the URL) and is **not** the PKCE `code_verifier`,
+so PKCE's server-only custody is intact. The cookie is `SameSite=Lax`,
+not `Strict` like the session cookie, because the callback is a
+top-level GET the IdP initiates -- cross-site for a separately hosted
+Keycloak, where `Strict` would drop the cookie and break every login;
+`Lax` is sent on exactly that top-level navigation and withheld from
+every other cross-site context. Because the cookie name embeds a hash
+of `state`, two concurrent logins from one browser bind independently
+(neither clobbers the other's cookie), and each is single-use --
+cleared on its own callback's success. This is distinct from the
+post-session BFF read-revalidation of #149: that hardens an
+**existing** session; this closes login CSRF **before** a session
+exists.
 
 Mid-session token refresh (G0.25 #1694): Keycloak's access token
 (~5 min TTL) routinely dies long before the session row does --

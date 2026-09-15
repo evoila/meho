@@ -30,6 +30,7 @@ from meho_backplane.operations._errors import (
     result_ambiguous_connector,
     result_connector_error,
     result_connector_http_403,
+    result_connector_timeout,
     result_connector_tls_verify_failed,
     result_no_connector,
 )
@@ -45,6 +46,29 @@ _BEARER_TEXT = "request rejected; header was " + "Bearer " + _BEARER_SECRET
 
 class _Target:
     host = "vcenter.lab.example.com"
+
+
+@pytest.mark.parametrize(
+    ("exc_type", "phase", "configured_timeout"),
+    [
+        (httpx.ReadTimeout, "read", 30.0),
+        (httpx.ConnectTimeout, "connect", 5.0),
+        (httpx.NetworkError, "transport", None),
+    ],
+)
+def test_connector_timeout_has_structured_phase_and_budget(
+    exc_type: type[httpx.TransportError], phase: str, configured_timeout: float | None
+) -> None:
+    request = httpx.Request("GET", "https://upstream.test/api")
+    request.extensions["timeout"] = {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 5.0}
+    result = result_connector_timeout("op.read", exc_type("transport fault", request=request), 12.5)
+    assert result.status == "error"
+    assert result.error == f"connector_timeout: {exc_type.__name__}"
+    assert result.duration_ms == 12.5
+    assert result.extras["error_code"] == "connector_timeout"
+    assert result.extras["phase"] == phase
+    assert result.extras["configured_timeout"] == configured_timeout
+    assert result.extras["exception_class"] == exc_type.__name__
 
 
 def test_connector_error_redacts_labelled_password() -> None:

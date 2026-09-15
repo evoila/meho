@@ -100,6 +100,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		skipUserProvisioning  bool
 		mcpRedirectURIs       []string
 		mcpWebOrigins         []string
+		keycloakCABundle      string
 		insecureSkipTLS       bool
 		dryRun                bool
 		cliOfflineSessionIdle int
@@ -187,12 +188,41 @@ func newBootstrapClientsCmd() *cobra.Command {
 				Err:                          cmd.ErrOrStderr(),
 			}
 
+			// TLS trust selection (F08 / #270). The package-level
+			// Bootstrap uses defaultHTTPClient() (system trust store)
+			// unless we stash a custom client via the package-internal
+			// httpClientOverride indirection. The two overrides are
+			// mutually exclusive: a CA-bundle pin keeps verification on
+			// (preferred), a blanket skip turns it off (escape hatch).
+			if keycloakCABundle != "" && insecureSkipTLS {
+				return errors.New(
+					"--keycloak-ca-bundle and --insecure-skip-tls-verify are " +
+						"mutually exclusive: pin the realm CA (verified TLS) or " +
+						"skip verification entirely, not both")
+			}
+			if keycloakCABundle != "" {
+				// Verified TLS against the pinned realm CA — the
+				// admin-password grant and every Bearer-token request
+				// run over a checked certificate chain + hostname.
+				client, cerr := newCABundleClient(keycloakCABundle)
+				if cerr != nil {
+					return cerr
+				}
+				httpClientOverride = client
+				defer func() { httpClientOverride = nil }()
+			}
 			if insecureSkipTLS {
-				// The package-level Bootstrap uses defaultHTTPClient();
-				// when the operator workstation has no system trust
-				// for the realm's CA we need to flip the TLS skip on
-				// a custom client. Build it here and stash it via a
-				// package-internal indirection (httpClientOverride).
+				// Escape hatch: verification off. Loud, opt-in, and never
+				// the default — the master-realm admin password and the
+				// minted admin token cross an unverified connection, so
+				// an active intermediary could capture both.
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"WARNING: --insecure-skip-tls-verify disables TLS "+
+						"certificate AND hostname verification for every "+
+						"Keycloak request. The master-realm admin password and "+
+						"the minted admin token will be sent over an unverified "+
+						"connection. Prefer --keycloak-ca-bundle=<realm-ca.pem> "+
+						"to pin the realm CA with verification left on.")
 				httpClientOverride = newInsecureClient()
 				defer func() { httpClientOverride = nil }()
 			}
@@ -238,8 +268,14 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"redirect URI(s) for the MCP browser-flow client (default: loopback localhost + 127.0.0.1, any port/path)")
 	cmd.Flags().StringSliceVar(&mcpWebOrigins, "mcp-web-origin", nil,
 		"CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)")
+	cmd.Flags().StringVar(&keycloakCABundle, "keycloak-ca-bundle", "",
+		"path to a PEM CA bundle to verify the Keycloak server certificate against "+
+			"(keeps chain + hostname verification ON while trusting an internal realm CA). "+
+			"Preferred over --insecure-skip-tls-verify; the two are mutually exclusive")
 	cmd.Flags().BoolVar(&insecureSkipTLS, "insecure-skip-tls-verify", false,
-		"skip TLS verification when calling Keycloak (one-time bootstrap convenience; do not use in CI against untrusted Keycloaks)")
+		"escape hatch: skip TLS certificate AND hostname verification for every "+
+			"Keycloak request (sends the admin password + token over an unverified "+
+			"connection; prints a loud warning). Prefer --keycloak-ca-bundle")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"print what would be provisioned without making any API calls")
 	cmd.Flags().IntVar(&cliOfflineSessionIdle, "cli-offline-access", 0,
@@ -292,6 +328,25 @@ func newInsecureClient() *http.Client {
 	transport.TLSClientConfig = newSkipVerifyTLSConfig()
 	c.Transport = transport
 	return c
+}
+
+// newCABundleClient builds an http.Client that verifies the Keycloak
+// server certificate against the PEM CA bundle at caBundlePath, with
+// certificate-chain and hostname verification left ON. Used by the
+// --keycloak-ca-bundle flag — the verified-TLS alternative to
+// --insecure-skip-tls-verify for a realm fronted by an internal CA.
+// Returns an error when the bundle can't be read or holds no PEM
+// certificates.
+func newCABundleClient(caBundlePath string) (*http.Client, error) {
+	tlsConfig, err := newCABundleTLSConfig(caBundlePath)
+	if err != nil {
+		return nil, err
+	}
+	c := defaultHTTPClient()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	c.Transport = transport
+	return c, nil
 }
 
 // readPassword prompts on stderr and reads one line from in, returning

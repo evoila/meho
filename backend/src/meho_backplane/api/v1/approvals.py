@@ -93,6 +93,7 @@ from meho_backplane.operations.approval_context import (
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    ApprovalRequestExpiredError,
     ParamsMismatchError,
     PreviewBindingMissingError,
     ResultAccessForbiddenError,
@@ -439,6 +440,13 @@ async def _capture_operator_decision(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_request_already_{exc.status}",
         ) from exc
+    except ApprovalRequestExpiredError as exc:
+        # F12 / #274: the pending deadline has passed — refuse the approval
+        # at decision time rather than trusting the background expiry sweep.
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="approval_request_expired",
+        ) from exc
     except PreviewBindingMissingError as exc:
         # #3197: a destructive row with no preview-hash binding cannot be
         # approved (fail-closed re-verification of the mandatory binding).
@@ -662,6 +670,13 @@ async def _record_approval_decision(
         raise HTTPException(
             status_code=http_status.HTTP_409_CONFLICT,
             detail=f"approval_request_already_{exc.status}",
+        ) from exc
+    except ApprovalRequestExpiredError as exc:
+        # F12 / #274: the pending deadline has passed — refuse the approval
+        # at decision time rather than trusting the background expiry sweep.
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="approval_request_expired",
         ) from exc
     except ParamsMismatchError as exc:
         raise HTTPException(

@@ -9,6 +9,32 @@ for each breaking one.
 MEHO is under active development. Each release below links to its full
 notes.
 
+## [v0.34.1](https://github.com/evoila/meho/releases/tag/v0.34.1) — 2026-09-09
+
+A patch release that fixes a v0.34.0 regression and rolls up the governed
+connector and shared-instance work that landed since.
+
+- **Compressed vendor responses decode again.** On v0.34.0, any read against a
+  vendor that gzip- or deflate-compressed its response failed with a decoding
+  error, because the response body-size cap added in v0.34.0 decompressed the
+  body a second time. Every HTTP-based connector — vmware-rest, vcf-fleet,
+  gcloud, and the rest — was affected. This release restores the earlier
+  behaviour so a compressed response decodes exactly once
+  ([#3521](https://github.com/evoila/meho/issues/3521)).
+- **Kubernetes Secret and ArgoCD credential values are redacted on read.** A
+  safe read that surfaces a Kubernetes `Secret` or an ArgoCD repository object
+  now blanks the secret values — keeping the key names and a digest — so payload
+  secrets no longer reach an agent on a shared instance.
+- **More governed VMware and SDDC lifecycle.** Resource-pool create/delete and a
+  DRS VM-Host affinity rule, an NFS tag-based storage policy, vSphere Supervisor
+  enable/disable/status, and SDDC Manager workload-domain build ops — each
+  approval-gated and audited on the governed dispatch path — plus a governed read
+  that stages a guest-cluster kubeconfig to a Vault reference instead of an
+  agent transcript.
+- **Shared-instance isolation controls.** Per-principal and per-tenant dispatch
+  rate limits, a per-tenant mail-recipient allowlist, an opt-in bearer guard on
+  `/metrics` and `/ready`, and a per-tenant bound on targetless network probes.
+
 ## [v0.33.3](https://github.com/evoila/meho/releases/tag/v0.33.3) — 2026-09-05
 
 - **Probe a target's certificate, then pin it — in one step.** `net.tls_inspect`

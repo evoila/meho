@@ -504,7 +504,7 @@ async def net_ntp_check(operator: Operator, target: Any, params: dict[str, Any])
     port = int(params.get("port", _DEFAULT_NTP_PORT))
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     try:
         data, t1, t4, sent = await _query_ntp(host, port, timeout)

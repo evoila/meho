@@ -1,0 +1,332 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Minimal, self-contained OpenAPI 3.0 description of the read-only subset
+# of the vSphere Automation REST API that MEHO ingests for the
+# `vmware/8.0` catalog row (#3569) -- the 8.0 U3 sibling of
+# vmware_rest_minimal.yaml (`vmware/9.0`).
+#
+# WHY THIS FILE EXISTS. After #3565 the 9.0 ingested catalog rejects a
+# fingerprinted 8.0.x target with `unqualified_target_version`, leaving
+# those targets no generic path. #3569 registers a second versioned
+# catalog (`vmware-rest-8.0`, dual-impl per #3038) so 8.0.x targets keep
+# governed generic operations. vSphere 8.0 publishes its spec on the
+# Broadcom Developer Portal (HTML landing page) and on the appliance
+# itself (fqdn-templated URL the backend can't dereference), and the
+# public `vmware/vcf-api-specs` repo is tagged 9.0/9.1 only -- so, exactly
+# like the 9.0 row, catalog-driven ingest (`meho connector ingest
+# --catalog vmware/8.0`) needs a MEHO-authored minimal spec shipped as
+# package data (`spec_resource`). The full vendor 8.0 U3 catalog
+# (vcenter.yaml + vi-json.yaml) stays the provenance pointer in
+# docs/compatibility/vcf-api-contract-manifest.yaml for a full-surface
+# re-ingest off a live 8.0.3 appliance via the explicit-quadruple --spec
+# shape.
+#
+# SCOPE. The vCenter inventory read (GET) operations MEHO surfaces today,
+# identical to the 9.0 minimal subset -- the 8.0 U3 and 9.0 REST surfaces
+# share these inventory read shapes. Paths and params copy the vendor's
+# verbatim names because the dispatcher must address the real appliance
+# with them; the descriptions are vendor-neutral, MEHO-authored prose. The
+# spec declares spec-relative op paths (bare `/vcenter/...`, the `/api` mount
+# living on `servers[0].url`); the typed connector re-mounts them onto the
+# modern /api or legacy /rest base per target (see the `servers` note below),
+# so a legacy-only appliance is addressed correctly.
+#
+# CONSTRAINTS. OpenAPI 3.0 (the parser rejects Swagger 2.0); self-contained
+# with only local `$ref`s (the parser rejects cross-document `$ref`); every
+# operation declares an `operationId`. Validated at boot by
+# `validate_shipped_artifacts` with the same `parse_openapi` the live
+# ingest uses.
+openapi: "3.0.3"
+info:
+  title: vSphere Automation REST API (MEHO minimal read subset, 8.0 U3)
+  version: "8.0.3"
+  description: >-
+    MEHO-authored minimal read-only subset of the vSphere Automation REST
+    API served by a vCenter 8.0 U3 appliance under /api. Covers the
+    inventory read operations MEHO ingests; not a full vendor spec.
+    SPDX-License-Identifier: Apache-2.0.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+# `servers[0].url` carries the absolute `/api` mount, mirroring the vendor
+# `vcenter.yaml` form (#3614) and the 9.0 minimal (kept identical per the
+# reconcile lane's lock-step guard). The ingest parser folds only a
+# *relative* server base into op paths (openapi.py::_server_base_path); an
+# absolute base like this is left to the operator, so each op_id is exactly
+# its bare path key -- `GET:/vcenter/vm`, byte-identical to the vendor catalog
+# and to the spec-relative form the connector expects (_mount.py::mounted_path
+# prefixes `/api` on a modern session or `/rest` on a legacy one, per target).
+# Keying `/api/vcenter/...` here instead (the pre-#3614 shape, with no
+# `servers` block) produced `GET:/api/vcenter/vm` op_ids that diverged from
+# the vendor form and, being already-mounted, bypassed that per-target
+# `/api`<->`/rest` selection. The `/api/about` fingerprint-probe path stays
+# keyed literally: it is the ESXi/host REST surface MEHO probes for
+# fingerprinting (the vCenter Automation `vcenter.yaml`'s only about is
+# `/vcenter/phm/about`), addressed directly by the connector, not a re-mounted
+# ingested op.
+servers:
+  - url: https://{host}/api
+    variables:
+      host:
+        default: vcenter.example.com
+        description: The vCenter appliance host.
+paths:
+  /api/about:
+    get:
+      operationId: getSystemAbout
+      summary: Get vCenter system information
+      description: >-
+        Return the appliance's identifying information: product line, full
+        product name, version and build. MEHO reads this endpoint to
+        fingerprint the target.
+      responses:
+        "200":
+          description: System information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/About"
+  /vcenter/datacenter:
+    get:
+      operationId: listDatacenters
+      summary: List datacenters
+      description: List the datacenters in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of datacenter summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DatacenterSummary"
+  /vcenter/cluster:
+    get:
+      operationId: listClusters
+      summary: List clusters
+      description: List the compute clusters in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of cluster summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ClusterSummary"
+  /vcenter/host:
+    get:
+      operationId: listHosts
+      summary: List ESXi hosts
+      description: List the ESXi hosts in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of host summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HostSummary"
+  /vcenter/datastore:
+    get:
+      operationId: listDatastores
+      summary: List datastores
+      description: List the datastores in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of datastore summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DatastoreSummary"
+  /vcenter/network:
+    get:
+      operationId: listNetworks
+      summary: List networks
+      description: List the networks in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of network summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NetworkSummary"
+  /vcenter/folder:
+    get:
+      operationId: listFolders
+      summary: List folders
+      description: List the inventory folders in vCenter.
+      responses:
+        "200":
+          description: A list of folder summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FolderSummary"
+  /vcenter/vm:
+    get:
+      operationId: listVms
+      summary: List virtual machines
+      description: List the virtual machines in the vCenter inventory.
+      responses:
+        "200":
+          description: A list of virtual-machine summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VmSummary"
+  /vcenter/vm/{vm}:
+    get:
+      operationId: getVm
+      summary: Get a virtual machine by id
+      description: >-
+        Return the full configuration and runtime detail for a single
+        virtual machine by its identifier.
+      parameters:
+        - name: vm
+          in: path
+          required: true
+          description: The virtual-machine identifier.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested virtual machine.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VmInfo"
+components:
+  schemas:
+    About:
+      type: object
+      description: vCenter appliance identifying information.
+      properties:
+        product_line_id:
+          type: string
+        full_name:
+          type: string
+        version:
+          type: string
+        build:
+          type: string
+    DatacenterSummary:
+      type: object
+      description: A datacenter inventory summary.
+      properties:
+        datacenter:
+          type: string
+        name:
+          type: string
+    ClusterSummary:
+      type: object
+      description: A compute-cluster inventory summary.
+      properties:
+        cluster:
+          type: string
+        name:
+          type: string
+        drs_enabled:
+          type: boolean
+        ha_enabled:
+          type: boolean
+    HostSummary:
+      type: object
+      description: An ESXi host inventory summary.
+      properties:
+        host:
+          type: string
+        name:
+          type: string
+        connection_state:
+          type: string
+        power_state:
+          type: string
+    DatastoreSummary:
+      type: object
+      description: A datastore inventory summary.
+      properties:
+        datastore:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        free_space:
+          type: integer
+          format: int64
+        capacity:
+          type: integer
+          format: int64
+    NetworkSummary:
+      type: object
+      description: A network inventory summary.
+      properties:
+        network:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+    FolderSummary:
+      type: object
+      description: An inventory-folder summary.
+      properties:
+        folder:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+    VmSummary:
+      type: object
+      description: A virtual-machine inventory summary.
+      properties:
+        vm:
+          type: string
+        name:
+          type: string
+        power_state:
+          type: string
+        cpu_count:
+          type: integer
+        memory_size_MiB:
+          type: integer
+    VmInfo:
+      type: object
+      description: Full virtual-machine configuration and runtime detail.
+      properties:
+        name:
+          type: string
+        power_state:
+          type: string
+        guest_OS:
+          type: string
+        cpu:
+          $ref: "#/components/schemas/VmCpu"
+        memory:
+          $ref: "#/components/schemas/VmMemory"
+    VmCpu:
+      type: object
+      description: Virtual-machine CPU configuration.
+      properties:
+        count:
+          type: integer
+        cores_per_socket:
+          type: integer
+    VmMemory:
+      type: object
+      description: Virtual-machine memory configuration.
+      properties:
+        size_MiB:
+          type: integer

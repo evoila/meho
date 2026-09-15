@@ -116,7 +116,9 @@ async def _declare_meta_tool_family(addon: str = _AUTOMATION_FAMILY) -> None:
             CapabilityDeclaration(kind=CapabilityKind.META_TOOL_FAMILY, name=_AUTOMATION_FAMILY),
         ],
     )
-    await AddonCapabilityService().declare(OPERATOR_TENANT_ID, addon, request)
+    await AddonCapabilityService().declare(
+        OPERATOR_TENANT_ID, addon, request, service_account_sub="svc-account-uuid"
+    )
 
 
 async def _drive_contract_incompatible(name: str = _AUTOMATION_FAMILY) -> None:

@@ -170,6 +170,10 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "k8s.job.create",
     # G3.14-T2 exec op (websocket pod-exec, approval-gated).
     "k8s.exec",
+    # #3496 governed guest-cluster kubeconfig read (credential_read,
+    # approval-gated): reads a Secret's data value and stages it to a
+    # tenant-scoped Vault secret_ref.
+    "k8s.secret.read_to_ref",
 )
 
 
@@ -198,6 +202,10 @@ class _K3sTarget:
 
     def __post_init__(self) -> None:
         self.id: UUID = uuid4()
+        # Tenant-unique cache key component (#1642, security F04). Aligns
+        # with the seeded Target ORM row's tenant so the connector's
+        # client cache and the resolver agree on the target identity.
+        self.tenant_id: UUID = _OPERATOR_TENANT_ID
         self.preferred_impl_id: str | None = None
 
         class _FP:

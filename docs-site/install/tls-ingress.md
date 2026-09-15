@@ -60,6 +60,34 @@ internal CA adds — trusting it on each operator workstation — and the
 per-client trust picture are in
 [Connect clients](../clients/index.md).
 
+## Reverse-proxy trust (`forwardedAllowIps`)
+
+The backplane sits behind your ingress controller, so it reads the real
+client address from the `X-Forwarded-*` headers the proxy sets — but it
+must only *trust* those headers from the proxy itself. That trust list
+is `config.forwardedAllowIps`, and the **baseline is to narrow it to the
+reverse proxy / ingress controller's own source address**, never the
+whole pod CIDR:
+
+```yaml
+config:
+  # Trust forwarded headers ONLY from the ingress controller's address.
+  # Recover it from the controller's Service/Endpoints rather than
+  # trusting the whole pod network:
+  #   kubectl get endpoints <ingress-controller> -n <ns> \
+  #     -o jsonpath='{.subsets[].addresses[].ip}'
+  forwardedAllowIps: "10.0.4.11/32"   # the controller's address, not 10.0.0.0/16
+```
+
+uvicorn's default (`127.0.0.1`) fails closed in-cluster — the controller
+pod is never loopback — so a value has to be set. The wrong fix is to
+open it to the entire pod network: any workload that can reach the
+backplane could then forge the client address the audit log and any
+address-based policy record. Scope it to the controller's address (a
+`/32`, or the tightest slice you have subnetted the controller onto).
+The per-cluster recommended values and the diagnostic walk are in
+[`docs/cross-repo/reverse-proxy-contract.md`](https://github.com/evoila/meho/blob/main/docs/cross-repo/reverse-proxy-contract.md).
+
 ## Your workstation: OS trust store
 
 Skip this section if the backplane and Keycloak present
@@ -195,6 +223,39 @@ The API and `targets.yaml` recipes for pinning and the opt-out live
 with the targets documentation in the
 [values-examples deep-dive](https://github.com/evoila/meho/blob/main/deploy/values-examples/README.md#connector-dispatch-against-self-signed--internal-ca-targets),
 and will be promoted into the *Do real work* section's target guide.
+
+## Outbound peer authentication for credential-bearing connections
+
+TLS on the ingress protects traffic *into* the backplane. The same
+discipline applies to every credential-bearing connection the backplane
+makes *outward* — and the **baseline is that none of these paths ships a
+verification-disabled default**. Each fails closed and authenticates its
+peer before a secret is offered:
+
+- **SSH host-key verification.** The SSH connector verifies the target's
+  host key fail-closed. A target whose resolved secret carries no
+  `known_hosts` entry is refused before the connection opens — so a
+  password can never be disclosed to an impostor host by default. Provision
+  the target's host key as an OpenSSH `known_hosts`-format line on the
+  target's secret (`<host-pattern> <keytype> <base64>`); an unexpected key
+  then aborts key exchange before authentication. A per-target
+  `known_hosts_insecure` escape hatch restores the old no-verification
+  behaviour for one target, logging a loud warning on every connect — opt-in,
+  per-target, never the default, and mirroring the `verify_tls: false`
+  target posture above.
+- **SMTP TLS verification.** The mail transport builds a validating TLS
+  context (`CERT_REQUIRED` with hostname checking on) for both the
+  implicit-TLS (port 465) and STARTTLS paths, so mail contents and SMTP
+  credentials are not exposed to an active intermediary. Point it at your
+  internal CA the same way the backplane's other outbound TLS is trusted
+  (the CA-bundle section above).
+- **Bootstrap CA trust.** Identity-bootstrap scripts that post an admin
+  credential must verify the endpoint's certificate against a real CA
+  bundle rather than running `curl -k` — provision the CA, and prefer a
+  bounded provisioning identity over a master-admin credential.
+
+Fail closed on the wrong name, an untrusted chain, or an unexpected SSH
+key; treat the per-target opt-outs as audited, temporary exceptions.
 
 ## Back to the trail
 

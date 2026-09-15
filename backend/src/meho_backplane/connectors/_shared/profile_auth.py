@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — the one registry of vetted per-scheme auth
+# extractors (the closed named-auth catalog's runtime half); already over the
+# line-count limit on origin/main. Each scheme's mechanics belong together in
+# this single reviewed module — there is no responsibility boundary to split
+# on. Pre-existing; this change only extends oauth2_mint for an external
+# issuer (#3571).
+
 """Named auth-scheme extractors for ``ProfiledRestConnector`` (#1970).
 
 G0.28-T4 — the runtime half of the named-auth catalog T3 (#1969) defined as
@@ -54,7 +61,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from meho_backplane.connectors.profile import AuthSpec
+# ``_validate_token_url`` is the vetted SSRF fail-closed validator #3571 uses
+# for the profile ``token_url`` field; a per-target credential-sourced
+# ``token_url`` (below) must clear the *same* rule, so it is reused verbatim
+# rather than duplicated.
+from meho_backplane.connectors.profile import AuthSpec, _validate_token_url
 
 __all__ = [
     "SESSION_SCHEME_SPECS",
@@ -297,6 +308,20 @@ class SessionSchemeSpec:
         winning path so op-path mount + teardown follow it. Only
         ``session_login_basic`` declares one (vCenter's
         ``/api/session`` → ``/rest/com/vmware/cis/session``).
+    login_path_with_secret
+        An optional login-path builder that additionally sees the resolved
+        secret bundle. ``None`` for every scheme whose login endpoint is
+        fixed by the profile alone (the common case). When set, the harness
+        calls it **instead of** :attr:`login_path` and passes the resolved
+        credential bundle, so a scheme whose token issuer is a *per-target*
+        value carried in the credential (not a reviewable profile constant)
+        can source the endpoint from there. Only ``oauth2_mint`` declares
+        one, to let a target's external-issuer ``token_url`` live in the
+        Vault credential rather than in a shipped profile — see
+        :func:`_oauth2_login_path_from_secret`. Kept as an additive optional
+        field so :attr:`login_path`'s ``(AuthSpec) -> str`` signature (which
+        the typed session connectors call at import to derive a constant
+        session-create path) is untouched.
     """
 
     login_path: Callable[[AuthSpec], str]
@@ -309,6 +334,7 @@ class SessionSchemeSpec:
     token_header: str
     token_value_kind: str
     legacy_fallback: LegacyFallback | None = None
+    login_path_with_secret: Callable[[AuthSpec, Mapping[str, str]], str] | None = None
 
 
 def _no_login_auth(_auth: AuthSpec, _secret: Mapping[str, str]) -> tuple[str, str] | None:
@@ -514,10 +540,15 @@ def _extract_access_token(payload: Any) -> SessionToken | None:
 
 # -- oauth2_mint (keycloak: form client-credentials grant -> Bearer) --------
 
-#: Keycloak's token endpoint path. The admin-realm segment in the typed
+#: Keycloak's target-relative token endpoint path — the default when the
+#: profile declares no ``token_url``. The admin-realm segment in the typed
 #: connector is a realm-routing concern T6 owns; the named scheme uses the
 #: conventional ``master`` admin realm so a profiled keycloak mints against
-#: the same endpoint shape the typed connector does.
+#: the same endpoint shape the typed connector does. When the profile sets an
+#: absolute ``auth.token_url`` (an issuer whose host differs from the target),
+#: :func:`_oauth2_token_endpoint` returns that instead and the login POST is
+#: dialed at the external issuer (#3571) — the pooled client resolves an
+#: absolute URL as-is, so ``base_url`` (the target) is bypassed for the mint.
 _OAUTH2_TOKEN_PATH = "/realms/master/protocol/openid-connect/token"
 
 #: Refresh margin shaved off ``expires_in`` so a near-expiry token is
@@ -531,19 +562,75 @@ _OAUTH2_REFRESH_MARGIN_SECONDS = 30.0
 _OAUTH2_DEFAULT_TTL_SECONDS = 60.0
 
 
+def _oauth2_token_endpoint(auth: AuthSpec) -> str:
+    """Return the token endpoint the ``oauth2_mint`` login POSTs to.
+
+    The profile's absolute ``auth.token_url`` when set (an issuer whose host
+    differs from the target; #3571), else the target-relative
+    :data:`_OAUTH2_TOKEN_PATH` default — byte-identical to today's keycloak
+    parity. The pooled ``httpx.AsyncClient`` resolves an absolute URL as-is
+    (its target ``base_url`` applies only to a relative path), so the same
+    ``client.post(...)`` seam dials either endpoint with no harness change.
+    """
+    return auth.token_url or _OAUTH2_TOKEN_PATH
+
+
+def _oauth2_login_path_from_secret(auth: AuthSpec, secret: Mapping[str, str]) -> str:
+    """Resolve the ``oauth2_mint`` token endpoint, honouring a credential override.
+
+    Precedence:
+
+    1. A ``token_url`` **credential field** (present in the resolved secret
+       bundle because the profile named it in ``auth.secret_fields``). This is
+       for a connector whose external issuer is a *per-deployment* value — the
+       token endpoint is not a reviewable constant that belongs in a shipped
+       profile (each deployment mints against its own realm), so it is stored
+       with the target's Vault credential instead. Validated fail-closed with
+       the *same* :func:`_validate_token_url` rule the profile field clears
+       (absolute ``http(s)`` with a host; ``https`` for a public host,
+       plaintext ``http`` only for a cluster-internal / private issuer), so a
+       fat-fingered credential can never ship the client secret to a public
+       host over cleartext.
+    2. The profile's static ``auth.token_url`` (#3571), when set.
+    3. The target-relative :data:`_OAUTH2_TOKEN_PATH` default — byte-identical
+       to today's keycloak parity.
+
+    A bundle that does **not** carry a ``token_url`` field (keycloak, which
+    declares only ``client_id`` / ``client_secret``) resolves via step 2/3
+    exactly as before, so this override is invisible to every existing
+    ``oauth2_mint`` user. Presence is tested with ``is not None`` (not
+    truthiness) so a declared-but-blank credential value fails closed at
+    :func:`_validate_token_url` rather than silently falling through to the
+    target-relative default.
+    """
+    cred_token_url = secret.get("token_url")
+    if cred_token_url is not None:
+        return _validate_token_url(cred_token_url)
+    return _oauth2_token_endpoint(auth)
+
+
 def _oauth2_mint_body(auth: AuthSpec, secret: Mapping[str, str]) -> dict[str, str]:
     """Build the OAuth2 client-credentials grant form body.
 
     ``grant_type=client_credentials`` with ``client_id`` / ``client_secret``
     from the secret bundle the profile declared. Form-encoded by the
     ``oauth2_mint`` spec's ``encoding="form"`` — Keycloak's token endpoint
-    does not accept JSON.
+    does not accept JSON. When the profile declares ``auth.scope`` /
+    ``auth.audience`` (only meaningful for an external issuer that requires
+    them), they are forwarded verbatim as the ``scope`` / ``audience`` form
+    parameters; both default to absent, so the keycloak-parity body is
+    byte-identical to today (#3571).
     """
-    return {
+    body = {
         "grant_type": "client_credentials",
         "client_id": _require_field(secret, "client_id", scheme="oauth2_mint"),
         "client_secret": _require_field(secret, "client_secret", scheme="oauth2_mint"),
     }
+    if auth.scope is not None:
+        body["scope"] = auth.scope
+    if auth.audience is not None:
+        body["audience"] = auth.audience
+    return body
 
 
 def _extract_oauth2_token(payload: Any) -> SessionToken | None:
@@ -607,7 +694,8 @@ SESSION_SCHEME_SPECS: dict[str, SessionSchemeSpec] = {
         token_value_kind="bearer",
     ),
     "oauth2_mint": SessionSchemeSpec(
-        login_path=lambda _auth: _OAUTH2_TOKEN_PATH,
+        login_path=_oauth2_token_endpoint,
+        login_path_with_secret=_oauth2_login_path_from_secret,
         login_credentials="body",
         encoding="form",
         build_body=_oauth2_mint_body,

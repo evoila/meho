@@ -30,6 +30,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -909,6 +910,264 @@ async def test_oauth2_mint_caches_within_ttl() -> None:
         await connector.auth_headers(target, operator=_operator())
 
     assert route.call_count == 1
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# oauth2_mint external token issuer (#3571) — issuer host != target host
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_ISSUER_URL = "https://idp.example.test/realms/example/protocol/openid-connect/token"
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_mints_and_forwards_scope_audience() -> None:
+    """An external ``token_url`` is dialed for the mint; scope+audience forwarded.
+
+    The issuer host (idp.example.test) differs from the target host
+    (addon.invalid). The mint POSTs to the absolute ``token_url``, and the
+    resulting Bearer is what ``auth_headers`` returns for the target call.
+    ``scope`` / ``audience`` ride the form body as extra grant params.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+        scope="svc",
+        audience="downstream-api",
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-ext", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-ext"}
+    request = route.calls[0].request
+    # Minted at the external issuer, not target-relative.
+    assert str(request.url) == _EXTERNAL_ISSUER_URL
+    assert request.url.host == "idp.example.test"
+    body = request.read().decode()
+    assert "grant_type=client_credentials" in body
+    assert "client_id=cid" in body
+    assert "scope=svc" in body
+    assert "audience=downstream-api" in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_omits_scope_audience_when_unset() -> None:
+    """token_url without scope/audience mints without those form params."""
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-ext", "expires_in": 300}
+        )
+        await connector.auth_headers(target, operator=_operator())
+
+    body = route.calls[0].request.read().decode()
+    assert "scope=" not in body
+    assert "audience=" not in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_remints_after_invalidation() -> None:
+    """A 401-driven session invalidation forces a fresh mint at the issuer.
+
+    Mirrors the dispatcher's re-login-once recovery (the seam #2067 calls on
+    an auth-class status): after ``invalidate_session`` drops the cached
+    token, the next ``auth_headers`` re-mints against the external issuer
+    rather than serving the evicted token.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": "csec"}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    async with respx.mock() as mock:
+        route = mock.post(_EXTERNAL_ISSUER_URL)
+        route.side_effect = [
+            httpx.Response(200, json={"access_token": "tok-1", "expires_in": 3600}),
+            httpx.Response(200, json={"access_token": "tok-2", "expires_in": 3600}),
+        ]
+        h1 = await connector.auth_headers(target, operator=_operator())
+        await connector.invalidate_session(target)
+        h2 = await connector.auth_headers(target, operator=_operator())
+
+    assert h1 == {"Authorization": "Bearer tok-1"}
+    assert h2 == {"Authorization": "Bearer tok-2"}
+    assert route.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_external_issuer_does_not_log_secret_or_token() -> None:
+    """The client secret and minted access token appear in no log line.
+
+    The login POST bypasses the recorded ``_post_json`` flight-recorder span
+    (it goes through the pooled client directly), so no vendor-call span
+    carries the grant body or the token. The only emitted event
+    (``profiled_session_established``) carries the login path, never the
+    secret or the token. This pins that redaction over the external-issuer
+    path too.
+    """
+    secret_value = "csec-" + "z" * 40
+    token_value = "tok-" + "y" * 40
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret"),
+        token_url=_EXTERNAL_ISSUER_URL,
+    )
+    connector = _connector(
+        "oauth2_mint", {"client_id": "cid", "client_secret": secret_value}, profile=profile
+    )
+    target = _StubTarget(name="addon", host="addon.invalid")
+
+    with capture_logs() as logs:
+        async with respx.mock() as mock:
+            mock.post(_EXTERNAL_ISSUER_URL).respond(
+                200, json={"access_token": token_value, "expires_in": 300}
+            )
+            headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": f"Bearer {token_value}"}
+    rendered = repr(logs)
+    assert secret_value not in rendered
+    assert token_value not in rendered
+    # The session-established event fired and names the login path (not a secret).
+    established = [e for e in logs if e.get("event") == "profiled_session_established"]
+    assert established and established[0].get("login_path") == _EXTERNAL_ISSUER_URL
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# oauth2_mint external issuer — token_url sourced from the per-target credential
+# (the meho-automation add-on shape: the realm endpoint is a per-deployment
+# value carried in Vault, never a constant in the shipped profile)
+# ---------------------------------------------------------------------------
+
+_CRED_ISSUER_URL = "https://realm.example.test/realms/example/protocol/openid-connect/token"
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_is_dialed_for_the_mint() -> None:
+    """A ``token_url`` credential field (no profile ``token_url``) drives the mint.
+
+    The profile declares ``token_url`` in ``secret_fields`` and sets no
+    ``auth.token_url``; the resolved secret bundle carries the endpoint. The
+    mint POSTs to that credential-sourced absolute URL and the resulting Bearer
+    is returned for the target call.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+        audience="meho-automation",
+    )
+    assert profile.auth.token_url is None  # never in the profile
+    connector = _connector(
+        "oauth2_mint",
+        {"client_id": "cid", "client_secret": "csec", "token_url": _CRED_ISSUER_URL},
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    async with respx.mock() as mock:
+        route = mock.post(_CRED_ISSUER_URL).respond(
+            200, json={"access_token": "tok-cred", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-cred"}
+    request = route.calls[0].request
+    assert str(request.url) == _CRED_ISSUER_URL
+    body = request.read().decode()
+    assert "grant_type=client_credentials" in body
+    assert "client_id=cid" in body
+    assert "audience=meho-automation" in body
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_overrides_profile_token_url() -> None:
+    """A credential ``token_url`` takes precedence over a profile ``token_url``."""
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+        token_url=_EXTERNAL_ISSUER_URL,  # profile default...
+    )
+    connector = _connector(
+        "oauth2_mint",
+        # ...overridden per-target by the credential value.
+        {"client_id": "cid", "client_secret": "csec", "token_url": _CRED_ISSUER_URL},
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    # assert_all_called=False: the profile route is deliberately never dialed
+    # (the credential value wins), which is exactly what this test asserts.
+    async with respx.mock(assert_all_called=False) as mock:
+        cred_route = mock.post(_CRED_ISSUER_URL).respond(
+            200, json={"access_token": "tok-cred", "expires_in": 300}
+        )
+        profile_route = mock.post(_EXTERNAL_ISSUER_URL).respond(
+            200, json={"access_token": "tok-profile", "expires_in": 300}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer tok-cred"}
+    assert cred_route.called
+    assert not profile_route.called
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_oauth2_mint_credential_token_url_fails_closed_on_public_http() -> None:
+    """A plaintext-http credential ``token_url`` to a public host fails closed.
+
+    The credential-sourced endpoint clears the SAME fail-closed rule the
+    profile field does (``_validate_token_url``): a public host must use
+    ``https``, so a misconfigured Vault value never ships the client secret to
+    a public host over cleartext. No mint request is made.
+    """
+    profile = _profile(
+        "oauth2_mint",
+        secret_fields=("client_id", "client_secret", "token_url"),
+    )
+    connector = _connector(
+        "oauth2_mint",
+        {
+            "client_id": "cid",
+            "client_secret": "csec",
+            "token_url": "http://attacker.example.com/token",
+        },
+        profile=profile,
+    )
+    target = _StubTarget(name="addon", host="meho-automation")
+
+    # No respx mock: the fail-closed validation raises before any HTTP is
+    # attempted, so no mint request is ever made.
+    with pytest.raises(ValueError, match="https for a public host"):
+        await connector.auth_headers(target, operator=_operator())
     await connector.aclose()
 
 

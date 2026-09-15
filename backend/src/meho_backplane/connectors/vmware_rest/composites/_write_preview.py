@@ -15,13 +15,17 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires 26 of the 29 write composites onto the per-op preview hook
+This wires 29 of the 32 write composites onto the per-op preview hook
 shipped by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
-helpers, never the mutating sub-ops. (The three most recent write ops —
+helpers, never the mutating sub-ops. (Three write ops —
 ``network.portgroup.create`` / ``network.portgroup.security.set`` /
 ``vm.import_from_library`` — carry no bespoke builder yet and fall back to
-the identifier-only default.)
+the identifier-only default.) The #3505 governed-allocation writes add three
+builders: ``resource_pool.create`` (param echo: name + parent / cluster +
+allocations), ``resource_pool.delete`` (live-read: child pool + VM counts the
+delete reparents), and ``cluster.drs_vm_host_rule.create`` (live-read: the
+resolved VM + host group sets).
 
 ========================  ====================================================
 ``vmware.composite.*``    preview stored in ``proposed_effect["preview"]``
@@ -95,7 +99,7 @@ Two preview depths, chosen per composite
   NIC backing / CD-ROM backing via the same shared helpers the handlers
   use (:func:`._write._read_vm_info` / :func:`._write._read_ethernet_nic`
   / :func:`._write._read_cdrom` /
-  :func:`._write._resolve_distributed_portgroup`) and pairs it with the
+  :func:`._write._resolve_repoint_target`) and pairs it with the
   requested change. Declines (``None`` -> identifier-only default) when no
   connector resolved or the VM read returns no dict, and fails-soft on a
   resolution fault exactly like the fan-out builders.
@@ -156,16 +160,25 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import httpx
+
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    _OP_STORAGE_POLICIES_LIST,
+)
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
+    _NIC_BACKING_DISTRIBUTED_PORTGROUP,
+    _list_child_resource_pool_ids,
     _read_cdrom,
     _read_ethernet_nic,
+    _read_sub_op,
     _read_vm_info,
     _read_vm_snapshots_best_effort,
     _resolve_cluster_hosts,
     _resolve_cluster_name,
     _resolve_disk_info,
-    _resolve_distributed_portgroup,
+    _resolve_named_hosts_in_cluster,
+    _resolve_repoint_target,
     _resolve_vm_list,
     _resolve_vm_name,
 )
@@ -690,6 +703,132 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {"parent_folder": parent_folder, "new_folder_name": folder_name}
 
 
+async def _resource_pool_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``resource_pool.create`` — echo the pool name + parent selector (no I/O).
+
+    Param echo (the ``folder.create`` precedent): the params fully name the
+    blast radius — one new pool under one parent (an explicit ``parent`` moid
+    or the root pool of a ``cluster``), plus any cpu / memory allocation. The
+    cluster→root-pool resolution and the POST write stay the handler's job.
+    """
+    name = ctx.params.get("name")
+    if not isinstance(name, str):
+        return None
+    effect: dict[str, Any] = {
+        "name": name,
+        "parent": ctx.params.get("parent"),
+        "cluster": ctx.params.get("cluster"),
+    }
+    for key in ("cpu_allocation", "memory_allocation"):
+        alloc = ctx.params.get(key)
+        if isinstance(alloc, dict):
+            effect[key] = alloc
+    return effect
+
+
+async def _resource_pool_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``resource_pool.delete`` — count the children the delete reparents.
+
+    The blast radius the approver signs off is which pool and how many child
+    pools + VMs get reparented up to the parent. Best-effort resolves the two
+    child counts (child pools via :func:`._write._list_child_resource_pool_ids`,
+    child VMs via :func:`._write._resolve_vm_list`); a resolution fault leaves
+    the count ``None`` rather than sinking the preview. The DELETE never fires
+    here. Declines without a resolved connector or a missing moid.
+    """
+    resource_pool = ctx.params.get("resource_pool")
+    if not isinstance(resource_pool, str) or ctx.connector_instance is None:
+        return None
+    try:
+        child_pool_ids = await _list_child_resource_pool_ids(
+            ctx.connector_instance,  # type: ignore[arg-type]
+            ctx.target,
+            ctx.operator,
+            parent_moid=resource_pool,
+        )
+        child_pool_count: int | None = len(child_pool_ids)
+    except httpx.HTTPError:
+        child_pool_count = None
+    try:
+        child_vms = await _resolve_vm_list(
+            connector=ctx.connector_instance,  # type: ignore[arg-type]
+            target=ctx.target,
+            operator=ctx.operator,
+            filter_dict={"resource_pools": [resource_pool]},
+        )
+        child_vm_count: int | None = len(child_vms)
+    except httpx.HTTPError:
+        child_vm_count = None
+    return {
+        "resource_pool": resource_pool,
+        "force": bool(ctx.params.get("force", False)),
+        "child_pool_count": child_pool_count,
+        "child_vm_count": child_vm_count,
+    }
+
+
+async def _cluster_drs_vm_host_rule_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``cluster.drs_vm_host_rule.create`` — resolve the VM + host groups.
+
+    The fan-out blast-radius pattern (like ``cluster.drs_rule.create``):
+    resolves the VM group's VM names and the host group's host names to the
+    same MoRef sets the approved write references — both scoped to the cluster
+    — capped at :data:`_PREVIEW_RESOLVED_CAP` with the uncapped ``total_*``
+    counts, plus the best-effort cluster display name. The reconfigure write
+    never fires here. Declines without a resolved connector or on malformed
+    params.
+    """
+    cluster = ctx.params.get("cluster")
+    rule_name = ctx.params.get("rule_name")
+    vm_group_name = ctx.params.get("vm_group_name")
+    host_group_name = ctx.params.get("host_group_name")
+    if (
+        not isinstance(cluster, str)
+        or not isinstance(rule_name, str)
+        or not isinstance(vm_group_name, str)
+        or not isinstance(host_group_name, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    vm_names = [n for n in (ctx.params.get("vms") or []) if isinstance(n, str)]
+    host_names = [n for n in (ctx.params.get("hosts") or []) if isinstance(n, str)]
+    vm_rows = await _resolve_vm_list(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        filter_dict={"names": vm_names, "clusters": [cluster]},
+    )
+    host_rows = await _resolve_named_hosts_in_cluster(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        cluster_moid=cluster,
+        host_names=host_names,
+    )
+    cluster_name = await _resolve_cluster_name(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        cluster=cluster,
+    )
+    vm_resolution = _capped_resolution(vm_rows, _vm_identity)
+    host_resolution = _capped_resolution(host_rows, _host_identity)
+    return {
+        "cluster": cluster,
+        "cluster_name": cluster_name,
+        "rule_name": rule_name,
+        "vm_group_name": vm_group_name,
+        "host_group_name": host_group_name,
+        "affine": bool(ctx.params.get("affine", True)),
+        "mandatory": bool(ctx.params.get("mandatory", False)),
+        "enabled": bool(ctx.params.get("enabled", True)),
+        "resolved_vms": vm_resolution["resolved"],
+        "total_vms": vm_resolution["total_resolved"],
+        "resolved_hosts": host_resolution["resolved"],
+        "total_hosts": host_resolution["total_resolved"],
+    }
+
+
 async def _vm_resize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vm.resize`` — live-read the current sizing, echo the requested.
 
@@ -736,11 +875,12 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 
     The from->to network pair is what the four-eyes reviewer needs: the
     NIC's current backing (which network it is on now) and the target
-    portgroup (name + resolved moid). Reads the NIC via
-    :func:`._write._read_ethernet_nic` and resolves the portgroup via
-    :func:`._write._resolve_distributed_portgroup` (the same helper the
-    approved dispatch binds); the VM ``name`` comes from
-    :func:`._write._read_vm_info`. No NIC PATCH fires here.
+    portgroup (``backing_type`` + resolved moid + name). Reads the NIC via
+    :func:`._write._read_ethernet_nic` and resolves the target via
+    :func:`._write._resolve_repoint_target` (the same helper the approved
+    dispatch binds, so distributed and standard portgroups preview
+    identically); the VM ``name`` comes from :func:`._write._read_vm_info`.
+    No NIC PATCH fires here.
     """
     vm = ctx.params.get("vm")
     nic = ctx.params.get("nic")
@@ -752,6 +892,9 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         or ctx.connector_instance is None
     ):
         return None
+    backing_type = ctx.params.get("backing_type", _NIC_BACKING_DISTRIBUTED_PORTGROUP)
+    network_param = ctx.params.get("network")
+    explicit_network = network_param if isinstance(network_param, str) and network_param else None
     info = await _read_vm_info(
         connector=ctx.connector_instance,  # type: ignore[arg-type]
         target=ctx.target,
@@ -765,11 +908,13 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         vm_moid=vm,
         nic_id=nic,
     )
-    network_moid, _resolution, _candidates = await _resolve_distributed_portgroup(
+    network_moid, _resolution, _candidates, resolved_name = await _resolve_repoint_target(
         connector=ctx.connector_instance,  # type: ignore[arg-type]
         target=ctx.target,
         operator=ctx.operator,
         portgroup_name=portgroup_name,
+        backing_type=backing_type,
+        explicit_network=explicit_network,
     )
     return {
         "vm": vm,
@@ -777,7 +922,11 @@ async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
         "nic": nic,
         "mac_address": nic_info.get("mac_address") if nic_info else None,
         "current_backing": nic_info.get("backing") if nic_info else None,
-        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+        "requested_backing": {
+            "portgroup_id": network_moid,
+            "portgroup_name": resolved_name,
+            "backing_type": backing_type,
+        },
     }
 
 
@@ -1131,9 +1280,167 @@ async def _vm_destroy_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 26 write composites. Module-level so the
+async def _supervisor_enable_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``supervisor.enable`` — echo the cluster + network stack (no I/O).
+
+    Enabling a Supervisor stands up an entire Kubernetes control plane on a
+    cluster; the reviewer must see *which* cluster and *which* network stack
+    (the VDS + Foundation LB vs NSX VPC decision) they are approving. Echoes
+    the cluster moid, Supervisor name, control-plane sizing (size + count),
+    and the workload ``network_type`` + edge ``provider`` -- all from params,
+    no resolution read. Declines (``None``) on malformed params (the handler
+    does the full spec validation + loud provider refusal).
+    """
+    cluster = ctx.params.get("cluster")
+    name = ctx.params.get("name")
+    control_plane = ctx.params.get("control_plane")
+    workloads = ctx.params.get("workloads")
+    if not isinstance(cluster, str) or not isinstance(name, str):
+        return None
+    if not isinstance(control_plane, dict) or not isinstance(workloads, dict):
+        return None
+    network = workloads.get("network")
+    edge = workloads.get("edge")
+    return {
+        "cluster": cluster,
+        "name": name,
+        "size": control_plane.get("size"),
+        "count": control_plane.get("count"),
+        "network_type": network.get("network_type") if isinstance(network, dict) else None,
+        "edge_provider": edge.get("provider") if isinstance(edge, dict) else None,
+    }
+
+
+async def _supervisor_disable_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``supervisor.disable`` — echo the cluster being torn down (no I/O).
+
+    Teardown removes the Supervisor's control-plane VMs + worker nodes; the
+    reviewer must see which cluster. The ``irreversibility`` marker flags
+    that the Kubernetes instance is destroyed (the cluster networking / zone
+    survive for a fresh re-enable). Declines (``None``) on a malformed param.
+    """
+    cluster = ctx.params.get("cluster")
+    if not isinstance(cluster, str):
+        return None
+    return {"cluster": cluster, "irreversibility": "kubernetes-instance-destroyed"}
+
+
+async def _storage_policy_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``storage_policy.create`` — echo what the caution-tier write builds.
+
+    Not destructive, so no mandatory blast_radius: a plain ``preview`` block
+    naming the policy / category / tag / datastores the approver is authorising
+    to be created. Params here are non-secret, so the echo is safe.
+    """
+    params = ctx.params
+    return {
+        "preview": {
+            "action": "create_tag_storage_policy",
+            "policy_name": params.get("policy_name"),
+            "category_name": params.get("category_name"),
+            "tag_name": params.get("tag_name"),
+            "datastore_names": params.get("datastore_names"),
+        }
+    }
+
+
+async def _storage_policy_delete_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``storage_policy.delete`` — the mandatory destructive blast radius (#3494).
+
+    Populates the ``blast_radius`` block the destructive-tier park gate requires
+    (:func:`~meho_backplane.operations._preview.blast_radius_missing_reason`):
+    the policy identity (name best-effort read from
+    ``GET /vcenter/storage/policies``), an empty ``children`` list (deleting the
+    policy removes no child objects — the tag / category are left in place), and
+    the ``permanent`` irreversibility class. Declines (``None``) only when no
+    ``policy_id`` was supplied; the name read degrades to the params echo /
+    ``None`` on a transport fault so the block is always well-formed.
+    """
+    policy_id = ctx.params.get("policy_id")
+    if not isinstance(policy_id, str) or not policy_id:
+        return None
+    name = ctx.params.get("policy_name")
+    if not name and ctx.connector_instance is not None:
+        try:
+            rows = await _read_sub_op(
+                ctx.connector_instance,  # type: ignore[arg-type]
+                ctx.target,
+                ctx.operator,
+                _OP_STORAGE_POLICIES_LIST,
+                {},
+            )
+            match = next(
+                (r for r in (rows or []) if isinstance(r, dict) and r.get("policy") == policy_id),
+                None,
+            )
+            if match is not None:
+                name = match.get("name")
+        except httpx.HTTPError:
+            name = ctx.params.get("policy_name")
+    return {
+        "blast_radius": {
+            "object": {"kind": "storage_policy", "id": policy_id, "name": name},
+            "children": [],
+            "irreversibility": "permanent",
+        },
+    }
+
+
+#: op_id → builder for the write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
+async def _content_library_subscribed_create_preview(
+    ctx: PreviewContext,
+) -> dict[str, Any] | None:
+    """Preview ``content_library.subscribed.create`` — non-secret fields only (no I/O).
+
+    Secret hygiene (#3495): echoes the library identity + subscription shape
+    the reviewer needs to decide (name, publisher URL, backing datastore,
+    auth method, sync mode, whether an SSL thumbprint was pinned) but **never**
+    the ``password`` / ``username`` — so no credential can reach the durable
+    ``proposed_effect`` row through this path by construction. The broadcast
+    ``_CREDENTIAL_WRITE_OPS`` pin and the ``params_hash``-only audit are the
+    other two surfaces; this builder is the park-time one.
+    """
+    name = ctx.params.get("name")
+    subscription_url = ctx.params.get("subscription_url")
+    datastore = ctx.params.get("datastore")
+    if not isinstance(name, str) or not isinstance(subscription_url, str):
+        return None
+    return {
+        "name": name,
+        "subscription_url": subscription_url,
+        "datastore": datastore if isinstance(datastore, str) else None,
+        "authentication_method": ctx.params.get("authentication_method") or "NONE",
+        "automatic_sync_enabled": bool(ctx.params.get("automatic_sync_enabled", False)),
+        "on_demand": bool(ctx.params.get("on_demand", True)),
+        "ssl_thumbprint_pinned": bool(ctx.params.get("ssl_thumbprint")),
+    }
+
+
+async def _content_library_subscribed_sync_preview(
+    ctx: PreviewContext,
+) -> dict[str, Any] | None:
+    """Preview ``content_library.subscribed.sync`` — the library reference only.
+
+    Echoes whichever reference the caller supplied (``library_id`` or
+    ``library_name``) so the reviewer sees which library the forced sync
+    targets. No I/O, no secret (the sync op carries no credential).
+    """
+    library_id = ctx.params.get("library_id")
+    library_name = ctx.params.get("library_name")
+    if not (isinstance(library_id, str) and library_id) and not (
+        isinstance(library_name, str) and library_name
+    ):
+        return None
+    return {
+        "library_id": library_id if isinstance(library_id, str) else None,
+        "library_name": library_name if isinstance(library_name, str) else None,
+    }
+
+
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
+    "vmware.composite.supervisor.enable": _supervisor_enable_preview,
+    "vmware.composite.supervisor.disable": _supervisor_disable_preview,
     "vmware.composite.vm.guest.file.write": _guest_file_write_preview,
     "vmware.composite.vm.guest.program.run": _guest_program_run_preview,
     "vmware.composite.vm.create": _vm_create_preview,
@@ -1154,19 +1461,28 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
     "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
+    "vmware.composite.cluster.drs_vm_host_rule.create": _cluster_drs_vm_host_rule_create_preview,
+    "vmware.composite.resource_pool.create": _resource_pool_create_preview,
+    "vmware.composite.resource_pool.delete": _resource_pool_delete_preview,
     "vmware.composite.folder.create": _folder_create_preview,
     "vmware.composite.guest.customization_spec.create": _guest_customization_spec_create_preview,
     "vmware.composite.vm.customize": _vm_customize_preview,
     "vmware.composite.host.datastore_mount_nfs": _host_datastore_mount_nfs_preview,
     "vmware.composite.host.disk_mark_flash": _host_disk_mark_flash_preview,
     "vmware.composite.host.service_control": _host_service_control_preview,
+    "vmware.composite.storage_policy.create": _storage_policy_create_preview,
+    "vmware.composite.storage_policy.delete": _storage_policy_delete_preview,
+    "vmware.composite.content_library.subscribed.create": (
+        _content_library_subscribed_create_preview
+    ),
+    "vmware.composite.content_library.subscribed.sync": _content_library_subscribed_sync_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 26 write-composite park-time preview builders. Import-time.
+    """Wire the 35 write-composite park-time preview builders. Import-time.
 
-    The 9 read composites register no builder — they are
+    The 13 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be
     dead code.
     """

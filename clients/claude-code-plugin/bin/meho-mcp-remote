@@ -70,6 +70,85 @@ if [ -z "${scopes//[[:space:]]/}" ]; then
   scopes="mcp:read mcp:execute"
 fi
 
-exec npx -y mcp-remote@0.1.38 "$url" \
+# Vendor mcp-remote from the committed lockfile instead of resolving it fresh
+# from npm semver ranges at each launch. This shim performs the OAuth 2.1 +
+# PKCE handshake and holds the operator's live backplane session, so its
+# dependency tree must be integrity-pinned, not floated: `npx -y` would
+# resolve mcp-remote's *transitive* graph against upstream semver ranges with
+# no committed integrity check. `npm ci` instead installs the exact tree
+# pinned in package-lock.json — a transitive version cannot change without a
+# reviewed lockfile update (evoila-bosnia/meho-internal#309; mirrors the
+# desktop .mcpb bundle's npm-ci vendoring).
+if ! command -v npm >/dev/null 2>&1; then
+  {
+    echo "meho plugin: 'npm' was not found on PATH. It is required to vendor"
+    echo "  the pinned mcp-remote tree from the committed lockfile. Install"
+    echo "  Node.js (which ships npm) and retry."
+  } >&2
+  exit 1
+fi
+
+# This script lives in <plugin_root>/bin, so its parent is the plugin root
+# where package.json + package-lock.json are committed — resolved from the
+# script's own location, independent of the caller's cwd or install layout.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+plugin_root="$(cd "$script_dir/.." && pwd)"
+
+# Vendor into a per-operator cache OUTSIDE the (possibly read-only) plugin
+# dir, so the install works regardless of where the plugin is installed and
+# survives plugin reinstalls. MEHO_PLUGIN_CACHE overrides the location.
+cache_dir="${MEHO_PLUGIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/meho/mcp-remote}"
+mkdir -p "$cache_dir"
+
+# (Re)vendor only when the committed lock differs from the cached copy or the
+# tree is absent — a byte-identical lock skips the install, so steady-state
+# launches pay no npm cost. `npm ci` is intentionally strict: it fails rather
+# than silently reconciling a drifted lock.
+if ! cmp -s "$plugin_root/package-lock.json" "$cache_dir/package-lock.json" \
+   || [ ! -d "$cache_dir/node_modules/mcp-remote" ]; then
+  cp "$plugin_root/package.json" "$plugin_root/package-lock.json" "$cache_dir/"
+  # --omit=dev keeps only the runtime tree; --no-audit/--no-fund suppress
+  # network chatter. npm's own output is sent to stderr so the MCP stdio
+  # channel (stdout) stays clean for the JSON-RPC stream mcp-remote drives.
+  if ! ( cd "$cache_dir" && npm ci --omit=dev --no-audit --no-fund 1>&2 ); then
+    {
+      echo "meho plugin: failed to vendor mcp-remote from the committed"
+      echo "  lockfile ($plugin_root/package-lock.json) into $cache_dir."
+      echo "  Check network access to the npm registry and retry."
+    } >&2
+    # Drop the marker so the next launch re-attempts a clean install.
+    rm -f "$cache_dir/package-lock.json"
+    exit 1
+  fi
+fi
+
+# Resolve the vendored mcp-remote CLI entry from the cache's node_modules by
+# reading the package's own bin mapping, so a future pinned version that
+# relocates its entry script keeps working without editing this shim.
+if ! entry="$(cd "$cache_dir" && node -e '
+const { createRequire } = require("node:module");
+const path = require("node:path");
+const req = createRequire(path.join(process.cwd(), "noop.js"));
+const pkgPath = req.resolve("mcp-remote/package.json");
+const pkg = require(pkgPath);
+const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin["mcp-remote"];
+process.stdout.write(path.join(path.dirname(pkgPath), bin));
+')"; then
+  entry=""
+fi
+if [ -z "$entry" ] || [ ! -f "$entry" ]; then
+  {
+    echo "meho plugin: could not resolve the vendored mcp-remote entry in"
+    echo "  $cache_dir/node_modules — the lockfile install may be incomplete."
+    echo "  Remove $cache_dir and retry to force a clean re-vendor."
+  } >&2
+  exit 1
+fi
+
+# Hand mcp-remote the same argv the previous `npx` invocation did: the URL
+# plus the static-OAuth client id and scope metadata. mcp-remote reads
+# process.argv.slice(2), so `node <entry> <url> --flags...` preserves the
+# exact contract. mcp-remote owns this process's stdio from here.
+exec node "$entry" "$url" \
   --static-oauth-client-info "{\"client_id\": \"$client_id\"}" \
   --static-oauth-client-metadata "{\"scope\": \"$scopes\"}"

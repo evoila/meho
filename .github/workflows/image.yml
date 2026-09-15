@@ -5,12 +5,13 @@
 #
 # Locked tag scheme (Goal #11 — artefact-distribution principle):
 #   PR (branch -> main)   : build only, do NOT push (verifies Dockerfile + deps).
-#   push to main          : push :<git-sha> (immutable) + :main (moving target).
-#   push tag v*           : push :v<x.y.z> (alongside :<sha> + :main from main push).
+#   push to main          : publish :<git-sha> (immutable) + :main (moving target).
+#   push tag v*           : publish :v<x.y.z> (alongside :<sha> + :main from main push).
 #
 # Goal #11 explicitly forbids :latest as a deploy target — operators MUST pin
-# to :<git-sha> (immutable) or :v<x.y.z> (semver, immutable). metadata-action
-# is configured to never emit a "latest" tag for that reason.
+# to :<git-sha> (immutable), :v<x.y.z> (semver, immutable), or the manifest
+# digest. metadata-action is configured to never emit a "latest" tag for that
+# reason.
 #
 # Multi-arch (linux/amd64 + linux/arm64) is mandatory per Initiative #31 DoD;
 # the Dockerfile is digest-pinned and multi-arch ready (PR #163 / Task #32).
@@ -26,6 +27,20 @@
 # (or via the GHCR UI). The workflow can't do this safely from CI — visibility
 # is org-scoped and changing it from a workflow would require a PAT with
 # org admin scope. README.md documents the one-time step.
+#
+# Scan-before-publish gate (#284 / F15b — supply-chain promotion ordering):
+#   The build pushes the manifest list to GHCR BY DIGEST ONLY (push-by-digest,
+#   no tag), so on a push event nothing yet advertises the freshly-built bytes
+#   as a release. The trivy vulnerability scan then runs against that
+#   quarantine digest as a GATE (exit-code 1 on a fixable CRITICAL/HIGH). Only
+#   when the scan passes does the promote step apply the release aliases
+#   (:sha-<sha>, :main, :v<x.y.z>) to the EXACT approved digest, and only then
+#   do cosign sign + SBOM + cosign attest run. A failing scan therefore leaves
+#   an untagged, unsigned, unattested manifest that no release alias points at
+#   (registry retention GC reclaims it) — it can never leave an artifact
+#   advertised as an approved release. Every step downstream of the trivy gate
+#   carries the implicit success() guard, so a red scan skips promote/sign/
+#   attest while the SARIF-upload steps still publish the CVE list.
 #
 # Cosign keyless signing (Task #34, ADR 0006):
 #   - id-token: write (granted in the permissions block) lets the runner mint
@@ -46,18 +61,18 @@
 #
 # Supply-chain attestations (Task #35):
 #   - provenance + sbom on build-push-action emit small inline OCI annotations
-#     into the manifest; the richer syft SBOM attestation + trivy scan run as
-#     additional steps on this same job, after the sign step below.
-#   - anchore/sbom-action invokes syft against the pushed manifest-list digest
-#     and writes SPDX JSON; cosign then packages the SBOM as a Sigstore
+#     into the manifest at build time; the richer syft SBOM attestation runs
+#     as an additional step on this same job, after the scan gate + sign below.
+#   - anchore/sbom-action invokes syft against the approved manifest-list
+#     digest and writes SPDX JSON; cosign then packages the SBOM as a Sigstore
 #     attestation signed under the same keyless identity as the image. The
 #     attestation is content-addressed (bound to the digest, not a tag) so
 #     verification works for every tag alias.
-#   - aquasecurity/trivy-action scans the same digest for CVEs and emits SARIF.
-#     It runs post-push on main/tags with `exit-code: '1'`, so a CRITICAL/HIGH
-#     fixed CVE fails the run as a red-main alarm against silent CVE
-#     accumulation on a stale base image (it is not a PR merge gate — the step
-#     is skipped on pull_request). SARIF results land both on the GitHub
+#   - aquasecurity/trivy-action scans the quarantine digest for CVEs and emits
+#     SARIF. It runs BEFORE publish/sign/attest on main/tags with
+#     `exit-code: '1'`, so a fixable CRITICAL/HIGH CVE fails the run and gates
+#     promotion (it is not a PR merge gate — the step is skipped on
+#     pull_request, which never pushes). SARIF results land both on the GitHub
 #     Security tab (Code scanning alerts) and as a 30-day workflow artefact —
 #     and, because the two upload steps are guarded on the scan step's outcome
 #     (not the default success() gate), they publish even when the scan FAILS,
@@ -137,6 +152,11 @@ jobs:
           #   type=raw,value=main           -> :main         (main push only)
           #   type=semver,pattern={{raw}}   -> :v<x.y.z>     (v* tag push only)
           # NO type=raw,value=latest — Goal #11 forbids :latest as deploy target.
+          #
+          # These tags are NOT fed to the build step: the build pushes by
+          # digest only (quarantine). The promote step applies them to the
+          # approved digest AFTER the trivy gate via `imagetools create`, so
+          # a release alias never advertises an unscanned digest (#284).
           tags: |
             type=sha,format=long
             type=raw,value=main,enable={{is_default_branch}}
@@ -147,7 +167,7 @@ jobs:
           flavor: |
             latest=false
 
-      - name: Build (and conditionally push) image
+      - name: Build image to quarantine digest (no release tag)
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
@@ -156,10 +176,17 @@ jobs:
           # covering amd64 + arm64. Dockerfile is digest-pinned so the base
           # image resolves per-arch automatically.
           platforms: linux/amd64,linux/arm64
-          # PRs build only (verifies Dockerfile + dep resolution).
-          # Main pushes and v* tag pushes go live.
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Quarantine push (#284 / F15b). On push events, publish the
+          # manifest list to GHCR BY DIGEST ONLY — `push-by-digest=true`
+          # writes the blobs and the index but creates NO tag, so nothing yet
+          # advertises these bytes as a release. `steps.build.outputs.digest`
+          # is the manifest-list digest the scan + promote + sign + attest
+          # steps below all reference. On PRs `push=false` keeps the old
+          # build-only verification (no registry write). Replaces the former
+          # `push:` + `tags:` inputs: those pushed the release aliases at build
+          # time, before the scan, which is exactly the ordering this task
+          # removes.
+          outputs: type=image,name=ghcr.io/evoila/meho,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           labels: ${{ steps.meta.outputs.labels }}
           # Build-identity stamps surfaced via GET /version (#631). The
           # Dockerfile already declares `ARG GIT_SHA` / `ARG BUILD_DATE`
@@ -179,15 +206,133 @@ jobs:
           cache-to: type=gha,mode=max
           # Inline OCI provenance + SBOM annotations on the manifest. These
           # are buildkit-native, cheap, and complement (do not replace) the
-          # cosign attestations landing in Task #35.
+          # cosign attestations landing in Task #35. push-by-digest carries
+          # them into the pushed index, so the promote step's manifest-level
+          # carbon-copy preserves them under every release alias.
           provenance: true
           sbom: true
 
-      - name: Echo pushed digest
-        # Surfaces the immutable manifest-list digest in workflow logs.
-        # The cosign sign step below signs by exactly this digest.
+      - name: Echo and guard the quarantine digest
+        # Surfaces the immutable manifest-list digest in workflow logs and
+        # fails loud if the build produced no digest on a push event. The
+        # scan / promote / sign / attest steps all key off this exact digest;
+        # an empty value would silently no-op the gate (e.g. if a future
+        # buildx change stopped emitting the digest for push-by-digest), so
+        # catching it here keeps the pipeline fail-closed rather than shipping
+        # an unscanned, unsigned image.
         if: github.event_name != 'pull_request'
-        run: echo "Pushed digest=${{ steps.build.outputs.digest }}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::build produced no manifest digest — cannot scan/promote/sign. Aborting." >&2
+            exit 1
+          fi
+          echo "Quarantine digest=${DIGEST}"
+
+      - name: Vulnerability scan (trivy — gates promotion on fixable CRITICAL/HIGH)
+        id: trivy
+        # trivy scans the quarantine digest (OS packages + language deps,
+        # including the uv-installed Python wheels in /app/.venv) BEFORE any
+        # release alias, signature or attestation exists. Emits SARIF for
+        # upload to the GitHub Security tab.
+        #
+        #   - `severity: CRITICAL,HIGH` restricts the scan to the levels that
+        #     actually matter. `limit-severities-for-sarif: true` makes the
+        #     SARIF honour that filter — without it the trivy-action emits
+        #     ALL severities into SARIF regardless of `severity` (its
+        #     documented default), which is why the Security tab previously
+        #     showed LOW/MEDIUM alerts the `severity` input was meant to drop.
+        #   - `exit-code: '1'` makes the step FAIL when a fixable CRITICAL/HIGH
+        #     CVE is present. This is the PROMOTION GATE (#284 / F15b): the
+        #     promote / sign / attest steps below all carry the implicit
+        #     success() guard, so a red scan skips them and the scanned digest
+        #     is never tagged as a release, signed, or attested. It is NOT a
+        #     PR merge gate — the `if:` below skips it on pull_request, which
+        #     never pushes an image to scan. A red run means "the base image
+        #     drifted; bump the digest (Dependabot docker PR) and re-run", and
+        #     the failed build ships nothing.
+        #   - `ignore-unfixed: true` drops CVEs with no upstream fix
+        #     available, which would otherwise dominate the SARIF without
+        #     any operator action to take.
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Upload trivy SARIF to GitHub Security tab
+        # SARIF upload surfaces findings under repo -> Security -> Code
+        # scanning alerts. Requires `security-events: write` at the job or
+        # workflow level — granted in the top-level permissions block.
+        #
+        # Publish on a FAILED scan too — a red scan is exactly when the CVE
+        # list must reach the Security tab — but stay skipped when the scan
+        # step was SKIPPED (the pull_request path, where it never ran). A bare
+        # `if:` is implicitly success()-gated, so the previous condition
+        # dropped this upload on every red scan; the explicit `!cancelled()`
+        # opts out of that default and the outcome check restores the PR skip.
+        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4.37.9
+        with:
+          sarif_file: trivy-results.sarif
+          # Category disambiguates this run when other SARIF sources (e.g.
+          # CodeQL itself) upload to the same repo; without it the upload
+          # would overwrite siblings.
+          category: trivy-image-scan
+
+      - name: Upload trivy SARIF as workflow artefact
+        # Mirrors the SARIF upload as a downloadable artefact (30-day
+        # retention) so operators can pull it via `gh run download` without
+        # needing Security-tab access. Same fail-visible guard as the
+        # Security-tab upload above: publishes on a red scan, skips on the
+        # pull_request path where the scan step never ran.
+        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Promote approved digest to release tags
+        # The trivy gate above passed (a failed scan makes success() false and
+        # skips this step), so the scanned digest is approved. Apply the
+        # release aliases computed by docker/metadata-action
+        # (:sha-<sha>, :main, :v<x.y.z> — event-appropriate) to the EXACT
+        # approved digest with a manifest-level carbon-copy: `imagetools
+        # create` from a single index source re-references the existing bytes
+        # (no rebuild, no blob re-push, same digest), and preserves the
+        # multi-arch children and the inline provenance/SBOM attestations. The
+        # release aliases and the signature/attestation below therefore all
+        # bind the same bytes trivy scanned (#284 / F15b).
+        #
+        # DOCKER_METADATA_OUTPUT_JSON is exported to the job env by the meta
+        # step; reading the tags from it (rather than interpolating a
+        # `${{ }}` value into the shell) keeps the run block free of
+        # expression-injected content.
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readarray -t tags < <(jq -r '.tags[]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "::error::metadata-action produced no tags to promote." >&2
+            exit 1
+          fi
+          args=()
+          for t in "${tags[@]}"; do args+=(--tag "$t"); done
+          echo "Promoting ghcr.io/evoila/meho@${DIGEST} -> ${tags[*]}"
+          docker buildx imagetools create "${args[@]}" "ghcr.io/evoila/meho@${DIGEST}"
 
       - name: Ensure envsubst (gettext-base) — cosign-installer dep
         # See chart.yml for context. Same PR-skip gate as the cosign step
@@ -225,10 +370,12 @@ jobs:
         # --yes is the non-interactive confirmation (CI has no TTY); it replaces
         # the deprecated COSIGN_EXPERIMENTAL=1 of the cosign-1.x era.
         #
-        # We sign the manifest-list digest, not any tag. For multi-arch builds
-        # docker/build-push-action's `digest` output IS the manifest-list digest,
-        # so this one invocation covers every per-arch child manifest and every
-        # tag alias pointing at this digest (`:sha-<long>`, `:main`, `:v<x.y.z>`).
+        # We sign the manifest-list digest, not any tag — the same approved
+        # digest trivy scanned and the promote step tagged. For multi-arch
+        # builds docker/build-push-action's `digest` output IS the manifest-
+        # list digest, so this one invocation covers every per-arch child
+        # manifest and every tag alias pointing at this digest (`:sha-<long>`,
+        # `:main`, `:v<x.y.z>`).
         if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -279,70 +426,3 @@ jobs:
             --predicate sbom.spdx.json \
             --type spdxjson \
             "ghcr.io/evoila/meho@${DIGEST}"
-
-      - name: Vulnerability scan (trivy — fails on fixable CRITICAL/HIGH)
-        id: trivy
-        # trivy scans the pushed image (OS packages + language deps,
-        # including the uv-installed Python wheels in /app/.venv). Emits
-        # SARIF for upload to the GitHub Security tab.
-        #
-        #   - `severity: CRITICAL,HIGH` restricts the scan to the levels that
-        #     actually matter. `limit-severities-for-sarif: true` makes the
-        #     SARIF honour that filter — without it the trivy-action emits
-        #     ALL severities into SARIF regardless of `severity` (its
-        #     documented default), which is why the Security tab previously
-        #     showed LOW/MEDIUM alerts the `severity` input was meant to drop.
-        #   - `exit-code: '1'` makes the step FAIL when a CRITICAL/HIGH fixed
-        #     CVE is present. This scan runs POST-PUSH on main/tags against the
-        #     already-pushed digest — it is a red-main alarm against silent
-        #     CVE accumulation on a stale base image, NOT a PR merge gate (the
-        #     `if:` below skips it on pull_request). A red run means "the base
-        #     image drifted; bump the digest (Dependabot docker PR) and
-        #     re-push", not "this merge is blocked".
-        #   - `ignore-unfixed: true` drops CVEs with no upstream fix
-        #     available, which would otherwise dominate the SARIF without
-        #     any operator action to take.
-        if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH
-          limit-severities-for-sarif: true
-          ignore-unfixed: true
-          exit-code: '1'
-
-      - name: Upload trivy SARIF to GitHub Security tab
-        # SARIF upload surfaces findings under repo -> Security -> Code
-        # scanning alerts. Requires `security-events: write` at the job or
-        # workflow level — granted in the top-level permissions block.
-        #
-        # Publish on a FAILED scan too — a red scan is exactly when the CVE
-        # list must reach the Security tab — but stay skipped when the scan
-        # step was SKIPPED (the pull_request path, where it never ran). A bare
-        # `if:` is implicitly success()-gated, so the previous condition
-        # dropped this upload on every red scan; the explicit `!cancelled()`
-        # opts out of that default and the outcome check restores the PR skip.
-        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4.37.9
-        with:
-          sarif_file: trivy-results.sarif
-          # Category disambiguates this run when other SARIF sources (e.g.
-          # CodeQL itself) upload to the same repo; without it the upload
-          # would overwrite siblings.
-          category: trivy-image-scan
-
-      - name: Upload trivy SARIF as workflow artefact
-        # Mirrors the SARIF upload as a downloadable artefact (30-day
-        # retention) so operators can pull it via `gh run download` without
-        # needing Security-tab access. Same fail-visible guard as the
-        # Security-tab upload above: publishes on a red scan, skips on the
-        # pull_request path where the scan step never ran.
-        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: trivy-results
-          path: trivy-results.sarif
-          retention-days: 30
-          if-no-files-found: error

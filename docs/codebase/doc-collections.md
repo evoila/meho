@@ -115,10 +115,15 @@ string that names the `create → probe → ready` flow while the row is
 `provisioning` (see
 [The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)).
 `next_step` lives on the create-response model only, never on the shared
-`DocCollection` read shape. There is still no `Update` schema — PATCH is a
-later follow-up — but DELETE shipped in #2487 as a bodyless route (no
-request schema): `DELETE /api/v1/doc_collections/{collection_key}`
-deregisters a disabled, tenant-owned row and frees its `collection_key`.
+`DocCollection` read shape. `DocCollectionUpdate` (#3601) is the PATCH body
+— a partial update (every field optional, only the fields present are
+written) carrying the mutable subset (`backend` / `description` /
+`when_to_use` / `products`); `collection_key` / `tenant_id` are never body
+fields (`extra="forbid"`), so a PATCH can neither rename nor re-scope a row
+(see [Update / repoint a collection](#update--repoint-a-collection-3601)).
+DELETE shipped in #2487 as a bodyless route (no request schema):
+`DELETE /api/v1/doc_collections/{collection_key}` deregisters a disabled,
+tenant-owned row and frees its `collection_key`.
 
 ### `project_doc_collection_to_summary(...)` (`meho_backplane.docs_collections.schemas`)
 
@@ -260,7 +265,9 @@ probe route.
 
 `meho docs collections list|probe|enable|disable <key>`. `list` (T4
 #1553, operator) is the catalogue-discovery verb; `probe` / `enable` /
-`disable` (T6 #1555, tenant_admin) are the lifecycle face. All four are
+`disable` (T6 #1555, tenant_admin) are the lifecycle face; `create`
+(#1739), `update` (#3601), and `delete` (#2487) are the registry
+write verbs (all tenant_admin). All four lifecycle verbs are
 capability-gated like `meho docs search` (hidden + refusing when the
 tenant lacks `meho-docs`). `probe` renders the `BackendReadiness` block;
 `enable` / `disable` confirm the transition. See
@@ -329,8 +336,12 @@ entitled to no collection, so a non-docs tenant's preamble is
 token-capped (`MAX_CATALOGUE_TOKENS`); over-budget it renders a summary
 form pointing at `list_doc_collections` and logs
 `doc_catalogue_band_over_budget`, mirroring the priming band. The guard
-delimiters are wrapper-emitted (never substituted from row content), so a
-malicious `when_to_use` carrying the terminator cannot escape the block.
+delimiters are wrapper-emitted, but the metadata fields
+(`vendor` / `when_to_use` / `description`) are interpolated verbatim and
+constrained by length only, so `_neutralise_delimiters` rewrites any
+`BLOCK_START` / `BLOCK_END` substring in the rendered entry before
+wrapping -- a malicious `when_to_use` carrying the terminator cannot plant
+a second boundary, and the assembled band holds exactly one delimiter pair.
 
 ## Create / register a collection (#1739)
 
@@ -355,6 +366,18 @@ The service primitive
   a structured `422` whose detail enumerates the registered types (the
   `create_target` unknown-product shape). This moves the failure forward
   from a deferred probe/search-time `503` to create time.
+- **`backend.ref` corpus endpoint SSRF-screened (#290)** — for a
+  `corpus-http` collection the `backend.ref["endpoint"]` (alias `url`) is
+  the URL later dialed with a credential, so it is screened at create:
+  `https` scheme + a public, allowlist-aware host, via the shared target
+  SSRF guard (`assert_public_destination_async` — the same
+  `MEHO_TARGET_SSRF_ALLOWLIST`-aware guard the connector target dial uses).
+  A non-`https` or private/link-local/metadata endpoint raises
+  `DocCollectionEndpointError` → `422` (`kind="endpoint_not_allowed"`) and
+  is never persisted, closing a credential-capture + SSRF path a
+  `tenant_admin` could otherwise open. Absent endpoint (the legacy global
+  `settings.corpus_url` deploy) is nothing to screen here; that global is
+  deployment-owned and screened again at dial time.
 - **Server-derived fields** — `id` / `created_at` / `updated_at` are
   generated; `status` defaults to `provisioning` (a follow-up `probe`
   promotes it); the probe-written liveness stays `NULL`.
@@ -372,7 +395,8 @@ Three fronts forward to the same primitive:
   (`DocCollectionCreateResponse`, #1756; see
   [The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)),
   `tenant_admin`-gated (parity with the lifecycle routes). The route maps
-  the two service exceptions to `422` / `409`.
+  the service exceptions to `422` (unknown backend type / rejected
+  endpoint) / `409` (conflict).
 - **MCP** — the `create_doc_collections` write-class tool
   (`meho_backplane.mcp.tools.doc_collections_create`), `tenant_admin` +
   `required_capability="meho-docs"`. The exceptions map to JSON-RPC
@@ -388,10 +412,11 @@ Three fronts forward to the same primitive:
 
 A created collection is `provisioning`, and the search-time access gate
 (`resolve_entitled_ready_collection`) rejects a non-`ready` collection with
-`CollectionNotReadyError`. There is no update API and create never
-self-probes (auto-promotion is out of scope — it couples to ingest cost),
-so **`create → probe → ready` is the only path to a searchable
-collection**:
+`CollectionNotReadyError`. Create never self-probes (auto-promotion is out
+of scope — it couples to ingest cost), so **`create → probe → ready` is the
+only path to a searchable collection** (a `backend` repoint via PATCH
+resets the row to `provisioning` and re-enters this same flow — see
+[Update / repoint a collection](#update--repoint-a-collection-3601)):
 
 1. `POST /api/v1/doc_collections` registers the row at
    `status=provisioning`.
@@ -414,11 +439,12 @@ catalogue, the MCP docs tools) is unchanged. The route's `201` OpenAPI
 
 DELETE shipped in #2487 (deregister a disabled, tenant-owned collection;
 see [Delete / deregister a collection](#delete--deregister-a-collection-2487)).
-Out of scope (a later follow-up): PATCH, cross-tenant sharing,
-and bulk import beyond the single-collection `--from-file` on-ramp.
-Auto-promotion / self-probe on create stays out of scope (#1756) — it is a
-behaviour change with ingest-cost implications; #1756 is discoverability
-only.
+PATCH shipped in #3601 (repoint the backend ref in place; see
+[Update / repoint a collection](#update--repoint-a-collection-3601)). Out of
+scope (a later follow-up): cross-tenant sharing and bulk import beyond the
+single-collection `--from-file` on-ramp. Auto-promotion / self-probe on
+create stays out of scope (#1756) — it is a behaviour change with
+ingest-cost implications; #1756 is discoverability only.
 
 ## Delete / deregister a collection (#2487)
 
@@ -463,6 +489,73 @@ fronts share one policy):
 > operator's JWT (resolved via Keycloak / corpus), not a backplane row, so
 > the backplane has no table of grant holders to enumerate. The
 > disabled-first + global-vs-tenant guards are the implementable stand-in.
+
+## Update / repoint a collection (#3601)
+
+The in-place update the registry lacked. A collection carries its own
+`backend.ref["endpoint"]`, and `CorpusHttpBackend` falls back to the
+deployment's global `settings.corpus_url` only when the ref is **absent** —
+so when a deployment moves its corpus endpoint (e.g. plain-`http` →
+internal-CA `https`, which the v0.34.x corpus SSRF screen now requires), a
+values-only repoint of `CORPUS_URL` does **not** touch a row that carries
+its own ref. The row keeps dialing the old endpoint and `search_docs` /
+`ask_docs` fail closed (`CorpusUnavailable` → 503) while `list_doc_collections`
+and `/ready` stay green. Before #3601 there was no governed fix: create
+`409`s on the existing key, delete refuses a global row, and there was no
+PATCH — the only path was a destructive delete + re-create, unsafe on a
+global (all-tenant) row and one that resets `status` to `provisioning`.
+
+PATCH closes that. Shipped across the three fronts, tenant_admin-gated, the
+create/delete precedent:
+
+- **Schema** — `DocCollectionUpdate` (`meho_backplane.docs_collections.schemas`),
+  a partial update: `backend` / `description` / `when_to_use` / `products`,
+  all optional; a model validator rejects an empty body and an explicit
+  `{"backend": null}` (backend is NOT NULL — clear the *endpoint* with
+  `backend.ref = {}`, which falls back to `settings.corpus_url`, not the
+  whole binding).
+- **Service** — `update_doc_collection(session, operator, collection, body)`,
+  audited `op_id="meho.docs.collections.update"` (the `meho.docs.*`
+  who-touched family). Applies only the fields present in the body
+  (`model_dump(exclude_unset=True)`); a supplied `backend` runs the **same**
+  `backend.type` registry validation + `https` / SSRF-allowlist endpoint
+  screen the create path runs (shared `_validate_backend_type` /
+  `_screen_backend_endpoint` helpers), so a repoint can never land a
+  non-`https` / private / metadata endpoint dialed with a credential (#290).
+- **REST** — `PATCH /api/v1/doc_collections/{collection_key}` → `200` with
+  the full `DocCollection`, resolved tenant-first via `resolve_doc_collection`
+  (unknown key → 404 + `known_keys`). Maps the typed errors to `403` / `422`.
+- **MCP** — `update_doc_collections` (tenant_admin, `op_class="write"`, the
+  same `meho-docs` capability create/delete declare); operator-surface, so
+  it lists only on an `mcp:admin`-elevated session.
+- **CLI** — `meho docs collections update <key> --backend-type … --backend-ref
+  '{…}'` (or `--description` / `--when-to-use` / `--product`, or `--from-file
+  <path>`), in `cli/internal/cmd/docs/collections_update.go`. Only the flags
+  set are sent, so an untouched field is never cleared.
+
+Two behaviours the service owns (one policy across all fronts):
+
+1. **Platform seat for a global row.** Editing a global (`tenant_id IS
+   NULL`) row — the shared platform catalogue — additionally requires
+   `operator.platform_admin`, refused otherwise with a structured 403
+   `{"error": "global_collection_update_forbidden"}` (MCP `-32602`). This is
+   the same cross-tenant/platform capability `authorize_tenant_scope` uses;
+   a tenant_admin is never silently widened to the all-tenant catalogue. It
+   is the deliberate counterpart to delete's outright global refusal — a
+   global row *is* editable, but only from the platform seat.
+2. **Readiness reset on a backend change.** The probe-written `readiness` /
+   `doc_count` / `last_ingested_at` described the OLD endpoint, so a `backend`
+   change clears them and (unless the operator has explicitly `disabled` the
+   collection — operator intent outranks a liveness signal, the same rule the
+   probe machine enforces) returns `status` to `provisioning`. The operator
+   then re-runs `probe` to promote it back to `ready` — the same
+   `create → probe → ready` flow. A metadata-only change leaves `status` +
+   liveness untouched.
+
+This is the governed repair for the migration-seeded global `vmware` row
+([Global-row manifest seed](#global-row-manifest-seed-1920) below): a
+`platform_admin` PATCHes its `backend.ref["endpoint"]` to the new `https`
+listener, then probes it back to `ready`.
 
 ## Global-row manifest seed (#1920)
 

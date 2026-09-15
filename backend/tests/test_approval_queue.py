@@ -54,6 +54,7 @@ from meho_backplane.operations._validate import compute_params_hash
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    ApprovalRequestExpiredError,
     NonHumanApprovalError,
     ParamsMismatchError,
     SelfApprovalForbiddenError,
@@ -1806,6 +1807,172 @@ async def test_expired_run_bound_request_cannot_be_approved(
 
 
 # ---------------------------------------------------------------------------
+# decision-time deadline gate (security F12 / #274) — approve refuses an
+# overdue pending row WITHOUT waiting for the background expiry sweep.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_refuses_overdue_pending_without_sweep(
+    session: AsyncSession,
+) -> None:
+    """An overdue pending row cannot be approved even if the sweep never ran (F12).
+
+    The row is left ``pending`` (the sweep never runs in this test), yet its
+    ``expires_at`` is in the past. ``approve_request`` checks the deadline at
+    decision time and refuses with :class:`ApprovalRequestExpiredError`, so a
+    delayed or failing expiry sweeper can never leave an overdue intent
+    approvable. The row stays ``pending`` for the sweeper to transition
+    later — the approval is refused, not the transition performed.
+    """
+    requester = _make_operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    past = datetime.now(UTC) - timedelta(hours=1)
+
+    request = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.overdue",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=past,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as approve_session:
+        with pytest.raises(ApprovalRequestExpiredError):
+            await approve_request(approve_session, request.id, operator=reviewer)
+
+    # No sweep ran — the row is still pending, only the approval was refused.
+    async with get_sessionmaker()() as check:
+        row = await check.get(ApprovalRequest, request.id)
+        assert row is not None
+        assert row.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_approve_refuses_overdue_legacy_null_expiry(
+    session: AsyncSession,
+) -> None:
+    """A legacy null-``expires_at`` row past ``created_at + default_ttl`` is refused (F12).
+
+    Pre-#2322 rows carry ``expires_at IS NULL``. The decision-time gate
+    coalesces the deadline against ``created_at + APPROVAL_DEFAULT_TTL`` — the
+    same rule the sweep predicate uses — so such a row aged past the default
+    TTL is refused on the approve path exactly as the sweep would expire it.
+    """
+    requester = _make_operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+
+    request = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-null",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    # Reshape the row into the pre-#2322 legacy shape: null deadline, created
+    # further back than the configured default TTL.
+    ttl_seconds = get_settings().approval_default_ttl_seconds
+    async with get_sessionmaker()() as reshape:
+        row = await reshape.get(ApprovalRequest, request.id)
+        assert row is not None
+        row.expires_at = None
+        row.created_at = datetime.now(UTC) - timedelta(seconds=ttl_seconds + 3600)
+        await reshape.commit()
+
+    async with get_sessionmaker()() as approve_session:
+        with pytest.raises(ApprovalRequestExpiredError):
+            await approve_request(approve_session, request.id, operator=reviewer)
+
+
+@pytest.mark.asyncio
+async def test_approve_allows_request_within_deadline(
+    session: AsyncSession,
+) -> None:
+    """A pending row still inside its deadline approves normally (F12 regression).
+
+    The deadline gate must not refuse a row whose ``expires_at`` is in the
+    future — the default-TTL park is approvable throughout its window.
+    """
+    requester = _make_operator(sub="agent-requester", principal_kind=PrincipalKind.AGENT)
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    params = {"key": "value"}
+
+    request = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.in-window",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as approve_session:
+        decided = await approve_request(
+            approve_session, request.id, operator=reviewer, params=params
+        )
+        await approve_session.commit()
+
+    assert decided.status == ApprovalRequestStatus.APPROVED.value
+
+
+@pytest.mark.asyncio
+async def test_claim_resume_requires_approved_status() -> None:
+    """The execution claim latches only an ``approved`` row (F12 / #274, AC4).
+
+    ``claim_resume`` carries ``status = 'approved'`` in its conditional
+    UPDATE, so a pending, rejected, or expired row can never be claimed for
+    execution — no execution can follow a losing/rejected transition. An
+    approved row is still latched exactly once (the single-resumer invariant
+    is preserved).
+    """
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    operator = _make_operator(sub="agent-claim-status", principal_kind=PrincipalKind.AGENT)
+
+    # Pending: not claimable.
+    pending = await _commit_pending(operator=operator, op_id="vault.kv.claim-pending")
+    assert await claim_resume(pending.id) is False
+    assert await _reload_resumed_at(pending.id) is None
+
+    # Rejected: not claimable.
+    rejected = await _commit_pending(operator=operator, op_id="vault.kv.claim-rejected")
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, rejected.id)
+        assert row is not None
+        row.status = ApprovalRequestStatus.REJECTED.value
+        await s.commit()
+    assert await claim_resume(rejected.id) is False
+
+    # Expired: not claimable.
+    expired = await _commit_pending(operator=operator, op_id="vault.kv.claim-expired")
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, expired.id)
+        assert row is not None
+        row.status = ApprovalRequestStatus.EXPIRED.value
+        await s.commit()
+    assert await claim_resume(expired.id) is False
+
+    # Approved: claimable exactly once.
+    approved = await _commit_pending(
+        operator=operator, op_id="vault.kv.claim-approved", approved=True
+    )
+    assert await claim_resume(approved.id) is True
+    assert await _reload_resumed_at(approved.id) is not None
+    assert await claim_resume(approved.id) is False
+
+
+# ---------------------------------------------------------------------------
 # pause → approve → resume → execute (integration-style)
 # ---------------------------------------------------------------------------
 
@@ -2618,12 +2785,19 @@ async def test_decide_agent_run_request_no_ops_when_claim_already_taken(
     from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
     from meho_backplane.connectors.registry import clear_registry
     from meho_backplane.operations import reset_dispatcher_caches
-    from meho_backplane.operations.approval_queue import claim_resume
 
     approval_request_id = await _park_agent_run_request(monkeypatch)
 
-    # The in-process waiter won the claim first (and executed the op).
-    assert await claim_resume(approval_request_id) is True
+    # The in-process waiter won the claim first (and executed the op). Stamp
+    # ``resumed_at`` directly rather than via ``claim_resume``: the claim now
+    # (F12 / #274) requires the ``approved`` state that ``/decide`` is about
+    # to apply, so the "already claimed" precondition is modelled straight on
+    # the latch column, exactly the state a prior winner would have left.
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, approval_request_id)
+        assert row is not None
+        row.resumed_at = datetime.now(UTC)
+        await s.commit()
 
     reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
     response = await decide_approval_request(
@@ -3096,8 +3270,15 @@ async def _commit_pending(
     connector_id: str = "vault-1.x",
     params: dict[str, Any] | None = None,
     run_id: uuid.UUID | None = None,
+    approved: bool = False,
 ) -> ApprovalRequest:
-    """Insert + commit a pending request so a fresh session can claim it."""
+    """Insert + commit a request so a fresh session can claim/resume it.
+
+    When *approved* is set the row is flipped to ``approved`` after the
+    insert: :func:`claim_resume` now requires the approved state in its
+    conditional UPDATE (security F12 / #274), and a resume only ever
+    happens on an approved row, so the claim/resume tests seed that state.
+    """
     call_params = params if params is not None else {"key": "value"}
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as s:
@@ -3112,6 +3293,14 @@ async def _commit_pending(
             run_id=run_id,
         )
         await s.commit()
+    if approved:
+        async with sessionmaker() as s:
+            row = await s.get(ApprovalRequest, request.id)
+            assert row is not None
+            row.status = ApprovalRequestStatus.APPROVED.value
+            row.decided_at = datetime.now(UTC)
+            await s.commit()
+        request.status = ApprovalRequestStatus.APPROVED.value
     return request
 
 
@@ -3135,7 +3324,7 @@ async def test_claim_resume_wins_once_then_loses() -> None:
     from meho_backplane.operations.approval_queue import claim_resume
 
     operator = _make_operator(sub="agent-claim")
-    request = await _commit_pending(operator=operator)
+    request = await _commit_pending(operator=operator, approved=True)
 
     assert await _reload_resumed_at(request.id) is None
 
@@ -3168,7 +3357,7 @@ async def test_resume_dispatch_after_approval_noops_when_claim_taken(
     )
 
     operator = _make_operator(sub="agent-noop")
-    request = await _commit_pending(operator=operator)
+    request = await _commit_pending(operator=operator, approved=True)
 
     # Simulate the winning resumer (e.g. the in-process waiter) having
     # already taken the claim.
@@ -3208,7 +3397,7 @@ async def test_resume_dispatch_after_approval_wins_free_claim_and_stamps(
     from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
 
     operator = _make_operator(sub="agent-win")
-    request = await _commit_pending(operator=operator)
+    request = await _commit_pending(operator=operator, approved=True)
     assert await _reload_resumed_at(request.id) is None
 
     dispatch_calls = 0

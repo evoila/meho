@@ -490,7 +490,8 @@ def _resume_parent_for_current_composite() -> dict[str, Any] | None:
 
 # code-quality-allow: pre-existing 118-line function (predates #3151); this
 # change adds the approval-resume sub-op clear + the resume_parent capture
-# (#3351) alongside the earlier `connector_id=connector_id` grant pass-through.
+# (#3351) and the #294 proposed_effect stamping + destructive-tier refusal,
+# alongside the earlier `connector_id=connector_id` grant pass-through.
 async def enforce_subop_policy(
     *,
     operator: Operator,
@@ -554,6 +555,10 @@ async def enforce_subop_policy(
     from meho_backplane.operations.approval_queue import (
         create_pending_request,
         publish_approval_event,
+    )
+    from meho_backplane.operations.dispatcher import (
+        _build_proposed_effect,
+        _destructive_binding_refusal,
     )
 
     started = time.monotonic()
@@ -619,6 +624,47 @@ async def enforce_subop_policy(
                 duration_ms=duration_ms,
             )
 
+        # #294 (security review S06): build a real ``proposed_effect`` via the
+        # dispatcher's shared helper so this parked sub-op row carries
+        # ``safety_level`` + the blast-radius/preview block, exactly like a
+        # dispatcher-parked write. Without it ``create_pending_request`` fell
+        # back to the identifier-only envelope, which silently disabled the
+        # tier-keyed self-approval carve-out (#3290 -- ``_check_self_approval``
+        # reads ``proposed_effect['safety_level']``) and blanked the reviewer
+        # row's severity / blast-radius (#1855 / #3197). Reusing the dispatcher's
+        # ``_build_proposed_effect`` keeps one stamping path rather than
+        # diverging; it is fail-soft (returns ``None`` only when connector /
+        # preview resolution raises, exactly as the dispatcher park path).
+        proposed_effect = await _build_proposed_effect(
+            op_id=op_id,
+            connector_id=connector_id,
+            descriptor=descriptor,
+            operator=operator,
+            target=target,
+            params=params,
+        )
+
+        # #294: a ``destructive``-tier sub-op must fail closed rather than park
+        # with only the identifier-only envelope -- the same binding the
+        # dispatcher enforces (#3197). The composite seam presents no
+        # ``preview_hash``, so this refuses at the binding check (no row written)
+        # for a destructive sub-op. Defense-in-depth: no shipped caller passes
+        # ``destructive`` today, but the seam must never write a weaker row than
+        # the dispatcher would for the same tier.
+        if descriptor.safety_level == "destructive":
+            refusal = await _destructive_binding_refusal(
+                op_id=op_id,
+                connector_id=connector_id,
+                operator=operator,
+                target=target,
+                params=params,
+                preview_hash=None,
+                proposed_effect=proposed_effect,
+                duration_ms=duration_ms,
+            )
+            if refusal is not None:
+                return refusal
+
         run_id = current_agent_run_id_var.get()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
@@ -631,6 +677,10 @@ async def enforce_subop_policy(
                 params=params,
                 params_hash=params_hash,
                 run_id=run_id,
+                # #294: stamp the resolved effect so the row carries its
+                # severity + blast-radius/preview instead of the identifier-only
+                # default the tier-keyed guards silently misread.
+                proposed_effect=proposed_effect,
                 # #3351: record the parent composite so the approval-resume
                 # re-enters it (this sub-op's key + gate params are not a
                 # dispatchable descriptor call). ``None`` outside a composite.

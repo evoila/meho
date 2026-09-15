@@ -104,6 +104,7 @@ __all__ = [
     "ApprovalError",
     "ApprovalNotFoundError",
     "ApprovalRequestAlreadyDecidedError",
+    "ApprovalRequestExpiredError",
     "NonHumanApprovalError",
     "ParamsMismatchError",
     "PreviewBindingMissingError",
@@ -164,6 +165,27 @@ class ApprovalRequestAlreadyDecidedError(ApprovalError):
         self.request_id = request_id
         self.status = status
         super().__init__(f"approval_request {request_id} is already in terminal state {status!r}")
+
+
+class ApprovalRequestExpiredError(ApprovalError):
+    """The pending request's deadline has passed; it cannot be approved.
+
+    Raised by :func:`approve_request` when a still-``pending`` row is past
+    its ``expires_at`` deadline at decision time (security F12 / #274). The
+    deadline is re-checked on the approve path rather than trusting the
+    background expiry sweep (:mod:`~meho_backplane.operations.approval_expiry`),
+    whose default cadence is 300s and whose per-tick failures are
+    swallowed to keep the loop alive: an overdue intent must be
+    un-approvable *immediately*, not only after the next successful sweep.
+    The row is left ``pending`` for the sweeper to transition to
+    ``expired`` with its decision audit row — this exception only refuses
+    the approval. The route layer maps it to 409 (conflict), the same
+    class as an already-decided row.
+    """
+
+    def __init__(self, request_id: uuid.UUID) -> None:
+        self.request_id = request_id
+        super().__init__(f"approval_request {request_id} deadline has passed")
 
 
 class ParamsMismatchError(ApprovalError):
@@ -778,7 +800,10 @@ async def reject_request(
     """
     _check_reviewer_role(operator)
 
-    request = await _load_for_tenant(session, request_id, operator.tenant_id)
+    # Row lock (security F12 / #274): a competing approve / reject / expiry
+    # on this row serialises on the lock, so the loser re-reads the
+    # committed terminal state and refuses rather than overwriting it.
+    request = await _load_for_tenant(session, request_id, operator.tenant_id, for_update=True)
 
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
@@ -828,16 +853,26 @@ async def claim_resume(
     """Win the exactly-one-resumer claim for *request_id* (#2293, G0.30).
 
     A single conditional ``UPDATE approval_request SET resumed_at = :now
-    WHERE id = :request_id AND resumed_at IS NULL`` -- the atomic claim
-    every resumer of an approved op must win before it re-dispatches
-    ``dispatch(..., _approved=True)``: the in-process agent waiter
-    (:mod:`meho_backplane.agent.approval_wait`), the shared
+    WHERE id = :request_id AND resumed_at IS NULL AND status = 'approved'``
+    -- the atomic claim every resumer of an approved op must win before it
+    re-dispatches ``dispatch(..., _approved=True)``: the in-process agent
+    waiter (:mod:`meho_backplane.agent.approval_wait`), the shared
     :func:`resume_dispatch_after_approval` operator path (REST ``/approve``
     + ``/decide``, MCP by-id approve, UI approve), and any future resumer.
     Returns ``True`` when this caller set ``resumed_at`` (one row touched)
     and therefore owns the single execution; ``False`` when another
-    resumer already claimed it (zero rows touched) and this caller must
-    no-op cleanly.
+    resumer already claimed it, or the row is not ``approved`` (zero rows
+    touched) and this caller must no-op cleanly.
+
+    The ``status = 'approved'`` predicate (security F12 / #274) makes the
+    claim require the approved state *in the same statement* as the
+    single-resumer latch, so no execution can follow a losing/rejected/
+    expired transition even under a race: a request that a competing
+    reject or expiry won cannot be claimed for execution. Every resume
+    surface already only reaches here after the decision committed
+    ``approved``, so this tightens the invariant without changing the
+    live control flow -- it fails closed if a resume is ever attempted
+    against a non-approved row.
 
     Why a conditional ``UPDATE`` rather than a Python ``if`` + edit (the
     same reasoning as :func:`~meho_backplane.operations.agent_run.extend_lease`'s
@@ -873,6 +908,7 @@ async def claim_resume(
             update(ApprovalRequest)
             .where(ApprovalRequest.id == request_id)
             .where(ApprovalRequest.resumed_at.is_(None))
+            .where(ApprovalRequest.status == ApprovalRequestStatus.APPROVED.value)
             .values(resumed_at=stamp)
             .execution_options(synchronize_session=False)
         )
@@ -1325,6 +1361,43 @@ def _deadline_passed_clause(cutoff: datetime, default_ttl: timedelta | None) -> 
     )
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Coerce a possibly-naive datetime to timezone-aware UTC.
+
+    Postgres ``timestamptz`` columns round-trip as aware datetimes, but the
+    SQLite unit-test driver returns naive ones; comparing a naive row value
+    against the aware :func:`_now` cutoff raises ``TypeError``. A naive
+    value is assumed to be UTC (the only zone the queue ever stores), the
+    same normalisation the console / checks surfaces apply on read.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _deadline_has_passed(
+    request: ApprovalRequest,
+    cutoff: datetime,
+    default_ttl: timedelta | None,
+) -> bool:
+    """Row-level mirror of :func:`_deadline_passed_clause` (security F12 / #274).
+
+    The decision-time deadline gate the approve path evaluates in Python
+    on the single locked row, using the same coalesce the background sweep
+    applies in SQL so the two agree on when a row is overdue: a concrete
+    ``expires_at`` compares directly; a legacy null-``expires_at`` row
+    (parked before #2322) is treated as if its deadline were
+    ``created_at + default_ttl`` when a *default_ttl* is supplied, and is
+    never overdue otherwise (the historical contract). Keeping this in
+    lock-step with :func:`_deadline_passed_clause` means an overdue request
+    the approve path refuses is exactly one the sweep would expire.
+    """
+    cutoff = _as_utc(cutoff)
+    if request.expires_at is not None:
+        return _as_utc(request.expires_at) <= cutoff
+    if default_ttl is None:
+        return False
+    return _as_utc(request.created_at) <= cutoff - default_ttl
+
+
 async def expire_stale_requests(
     session: AsyncSession,
     *,
@@ -1380,6 +1453,14 @@ async def expire_stale_requests(
         .where(ApprovalRequest.status == ApprovalRequestStatus.PENDING.value)
         .where(_deadline_passed_clause(cutoff, default_ttl))
         .where(ApprovalRequest.tenant_id == operator.tenant_id)
+        # Lock each swept row FOR UPDATE and skip any a concurrent approve /
+        # reject already holds (security F12 / #274): the sweep never blocks
+        # on an in-flight decision, and it never competes with one for the
+        # same row — the decision path wins that row and the sweep expires
+        # only the rows no operator is deciding, so every transition has
+        # exactly one winner. ``SKIP LOCKED`` is a no-op on SQLite; the
+        # guarantee is proven against Postgres in the integration suite.
+        .with_for_update(skip_locked=True)
     )
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
@@ -1530,16 +1611,27 @@ async def _load_pending_for_approval(
     """Load + validate a row for approval, raising on any precondition failure.
 
     Runs the full approve precondition ladder in order so callers learn
-    the most specific reason first: role gate → tenant-scoped load →
-    pending guard → self-approval guard (G11.7-T1 #1401) → params-hash
-    check (only when *params* is supplied) → destructive preview-binding
-    re-verification (#3197). Returns the validated pending row; the caller
-    flips status + writes the decision audit row.
+    the most specific reason first: role gate → tenant-scoped load (under a
+    row lock) → pending guard → deadline guard (security F12 / #274) →
+    self-approval guard (G11.7-T1 #1401) → params-hash check (only when
+    *params* is supplied) → destructive preview-binding re-verification
+    (#3197). Returns the validated pending row; the caller flips status +
+    writes the decision audit row.
+
+    The row is loaded ``FOR UPDATE`` so a competing approve / reject /
+    expiry serialises on the lock and the loser re-reads the committed
+    terminal state (the pending guard then refuses it) rather than
+    overwriting a decision. The deadline guard re-checks ``expires_at`` at
+    decision time — an overdue pending request is refused with
+    :class:`ApprovalRequestExpiredError` even while the background sweep is
+    delayed or failing, so it can never be approved into execution.
     """
     _check_reviewer_role(operator)
-    request = await _load_for_tenant(session, request_id, operator.tenant_id)
+    request = await _load_for_tenant(session, request_id, operator.tenant_id, for_update=True)
     if request.status != ApprovalRequestStatus.PENDING.value:
         raise ApprovalRequestAlreadyDecidedError(request_id, request.status)
+    if _deadline_has_passed(request, _now(), _resolve_default_ttl()):
+        raise ApprovalRequestExpiredError(request_id)
     _check_self_approval(operator, request)
     if params is not None:
         incoming_hash = compute_params_hash(params)
@@ -1570,14 +1662,26 @@ async def _load_for_tenant(
     session: AsyncSession,
     request_id: uuid.UUID,
     tenant_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> ApprovalRequest:
     """Load an :class:`ApprovalRequest` by id, enforcing tenant isolation.
 
     Returns the row if found and owned by *tenant_id*; raises
     :class:`ApprovalNotFoundError` for missing rows or cross-tenant
     access (the two cases are indistinguishable to callers).
+
+    When *for_update* is set the row is loaded ``SELECT ... FOR UPDATE``
+    (security F12 / #274): the decision paths (approve / reject) take the
+    row lock so a competing approve / reject / expiry serialises on it and
+    the loser re-reads the committed terminal state rather than
+    overwriting it, yielding exactly one winning transition. The read
+    surfaces (``get_request`` / ``read_approval_result`` / ``list_pending``)
+    leave it unset — they must not lock. On SQLite (the unit-suite driver)
+    ``FOR UPDATE`` is a silent no-op; the concurrency guarantee is proven
+    against Postgres in the integration suite.
     """
-    row = await session.get(ApprovalRequest, request_id)
+    row = await session.get(ApprovalRequest, request_id, with_for_update=for_update)
     if row is None or row.tenant_id != tenant_id:
         raise ApprovalNotFoundError(request_id)
     return row

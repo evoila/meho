@@ -138,6 +138,8 @@ class _LiveK3dTarget:
 
     def __post_init__(self) -> None:
         self.id: UUID = uuid4()
+        # Tenant-unique cache key component (#1642, security F04).
+        self.tenant_id: UUID = UUID("00000000-0000-0000-0000-00000000a0a0")
         self.preferred_impl_id: str | None = None
         self.fingerprint = type("_FP", (), {"version": "1.32.0"})()
 

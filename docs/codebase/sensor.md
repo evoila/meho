@@ -90,13 +90,17 @@ healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
    `EndpointDescriptor` via `lookup_descriptor` (tenant-scoped, then
    global). No descriptor ⇒ 422 `sensor_operation_not_found`.
 4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
-   `sensor_requires_safe_operation`. This is a create-time-only guard:
-   the dispatch-time policy gate (`operations/dispatcher.dispatch`)
-   still runs on every evaluation, but it does **not** re-validate
-   `safety_level` — a descriptor re-ingested to a less-safe level keeps
-   auto-executing on schedule (`checks/runner.py`, "Dispatch
-   identity"). The platform-level half of that trade-off — the
-   reporting/triage mitigation — is #2702: a connector re-ingest
+   `sensor_requires_safe_operation`. This is the create-time half of a
+   two-point enforcement. The dispatch-time policy gate
+   (`operations/dispatcher.dispatch`) does **not** re-consult
+   `safety_level` for the runner's synthetic `USER` operator (it parks
+   only the `destructive` / `requires_approval` tiers), so the runner
+   itself re-asserts the safe floor at dispatch (#303, `checks/runner.py`
+   `_run_evaluation`, "Dispatch identity"): a descriptor re-ingested
+   above `safe` after create records `unknown`
+   (`reason: op_not_safe_at_dispatch`) instead of auto-executing on
+   schedule. The platform-level reporting/triage mitigation is #2702: a
+   connector re-ingest
    that overwrites a pinned op's `safety_level` surfaces the diff — with
    each affected sensor's id/name/tenant_id, scoped to the ingest's
    tenant for tenant-scoped ingests — on the ingest result's
@@ -269,8 +273,9 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   `docs/codebase/connectors-net-diagnostics.md` § *Refusal is a dispatch
   error, not a reading*.
 - The safe-only guard's descriptor read and the insert are in separate
-  sessions (a TOCTOU window); acceptable because the dispatch-time policy
-  gate is the real boundary.
+  sessions (a TOCTOU window); acceptable because the runner re-asserts the
+  safe-tier floor at dispatch (#303), so a race that lands a non-safe
+  descriptor records `unknown` rather than executing.
 - **The `identity_sub` ownership guard (#2699) is create-time only.** There
   is no update route, so it covers every new row, but any `sensor` row
   persisted *before* the guard landed with a spoofed `identity_sub` keeps

@@ -50,8 +50,9 @@ meho admin keycloak bootstrap-clients [flags]
 - `--cli-client-id` — public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)
 - `--cli-offline-access` — opt the device-code CLI client into the long-lived offline-token path: assign `offline_access` as an optional client scope and bound its per-client offline-session idle timeout to the given number of seconds. Off by default. A bare `--cli-offline-access` uses 172800 seconds (48h); to pass a custom value use the equals form, e.g. `--cli-offline-access=86400`. Pairs with `meho login --offline`. Security: this enables a long-lived refresh token on the operator's disk — keep the bound tight and prefer the OS keyring for storage
 - `--dry-run` — print what would be provisioned without making any API calls
-- `--insecure-skip-tls-verify` — skip TLS verification when calling Keycloak (one-time bootstrap convenience; do not use in CI against untrusted Keycloaks)
+- `--insecure-skip-tls-verify` — escape hatch: skip TLS certificate AND hostname verification for every Keycloak request (sends the admin password + token over an unverified connection; prints a loud warning). Prefer --keycloak-ca-bundle
 - `--keycloak-base-url` — Keycloak base URL, e.g. https://keycloak.example.com
+- `--keycloak-ca-bundle` — path to a PEM CA bundle to verify the Keycloak server certificate against (keeps chain + hostname verification ON while trusting an internal realm CA). Preferred over --insecure-skip-tls-verify; the two are mutually exclusive
 - `--mcp-client-id` — public client_id for the MCP browser-flow client
 - `--mcp-redirect-uri` — redirect URI(s) for the MCP browser-flow client (default: loopback localhost + <ip>, any port/path)
 - `--mcp-resource-uri` — audience the `meho-mcp-audience` mapper emits, e.g. https://meho.example.com/mcp (no trailing slash)
@@ -909,6 +910,25 @@ Manage broadcast-detail overrides (overrides list / set / remove)
 meho broadcast
 ```
 
+### `meho broadcast announce`
+
+Publish a governed broadcast announcement
+
+```
+meho broadcast announce <activity> [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit JSON
+- `--phase` — start, update, or completion
+- `--planned-op-class` — declared operation class
+- `--run-id` — agent run UUID
+- `--scope` — announcement scope
+- `--target` — target name
+- `--targets` — target names
+- `--ttl-minutes` — claim TTL in minutes (1-1440)
+- `--work-ref` — external work reference
+
 ### `meho broadcast overrides`
 
 List, create, and delete broadcast-detail override rules
@@ -954,6 +974,39 @@ meho broadcast overrides set [flags]
 - `--op-id-pattern` — op_id glob (e.g. "vault.kv.*" or "k8s.configmap.info"); regex chars are rejected
 - `--scope-field` — scope field (one of: namespace, target_name); leave empty for an op-wide rule
 - `--scope-value` — scope value (e.g. "kube-system"); required when --scope-field is set
+
+### `meho broadcast recent`
+
+Read recent broadcast events for the operator's tenant
+
+```
+meho broadcast recent [flags]
+```
+
+- `--active-only` — exclude expired TTL claims
+- `--actor-sub` — exact delegated-agent filter
+- `--backplane` — backplane URL
+- `--cursor` — forward cursor (ISO-8601 timestamp or stream id)
+- `--json` — emit JSON
+- `--limit` — maximum events (1-1000)
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
+- `--work-ref` — exact work-reference filter
+
+### `meho broadcast watch`
+
+Tail the tenant broadcast SSE feed
+
+```
+meho broadcast watch [flags]
+```
+
+- `--backplane` — backplane URL
+- `--json` — emit each event as JSON
+- `--op-class` — exact op class filter
+- `--principal` — exact principal filter
+- `--target` — exact target filter
 
 ## `meho connector`
 
@@ -1264,7 +1317,7 @@ meho docs
 
 ### `meho docs collections`
 
-List, create, delete, and probe / toggle doc collections
+List, create, update, delete, and probe / toggle doc collections
 
 ```
 meho docs collections
@@ -1345,6 +1398,23 @@ meho docs collections probe <collection-key> [flags]
 
 - `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
 - `--json` — emit raw BackendReadiness JSON
+
+#### `meho docs collections update`
+
+Repoint / update an existing doc collection in place (tenant_admin)
+
+```
+meho docs collections update <collection-key> [flags]
+```
+
+- `--backend-ref` — replacement backend config as a JSON object (e.g. '{"endpoint":"https://corpus/v1/search"}'); requires --backend-type; '{}' clears the ref
+- `--backend-type` — replacement search-backend type (e.g. corpus-http); the backend is replaced as a whole
+- `--backplane` — backplane URL to query (defaults to the URL recorded by the most recent `meho login`)
+- `--description` — replacement free-text description
+- `--from-file` — read the update body (fields to change) from a JSON file instead of the flags
+- `--json` — emit the updated collection as JSON instead of a confirmation line
+- `--product` — replacement product list (repeatable, e.g. --product vsphere --product nsx)
+- `--when-to-use` — replacement 'pick this collection when…' blurb surfaced to agents
 
 ### `meho docs search`
 
@@ -3136,6 +3206,7 @@ meho operation call <connector_id> <op_id> [flags]
 - `--params` — operation params as inline JSON or @<file>; omitted means no params
 - `--preview-hash` — preview_hash from a prior `meho operation preview` — required for a destructive-tier op
 - `--target` — target slug to dispatch against (required for ops that read a target)
+- `--work-ref` — external change-ticket reference for this dispatch's audit and approval rows
 
 ### `meho operation groups`
 
@@ -4152,7 +4223,7 @@ meho targets probe <name-or-alias> [flags]
 
 ## `meho tenants`
 
-Operate per-tenant policy (flight-recorder capture policy)
+Operate per-tenant policy (flight-recorder capture, mail-recipient allowlist)
 
 ```
 meho tenants
@@ -4180,6 +4251,38 @@ meho tenants flight-recorder-policy set [flags]
 - `--enabled` — per-tenant capture default (F1); send true or false
 - `--json` — emit the resolved policy as JSON instead of the human summary
 - `--retention-days` — per-tenant trace retention window in days (F4; 1..365)
+
+#### `meho tenants flight-recorder-policy show`
+
+Show effective and raw flight-recorder capture policy (tenant_admin)
+
+```
+meho tenants flight-recorder-policy show [flags]
+```
+
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--json` — emit the effective and raw policy as JSON instead of the human summary
+
+### `meho tenants mail-recipient-policy`
+
+Manage the tenant's mail-recipient allowlist (tenant_admin)
+
+```
+meho tenants mail-recipient-policy
+```
+
+#### `meho tenants mail-recipient-policy set`
+
+Set or clear the tenant mail-recipient allowlist (tenant_admin)
+
+```
+meho tenants mail-recipient-policy set [flags]
+```
+
+- `--allowlist` — the tenant's permitted recipient space (comma-separated addresses/domains); empty string denies all mail for the tenant
+- `--backplane` — backplane URL (defaults to the URL recorded by the most recent `meho login`)
+- `--clear` — clear the per-tenant override back to inheriting the instance floor
+- `--json` — emit the resolved policy as JSON instead of the human summary
 
 ## `meho topology`
 

@@ -85,11 +85,19 @@ class _SeqTaskConnector:
         self._responses = list(responses)
         self._last: Any = None
         self.calls: list[tuple[str, Any]] = []
+        self.promote_not_found_calls: list[bool] = []
 
     async def _post_vmomi_json(
-        self, target: Any, path: str, *, operator: Any, json: Any = None
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Any,
+        json: Any = None,
+        promote_managed_object_not_found: bool = False,
     ) -> Any:
         self.calls.append((path, json))
+        self.promote_not_found_calls.append(promote_managed_object_not_found)
         response = self._responses.pop(0) if self._responses else self._last
         self._last = response
         if isinstance(response, Exception):
@@ -160,6 +168,27 @@ async def test_poll_loops_through_running_until_success() -> None:
     )
     assert outcome.succeeded is True
     assert len(conn.calls) == 3
+
+
+async def test_task_poll_keeps_managed_object_transport_fault_unpromoted() -> None:
+    """Destructive task polling retains its existing HTTP failure contract (#3479)."""
+    request = httpx.Request("POST", "https://vc.test.invalid/sdk")
+    transport_error = httpx.HTTPStatusError(
+        "ManagedObjectNotFound", request=request, response=httpx.Response(500, request=request)
+    )
+    conn = _SeqTaskConnector([transport_error])
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await poll_vim_task(
+            conn,  # type: ignore[arg-type]
+            object(),
+            object(),  # type: ignore[arg-type]
+            task="task-1",
+            poll_interval=0.0,
+        )
+
+    assert raised.value is transport_error
+    assert conn.promote_not_found_calls == [False]
 
 
 async def test_poll_returns_error_with_localized_message() -> None:

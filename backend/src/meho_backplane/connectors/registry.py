@@ -46,6 +46,7 @@ __all__ = [
     "clear_registry",
     "deregister_connector_v2",
     "get_connector",
+    "get_connector_v2",
     "list_connector_impls",
     "product_impl_id_round_trips",
     "register_connector",
@@ -338,6 +339,15 @@ def deregister_connector_v2(
 def get_connector(product: str) -> type[Connector] | None:
     """Look up a v1 connector class by product slug. Returns ``None`` if not found."""
     return _REGISTRY.get(product)
+
+
+def get_connector_v2(
+    product: str,
+    version: str,
+    impl_id: str,
+) -> type[Connector] | None:
+    """Look up the class registered for one exact v2 connector identity."""
+    return _REGISTRY_V2.get((product, version, impl_id))
 
 
 def all_connectors() -> dict[str, type[Connector]]:

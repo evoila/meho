@@ -558,6 +558,9 @@ async def test_registered_ops_are_visible_to_search_operations(
     assert expected <= found, f"missing from search: {expected - found}"
 
 
+#: The read subset of the typed-op table — the #2306 audited reads, the
+#: #2837 network-pool pre-flight reads, and the #3497 ``sddc.task.get`` build
+#: poll. Every op here is ``safe`` / no-approval / ``read-only``.
 _EXPECTED_OP_IDS = {
     "sddc.domain.list",
     "sddc.domain.status",
@@ -569,15 +572,27 @@ _EXPECTED_OP_IDS = {
     "sddc.network_pool.get",
     "sddc.credential.list",
     "sddc.task.list",
+    "sddc.task.get",
     "sddc.system.info",
     "sddc.vcf_service.list",
     "sddc.manager.list",
     "sddc.license.list",
 }
 
+#: The curated workload-domain write ops added in #3497. Approval-gated at
+#: the ``caution`` / ``dangerous`` tier; guarded separately in
+#: :mod:`tests.test_connectors_sddc_manager_writes`.
+_EXPECTED_WRITE_OP_IDS = {
+    "sddc.network_pool.create",
+    "sddc.host.validate",
+    "sddc.host.commission",
+    "sddc.domain.validate",
+    "sddc.domain.create",
+}
 
-def test_typed_ops_table_is_exactly_the_audited_read_set() -> None:
-    assert {op.op_id for op in SDDC_TYPED_OPS} == _EXPECTED_OP_IDS
+
+def test_typed_ops_table_is_exactly_the_read_set_plus_curated_writes() -> None:
+    assert {op.op_id for op in SDDC_TYPED_OPS} == _EXPECTED_OP_IDS | _EXPECTED_WRITE_OP_IDS
 
 
 @pytest.mark.parametrize("op_id", sorted(_EXPECTED_OP_IDS - {_CREDENTIAL_OP_ID}))
@@ -602,10 +617,22 @@ def test_each_op_parameter_schema_disallows_additional_properties(op_id: str) ->
     assert op.parameter_schema.get("additionalProperties") is False
 
 
-def test_no_write_or_mutating_op_is_registered() -> None:
-    """Read-only Task: no create/write op ships (SDDC writes are out of scope)."""
+def test_only_the_curated_write_ops_are_mutating() -> None:
+    """The read subset stays read-only; the only write ops are the #3497 WLD set.
+
+    The pre-#3497 invariant was "no write op ships"; #3497 lands the curated
+    workload-domain write path, so the guard flips: every ``read-only``-tagged
+    op is ``safe`` / no-approval, and every mutating op (``write`` tag) is one
+    of the expected #3497 write ops (registration-shape detail asserted in
+    :mod:`tests.test_connectors_sddc_manager_writes`).
+    """
     for op in SDDC_TYPED_OPS:
-        assert not any(
-            token in op.op_id for token in (".create", ".delete", ".update", ".set", ".put")
-        )
-        assert "write" not in op.tags
+        if "write" in op.tags:
+            assert op.op_id in _EXPECTED_WRITE_OP_IDS, op.op_id
+        elif op.op_id == _CREDENTIAL_OP_ID:
+            # The one read gated as a credential-read (caution + approval).
+            assert op.safety_level == "caution"
+            assert op.requires_approval is True
+        else:
+            assert op.safety_level == "safe", op.op_id
+            assert op.requires_approval is False, op.op_id

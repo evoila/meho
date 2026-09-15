@@ -35,6 +35,16 @@ image:
   # install.sh injects this via `--set image.tag=...` so the example file
   # leaves it as the schema's reject-empty trigger.
   tag: "<REPLACE: sha-<40-char-git-sha> or v0.1.0>"
+  # SECURITY BASELINE (deploy by digest + verify signature). Beyond the
+  # immutable tag, the production baseline is to pin `digest` to the exact
+  # content-addressed, scanned + cosign-signed digest the image pipeline
+  # promoted — a digest can never be re-pointed the way a tag can. When set
+  # the Deployment (and the byte-identical migration Job) render
+  # `repository@digest`; `tag` stays as the human-readable label. Verify it
+  # with `cosign verify ghcr.io/evoila/meho@<digest>` against the keyless
+  # workflow identity before rollout (ideally enforced at admission). See
+  # docs-site install/index.md § Step 7 and the repo README verify recipes.
+  # digest: "sha256:<64-hex from the release>"
   pullPolicy: IfNotPresent
 
 # RDC GHCR pulls are anonymous (public package). No pullSecret needed.
@@ -135,12 +145,18 @@ config:
   databasePoolTimeout: "30.0"
   # Reverse-proxy trust list (Issue #730, RDC Signal #3). uvicorn's
   # default `127.0.0.1` fails-closed in-cluster — the Ingress
-  # controller's pod IP is never the loopback. The rke2-infra RDC
-  # cluster runs the default pod CIDR; pin to the ingress controller's
-  # pod-CIDR slice if you've subnetted it tighter. See
-  # `docs/cross-repo/reverse-proxy-contract.md` for the per-cluster
-  # recommended values and the diagnostic walk.
-  forwardedAllowIps: "10.42.0.0/16"
+  # controller's pod IP is never the loopback.
+  # SECURITY BASELINE (narrow forwarded-header trust). Trust `X-Forwarded-*`
+  # ONLY from the ingress controller's own source address — a `/32` or the
+  # tightest slice you have subnetted the controller onto — NOT the whole
+  # pod CIDR. The wide `10.42.0.0/16` below is the lab convenience value; on
+  # a shared or multi-tenant cluster it lets any in-cluster workload forge
+  # the client address, so narrow it. Recover the controller address with
+  #   kubectl get endpoints <ingress-controller> -n <ns> \
+  #     -o jsonpath='{.subsets[].addresses[].ip}'
+  # See `docs/cross-repo/reverse-proxy-contract.md` for per-cluster values
+  # and docs-site install/tls-ingress.md § Reverse-proxy trust.
+  forwardedAllowIps: "10.42.0.0/16"   # REPLACE: narrow to the controller /32
   # Target-destination SSRF allowlist (v0.20.0, PR #2191). The default-
   # deny guard refuses to register or dial a target on non-public space,
   # but the RDC lab registers on-prem appliances on RFC 1918 ranges as a
@@ -150,6 +166,14 @@ config:
   # Leave `""` on a chassis-only lab that dials no private-range targets.
   # See `docs/codebase/target-ssrf-guard.md`.
   targetSsrfAllowlist: "10.0.0.0/8,192.168.0.0/16"
+  # SECURITY BASELINE (self-approval off). `approvalAllowSelfApproval`
+  # defaults to "false" (four-eyes enforced: the requester of a gated write
+  # may not approve it). This example leaves the secure default in place by
+  # not setting it. Set "true" ONLY as an audited, posture-wide emergency
+  # break-glass — it never reaches a dangerous/destructive op, and the
+  # endorsed single-operator answer is the agent-requester pattern instead.
+  # See docs-site guides/approvals-and-break-glass.md.
+  # approvalAllowSelfApproval: "false"
 
 postgres:
   # Cluster-internal Postgres on rke2-infra (per Goal #11 cross-repo deps).
@@ -238,6 +262,13 @@ connectors:
   enabled: []
 
 networkPolicy:
+  # SECURITY BASELINE (default-deny network isolation ON). `enabled: true`
+  # is the baseline for any multi-tenant or production install — it renders
+  # a default-deny ingress+egress policy and makes the schema REQUIRE the
+  # three egress CIDRs below (it refuses to ship a wide subnet by accident).
+  # `enabled: false` is a first-install-only convenience and a documented
+  # downgrade past bring-up. The broadcast subchart renders its own ingress
+  # NetworkPolicy + Valkey auth alongside.
   enabled: true
   # rke2-infra labels the controller namespace `ingress-nginx`.
   ingressControllerNamespace: ingress-nginx
@@ -318,6 +349,17 @@ extraVolumeMounts:
     readOnly: true
 
 extraEnv:
+  # SECURITY BASELINE (Vault per-tenant credential scope ON). The backend
+  # setting VAULT_KV_TENANT_SCOPE_PREFIX defaults to
+  # `secret/tenants/{tenant_id}/` — the cross-tenant credential guard is on
+  # out of the box, so this example does NOT override it (the secure default
+  # carries). Setting `VAULT_KV_TENANT_SCOPE_PREFIX=""` here would turn the
+  # guard OFF and is a DOCUMENTED DOWNGRADE — valid only mid-migration (while
+  # a tenant's secrets are relocated under the prefix) or on a genuinely
+  # single-tenant install. Never empty it on a multi-tenant deploy.
+  # See docs-site install/credential-backends.md.
+  # - name: VAULT_KV_TENANT_SCOPE_PREFIX
+  #   value: "secret/tenants/{tenant_id}/"   # default; shown for reference only
   - name: SSL_CERT_FILE
     # Python's `ssl` module honours `SSL_CERT_FILE` as a CA bundle
     # path (see CPython `ssl.get_default_verify_paths()`). This routes

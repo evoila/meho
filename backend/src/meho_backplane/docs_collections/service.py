@@ -42,6 +42,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.auth.corpus import corpus_endpoint_host
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.models import DocCollection as DocCollectionORM
 from meho_backplane.docs_collections.lifecycle import (
@@ -51,19 +52,31 @@ from meho_backplane.docs_collections.lifecycle import (
     apply_probe_transition,
     status_for_readiness,
 )
-from meho_backplane.docs_collections.schemas import DocCollectionCreate
+from meho_backplane.docs_collections.schemas import (
+    DocCollectionBackend,
+    DocCollectionCreate,
+    DocCollectionUpdate,
+)
 from meho_backplane.docs_search.backends import BackendReadiness, resolve_backend
+from meho_backplane.docs_search.backends.corpus_http import CORPUS_HTTP_BACKEND_TYPE
 from meho_backplane.docs_search.backends.registry import all_backends
+from meho_backplane.targets.ssrf_guard import (
+    TargetDestinationBlockedError,
+    assert_public_destination_async,
+)
 
 __all__ = [
     "DocCollectionBackendTypeError",
     "DocCollectionConflictError",
+    "DocCollectionEndpointError",
     "DocCollectionGlobalError",
+    "DocCollectionGlobalUpdateForbiddenError",
     "DocCollectionNotDisabledError",
     "create_doc_collection",
     "delete_doc_collection",
     "probe_collection",
     "set_collection_enabled",
+    "update_doc_collection",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -79,6 +92,12 @@ _CREATE_OP_ID = "meho.docs.collections.create"
 #: caught by the same ``op_id="meho.docs.*"`` who-touched filter.
 #: ``op_class="write"`` — a delete mutates the registry.
 _DELETE_OP_ID = "meho.docs.collections.delete"
+
+#: Canonical audit op_id for the in-place backend-ref update (#3601). Same
+#: ``meho.docs.*`` family as create / delete / list / the lifecycle verbs,
+#: so a repoint is caught by the same ``op_id="meho.docs.*"`` who-touched
+#: filter. ``op_class="write"`` — an update mutates the registry.
+_UPDATE_OP_ID = "meho.docs.collections.update"
 
 
 class DocCollectionBackendTypeError(Exception):
@@ -126,6 +145,114 @@ class DocCollectionConflictError(Exception):
         super().__init__(f"doc collection {collection_key!r} already exists in the {scope} scope")
 
 
+class DocCollectionEndpointError(Exception):
+    """The ``backend.ref`` corpus endpoint is not an allowed destination.
+
+    A ``corpus-http`` collection's ``backend.ref["endpoint"]`` (alias
+    ``url``) is the URL the federation transport later dials with a
+    credential attached. Left unscreened, a ``tenant_admin`` could point it
+    at ``http://``, loopback, RFC 1918 space, or ``169.254.169.254`` (cloud
+    metadata) — a credential-capture + SSRF path
+    (evoila-bosnia/meho-internal#290). The create rejects a non-``https`` or
+    non-public endpoint here so it never persists, mirroring the
+    ``create_target`` SSRF screen. Carries a structured 422 ``detail`` (a
+    stable ``kind`` + a human ``message``); it never echoes any resolved
+    address, so the error is not an internal-DNS oracle.
+    """
+
+    def __init__(self, endpoint: str, reason: str) -> None:
+        self.endpoint = endpoint
+        self.detail: dict[str, object] = {
+            "kind": "endpoint_not_allowed",
+            "endpoint": endpoint,
+            "message": (
+                f"backend.ref endpoint {endpoint!r} is not allowed: {reason}. "
+                f"The corpus endpoint must be an https:// URL that resolves to "
+                f"a public address; an on-prem corpus on private space is opted "
+                f"in via MEHO_TARGET_SSRF_ALLOWLIST."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+class DocCollectionGlobalUpdateForbiddenError(Exception):
+    """Updating a global (platform-owned) collection needs the platform seat.
+
+    A row with ``tenant_id IS NULL`` is a shared platform-catalogue entry
+    every tenant sees; repointing its backend is a platform action, not a
+    tenant one. The update route's ``tenant_admin`` floor authorises a
+    tenant to edit *its own* rows; crossing into the platform catalogue is
+    the orthogonal ``platform_admin`` capability — the same seat
+    :func:`~meho_backplane.auth.rbac.authorize_tenant_scope` requires for a
+    cross-tenant claim (#1638). A ``tenant_admin`` without ``platform_admin``
+    is refused here so a tenant admin is never silently widened to the
+    all-tenant catalogue (evoila/meho#3601). Carries a structured ``detail``
+    the fronts map to a typed refusal (REST 403 / MCP ``-32602``); it never
+    echoes a resolved address, so it is not an internal-topology oracle.
+    """
+
+    def __init__(self, collection_key: str) -> None:
+        self.collection_key = collection_key
+        self.detail: dict[str, object] = {
+            "error": "global_collection_update_forbidden",
+            "collection_key": collection_key,
+            "message": (
+                f"doc collection {collection_key!r} is a global "
+                f"(platform-owned) row; updating it requires the "
+                f"platform_admin capability, not tenant_admin alone. A "
+                f"tenant-owned collection is editable by its tenant_admin."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+def _validate_backend_type(backend_type: str) -> None:
+    """Reject a ``backend.type`` that is not a registered search backend.
+
+    Validates against
+    :func:`~meho_backplane.docs_search.backends.registry.all_backends` so an
+    unroutable type is a structured 422 (:class:`DocCollectionBackendTypeError`)
+    at write time, not a deferred probe-time 503. ``all_backends`` is
+    populated at import time (the adapters self-register), so the set is
+    non-empty in every real deploy; an empty registry would be a boot-order
+    bug, and validating against an empty set would reject every write, so —
+    matching ``create_target``'s empty-registry skip — enforcement only fires
+    when the registry is populated. Shared by the create and update paths so
+    both apply the identical registry gate.
+    """
+    valid_types = sorted(all_backends())
+    if valid_types and backend_type not in valid_types:
+        raise DocCollectionBackendTypeError(backend_type, valid_types)
+
+
+async def _screen_backend_endpoint(backend: DocCollectionBackend) -> None:
+    """Reject a ``corpus-http`` backend whose endpoint is non-public / non-https.
+
+    Extracts the corpus endpoint from ``backend.ref`` (the ``endpoint`` key,
+    alias ``url``) and screens it with the shared target SSRF guard —
+    ``https`` scheme + a public, allowlist-aware host — the same
+    :func:`~meho_backplane.targets.ssrf_guard.assert_public_destination_async`
+    the connector target dial uses. Absent endpoint (the legacy global
+    ``settings.corpus_url`` deploy, or a deliberate ``ref={}`` repoint that
+    falls back to it) is nothing to screen here; that global is
+    deployment-owned and screened at dial time. Only ``corpus-http`` names a
+    dialed URL, so the screen is scoped to that backend type. Shared by the
+    create and update paths so a repoint is screened identically to a create.
+    """
+    if backend.type != CORPUS_HTTP_BACKEND_TYPE:
+        return
+    ref = backend.ref
+    raw = ref.get("endpoint") or ref.get("url")
+    endpoint = raw.strip() if isinstance(raw, str) else None
+    if not endpoint:
+        return
+    try:
+        host = corpus_endpoint_host(endpoint)
+        await assert_public_destination_async(host)
+    except TargetDestinationBlockedError as exc:
+        raise DocCollectionEndpointError(endpoint, str(exc)) from exc
+
+
 async def create_doc_collection(
     session: AsyncSession,
     operator: Operator,
@@ -164,6 +291,9 @@ async def create_doc_collection(
             the front maps it to 422.
         DocCollectionConflictError: a collection with this ``collection_key``
             already exists in the operator's scope; the front maps it to 409.
+        DocCollectionEndpointError: the ``corpus-http`` ``backend.ref``
+            endpoint is not an ``https`` public destination; the front maps
+            it to 422.
     """
     # Bind the canonical op_id up-front so a persisted audit row is
     # filterable by ``op_id="meho.docs.*"`` even if the insert raises
@@ -175,15 +305,14 @@ async def create_doc_collection(
     )
 
     # Validate ``backend.type`` against the registry BEFORE the insert so
-    # the operator sees the registered set at create time. ``all_backends``
-    # is populated at import time (the adapters self-register), so the set
-    # is non-empty in every real deploy; an empty registry would be a
-    # boot-order bug, and validating against an empty set would reject
-    # every create, so — matching ``create_target``'s empty-registry skip —
-    # we only enforce when the registry is populated.
-    valid_types = sorted(all_backends())
-    if valid_types and body.backend.type not in valid_types:
-        raise DocCollectionBackendTypeError(body.backend.type, valid_types)
+    # the operator sees the registered set at create time (see
+    # :func:`_validate_backend_type`).
+    _validate_backend_type(body.backend.type)
+
+    # Screen the corpus endpoint BEFORE the insert so a non-https / non-public
+    # destination is rejected at create (a structured 422), never persisted
+    # and never dialed with a credential (#290).
+    await _screen_backend_endpoint(body.backend)
 
     now = datetime.now(UTC)
     row = DocCollectionORM(
@@ -220,6 +349,118 @@ async def create_doc_collection(
         status=row.status,
     )
     return row
+
+
+async def _apply_backend_repoint(
+    collection: DocCollectionORM,
+    backend: DocCollectionBackend,
+) -> bool:
+    """Validate + screen a replacement backend, writing it when it changed.
+
+    Runs the SAME ``backend.type`` registry check and ``https`` / SSRF
+    endpoint screen the create path runs — both raise *before* the row is
+    mutated (:class:`DocCollectionBackendTypeError` / :class:`DocCollectionEndpointError`)
+    so a rejected repoint leaves the row untouched — then writes the new
+    binding only when it differs from the stored one. Returns whether the
+    backend actually changed; the caller resets readiness on a change.
+    """
+    _validate_backend_type(backend.type)
+    await _screen_backend_endpoint(backend)
+    new_backend: dict[str, object] = {"type": backend.type, "ref": dict(backend.ref)}
+    if new_backend == collection.backend:
+        return False
+    collection.backend = new_backend
+    return True
+
+
+def _reset_readiness_after_repoint(collection: DocCollectionORM) -> None:
+    """Clear the stale probe-written liveness and re-provision (unless disabled).
+
+    The cached ``readiness`` / ``doc_count`` / ``last_ingested_at`` described
+    the OLD endpoint, so they are always stale after a repoint. A
+    non-``disabled`` collection returns to ``provisioning`` so a follow-up
+    probe re-validates against the new endpoint (mirroring create's status
+    semantics); an operator's explicit ``disabled`` is preserved — a repoint
+    never silently re-enables it, the same "operator intent outranks a
+    liveness signal" rule the probe machine enforces.
+    """
+    collection.readiness = None
+    collection.doc_count = None
+    collection.last_ingested_at = None
+    if collection.status != STATUS_DISABLED:
+        collection.status = STATUS_PROVISIONING
+
+
+async def update_doc_collection(
+    session: AsyncSession,
+    operator: Operator,
+    collection: DocCollectionORM,
+    body: DocCollectionUpdate,
+) -> DocCollectionORM:
+    """Update the mutable fields of an existing doc collection in place (#3601).
+
+    The in-place repoint half of the registry — the counterpart to
+    :func:`create_doc_collection` for a row that already exists. A migration-
+    seeded collection carrying its own ``backend.ref["endpoint"]`` keeps
+    dialing the old endpoint when a deployment moves its corpus (create 409s
+    on the key, delete refuses a global row, and repointing the global
+    ``CORPUS_URL`` env does not touch a row that carries its own ref), so
+    ``search_docs`` / ``ask_docs`` fail closed. This writes the new binding.
+
+    Only fields present in *body* are changed (``model_dump(exclude_unset=True)``
+    — the ``update_target`` PATCH precedent); ``collection_key`` / ``tenant_id``
+    / ``id`` / timestamps / probe-written liveness are never client-set.
+    Editing a **global** (``tenant_id IS NULL``) row requires
+    ``operator.platform_admin`` (:class:`DocCollectionGlobalUpdateForbiddenError`
+    → 403 / ``-32602``) — the shared-catalogue platform seat — checked before
+    any field validation. A supplied ``backend`` runs the create path's
+    registry + endpoint screen (:func:`_apply_backend_repoint`) and, on an
+    actual change, resets readiness (:func:`_reset_readiness_after_repoint`);
+    a metadata-only change leaves ``status`` + liveness untouched. The caller
+    owns the transaction (the route's ``session.begin()``); this flushes but
+    does not commit, so a downstream failure rolls the update back.
+    """
+    # Bind the canonical op_id up-front so the persisted audit row is
+    # filterable by ``op_id="meho.docs.*"`` even when the guard refuses below
+    # (create / delete bind identically). ``op_class="write"`` — an update
+    # mutates the registry.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_UPDATE_OP_ID,
+        audit_op_class="write",
+    )
+
+    # Platform-seat gate for the shared catalogue, checked first: a
+    # tenant_admin editing a global row they are not entitled to must be told
+    # *that*, before any field-level validation runs.
+    if collection.tenant_id is None and not operator.platform_admin:
+        raise DocCollectionGlobalUpdateForbiddenError(collection.collection_key)
+
+    updates = body.model_dump(exclude_unset=True)
+
+    backend_changed = False
+    if "backend" in updates and body.backend is not None:
+        backend_changed = await _apply_backend_repoint(collection, body.backend)
+    if "description" in updates:
+        collection.description = body.description
+    if "when_to_use" in updates:
+        collection.when_to_use = body.when_to_use
+    if "products" in updates and body.products is not None:
+        collection.products = list(body.products)
+    if backend_changed:
+        _reset_readiness_after_repoint(collection)
+
+    collection.updated_at = datetime.now(UTC)
+    await session.flush()
+
+    _log.info(
+        "doc_collection_updated",
+        collection_key=collection.collection_key,
+        tenant_scope="tenant" if collection.tenant_id is not None else "global",
+        fields=sorted(updates.keys()),
+        backend_changed=backend_changed,
+        status=collection.status,
+    )
+    return collection
 
 
 class DocCollectionGlobalError(Exception):

@@ -19,12 +19,19 @@ THE audit rule: the dispatcher persists the **raw** handler result on the
 audit row (``dispatcher.py`` ``raw_payload=redaction.raw``); connector-boundary
 redaction never scrubs ``raw_payload``. So the only reliable control is that
 this handler **never returns the token** -- old or new, not the value, not in
-any field. The OLD token is read on-disk server-side inside the sudo script (a
-shell ``$(cat ...)``), so its value never enters Python. The NEW token is
-minted server-side (:func:`secrets.token_hex`), written to **Vault** under the
-operator's identity, and only a **pointer** to the Vault location plus
-non-secret metadata (``rotated`` / ``node`` / ``exit_status``) is returned. The
-op is pinned in
+any field. Neither value ever reaches the world-readable ``/proc/<pid>/cmdline``
+of the ``rke2`` child either (S12, meho-internal#300): the OLD token is read
+on-disk server-side inside the sudo script (a shell ``$(cat ...)``, so its
+value never enters Python) and handed to ``rke2`` through the ``RKE2_TOKEN``
+environment variable -- the upstream ``EnvVar`` backing for ``--token`` -- so
+it lands in owner-readable ``/proc/<pid>/environ`` (``0400``), not argv. The NEW
+token is **minted on the node by ``rke2 token rotate`` itself**: ``--new-token``
+has no ``EnvVar`` backing, so it is omitted (passing a value there would put it
+straight back on argv), and rke2 mints the replacement in-process and persists
+it to the ``0600`` server token file. The handler reads that file back over the
+same governed SSH channel and writes the value to **Vault** under the operator's
+identity; only a **pointer** to the Vault location plus non-secret metadata
+(``rotated`` / ``node`` / ``exit_status``) is returned. The op is pinned in
 :data:`~meho_backplane.broadcast.events._CREDENTIAL_MINT_OPS` and registers a
 non-secret park-time preview builder (``ops_write_preview``). A read-only
 fingerprint gate refuses a non-server / inactive / below-CVE-floor node
@@ -72,7 +79,6 @@ import asyncio
 import base64
 import posixpath
 import re
-import secrets
 import shlex
 from typing import TYPE_CHECKING, Any
 
@@ -149,6 +155,11 @@ RKE2_TOKEN_PATH: str = "/var/lib/rancher/rke2/server/token"
 #: Absolute path to the ``rke2`` binary the installer drops. Absolute so the
 #: sudo script never depends on root's ``PATH``.
 _RKE2_BIN: str = "/var/lib/rancher/rke2/bin/rke2"
+
+#: The stdout marker the rotate script prints the read-back token behind. The
+#: handler parses this one line and writes the value straight to Vault -- the
+#: token never enters a log or the returned dict.
+_ROTATED_TOKEN_MARKER: str = "MEHO_ROTATED_TOKEN"
 
 #: The systemd unit an RKE2 **server** node runs. Its presence in
 #: ``systemctl list-unit-files`` is the role signal; ``is-active`` on it is
@@ -396,13 +407,28 @@ async def _stash_token_in_vault(
     }
 
 
-def _build_rotate_script(new_token: str) -> str:
-    """Build the sudo script: read OLD on-disk as root, run ``rke2 token rotate``.
+def _build_rotate_script() -> str:
+    """Build the sudo script that rotates the server token off the rke2 argv.
 
-    The OLD token is a shell variable (``$(cat ...)``) -- it never enters
-    Python. The NEW token is the only interpolated value (``shlex.quote``'d),
-    streamed on stdin via the safe-sudo primitive, never in argv / history /
-    log.
+    Neither token value reaches the world-readable ``/proc/<pid>/cmdline`` of
+    the ``rke2`` process (S12, meho-internal#300):
+
+    * The OLD token is read on-disk as root (``$(cat ...)`` -- it never enters
+      Python) and handed to the child via the ``RKE2_TOKEN`` environment
+      variable, the upstream ``EnvVar`` backing for ``--token`` (k3s
+      ``pkg/cli/cmds/token.go``). It therefore lands in ``/proc/<pid>/environ``
+      (owner-readable ``0400``), not argv.
+    * ``--new-token`` is omitted. It has **no** ``EnvVar`` backing, so pushing a
+      node-minted value through it would put that value straight back on argv.
+      Omitted, ``rke2 token rotate`` mints the replacement in-process
+      (``util.Random``, k3s ``pkg/server/handlers/token.go``) and persists it to
+      the ``0600`` server token file before it returns.
+
+    The script then reads the rotated token back from that file and prints it on
+    stdout behind :data:`_ROTATED_TOKEN_MARKER` for the handler to stash in
+    Vault; rke2's own chatter is redirected to stderr so stdout carries only
+    that one line. ``set -e`` aborts (nothing emitted) if the rotate exits
+    non-zero or the on-disk token did not actually change.
     """
     return (
         "set -euo pipefail\n"
@@ -410,9 +436,30 @@ def _build_rotate_script(new_token: str) -> str:
         f"TOKENFILE={shlex.quote(RKE2_TOKEN_PATH)}\n"
         'if [ ! -r "$TOKENFILE" ]; then echo "old-token-unreadable" >&2; exit 3; fi\n'
         'OLD=$(cat "$TOKENFILE")\n'
-        f'{shlex.quote(_RKE2_BIN)} token rotate --token "$OLD" '
-        f"--new-token {shlex.quote(new_token)}\n"
+        'export RKE2_TOKEN="$OLD"\n'
+        f"{shlex.quote(_RKE2_BIN)} token rotate 1>&2\n"
+        'NEW=$(cat "$TOKENFILE")\n'
+        'if [ -z "$NEW" ] || [ "$NEW" = "$OLD" ]; then '
+        'echo "new-token-not-observed" >&2; exit 4; fi\n'
+        f"printf '{_ROTATED_TOKEN_MARKER}=%s\\n' \"$NEW\"\n"
     )
+
+
+def _parse_rotated_token(stdout: str) -> str | None:
+    """Return the rotated token from the script's read-back line, else ``None``.
+
+    The rotate script prints exactly one ``MEHO_ROTATED_TOKEN=<value>`` line on
+    stdout (rke2's own output rides stderr). The value is a live cluster
+    credential -- the sole caller writes it straight to Vault and never logs or
+    returns it.
+    """
+    prefix = f"{_ROTATED_TOKEN_MARKER}="
+    for line in stdout.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+            if value:
+                return value
+    return None
 
 
 async def rke2_token_rotate(
@@ -426,10 +473,11 @@ async def rke2_token_rotate(
     Runs only on the ``_approved=True`` resume path. Flow: fail closed
     without an operator (no Vault sink) -> resolve the sudo credential ->
     read-only fingerprint gate (server role + active service + safe version)
-    -> mint a new token -> one sudo script that reads the OLD token on-disk
-    and runs ``rke2 token rotate`` -> stash the NEW token in Vault -> return
-    a pointer + non-secret metadata. The token value (old or new) never
-    appears in the returned dict.
+    -> one sudo script that hands the OLD token to ``rke2`` via ``RKE2_TOKEN``
+    and runs ``rke2 token rotate`` (which mints the NEW token node-side, off
+    argv) -> read the new token back over the same governed SSH channel ->
+    stash it in Vault -> return a pointer + non-secret metadata. The token
+    value (old or new) never appears in the returned dict.
     """
     del params  # schema declares no params; the target addresses the node
 
@@ -453,14 +501,15 @@ async def rke2_token_rotate(
     if gate_error is not None:
         return gate_error
 
-    # Mint + rotate. The OLD token is read on-disk as root inside the script;
-    # the NEW token is minted here and only ever leaves as a Vault pointer.
-    new_token = secrets.token_hex(32)
+    # Rotate. The OLD token is read on-disk as root inside the script and handed
+    # to rke2 via the RKE2_TOKEN env; the NEW token is minted node-side by rke2
+    # itself and read back over this same governed channel -- neither value is
+    # interpolated by the backplane or placed on any process argv.
     node = _node_label(target)
     result = await run_remote_bash_with_sudo(
         connector,
         target,
-        _build_rotate_script(new_token),
+        _build_rotate_script(),
         operator=operator,
         sudo_password=sudo_password,
     )
@@ -474,6 +523,19 @@ async def rke2_token_rotate(
             "exit_status": exit_status,
             "node": node,
             "gate": "rotate",
+        }
+
+    new_token = _parse_rotated_token(getattr(result, "stdout", "") or "")
+    if new_token is None:
+        # The rotate exited 0 but the read-back line was absent. The cluster
+        # token did change on-disk, so report honestly -- ``rotated: True`` with
+        # no Vault pointer and no token value (mirrors the Vault-failure shape).
+        return {
+            "rotated": True,
+            "node": node,
+            "exit_status": exit_status,
+            "token_ref": None,
+            "readback_error": "rotated-token-not-read-back",
         }
 
     return await _stash_token_in_vault(
@@ -877,6 +939,7 @@ _TOKEN_ROTATE_RESPONSE_SCHEMA: dict[str, Any] = {
         "error": {"type": "string"},
         "gate": {"type": "string"},
         "vault_error": {"type": "string"},
+        "readback_error": {"type": "string"},
         "version": {"type": ["string", "null"]},
     },
     "required": ["rotated"],
@@ -891,12 +954,13 @@ _RKE2_TOKEN_ROTATE_OP = Rke2Op(
     description=(
         "Runs ``rke2 token rotate`` on an RKE2 server node over SSH to "
         "replace the cluster's server join token. Takes NO parameters "
-        "and NO token value: the new token is minted server-side, the "
-        "OLD token is read on-disk as root inside the rotate script, and "
-        "the new token is written to Vault -- only a pointer to the Vault "
-        "location plus non-secret metadata (rotated / node / exit_status) "
-        "is returned, so no token value ever reaches the result, the "
-        "audit row, or the broadcast feed. A read-only fingerprint gate "
+        "and NO token value: the OLD token is read on-disk as root inside "
+        "the rotate script and handed to rke2 via the RKE2_TOKEN env, the "
+        "new token is minted node-side by rke2 itself and read back over "
+        "the SSH channel, and it is written to Vault -- only a pointer to "
+        "the Vault location plus non-secret metadata (rotated / node / "
+        "exit_status) is returned, so no token value ever reaches the "
+        "result, the audit row, or the broadcast feed. A read-only fingerprint gate "
         "refuses a non-server node, an inactive rke2-server, or a "
         "below-floor / known-bad (v1.27.10+rke2r1) RKE2 version before "
         "any mutation, because a botched rotate wedges every future node "
@@ -922,7 +986,9 @@ _RKE2_TOKEN_ROTATE_OP = Rke2Op(
             "location the new token was stashed at -- the token VALUE is "
             "never returned. On a gate refusal or failure: {rotated: "
             "false, error, gate}. If the rotate succeeded but the Vault "
-            "stash failed: {rotated: true, token_ref: null, vault_error}."
+            "stash failed: {rotated: true, token_ref: null, vault_error}. "
+            "If it succeeded but the rotated token could not be read back: "
+            "{rotated: true, token_ref: null, readback_error}."
         ),
     },
 )

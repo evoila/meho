@@ -99,6 +99,13 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
         # collapse to aggregate-only, on top of the op's requires_approval
         # gate and the connector-boundary secret scrub.
         "sddc.credential.list",
+        # The governed guest-cluster kubeconfig read (#3496). Reads a Secret's
+        # data value on a k8s / vSphere-Supervisor target and stages it to a
+        # tenant-scoped Vault secret_ref (returning only the ref, never the
+        # value). Classified credential_read — same posture as the SDDC read —
+        # so audit + broadcast collapse to aggregate-only on top of its
+        # requires_approval gate; the result is value-free by construction.
+        "k8s.secret.read_to_ref",
     }
 )
 
@@ -250,6 +257,37 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only; the park-time bespoke preview echoes only program
         # identity + argument byte size + env-var NAMES, never any value.
         "linux.script.run",
+        # #3497 — the governed SDDC Manager host-commission write pair. Both
+        # take the same ``{"spec": [<HostCommissionSpec>, ...]}`` params, and
+        # each spec item declares a ``password`` (the ESXi host root password
+        # POSTed to /v1/hosts/validations resp. /v1/hosts). ``password`` is a
+        # secret-*named* key the runtime ``scrub_broadcast_params`` key-scrub
+        # would catch, but the classifier-coverage lint (meho-internal #151)
+        # requires every op *declaring* a secret-shaped param to be statically
+        # pinned to a ``credential_*`` class so its broadcast collapses to
+        # aggregate-only, not merely field-redacted. ``.validate`` is not even
+        # a ``.write`` suffix (it would fall through to ``other``) and
+        # ``.commission`` would classify plain ``write`` — either would ship
+        # the host passwords on the feed. Pinning both collapses the params
+        # dict to aggregate-only. The sibling domain writes
+        # (``sddc.domain.validate`` / ``sddc.domain.create``) carry their
+        # passwords inside an open-``additionalProperties`` DomainCreationSpec
+        # (no *declared* secret prop), so the lint does not flag them; the
+        # runtime scrub catches their nested ``*password*`` keys and collapses
+        # the broadcast, exactly the two-layer split that pins ``vault.kv.put``
+        # statically while leaving its generic ``data`` container to the scrub.
+        "sddc.host.validate",
+        "sddc.host.commission",
+        # #3495 — the SUBSCRIBED content-library create composite. Its
+        # ``password`` param (BASIC-auth to the publisher) IS a secret-named
+        # key the scrub would catch, but ``username`` / ``ssl_thumbprint`` are
+        # not, and pinning the whole op collapses its params to aggregate-only
+        # rather than relying on per-key scrubbing — matching the GOSC-create /
+        # guest-ops precedent. The park-time bespoke preview echoes only the
+        # non-secret identity fields (name / subscription URL / datastore /
+        # auth method / sync mode). The sibling reads (status / items.list) and
+        # the sync write carry no credential and are NOT pinned.
+        "vmware.composite.content_library.subscribed.create",
     }
 )
 

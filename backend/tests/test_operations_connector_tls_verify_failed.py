@@ -287,6 +287,48 @@ class _ConnRefusedConnector(_TlsVerifyFailConnector):
         raise httpx.ConnectError("[Errno 111] Connection refused")
 
 
+class _TransportFailConnector(_TlsVerifyFailConnector):
+    """A connector that reaches the new non-ConnectError transport arms."""
+
+    impl_id = "vcfops-rest-transport"
+    transport_error: type[httpx.TransportError] = httpx.NetworkError
+
+    async def _request_json(
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        request = httpx.Request("GET", "https://upstream.test/version")
+        request.extensions["timeout"] = {
+            "connect": 5.0,
+            "read": 30.0,
+            "write": 30.0,
+            "pool": 5.0,
+        }
+        raise self.transport_error("transport fault", request=request)
+
+
+class _ReadTimeoutConnector(_TransportFailConnector):
+    impl_id = "vcfops-rest-read-timeout"
+    transport_error = httpx.ReadTimeout
+
+
+class _ConnectTimeoutConnector(_TransportFailConnector):
+    impl_id = "vcfops-rest-connect-timeout"
+    transport_error = httpx.ConnectTimeout
+
+
+class _NetworkErrorConnector(_TransportFailConnector):
+    impl_id = "vcfops-rest-network-error"
+    transport_error = httpx.NetworkError
+
+
 async def _insert_ingested_descriptor(
     *,
     session: AsyncSession,
@@ -466,12 +508,12 @@ async def test_dispatch_tls_verify_failure_to_connector_tls_verify_failed(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_non_ssl_connect_error_falls_through_to_connector_error(
+async def test_dispatch_non_ssl_connect_error_preserves_connector_error(
     stub_embedding_service: AsyncMock,
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A non-SSL ``ConnectError`` (connection refused) stays ``connector_error``.
+    """A non-SSL ConnectError retains its established generic envelope.
 
     Narrowing boundary (#1782 AC): only TLS-verify failures are siphoned
     into ``connector_tls_verify_failed``; DNS / refused / timeout
@@ -511,6 +553,70 @@ async def test_dispatch_non_ssl_connect_error_falls_through_to_connector_error(
     assert "host" not in result.extras
     assert "remediation_secure" not in result.extras
 
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connector_cls", "impl_id", "exception_class", "phase", "configured_timeout"),
+    [
+        (_ReadTimeoutConnector, "vcfops-rest-read-timeout", "ReadTimeout", "read", 30.0),
+        (_ConnectTimeoutConnector, "vcfops-rest-connect-timeout", "ConnectTimeout", "connect", 5.0),
+        (_NetworkErrorConnector, "vcfops-rest-network-error", "NetworkError", "transport", None),
+    ],
+)
+async def test_dispatch_transport_fault_returns_timeout_envelope_and_audits(
+    connector_cls: type[_TransportFailConnector],
+    impl_id: str,
+    exception_class: str,
+    phase: str,
+    configured_timeout: float | None,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Cover routing plus the established audit and broadcast error contract."""
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id=impl_id,
+        cls=connector_cls,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id=impl_id,
+        op_id="GET:/version",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=f"{impl_id}-9",
+        op_id="GET:/version",
+        target=_FakeTarget(name="vrli-lab", host="vrli.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error == f"connector_timeout: {exception_class}"
+    assert result.extras["error_code"] == "connector_timeout"
+    assert result.extras["exception_class"] == exception_class
+    assert result.extras["phase"] == phase
+    assert result.extras["configured_timeout"] == configured_timeout
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "GET:/version")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
+    assert rows[0].payload["error"]["error_code"] == "connector_timeout"
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"
 

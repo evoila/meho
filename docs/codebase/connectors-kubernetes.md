@@ -201,6 +201,68 @@ credential-agnostic and uses whatever SSO pair is staged. Sibling
 issue #2902 (operator-CLI login-token longevity) is a different surface
 (Keycloak OIDC) and shares no implementation with this WCP token dance.
 
+## Passive-only kubeconfig schema (F03, #265)
+
+A static kubeconfig is read from a per-target credential secret (Vault
+KV-v2 / GSM). Target creation is tenant-admin gated, so the kubeconfig is
+**tenant-controlled** — but a tenant's right to manage its own credential
+must not translate into code execution or arbitrary file reads inside the
+shared backplane process. `kubernetes_asyncio`'s kubeconfig loader
+honours the full client-side feature set, three parts of which reach an
+out-of-band sink the moment the document is loaded:
+
+- an **`exec` credential provider** spawns a *subprocess* with the
+  configured command/args (`KubeConfigLoader.load_from_exec_plugin`);
+- a legacy **`auth-provider`** block (`gcp` / `oidc` / vendor plugins)
+  performs a *network token fetch/refresh* (`load_gcp_token` /
+  `_load_oid_token`);
+- a **file-path reference** — cluster `certificate-authority`, user
+  `client-certificate` / `client-key` / `tokenFile` — makes the loader
+  *read that local path* off the backplane's own filesystem (`FileOrData`
+  falls back to the `<key>` file whenever the inline `<key>-data` sibling
+  is absent).
+
+`connectors/kubernetes/kubeconfig_schema.py` (`enforce_passive_kubeconfig`)
+enforces a minimal server-side schema **before** the parsed mapping can
+reach that loader. It:
+
+- **rejects** the three sink classes above with a specific, fail-closed
+  `UnsupportedKubeconfigError` (a `ValueError` subclass, so it flows
+  through the loaders' documented `ValueError` contract and the
+  dispatcher's catch-all → `connector_error`). The message names only the
+  offending section/field — never a credential value, endpoint, or
+  certificate — so it is safe to log (preserves the no-leak canary
+  discipline);
+- **explicitly validates** the cluster `server` endpoint (must be an
+  http(s) URL with a host), `proxy-url` (http/https/socks5 URL with a
+  host), `insecure-skip-tls-verify` (boolean), `tls-server-name`, and the
+  inline `certificate-authority-data`;
+- **rebuilds a fresh mapping** from only the accepted fields — the
+  untrusted input mapping is never returned or handed to the library.
+  Only inline authentication survives: a bearer `token`, HTTP-basic
+  `username`/`password`, and inline `client-certificate-data` /
+  `client-key-data` / cluster `certificate-authority-data`.
+
+Enforcement sits at the trust boundary — the Vault/GSM read — in **both**
+production loaders (`load_kubernetes_credential`, the default, and the
+legacy-injectable `load_kubeconfig_from_vault`), immediately after
+`parse_kubeconfig_yaml`. `parse_kubeconfig_yaml` itself stays a pure
+parse; the injectable `kubeconfig_loader=` / `credential_loader=` test
+seams build dicts directly and are trusted (never a tenant secret).
+
+The **WCP SSO path is unaffected**: a Supervisor secret carries
+`username`/`password`, resolves to a `WcpSsoCredential`, and never
+constructs a kubeconfig dict — so `enforce_passive_kubeconfig` is not on
+that path.
+
+No executable-provider facility is retained: `exec` is rejected
+unconditionally, with no parameter or elevation re-enabling it. A
+deployment that genuinely needs exec-plugin credentials would run that
+behind a separate platform-admin-managed, isolated facility (out of scope
+here). This mirrors the Kubernetes upstream warning that untrusted
+kubeconfig can cause code execution or file exposure
+([kubeconfig guidance](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/)).
+
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
 The `Connector.fingerprint(target, operator=None)` ABC signature
@@ -264,6 +326,7 @@ real operator through the same loader.
 | `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
+| `k8s.secret.read_to_ref` | **caution** (`requires_approval=True`) | `CoreV1Api.read_namespaced_secret()` -- reads one Secret's `data[data_key]` (default `value`), decodes it, and stages the value to a **tenant-scoped Vault `secret_ref`** via `vault.kv.put`; returns **only** the ref + provenance (SHA-256 / byte length), never the value. Classified `credential_read` (audit + broadcast aggregate-only). The governed VKS guest-kubeconfig read (`ops_secret_read.py`, #3496). |
 
 ### `k8s.exec` -- websocket command-and-capture (`ops_exec.py`)
 
@@ -404,6 +467,75 @@ auto-populated into the approval row at queue time today; the dry-run is
 expressible + returned by the op, and queue-time auto-population is a
 follow-up that needs a dispatcher hook.
 
+### Governed guest-cluster kubeconfig read -- `k8s.secret.read_to_ref` (#3496)
+
+The `ops_secret_read.py` op closes the one gap the write surface left:
+there was `k8s.secret.create` but **no data-returning Secret read**
+(Secret `data` is clamped on broadcast). Extracting a credential from a
+Secret therefore meant an out-of-band `kubectl get secret … -o
+jsonpath`, escaping audit / policy / approval. The motivating case is
+registering a **VKS guest cluster** as a second `product=k8s` target: the
+shipped WCP SSO auth mode (#2905) reaches only the Supervisor, so a guest
+cluster is registered from its Cluster-API-generated
+`<cluster>-kubeconfig` Secret (the admin client-cert kubeconfig, stored
+under the `value` data key) in the Supervisor namespace.
+
+**No-transit shape (not the issue's `read_data` sketch).** The op does
+**not** return the decoded kubeconfig to the caller. Borrowing the secret
+broker's core invariant (`connectors/secret`, #1577), it reads the value
+inside the backplane and writes it straight to a Vault `secret_ref`,
+returning only `{secret_ref, field, registered_as, name, namespace,
+data_key, value_sha256, length}`. So the kubeconfig never reaches the
+`call_operation` result / the agent transcript at all -- not merely the
+audit row. This is a deliberate hardening of #3496's `read_data` sketch
+(which returned the value to the approval-gated caller); the round-trip
+the issue asks for is served directly, because the op **is** the staging
+step.
+
+**Round-trip.** The destination path is derived with
+`tenant_secret_ref(operator.tenant_id, register_as)`
+(`connectors/vault/tenant_paths.py`) -- the same helper `POST
+/api/v1/targets` uses to default an omitted `secret_ref` (#1723) -- and
+the value is written under the `field` name the kubeconfig loader reads
+(`kubeconfig` by default, see `load_kubeconfig_from_vault`). So the demo
+flow is: `call_operation k8s.secret.read_to_ref … register_as=<guest>`
+-> `meho targets create --name <guest> --product k8s --host <guest-VIP>
+--port 6443` (secret_ref omitted; it defaults to the returned path) ->
+`k8s.node.list` against the guest works.
+
+**Governance (mirrors `sddc.credential.list`).** Three layers: (1)
+`safety_level="caution"` + `requires_approval=True` (the policy gate
+parks an unapproved dispatch); (2) the op-id is pinned in
+`broadcast.events._CREDENTIAL_READ_OPS`, so `classify_op` returns
+`credential_read` and audit + broadcast rows collapse to aggregate-only;
+(3) the result is value-free **by construction** (only the ref + a
+SHA-256 + byte length), so the connector-boundary `credential_read`
+response scrub (#2467) and the defensive Tier-1 engine have no secret to
+strip.
+
+**Tenant scope, not duplicated.** The write rides the `vault.kv.put`
+handler, which runs `enforce_tenant_scope`
+(`connectors/vault/tenant_scope.py`) under the operator's own Vault
+identity before any round-trip -- the same default-on guard the
+`api/v1/targets.py` write-time `secret_ref` gate mirrors, enforced here
+without re-implementing it (that gate raises `HTTPException` and is
+FastAPI-coupled, so the connector-appropriate reuse is the shared guard
+it wraps). The derived path is inside the operator's tenant subtree by
+construction.
+
+**Supervisor case: no server rewrite (corpus-verified).** A VKS guest
+kubeconfig's `clusters[].cluster.server` already points at the guest
+cluster's own LoadBalancer API-server VIP and is used as-is, so **no**
+server-address rewrite is performed -- the op stages the kubeconfig
+verbatim (corpus:
+`vsphere-supervisor-services-and-standalone-components.pdf`,
+`VCFB1443LV-kubernetes-101-and-the-iaas-control-plane-on-vmware-cloud-fo.pdf`).
+
+A missing `data_key`, or a value that is not valid base64 / UTF-8, raises
+`KubernetesSecretDataError` naming the Secret + key (never the value);
+the error surfaces through the dispatcher's `connector_error` envelope,
+and nothing is written to Vault on failure.
+
 ### Shared list-op request shape (`ops_listparams.py`)
 
 Every namespaced list op on this connector
@@ -517,6 +649,45 @@ with no op behind them. The op ids are exactly
 map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
 `k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
 `unknown_op` envelope.
+
+### Read-side Secret redaction (#3501, `redaction.py`)
+
+Response redaction is otherwise pattern-based (the Tier-1 named-pattern
+engine + optional Presidio), which keys on **labelled** secret shapes in
+string leaves. A Kubernetes `Secret`'s `data` map is the opposite shape:
+arbitrary, operator-chosen keys whose base64 values carry no in-leaf
+label, so they would pass through unless a value happened to match a
+named pattern.
+[`connectors/kubernetes/redaction.py`](../../backend/src/meho_backplane/connectors/kubernetes/redaction.py)
+closes that read-side gap with a pure, **structural** redactor
+(`redact_kubernetes_payload`): it recognises any `kind: Secret` object
+and replaces every `data` / `stringData` value with a fixed placeholder
+carrying a `sha256:` digest — key names kept — regardless of whether the
+value matches a pattern. It is the k8s sibling of the keycloak / rabbitmq
+per-connector redactors (see [`redaction.md`](redaction.md)).
+
+The redactor is wired into `custom_resource_row`
+(`ops_customresource.py`), the projection both `k8s.cr.list` and
+`k8s.cr.info` share, so a dynamic read pointed at core Secrets
+(`group=""` / `version="v1"` / `plural="secrets"`) — the one shipped read
+path that can surface a raw Secret object — is scrubbed before JSONFlux /
+audit / broadcast.
+
+**Projection note.** `custom_resource_row` otherwise keeps only
+`metadata` + a bounded `.spec` excerpt and drops every other top-level
+field; a `Secret` has no `.spec`, so before #3501 a CR read of a Secret
+returned no `data` at all (safe, but uninformative). The redactor lets
+the projection surface a `data` / `string_data` **key inventory** (values
+redacted, digests attached) for a `kind: Secret` object instead — safe
+*and* useful. Non-Secret CR rows gain neither field. The op remains
+`safe` / no-approval — the redaction, not a gate, is what makes a Secret
+read leak-free.
+
+**Carve-out.** `k8s.secret.read_to_ref` (#3496) is untouched by this
+pass: it reads the value inside the backplane and stages it to a Vault
+`secret_ref`, returning only the ref + a SHA-256 + byte length — no
+`data` map and no `kind: Secret` object, so the structural walk finds
+nothing to redact and the op's no-transit contract is preserved.
 
 ## Control flow
 

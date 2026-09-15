@@ -59,9 +59,13 @@ mapped to the **existing** safety_level/policy mechanism:
 * the handler additionally scrubs secret-keyed values at the connector
   boundary (:func:`~meho_backplane.connectors.sddc_manager.typed_reads._redact_secrets`).
 
-The write surface (none wanted for SDDC), the session/auth itself
-(#2290), and the profiled ingested dispatch (#2271) are out of this
-task's scope.
+The curated workload-domain **write** surface (#3497) — network-pool
+create, host validate/commission, domain validate/create, plus the
+``sddc.task.get`` build poll — ships alongside the reads as typed ops in
+:mod:`.typed_writes` (bodies) and this module (metadata), each
+approval-gated at the ``caution`` / ``dangerous`` tier and dispatched via
+:meth:`HttpConnector._post_json`. The session/auth itself (#2290) and the
+profiled ingested dispatch (#2271) remain out of scope.
 """
 
 from __future__ import annotations
@@ -70,6 +74,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
+
+from meho_backplane.connectors.sddc_manager.typed_writes import (
+    SDDC_DOMAIN_CREATE_OP_ID,
+    SDDC_DOMAIN_VALIDATE_OP_ID,
+    SDDC_HOST_COMMISSION_OP_ID,
+    SDDC_HOST_VALIDATE_OP_ID,
+    SDDC_NETWORK_POOL_CREATE_OP_ID,
+)
 
 if TYPE_CHECKING:
     from meho_backplane.retrieval.embedding import EmbeddingService
@@ -90,6 +102,7 @@ _GROUP_INVENTORY = "sddc-inventory"
 _GROUP_PLATFORM = "sddc-platform"
 _GROUP_TASKS = "sddc-tasks-typed"
 _GROUP_CREDENTIALS = "sddc-credentials"
+_GROUP_LIFECYCLE = "sddc-lifecycle"
 
 
 @dataclass(frozen=True)
@@ -162,6 +175,21 @@ SDDC_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "never their passwords. The group an operator reaches for during a "
         "nested-infra credential audit or outage."
     ),
+    _GROUP_LIFECYCLE: (
+        "Use to BUILD a VCF workload domain through the backplane -- the "
+        "curated, approval-gated write path (#3497): create the network pool "
+        "the domain draws from (sddc.network_pool.create), validate then "
+        "commission the ESXi hosts (sddc.host.validate / sddc.host.commission), "
+        "and validate then create the domain itself "
+        "(sddc.domain.validate / sddc.domain.create). The mutating steps are "
+        "dangerous + require operator approval; the validations are "
+        "non-mutating pre-flights. Each create is 202-async -- keep the "
+        "returned task id and poll sddc.task.get (and sddc.domain.status) to a "
+        "terminal state. Sequencing (validate -> create -> poll) is the "
+        "caller's job. For an NFS-principal domain the DomainCreationSpec uses "
+        "computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume, "
+        "never vsanDatastoreSpec."
+    ),
 }
 
 
@@ -182,12 +210,211 @@ def _instructions(
     when_to_use: str,
     output_shape: str,
     parameter_hints: dict[str, str] | None = None,
+    result_scalars: tuple[str, ...] | None = None,
+    result_digest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the per-op ``llm_instructions`` blob with the canonical keys."""
+    """Build the per-op ``llm_instructions`` blob with the canonical keys.
+
+    ``result_scalars`` / ``result_digest`` are the JSONFlux reduction hints
+    (#3084 / #3122): on the WLD-build poll ops the vendor ``Task`` /
+    ``Validation`` carries a large set-shaped field (``subTasks[]`` /
+    ``validationChecks[]``), so ``result_scalars`` names the scalar siblings
+    (``id`` / ``status``) that survive the reduction on the inline summary and
+    ``result_digest`` names the collection to reduce (SDDC's ``Task`` carries
+    three list fields — ``subTasks`` / ``errors`` / ``resources`` — so the hint
+    is what makes the reducer reduce ``subTasks`` instead of passing the whole
+    document through the multi-list detail-object exemption).
+    """
     blob: dict[str, Any] = {"when_to_use": when_to_use, "output_shape": output_shape}
     if parameter_hints is not None:
         blob["parameter_hints"] = parameter_hints
+    if result_scalars is not None:
+        blob["result_scalars"] = {"keys": list(result_scalars)}
+    if result_digest is not None:
+        blob["result_digest"] = dict(result_digest)
     return blob
+
+
+# ---------------------------------------------------------------------------
+# JSONFlux reduction hints for the WLD write/poll ops (#3497)
+# ---------------------------------------------------------------------------
+
+#: ``Task`` scalars that must survive a ``subTasks[]`` reduction (#3084):
+#: ``id`` is the poll key for ``sddc.task.get``; ``status`` carries the
+#: lifecycle state; the rest identify the task. Field names pinned by the
+#: ``sddc-manager-9.1`` OpenAPI (``components.schemas.Task``).
+_TASK_RESULT_SCALARS: tuple[str, ...] = ("id", "name", "status", "type", "creationTimestamp")
+
+#: ``Task`` row-digest hint (#3122). A live workload-domain build's ``Task``
+#: carries a large ``subTasks[]`` AND populated ``errors[]`` / ``resources[]``
+#: — three list fields, so the reducer's dict-of-arrays detail-object
+#: exemption would pass the whole document through UNREDUCED. This hint names
+#: ``subTasks`` as THE collection to reduce and drives the inline digest:
+#: per-``status`` counts, the ``name`` of every IN_PROGRESS/PENDING sub-task,
+#: and every FAILED sub-task preserved whole. Status values pinned by the
+#: ``sddc-manager-9.1`` OpenAPI (``components.schemas.SubTask.status``:
+#: PENDING / IN_PROGRESS / SUCCESSFUL / FAILED / SKIPPED / NOT_APPLICABLE).
+_TASK_RESULT_DIGEST: dict[str, Any] = {
+    "collection": "subTasks",
+    "status_field": "status",
+    "name_field": "name",
+    "active_states": ["IN_PROGRESS", "PENDING"],
+    "failed_states": ["FAILED"],
+}
+
+#: ``Validation`` scalars that must survive a ``validationChecks[]`` reduction
+#: (#3084): ``id`` is the poll key; ``executionStatus`` / ``resultStatus``
+#: carry the lifecycle + verdict; ``description`` names the run. Field names
+#: pinned by the ``sddc-manager-9.1`` OpenAPI (``components.schemas.Validation``).
+_VALIDATION_RESULT_SCALARS: tuple[str, ...] = (
+    "id",
+    "description",
+    "executionStatus",
+    "resultStatus",
+)
+
+
+# ---------------------------------------------------------------------------
+# WLD write parameter schemas (#3497)
+# ---------------------------------------------------------------------------
+
+#: The ``{"id": <task id>}`` parameter schema of ``sddc.task.get``.
+_TASK_GET_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The task id returned by a host-commission or domain-create.",
+        },
+    },
+    "required": ["id"],
+    "additionalProperties": False,
+}
+
+#: The ``{"spec": <NetworkPool>}`` parameter schema of ``sddc.network_pool.create``.
+#: The vendor ``NetworkPool`` requires ``name`` + ``networks``; the body is
+#: otherwise passed through verbatim (``additionalProperties`` open) so the
+#: full vendor shape reaches the wire without this connector re-modelling it.
+_NETWORK_POOL_CREATE_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "spec": {
+            "type": "object",
+            "description": (
+                "A vendor NetworkPool. For an NFS-principal workload domain the "
+                "networks[] must carry the vMotion and NFS networks the hosts "
+                "draw from; POSTed verbatim to /v1/network-pools."
+            ),
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "networks": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["name", "networks"],
+            "additionalProperties": True,
+        },
+    },
+    "required": ["spec"],
+    "additionalProperties": False,
+}
+
+#: The ``{"spec": [<HostCommissionSpec>, ...]}`` parameter schema shared by
+#: ``sddc.host.validate`` and ``sddc.host.commission``. The vendor endpoint
+#: takes a JSON **array** of ``HostCommissionSpec`` (required ``fqdn`` /
+#: ``username`` / ``password`` / ``storageType`` / ``networkPoolId``).
+_HOST_COMMISSION_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "spec": {
+            "type": "array",
+            "minItems": 1,
+            "description": (
+                "A JSON array of vendor HostCommissionSpec objects; POSTed "
+                "verbatim. storageType='NFS' for the Envision NFS-principal "
+                "estate."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "fqdn": {"type": "string", "minLength": 1},
+                    "username": {"type": "string", "minLength": 1},
+                    "password": {"type": "string", "minLength": 1},
+                    "storageType": {"type": "string", "minLength": 1},
+                    "networkPoolId": {"type": "string", "minLength": 1},
+                },
+                "required": ["fqdn", "username", "password", "storageType", "networkPoolId"],
+                "additionalProperties": True,
+            },
+        },
+    },
+    "required": ["spec"],
+    "additionalProperties": False,
+}
+
+
+def _domain_spec_parameter_schema(posted_to: str) -> dict[str, Any]:
+    """The ``{"spec": <DomainCreationSpec>}`` schema shared by the domain ops.
+
+    The body is passed through verbatim (``additionalProperties`` open) so the
+    full vendor ``DomainCreationSpec`` reaches the wire without this connector
+    re-modelling every field — but the **NFS datastore sub-shape** is modelled
+    so a well-formed NFS spec validates while a malformed ``nasVolume`` (the
+    common trap the field notes warn about — reusing a vSAN-shaped spec and
+    swapping only the datastore) is rejected before dispatch. ``nfsDatastoreSpecs``
+    stays optional (a vSAN or VMFS domain is a valid spec too); when present, each
+    entry must carry a ``nasVolume`` with ``serverName`` / ``path`` / ``readOnly``.
+    """
+    nas_volume = {
+        "type": "object",
+        "properties": {
+            "serverName": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "path": {"type": "string", "minLength": 1},
+            "readOnly": {"type": "boolean"},
+        },
+        "required": ["serverName", "path", "readOnly"],
+        "additionalProperties": True,
+    }
+    nfs_datastore_spec = {
+        "type": "object",
+        "properties": {"nasVolume": nas_volume},
+        "required": ["nasVolume"],
+        "additionalProperties": True,
+    }
+    datastore_spec = {
+        "type": "object",
+        "properties": {
+            "nfsDatastoreSpecs": {"type": "array", "items": nfs_datastore_spec},
+        },
+        "additionalProperties": True,
+    }
+    cluster_spec = {
+        "type": "object",
+        "properties": {"datastoreSpec": datastore_spec},
+        "additionalProperties": True,
+    }
+    compute_spec = {
+        "type": "object",
+        "properties": {"clusterSpecs": {"type": "array", "items": cluster_spec}},
+        "additionalProperties": True,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "spec": {
+                "type": "object",
+                "description": (
+                    "A vendor DomainCreationSpec. NFS-principal shape: "
+                    "computeSpec.clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[]."
+                    "nasVolume (never vsanDatastoreSpec). POSTed verbatim to "
+                    f"{posted_to}."
+                ),
+                "properties": {"computeSpec": compute_spec},
+                "additionalProperties": True,
+            },
+        },
+        "required": ["spec"],
+        "additionalProperties": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -754,10 +981,262 @@ _LICENSE_LIST = SddcTypedOp(
 )
 
 
+# ---------------------------------------------------------------------------
+# sddc.task.get — WLD-build task poll (#3497)
+# ---------------------------------------------------------------------------
+
+_TASK_GET = SddcTypedOp(
+    op_id="sddc.task.get",
+    handler_attr="task_get",
+    summary="Read one VCF workflow task by id (the WLD-build poll).",
+    description=(
+        "Reads one VCF workflow task via GET /v1/tasks/{id} -- the poll a "
+        "caller runs against the Task a host-commission or domain-create "
+        "returned (both are 202-async). The object's top-level status carries "
+        "the PENDING / IN_PROGRESS / SUCCESSFUL / FAILED lifecycle state, and "
+        "subTasks[] the per-stage progress; on a live workload-domain build "
+        "subTasks[] reduces to a JSONFlux handle while id / status / name stay "
+        "top-level. Requires a task id from sddc.host.commission / "
+        "sddc.domain.create. Works with zero catalog ingest. safety_level=safe, "
+        "read-only."
+    ),
+    parameter_schema=_TASK_GET_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_TASKS,
+    tags=("read-only", "sddc", "vcf", "task", "lifecycle"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a task id to poll a host-commission or domain-create to "
+            "a terminal status; read subTasks for per-stage progress."
+        ),
+        output_shape=(
+            "{id, name, status, type, creationTimestamp, subTasks: [...], "
+            "errors: [...]}. When subTasks[] reduces to a JSONFlux handle, "
+            "id / name / status stay top-level with a per-status digest inline."
+        ),
+        parameter_hints={"id": "The task id from sddc.host.commission / sddc.domain.create."},
+        result_scalars=_TASK_RESULT_SCALARS,
+        result_digest=_TASK_RESULT_DIGEST,
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.network_pool.create — WLD write (#3497)
+# ---------------------------------------------------------------------------
+
+_NETWORK_POOL_CREATE = SddcTypedOp(
+    op_id=SDDC_NETWORK_POOL_CREATE_OP_ID,
+    handler_attr="network_pool_create",
+    summary="Create the network pool a workload domain draws from.",
+    description=(
+        "Creates a VCF network pool via POST /v1/network-pools -- step 1 of "
+        "the governed workload-domain build. For an NFS-principal domain the "
+        "spec's networks[] must carry the vMotion and NFS networks the hosts "
+        "draw from. safety_level=caution + requires_approval -- the dispatcher "
+        "parks the call for approval before it runs. Returns the created pool."
+    ),
+    parameter_schema=_NETWORK_POOL_CREATE_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_LIFECYCLE,
+    tags=("write", "sddc", "vcf", "network-pool", "lifecycle"),
+    safety_level="caution",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a NetworkPool spec to create the pool a new workload "
+            "domain's hosts will draw from. Parks for approval first."
+        ),
+        output_shape="{id, name, networks: [...]} (the created NetworkPool).",
+        parameter_hints={
+            "spec": (
+                "The NetworkPool body: name + networks[] (VMOTION + NFS for an "
+                "NFS-principal domain, each with vlanId / subnet / gateway / "
+                "ipPools[])."
+            ),
+        },
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.host.validate — WLD write pre-flight (#3497)
+# ---------------------------------------------------------------------------
+
+_HOST_VALIDATE = SddcTypedOp(
+    op_id=SDDC_HOST_VALIDATE_OP_ID,
+    handler_attr="host_validate",
+    summary="Validate a host-commission spec (non-mutating pre-flight).",
+    description=(
+        "Submits a JSON array of HostCommissionSpec to POST /v1/hosts/"
+        "validations -- the vendor's non-mutating pre-flight before "
+        "sddc.host.commission. Returns the Validation to poll (202); check its "
+        "resultStatus before commissioning. Mutates no estate. "
+        "safety_level=caution, no approval."
+    ),
+    parameter_schema=_HOST_COMMISSION_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_LIFECYCLE,
+    tags=("write", "sddc", "vcf", "host", "validation", "lifecycle"),
+    safety_level="caution",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with the array of HostCommissionSpec to dry-run-validate the "
+            "hosts before committing to sddc.host.commission."
+        ),
+        output_shape=(
+            "{id, description, executionStatus, resultStatus, "
+            "validationChecks: [...]}. Poll to a terminal executionStatus."
+        ),
+        parameter_hints={
+            "spec": "The array of HostCommissionSpec (storageType=NFS for the estate).",
+        },
+        result_scalars=_VALIDATION_RESULT_SCALARS,
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.host.commission — WLD write (estate mutation) (#3497)
+# ---------------------------------------------------------------------------
+
+_HOST_COMMISSION = SddcTypedOp(
+    op_id=SDDC_HOST_COMMISSION_OP_ID,
+    handler_attr="host_commission",
+    summary="Commission ESXi hosts into the free pool (estate mutation).",
+    description=(
+        "Submits the array of HostCommissionSpec (validated first via "
+        "sddc.host.validate) to POST /v1/hosts and returns the Task to poll "
+        "(202-async) -- step 2 of the governed workload-domain build, moving "
+        "ESXi hosts into the free pool. safety_level=dangerous + "
+        "requires_approval -- the dispatcher parks for approval first; poll "
+        "sddc.task.get with the returned id to a terminal status."
+    ),
+    parameter_schema=_HOST_COMMISSION_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_LIFECYCLE,
+    tags=("write", "sddc", "vcf", "host", "commission", "dangerous"),
+    safety_level="dangerous",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with the validated array of HostCommissionSpec to add the "
+            "hosts. Parks for approval first; poll sddc.task.get to terminal."
+        ),
+        output_shape=(
+            "{id, name, status, subTasks: [...]} (a Task). Keep the id and "
+            "poll sddc.task.get; when subTasks[] reduces to a JSONFlux handle, "
+            "id / status stay top-level."
+        ),
+        parameter_hints={"spec": "The validated array of HostCommissionSpec."},
+        result_scalars=_TASK_RESULT_SCALARS,
+        result_digest=_TASK_RESULT_DIGEST,
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.domain.validate — WLD write pre-flight (#3497)
+# ---------------------------------------------------------------------------
+
+_DOMAIN_VALIDATE = SddcTypedOp(
+    op_id=SDDC_DOMAIN_VALIDATE_OP_ID,
+    handler_attr="domain_validate",
+    summary="Validate a DomainCreationSpec (non-mutating pre-flight).",
+    description=(
+        "Submits a DomainCreationSpec to POST /v1/domains/validations -- the "
+        "vendor's non-mutating pre-flight before sddc.domain.create. Returns "
+        "the Validation to poll; run it to a passing resultStatus first "
+        "because the DomainCreationSpec is trap-rich (NFS-vs-vSAN datastore "
+        "shape, clusterImageId). Mutates no estate. safety_level=caution, no "
+        "approval."
+    ),
+    parameter_schema=_domain_spec_parameter_schema("/v1/domains/validations"),
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_LIFECYCLE,
+    tags=("write", "sddc", "vcf", "domain", "validation", "lifecycle"),
+    safety_level="caution",
+    requires_approval=False,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a DomainCreationSpec to dry-run-validate the domain "
+            "before committing to sddc.domain.create."
+        ),
+        output_shape=(
+            "{id, description, executionStatus, resultStatus, "
+            "validationChecks: [...]}. Poll to a terminal executionStatus and "
+            "read resultStatus."
+        ),
+        parameter_hints={
+            "spec": (
+                "The DomainCreationSpec. NFS-principal: computeSpec."
+                "clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume "
+                "(serverName[] / path / readOnly), never vsanDatastoreSpec."
+            ),
+        },
+        result_scalars=_VALIDATION_RESULT_SCALARS,
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# sddc.domain.create — WLD write (estate mutation) (#3497)
+# ---------------------------------------------------------------------------
+
+_DOMAIN_CREATE = SddcTypedOp(
+    op_id=SDDC_DOMAIN_CREATE_OP_ID,
+    handler_attr="domain_create",
+    summary="Create a VCF workload domain (202-async build).",
+    description=(
+        "Submits an NFS-shaped DomainCreationSpec (validated first via "
+        "sddc.domain.validate) to POST /v1/domains and returns the Task the "
+        "moment the build is accepted (202-async) -- the final step of the "
+        "governed workload-domain build. The build runs for hours on the "
+        "appliance; poll sddc.task.get (and sddc.domain.status once the domain "
+        "object exists) to ACTIVE. safety_level=dangerous + requires_approval "
+        "-- the dispatcher parks for approval first, and the reviewer context "
+        "shows op/target/subject identity only (never the spec body), so the "
+        "spec's plaintext passwords never reach the approver."
+    ),
+    parameter_schema=_domain_spec_parameter_schema("/v1/domains"),
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_LIFECYCLE,
+    tags=("write", "sddc", "vcf", "domain", "create", "dangerous"),
+    safety_level="dangerous",
+    requires_approval=True,
+    llm_instructions=_instructions(
+        when_to_use=(
+            "Call with a validated NFS-shaped DomainCreationSpec to build the "
+            "workload domain. Parks for approval first; poll sddc.task.get to "
+            "terminal, then sddc.domain.status to ACTIVE."
+        ),
+        output_shape=(
+            "{id, name, status, subTasks: [...]} (a Task). Keep the id and "
+            "poll sddc.task.get; when subTasks[] reduces to a JSONFlux handle, "
+            "id / status stay top-level with a per-status digest inline."
+        ),
+        parameter_hints={
+            "spec": (
+                "The DomainCreationSpec. NFS-principal: computeSpec."
+                "clusterSpecs[].datastoreSpec.nfsDatastoreSpecs[].nasVolume "
+                "(serverName[] / path / readOnly), never vsanDatastoreSpec."
+            ),
+        },
+        result_scalars=_TASK_RESULT_SCALARS,
+        result_digest=_TASK_RESULT_DIGEST,
+    ),
+)
+
+
 #: The typed ops :class:`SddcManagerConnector` registers at lifespan
-#: startup -- the audited 12-read set (#2306) plus the network-pool
-#: pre-flight reads (#2837). Ordered inventory -> credentials -> tasks ->
-#: platform to match the operator's typical path.
+#: startup -- the audited 12-read set (#2306), the network-pool pre-flight
+#: reads (#2837), and the curated workload-domain write path (#3497:
+#: network-pool create, host validate/commission, domain validate/create,
+#: plus the task poll). Ordered inventory -> credentials -> tasks -> platform
+#: -> lifecycle to match the operator's typical path.
 SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _DOMAIN_LIST,
     _DOMAIN_STATUS,
@@ -769,10 +1248,16 @@ SDDC_TYPED_OPS: tuple[SddcTypedOp, ...] = (
     _NETWORK_POOL_GET,
     _CREDENTIAL_LIST,
     _TASK_LIST,
+    _TASK_GET,
     _SYSTEM_INFO,
     _VCF_SERVICE_LIST,
     _MANAGER_LIST,
     _LICENSE_LIST,
+    _NETWORK_POOL_CREATE,
+    _HOST_VALIDATE,
+    _HOST_COMMISSION,
+    _DOMAIN_VALIDATE,
+    _DOMAIN_CREATE,
 )
 
 

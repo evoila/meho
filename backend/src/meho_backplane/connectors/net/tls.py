@@ -57,7 +57,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
 from OpenSSL import SSL
 
@@ -151,6 +151,10 @@ _CHAIN_ITEM_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "True iff subject == issuer (a root or self-signed leaf).",
         },
+        "fingerprint_sha256": {
+            "type": "string",
+            "description": "SHA-256 fingerprint of the presented certificate, hexadecimal.",
+        },
         "pem": {
             "type": "string",
             "description": (
@@ -170,6 +174,7 @@ _CHAIN_ITEM_SCHEMA: dict[str, Any] = {
         "days_to_expiry",
         "serial",
         "self_signed",
+        "fingerprint_sha256",
         "pem",
     ],
     "additionalProperties": False,
@@ -290,7 +295,8 @@ _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
     "output_shape": (
         "On a completed handshake: {'handshake': true, 'reason': null, "
         "'chain': [{subject, issuer, san, not_before, not_after, "
-        "days_to_expiry, serial, self_signed}, ...] (leaf-first), 'leaf': "
+        "days_to_expiry, serial, self_signed, fingerprint_sha256}, ...] "
+        "(leaf-first), 'leaf': "
         "<chain[0]>, 'hostname_match': <bool>, 'chain_complete': <bool>, "
         "'protocol': <str>, 'cipher': <str>, 'not_after': <leaf notAfter>, "
         "'days_to_expiry': <leaf days-to-expiry, float; negative once "
@@ -301,6 +307,16 @@ _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
         "MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a reading: the op fails with "
         "error_code='connector_probe_refused' and no socket was opened."
     ),
+    "result_scalars": {
+        "keys": [
+            "handshake",
+            "reason",
+            "days_to_expiry",
+            "hostname_match",
+            "chain_complete",
+        ]
+    },
+    "result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}},
 }
 
 
@@ -435,6 +451,7 @@ def _cert_to_dict(cert: x509.Certificate, now: datetime) -> dict[str, Any]:
         "days_to_expiry": (cert.not_valid_after_utc - now).total_seconds() / 86400.0,
         "serial": str(cert.serial_number),
         "self_signed": cert.subject == cert.issuer,
+        "fingerprint_sha256": cert.fingerprint(hashes.SHA256()).hex(),
         "pem": cert.public_bytes(serialization.Encoding.PEM).decode("ascii"),
     }
 
@@ -565,7 +582,7 @@ async def net_tls_inspect(
     server_name = raw_server_name or host
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     try:
         chain, protocol, cipher = await asyncio.to_thread(

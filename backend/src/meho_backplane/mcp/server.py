@@ -104,6 +104,10 @@ from meho_backplane.mcp.schemas import (
     JsonRpcResponse,
     ServerCapabilities,
 )
+from meho_backplane.mcp.session_limit import (
+    check_mcp_session_cap,
+    resolve_mcp_session_cap,
+)
 from meho_backplane.settings import Settings, get_settings
 from meho_backplane.version import deployed_version_label
 
@@ -394,6 +398,36 @@ async def _session_instructions(operator: Operator) -> str | None:
     return joined or None
 
 
+async def _enforce_mcp_session_cap(operator: Operator) -> None:
+    """Refuse ``initialize`` when the tenant is over its session cap (#3500).
+
+    MEHO holds no session store, so the cap bounds new-session handshakes
+    per window (see :mod:`meho_backplane.mcp.session_limit`). Disabled by
+    default (cap ``0``) -- an unconfigured tenant makes no Valkey call.
+    Over the cap, raises :class:`McpRateLimitedError` (JSON-RPC ``-32000``)
+    carrying a ``retry_after_seconds`` hint so the client backs off.
+    """
+    cap = resolve_mcp_session_cap(get_settings(), operator.tenant_id)
+    retry_after = await check_mcp_session_cap(operator.tenant_id, cap)
+    if retry_after is None:
+        return
+    _log.warning(
+        "mcp_session_cap_exceeded",
+        tenant_id=str(operator.tenant_id),
+        cap=cap,
+        retry_after_seconds=retry_after,
+    )
+    raise McpRateLimitedError(
+        f"session cap exceeded: {cap} new MCP sessions per minute for this "
+        f"tenant; retry after {retry_after}s",
+        data={
+            "limit": cap,
+            "window_seconds": 60,
+            "retry_after_seconds": retry_after,
+        },
+    )
+
+
 async def _initialize(
     operator: Operator,
     params: dict[str, Any] | None,
@@ -415,7 +449,13 @@ async def _initialize(
     WARNING, while the response body stays unchanged. Multi-version
     negotiation behaviour is tracked as explicit follow-up work,
     gated on concrete operator demand.
+
+    #3500: a per-tenant session cap is enforced first, so a tenant over its
+    new-sessions-per-minute limit is refused with a ``-32000`` rate-limited
+    error before a new session is negotiated.
     """
+    await _enforce_mcp_session_cap(operator)
+
     # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
     # aligned: a missing ``params`` field on the JSON-RPC request and an
     # explicit empty params object are both equivalent to "no required

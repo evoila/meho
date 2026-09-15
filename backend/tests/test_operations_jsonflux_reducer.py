@@ -68,6 +68,7 @@ from meho_backplane.operations.jsonflux_reducer import (
     JsonFluxReducer,
     _detect_collection,
     _fit_sample_to_budget,
+    _preserved_objects,
     _preserved_scalars,
     _query_sample,
     _resolve_digest_hint,
@@ -640,6 +641,147 @@ def test_preserved_scalars_noop_on_bare_list_payload_and_absent_hint() -> None:
     assert _preserved_scalars({"id": "x", "rows": []}, "rows", {}) == {}
 
 
+async def test_reduce_keeps_bounded_object_identity_and_spills_full_pem() -> None:
+    """A PEM-heavy certificate chain reduces while leaf identity stays usable.
+
+    The 4 KiB byte threshold, rather than row count, triggers reduction for
+    the small presented chain. The inline result retains only the registered
+    verdict and leaf identity; the full leaf PEM remains in the persisted
+    handle rows for a later ``result_query`` retrieval.
+    """
+    leaf = {
+        "subject": "CN=appliance.example.test",
+        "san": ["appliance.example.test", "10.0.0.8"],
+        "fingerprint_sha256": "a" * 64,
+        "pem": "-----BEGIN CERTIFICATE-----\n" + "L" * 2600,
+    }
+    issuer = {
+        "subject": "CN=Example Issuer",
+        "san": [],
+        "fingerprint_sha256": "b" * 64,
+        "pem": "-----BEGIN CERTIFICATE-----\n" + "I" * 2600,
+    }
+    payload = {
+        "handshake": True,
+        "reason": None,
+        "days_to_expiry": 24.5,
+        "hostname_match": True,
+        "chain_complete": False,
+        "chain": [leaf, issuer],
+        "leaf": leaf,
+    }
+    store = _FakeStore()
+    context = {
+        "op_id": "net.tls_inspect",
+        "operator_sub": "op-a",
+        "tenant_id": "00000000-0000-0000-0000-00000000a0a0",
+        "result_scalars": {
+            "keys": [
+                "handshake",
+                "reason",
+                "days_to_expiry",
+                "hostname_match",
+                "chain_complete",
+            ]
+        },
+        "result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}},
+    }
+
+    reduced, handle = await JsonFluxReducer(store=store, max_spill_rows=100).reduce(
+        payload, None, context
+    )
+
+    assert handle is not None
+    assert reduced["handshake"] is True
+    assert reduced["reason"] is None
+    assert reduced["days_to_expiry"] == 24.5
+    assert reduced["hostname_match"] is True
+    assert reduced["chain_complete"] is False
+    assert reduced["leaf"] == {
+        "subject": leaf["subject"],
+        "san": leaf["san"],
+        "fingerprint_sha256": leaf["fingerprint_sha256"],
+    }
+    assert "pem" not in reduced["leaf"]
+    assert "chain" not in reduced
+    assert store.spills[0]["rows"][0]["pem"] == leaf["pem"]
+
+
+async def test_single_small_certificate_payload_remains_inline() -> None:
+    """A single certificate below 4 KiB is returned unchanged without a handle."""
+    leaf = {
+        "subject": "CN=appliance.example.test",
+        "san": ["appliance.example.test"],
+        "fingerprint_sha256": "a" * 64,
+        "pem": "-----BEGIN CERTIFICATE-----\nsmall\n-----END CERTIFICATE-----",
+    }
+    payload = {"handshake": True, "chain": [leaf], "leaf": leaf}
+
+    reduced, handle = await JsonFluxReducer().reduce(payload, None)
+
+    assert handle is None
+    assert reduced is payload
+    assert reduced["leaf"]["pem"] == leaf["pem"]
+
+
+def test_preserved_objects_rejects_nested_values_and_obeys_byte_budget() -> None:
+    """Generic object projection cannot copy an arbitrary nested envelope."""
+    payload = {
+        "leaf": {"subject": "CN=ok", "nested": {"unbounded": "object"}, "san": ["x" * 2000]},
+        "chain": [],
+    }
+    context = {"result_objects": {"objects": {"leaf": ["subject", "nested", "san"]}}}
+
+    preserved = _preserved_objects(payload, "chain", context)
+    assert preserved["leaf"]["subject"] == "CN=ok"
+    assert preserved["leaf"]["san"] == ["x" * 1024]
+    assert preserved["result_object_truncations"] == {"leaf": ["san"]}
+
+
+def test_preserved_objects_keeps_normal_leaf_identity_and_marks_huge_values() -> None:
+    """Normal 1 KiB SANs stay verbatim; exceptional values remain recoverable."""
+    normal_san = "dns:" + "a" * 990
+    huge_san = "dns:" + "b" * 5000
+    context = {"result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}}}
+    normal = _preserved_objects(
+        {
+            "leaf": {"subject": "CN=normal", "san": [normal_san], "fingerprint_sha256": "f" * 64},
+            "chain": [],
+        },
+        "chain",
+        context,
+    )
+    assert normal["leaf"] == {
+        "subject": "CN=normal",
+        "san": [normal_san],
+        "fingerprint_sha256": "f" * 64,
+    }
+    assert "result_object_truncations" not in normal
+    huge = _preserved_objects(
+        {
+            "leaf": {"subject": "CN=huge", "san": [huge_san], "fingerprint_sha256": "f" * 64},
+            "chain": [],
+        },
+        "chain",
+        context,
+    )
+    assert huge["leaf"]["san"] == [huge_san[:1024]]
+    assert huge["result_object_truncations"] == {"leaf": ["san"]}
+
+
+def test_preserved_objects_bounds_a_long_san_list_without_silent_drop() -> None:
+    san = [f"dns-{index}-" + "x" * 245 for index in range(16)]
+    preserved = _preserved_objects(
+        {"leaf": {"subject": "CN=normal", "san": san, "fingerprint_sha256": "f" * 64}, "chain": []},
+        "chain",
+        {"result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}}},
+    )
+    assert preserved["leaf"]["subject"] == "CN=normal"
+    assert preserved["leaf"]["fingerprint_sha256"] == "f" * 64
+    assert preserved["leaf"]["san"]
+    assert preserved["result_object_truncations"] == {"leaf": ["san"]}
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher integration — broken reducer → connector_error
 # ---------------------------------------------------------------------------
@@ -1002,6 +1144,7 @@ class _FakeStore:
                 "stored_rows": len(stored),
                 "total_rows": total_rows,
                 "ttl_seconds": ttl_seconds,
+                "rows": stored,
             }
         )
         self._rows[(str(tenant_id), str(handle_id))] = stored
@@ -2055,3 +2198,73 @@ async def test_reducing_dispatch_preserves_registered_result_scalars(
     assert result.result["row_count"] == 60
     assert result.result["source_key"] == "validationChecks"
     assert "validationChecks" not in result.result
+
+
+async def _tls_shaped_handler(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+    del target, params
+    leaf = {
+        "subject": "CN=appliance.test",
+        "san": ["appliance.test"],
+        "fingerprint_sha256": "a" * 64,
+        "pem": "L" * 3000,
+    }
+    return {
+        "handshake": True,
+        "reason": None,
+        "days_to_expiry": 20.0,
+        "hostname_match": True,
+        "chain_complete": True,
+        "leaf": leaf,
+        "chain": [leaf, {**leaf, "pem": "I" * 3000}],
+    }
+
+
+async def test_registered_descriptor_forwards_tls_identity_to_reducer(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Persisted descriptor metadata, not hand-built context, drives reduction."""
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="tls.shaped",
+        handler=_tls_shaped_handler,
+        summary="TLS",
+        description="TLS",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        llm_instructions={
+            "result_scalars": {
+                "keys": [
+                    "handshake",
+                    "reason",
+                    "days_to_expiry",
+                    "hostname_match",
+                    "chain_complete",
+                ]
+            },
+            "result_objects": {"objects": {"leaf": ["subject", "san", "fingerprint_sha256"]}},
+        },
+        embedding_service=stub_embedding_service,
+    )
+    store = _FakeStore()
+    set_default_reducer(JsonFluxReducer(store=store))
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="tls.shaped",
+            target=_FakeTarget(),
+            params={},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+    assert result.status == "ok" and result.handle is not None
+    assert result.result["leaf"] == {
+        "subject": "CN=appliance.test",
+        "san": ["appliance.test"],
+        "fingerprint_sha256": "a" * 64,
+    }
+    assert result.result["handshake"] is True
+    assert store.spills[0]["rows"][0]["pem"] == "L" * 3000

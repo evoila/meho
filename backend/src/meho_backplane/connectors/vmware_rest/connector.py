@@ -96,6 +96,7 @@ import httpx
 import structlog
 from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import ParseError, fromstring
+from packaging.version import InvalidVersion, Version
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -107,6 +108,7 @@ from meho_backplane.connectors._shared.vcf_auth import (
     session_establish_auth_error,
 )
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.base import Connector, ConnectorResourceNotFoundError
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -149,9 +151,25 @@ from meho_backplane.connectors.vmware_rest.soap import (
     parse_soap_fault,
     soap_action_for_version,
 )
+from meho_backplane.connectors.vmware_rest.soap_pbm import (
+    PBM_PATH,
+    build_pbm_create_envelope,
+    build_pbm_delete_envelope,
+    build_pbm_retrieve_content_envelope,
+    build_pbm_service_content_envelope,
+    parse_pbm_delete_outcomes,
+    parse_pbm_profile_id,
+    parse_pbm_profiles,
+    parse_pbm_service_content,
+)
 from meho_backplane.flight_recorder import capture as flight_recorder_capture
 
-__all__ = ["VmwareRestConnector", "product_from_line_id", "service_versions_api_version"]
+__all__ = [
+    "VmwareRest80Connector",
+    "VmwareRestConnector",
+    "product_from_line_id",
+    "service_versions_api_version",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -175,6 +193,27 @@ _SESSION_HEADER = "vmware-api-session-id"
 # shared :data:`SESSION_TOKEN_OBJECT_KEY` so the typed and profiled
 # (``session_login_basic``) extractors can't drift apart (#2047).
 _SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
+
+
+def _retrieve_properties_resource_ids(body: dict[str, Any] | None) -> list[str]:
+    """Return the addressed MoIDs from a ``RetrievePropertiesEx`` body."""
+    if not isinstance(body, dict):
+        return []
+    resource_ids: list[str] = []
+    for spec in body.get("specSet", []):
+        if not isinstance(spec, dict):
+            continue
+        for object_spec in spec.get("objectSet", []):
+            if not isinstance(object_spec, dict):
+                continue
+            obj = object_spec.get("obj")
+            if not isinstance(obj, dict):
+                continue
+            value = obj.get("value")
+            if isinstance(value, str) and value:
+                resource_ids.append(value)
+    return resource_ids
+
 
 # Session endpoints + the spec-relative-op → /api-or-/rest mount
 # mapping live in ``._mount`` (extracted to keep this module within
@@ -408,6 +447,55 @@ class VmwareRestConnector(HttpConnector):
     version = "9.0"
     impl_id = "vmware-rest"
     supported_version_range = ">=8.5,<10.0"
+    enforces_catalog_target_compatibility = True
+
+    #: Ingested-catalog target boundary this connector qualifies. The guard
+    #: rejects an ingested dispatch whose fingerprinted target version falls
+    #: outside ``[floor, ceiling)``. The 9.0 class owns the 9.x line;
+    #: :class:`VmwareRest80Connector` overrides these three attributes for the
+    #: 8.0.x line so each versioned catalog advertises its own bounded
+    #: predicate instead of sharing the 9.x boundary. Keeping the boundary on
+    #: the class (not hard-coded in the method) is what lets the dual-impl
+    #: sibling reuse the guard without loosening it for the 9.0 catalog.
+    _catalog_version_floor = Version("9")
+    _catalog_version_ceiling = Version("10")
+    _catalog_version_band_label = "9.x"
+
+    @classmethod
+    def catalog_target_incompatibility(
+        cls,
+        *,
+        descriptor_source_kind: str,
+        target_product: str | None,
+        target_version: str | None,
+        selected_target_connector: type[Connector] | None,
+    ) -> str | None:
+        """Guard an ingested vSphere catalog against an unqualified target.
+
+        The boundary is per-catalog: the 9.0 class qualifies the 9.x line,
+        the 8.0 subclass the 8.0.x line. A dispatch whose descriptor is owned
+        by this class but whose fingerprinted target falls outside the class's
+        ``[floor, ceiling)`` is rejected before any connector is constructed.
+        """
+        if descriptor_source_kind != "ingested":
+            return None
+        if target_product != "vmware":
+            return "target product is not vmware"
+        if target_version is None:
+            return "target version is missing"
+        try:
+            version = Version(target_version)
+        except InvalidVersion:
+            return "target version is invalid"
+        if not cls._catalog_version_floor <= version < cls._catalog_version_ceiling:
+            return (
+                "target version is outside the supported "
+                f"{cls._catalog_version_band_label} catalog boundary"
+            )
+        if selected_target_connector is None:
+            return "target connector could not be resolved"
+        return None
+
     # Outranks the GenericRestConnector auto-shim's priority=0 if both
     # somehow register for the same triple; the idempotency check in
     # ensure_connector_class_registered should make this unreachable
@@ -479,6 +567,19 @@ class VmwareRestConnector(HttpConnector):
         # so the vmomi path falls back to the ``/api`` mount without
         # re-probing on every call.
         self._about_versions: dict[tuple[str, str], str | None] = {}
+        # PBM (Storage Policy Based Management) SOAP session bookkeeping
+        # (#3494), used ONLY by the storage-policy create/delete composites.
+        # PBM is a distinct SOAP service (endpoint ``/pbm``, ns ``urn:pbm``)
+        # that reuses a vim ``vmware_soap_session`` cookie for auth, so a
+        # vCenter target — which authenticates the vAPI/VI-JSON path with the
+        # ``vmware-api-session-id`` token, never a SOAP cookie — needs a
+        # *separate* SOAP login established on demand. ``_pbm_cookies`` is the
+        # ``SessionManager.Login`` cookie; ``_pbm_profile_managers`` the
+        # ``PbmServiceInstanceContent.profileManager`` moid. Both keyed on the
+        # tenant-unique tuple, both empty until the first storage-policy op.
+        self._pbm_cookies: dict[tuple[str, str], str] = {}
+        self._pbm_profile_managers: dict[tuple[str, str], str] = {}
+        self._pbm_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -591,6 +692,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
 
@@ -625,7 +727,11 @@ class VmwareRestConnector(HttpConnector):
         /sdk/vim25/8.0.3.0/... and /api/... both 404 on vCenter 8.0.3``)
         rather than a bare 404. Non-404 failures (401 / 403 / 5xx /
         transport) propagate unchanged — those are not "this mount isn't
-        served".
+        served". ``promote_managed_object_not_found`` is intentionally opt-in
+        for a typed single-resource read that can safely render a missing MoID
+        as ``not_found``. It defaults to ``False`` so shared task polling and
+        destructive-composite preflight reads retain their existing transport
+        failure semantics (#3479).
         """
         await self._session_token(target, operator)
         # ESXi SOAP branch (#3363). ``_session_token`` established the flavor
@@ -636,28 +742,62 @@ class VmwareRestConnector(HttpConnector):
         # unreached on ESXi and unchanged for vCenter (no vCenter target ever
         # carries the esxi flavor).
         if self._session_flavors.get(target_cache_key(target)) == HOST_FLAVOR_ESXI:
-            return await self._post_soap(target, vmomi_path, operator=operator, json=json)
+            return await self._post_soap(
+                target,
+                vmomi_path,
+                operator=operator,
+                json=json,
+                promote_managed_object_not_found=promote_managed_object_not_found,
+            )
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
             legacy_path = mounted_path(session_path, vmomi_path)
-            return await self._post_json(target, legacy_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                legacy_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
 
         api_path = mounted_path(session_path, vmomi_path)
         version = await self._about_version(target, operator)
         release = vmomi_release_from_version(version)
         if release is None:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
 
         vijson_path = vmomi_mounted_path(release, vmomi_path)
         try:
-            return await self._post_json(target, vijson_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                vijson_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
         # Single fallback to the /api-mounted vmomi form (the observed 9.x
         # accommodation); if that also 404s, surface both attempts.
         try:
-            return await self._post_json(target, api_path, operator=operator, json=json)
+            return await self._post_vmomi_json_at_path(
+                target,
+                api_path,
+                vmomi_path,
+                operator,
+                json,
+                promote_managed_object_not_found,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise RuntimeError(
@@ -665,6 +805,60 @@ class VmwareRestConnector(HttpConnector):
                     f"on vCenter {version}"
                 ) from exc
             raise
+
+    async def _post_vmomi_json_at_path(
+        self,
+        target: VsphereTargetLike,
+        path: str,
+        vmomi_path: str,
+        operator: Operator,
+        body: dict[str, Any] | None,
+        promote_managed_object_not_found: bool,
+    ) -> dict[str, Any]:
+        """POST one VI-JSON path, optionally promoting an explicit missing object."""
+        try:
+            return await self._post_json(target, path, operator=operator, json=body)
+        except httpx.HTTPStatusError as exc:
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found(exc, vmomi_path, body)
+            raise
+
+    @staticmethod
+    def _raise_managed_object_not_found(
+        exc: httpx.HTTPStatusError,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Promote a vim ``ManagedObjectNotFound`` read fault.
+
+        VI-JSON reports vim faults as HTTP 500, so status alone cannot
+        distinguish a deleted object from a transient vCenter failure.  Parse
+        the SOAP-shaped fault body first and only map the explicit vim fault
+        on the shared ``RetrievePropertiesEx`` read seam.
+        """
+        fault = parse_soap_fault(exc.response.text)
+        VmwareRestConnector._raise_managed_object_not_found_fault(fault, vmomi_path, body)
+
+    @staticmethod
+    def _raise_managed_object_not_found_fault(
+        fault: SoapFault | None,
+        vmomi_path: str,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Raise the generic missing-resource signal for one parsed vim fault."""
+        if not vmomi_path.endswith("/RetrievePropertiesEx"):
+            return
+        if fault is None or fault.fault_type != "ManagedObjectNotFound":
+            return
+        resource_ids = _retrieve_properties_resource_ids(body)
+        if not resource_ids:
+            return
+        noun = "resource" if len(resource_ids) == 1 else "resources"
+        identifiers = ", ".join(repr(resource_id) for resource_id in resource_ids)
+        raise ConnectorResourceNotFoundError(
+            resource_ids,
+            f"vSphere {noun} {identifiers} was not found (ManagedObjectNotFound)",
+        )
 
     async def _about_version(self, target: VsphereTargetLike, operator: Operator) -> str | None:
         """Return *target*'s version string for the VI-JSON ``{release}`` segment.
@@ -1056,8 +1250,9 @@ class VmwareRestConnector(HttpConnector):
         extensions: dict[str, Any],
         *,
         soap_action: str = "",
+        path: str = _SDK_PATH,
     ) -> httpx.Response:
-        """POST a SOAP 1.1 *envelope* on ``/sdk``, recording a body-free span.
+        """POST a SOAP 1.1 *envelope* on ``/sdk`` (or *path*), recording a body-free span.
 
         The shared low-level wire helper for every ESXi vmomi POST
         (ServiceContent, Login, Logout, and the :meth:`_post_soap` ops). It
@@ -1081,7 +1276,7 @@ class VmwareRestConnector(HttpConnector):
         """
         _fr_start = flight_recorder_capture.span_start()
         resp = await client.post(
-            _SDK_PATH,
+            path,
             content=envelope.encode("utf-8"),
             headers={"Content-Type": SOAP_CONTENT_TYPE, "SOAPAction": soap_action},
             extensions=extensions,
@@ -1103,6 +1298,7 @@ class VmwareRestConnector(HttpConnector):
         *,
         operator: Operator,
         json: dict[str, Any] | None = None,
+        promote_managed_object_not_found: bool = False,
     ) -> dict[str, Any]:
         """The ESXi twin of the VI-JSON transport: one vmomi method as SOAP over ``/sdk``.
 
@@ -1145,10 +1341,229 @@ class VmwareRestConnector(HttpConnector):
         resp = await self._soap_post(client, envelope, extensions, soap_action=soap_action)
         fault = parse_soap_fault(resp.text)
         if fault is not None:
+            if promote_managed_object_not_found:
+                self._raise_managed_object_not_found_fault(fault, vmomi_path, json)
             message = f"vmware vim {method} failed on target {target.name!r} ({mo_type}:{moid})"
             raise self._soap_fault_error(fault, target, message=message)
         resp.raise_for_status()
         return self._parse_esxi_soap_response(method, resp.text)
+
+    # -----------------------------------------------------------------------
+    # PBM (Storage Policy Based Management) SOAP transport (#3494)
+    # -----------------------------------------------------------------------
+
+    async def _ensure_pbm(self, target: VsphereTargetLike, operator: Operator) -> tuple[str, str]:
+        """Establish (once, per target) a PBM SOAP session and return its handles.
+
+        Storage-policy create/delete have no vCenter REST path, so they run
+        over the PBM SOAP service (``/pbm``, ``urn:pbm``). PBM authenticates
+        with a **vim** ``vmware_soap_session`` cookie — not the vAPI
+        ``vmware-api-session-id`` token the connector's REST/VI-JSON path uses
+        — so this mints a *separate* SOAP session on the pooled client:
+
+        1. unauthenticated ``RetrieveServiceContent`` on ``/sdk`` → the
+           vCenter ``sessionManager`` moid (read from ServiceContent, not a
+           hard-coded literal);
+        2. ``SessionManager.Login`` on ``/sdk`` → a 200 sets the
+           ``vmware_soap_session`` cookie, which ``httpx`` keeps in the pooled
+           client's cookie jar (harmless to the REST path, which authenticates
+           by header, never by cookie);
+        3. ``PbmRetrieveServiceContent`` on ``/pbm`` → the
+           ``PbmServiceInstanceContent.profileManager`` moid every PBM
+           create/delete/retrieve is invoked on. The Login cookie rides to
+           ``/pbm`` automatically (same host, same pooled jar), exactly as
+           govmomi's ``pbm.NewClient`` copies the vim session cookie.
+
+        Returns ``(cookie, profile_manager_moid)`` and caches both under the
+        tenant-unique ``target_cache_key``. Credentials never appear in logs,
+        errors, results, or the flight-recorder span: the Login envelope is
+        the only place the password lives (XML-escaped) and :meth:`_soap_post`
+        records the vendor-call span with no request body. A rejected
+        credential (``InvalidLogin`` / ``NoPermission``) raises
+        :class:`ConnectorAuthError`; any other fault a :class:`RuntimeError`
+        naming only the target.
+        """
+        cache_key = target_cache_key(target)
+        async with self._pbm_lock:
+            cookie = self._pbm_cookies.get(cache_key)
+            profile_manager = self._pbm_profile_managers.get(cache_key)
+            if cookie and profile_manager:
+                return cookie, profile_manager
+            creds = await self._session_loader(target, operator)
+            try:
+                username = creds["username"]
+                password = creds["password"]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"vsphere pbm session loader for target {target.name!r} returned "
+                    f"a dict missing required key {exc.args[0]!r}"
+                ) from exc
+            client = await self._http_client(target)
+            extensions = self._request_extensions(target)
+            # 1. vim SOAP ServiceContent bootstrap → sessionManager moid.
+            sc_resp = await self._soap_post(client, build_service_content_envelope(), extensions)
+            sc_fault = parse_soap_fault(sc_resp.text)
+            if sc_fault is not None:
+                raise RuntimeError(
+                    f"vmware pbm session establish failed for target {target.name!r}: "
+                    f"SOAP RetrieveServiceContent faulted "
+                    f"({sc_fault.fault_type or sc_fault.faultcode})"
+                )
+            sc_resp.raise_for_status()
+            content = parse_service_content(sc_resp.text)
+            sm_ref = content.get("sessionManager")
+            sm_moid = sm_ref.get("value") if isinstance(sm_ref, dict) else None
+            if not isinstance(sm_moid, str) or not sm_moid:
+                raise RuntimeError(
+                    f"vmware pbm session establish failed for target {target.name!r}: "
+                    f"SOAP RetrieveServiceContent returned no sessionManager MoRef"
+                )
+            # 2. SessionManager.Login → vmware_soap_session cookie.
+            login_resp = await self._soap_post(
+                client,
+                build_login_envelope(sm_moid, username=username, password=password),
+                extensions,
+            )
+            login_fault = parse_soap_fault(login_resp.text)
+            if login_fault is not None:
+                raise self._soap_fault_error(
+                    login_fault,
+                    target,
+                    message=(
+                        f"vmware pbm session establish failed for target {target.name!r}: "
+                        f"SOAP SessionManager.Login rejected the credential"
+                    ),
+                )
+            login_resp.raise_for_status()
+            cookie = login_resp.cookies.get(_ESXI_SOAP_SESSION_COOKIE)
+            if not cookie:
+                raise RuntimeError(
+                    f"vmware pbm session establish failed for target {target.name!r}: "
+                    f"SOAP SessionManager.Login returned HTTP {login_resp.status_code} "
+                    f"without a {_ESXI_SOAP_SESSION_COOKIE} cookie"
+                )
+            # 3. PbmRetrieveServiceContent on /pbm → profileManager moid.
+            pbm_resp = await self._soap_post(
+                client, build_pbm_service_content_envelope(), extensions, path=PBM_PATH
+            )
+            pbm_fault = parse_soap_fault(pbm_resp.text)
+            if pbm_fault is not None:
+                raise self._soap_fault_error(
+                    pbm_fault,
+                    target,
+                    message=(
+                        f"vmware pbm session establish failed for target {target.name!r}: "
+                        f"SOAP PbmRetrieveServiceContent faulted"
+                    ),
+                )
+            pbm_resp.raise_for_status()
+            pbm_content = parse_pbm_service_content(pbm_resp.text)
+            pm_ref = pbm_content.get("profileManager")
+            profile_manager = pm_ref.get("value") if isinstance(pm_ref, dict) else None
+            if not isinstance(profile_manager, str) or not profile_manager:
+                raise RuntimeError(
+                    f"vmware pbm session establish failed for target {target.name!r}: "
+                    f"PbmRetrieveServiceContent returned no profileManager MoRef"
+                )
+            self._pbm_cookies[cache_key] = cookie
+            self._pbm_profile_managers[cache_key] = profile_manager
+            return cookie, profile_manager
+
+    async def _post_pbm(
+        self, target: VsphereTargetLike, envelope: str, operator: Operator, *, method: str
+    ) -> str:
+        """POST one PBM SOAP *envelope* on ``/pbm``; return the response body.
+
+        The PBM twin of :meth:`_post_soap`: the fault parse (not the HTTP
+        status) is the authority, so :func:`.soap.parse_soap_fault` runs on the
+        body before ``raise_for_status`` — an ``InvalidLogin`` /
+        ``NoPermission`` fault becomes :class:`ConnectorAuthError` (the
+        dispatcher's cold re-login path), any other PBM fault a
+        :class:`RuntimeError` naming only the target and method. The caller
+        builds *envelope* with the profile-manager moid from :meth:`_ensure_pbm`.
+        """
+        client = await self._http_client(target)
+        extensions = self._request_extensions(target)
+        resp = await self._soap_post(client, envelope, extensions, path=PBM_PATH)
+        fault = parse_soap_fault(resp.text)
+        if fault is not None:
+            raise self._soap_fault_error(
+                fault, target, message=f"vmware pbm {method} failed on target {target.name!r}"
+            )
+        resp.raise_for_status()
+        return resp.text
+
+    async def pbm_create_tag_profile(
+        self,
+        target: VsphereTargetLike,
+        operator: Operator,
+        *,
+        name: str,
+        description: str,
+        category_name: str,
+        tag_names: list[str],
+    ) -> str:
+        """Create a tag-based requirement storage policy; return its profile id.
+
+        Post-gate raw dispatch (the composite runs the governance gate first):
+        ensures the PBM session, POSTs ``PbmCreate`` with the tag-rule
+        create-spec, and returns the new ``PbmProfileId.uniqueId`` — which is
+        the identifier ``GET /vcenter/storage/policies`` lists the policy by.
+        """
+        _cookie, profile_manager = await self._ensure_pbm(target, operator)
+        xml = await self._post_pbm(
+            target,
+            build_pbm_create_envelope(
+                profile_manager,
+                name=name,
+                description=description,
+                category_name=category_name,
+                tag_names=tag_names,
+            ),
+            operator,
+            method="PbmCreate",
+        )
+        policy_id = parse_pbm_profile_id(xml)
+        if not policy_id:
+            raise RuntimeError(
+                f"vmware pbm PbmCreate on target {target.name!r} returned no profile id"
+            )
+        return policy_id
+
+    async def pbm_delete_profiles(
+        self, target: VsphereTargetLike, operator: Operator, *, profile_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Delete storage policies by id; return the per-id operation outcomes.
+
+        An outcome carrying a ``fault`` means that id was not removed; an empty
+        list means every id was removed without a reported per-id fault.
+        """
+        _cookie, profile_manager = await self._ensure_pbm(target, operator)
+        xml = await self._post_pbm(
+            target,
+            build_pbm_delete_envelope(profile_manager, profile_ids),
+            operator,
+            method="PbmDelete",
+        )
+        return parse_pbm_delete_outcomes(xml)
+
+    async def pbm_retrieve_profiles(
+        self, target: VsphereTargetLike, operator: Operator, *, profile_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Read storage policies by id (the create/delete read-back verify).
+
+        Returns the profile dicts (``profileId`` / ``name`` / ``description`` /
+        ``constraints``) for the ids that still exist; an id absent from the
+        result has been removed.
+        """
+        _cookie, profile_manager = await self._ensure_pbm(target, operator)
+        xml = await self._post_pbm(
+            target,
+            build_pbm_retrieve_content_envelope(profile_manager, profile_ids),
+            operator,
+            method="PbmRetrieveContent",
+        )
+        return parse_pbm_profiles(xml)
 
     @staticmethod
     def _parse_vmomi_path(vmomi_path: str) -> tuple[str, str, str]:
@@ -1377,6 +1792,13 @@ class VmwareRestConnector(HttpConnector):
             self._esxi_pc_moids.pop(cache_key, None)
             self._esxi_api_versions.pop(cache_key, None)
             sm_moid = self._esxi_session_manager_moids.pop(cache_key, None)
+        # Drop any PBM SOAP session too (#3494): an expired vim cookie faults
+        # the next storage-policy op as ``InvalidLogin`` -> ConnectorAuthError
+        # -> this invalidate; evicting forces ``_ensure_pbm`` to re-login and
+        # re-read the profileManager. A plain dict ``pop`` is atomic, so no
+        # ``_pbm_lock`` is needed for the eviction.
+        self._pbm_cookies.pop(cache_key, None)
+        self._pbm_profile_managers.pop(cache_key, None)
         if flavor == HOST_FLAVOR_ESXI and token is not None:
             await self._esxi_logout_quiet(cache_key, sm_moid, extensions or {})
 
@@ -2013,3 +2435,37 @@ class VmwareRestConnector(HttpConnector):
                     session_path=revoke_path,
                 )
         await super().aclose()
+
+
+class VmwareRest80Connector(VmwareRestConnector):
+    """vSphere REST connector for fingerprinted 8.0.x vCenter / ESXi targets.
+
+    Second versioned catalog for the ``vmware-rest`` implementation,
+    registered as ``(product="vmware", version="8.0", impl_id="vmware-rest")``
+    beside the 9.0 catalog under the dual-impl policy: both implementations
+    register against the same product and the resolver selects one per target
+    by fingerprint. Endpoint-descriptor rows for the ingested 8.0 U3 catalog
+    live under ``connector_id="vmware-rest-8.0"``.
+
+    Everything but the version identity and the ingested-catalog boundary is
+    inherited from :class:`VmwareRestConnector`: session auth, dispatch, and
+    the ``vmware-rest`` safety floor (keyed on ``(product, impl_id)``, so it
+    covers this class's ingested writes too). ``supported_version_range``
+    covers the fingerprinted 8.0.x line only and is disjoint from the base
+    class's ``>=8.5,<10.0`` band, so an 8.0.x target resolves here (versioned
+    beats the product wildcard) while the 9.0 catalog's guard keeps rejecting
+    it. The catalog-boundary attributes narrow the inherited guard to the
+    8.0.x line, so an ingested dispatch against an 8.0.3 target is not
+    rejected with ``unqualified_target_version``.
+
+    Scope is the 8.0 U3 catalog: the band covers the whole 8.0.x fingerprint
+    line so no 8.0.x target is stranded, while the pinned catalog evidence in
+    the VCF API contract manifest qualifies 8.0 U3 only (it does not claim
+    8.0 U1 / U2 or a general all-8.x qualification).
+    """
+
+    version = "8.0"
+    supported_version_range = ">=8.0,<8.1"
+    _catalog_version_floor = Version("8.0")
+    _catalog_version_ceiling = Version("8.1")
+    _catalog_version_band_label = "8.0.x"

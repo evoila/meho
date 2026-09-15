@@ -50,6 +50,7 @@ _ADMIN_REALMS_PATH = "/admin/realms"
 _ADMIN_REALM_PATH = "/admin/realms/{realm}"
 _CLIENTS_PATH = "/admin/realms/{realm}/clients"
 _CLIENT_PATH = "/admin/realms/{realm}/clients/{client-uuid}"
+_CLIENT_SECRET_PATH = "/admin/realms/{realm}/clients/{client-uuid}/client-secret"
 _CLIENT_PROTOCOL_MAPPERS_PATH = (
     "/admin/realms/{realm}/clients/{client-uuid}/protocol-mappers/models"
 )

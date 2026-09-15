@@ -231,7 +231,7 @@ async def net_tcp_check(operator: Operator, target: Any, params: dict[str, Any])
     port = int(params["port"])
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    assert_probe_allowed(host)
+    assert_probe_allowed(host, tenant_id=operator.tenant_id)
 
     started = time.perf_counter()
     try:
@@ -572,9 +572,9 @@ async def net_dns_lookup(operator: Operator, target: Any, params: dict[str, Any]
     # a custom resolver IP is gated too — querying an internal resolver or
     # resolving internal names is itself mild recon. A refusal propagates
     # to the dispatcher's ``connector_probe_refused`` arm (#2784).
-    assert_probe_allowed(name)
+    assert_probe_allowed(name, tenant_id=operator.tenant_id)
     if resolver_ip is not None:
-        assert_probe_allowed(resolver_ip)
+        assert_probe_allowed(resolver_ip, tenant_id=operator.tenant_id)
 
     # Reverse (PTR) form when the name is an IP literal — mirrors ``dig -x``.
     ip_literal = _as_ip_literal(name)

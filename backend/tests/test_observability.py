@@ -46,8 +46,31 @@ from prometheus_client import REGISTRY
 
 from meho_backplane.main import app
 from meho_backplane.middleware import UNMATCHED_ROUTE_LABEL, RequestContextMiddleware
+from meho_backplane.settings import get_settings
 
 _UUID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the minimal Settings env the exposition endpoints now need.
+
+    ``/metrics`` and ``/ready`` gained the opt-in bearer guard
+    :func:`~meho_backplane.metrics_access.verify_metrics_access` (#3499),
+    which calls :func:`get_settings` on every request. Without the required
+    Keycloak env vars ``get_settings`` raises ``KeyError`` before the
+    default-open short-circuit is reached, so this file — which drives both
+    endpoints against the bare production ``app`` — must pin them just like
+    every other test file does (see ``tests/conftest.py`` and
+    ``tests/test_metrics_access.py``). ``METRICS_AUTH_TOKEN`` stays unset so
+    the guard is default-open and behaviour is unchanged.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.delenv("METRICS_AUTH_TOKEN", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _configure_capture(buf: io.StringIO) -> None:

@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.argocd import ARGOCD_OPS, ArgoCdConnector
+from meho_backplane.connectors.argocd.redaction import REDACTED
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
@@ -283,6 +284,28 @@ _CLUSTER_LIST_WITH_CONFIG_RESPONSE: dict[str, Any] = {
         }
     ],
 }
+#: A repo's HTTPS-basic password + SSH key + bearer token — must never
+#: survive the ``argocd.repo.list`` handler's read-side redaction (#3501).
+_REPO_SECRET_PASSWORD = "repo-https-password-must-not-leak"
+_REPO_SECRET_SSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----must-not-leak-----END-----"
+_REPO_SECRET_BEARER = "repo-bearer-token-must-not-leak"
+#: A repository-list payload that carries the credential fields argocd-server
+#: echoes for a broad-RBAC token, so the redaction test proves the handler
+#: strips them rather than relying on the API to omit them.
+_REPO_LIST_WITH_CREDS_RESPONSE: dict[str, Any] = {
+    "metadata": {},
+    "items": [
+        {
+            "repo": "https://github.com/example/gitops",
+            "type": "git",
+            "username": "git-user",
+            "password": _REPO_SECRET_PASSWORD,
+            "sshPrivateKey": _REPO_SECRET_SSH_KEY,
+            "bearerToken": _REPO_SECRET_BEARER,
+            "connectionState": {"status": "Successful", "message": ""},
+        }
+    ],
+}
 
 
 @pytest.mark.parametrize(
@@ -471,6 +494,45 @@ async def test_cluster_list_redacts_config_from_items(
     # destination-cluster bearer never rides back in the envelope.
     assert all("config" not in row for row in result.result["items"])
     assert _DEST_CLUSTER_SECRET not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_repo_list_redacts_credentials(
+    _stub_embedding: AsyncMock,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC (#3501): repo.list strips inline repository credentials from every item.
+
+    The upstream payload deliberately includes ``password`` / ``sshPrivateKey``
+    / ``bearerToken`` — proving the read-side redaction is enforced by the
+    handler, not merely assumed of the argocd-server API.
+    """
+    await _register_ops(_stub_embedding)
+    install_fake_client(monkeypatch, secret={"token": _CANARY_TOKEN})
+
+    async with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        mock.get("/api/v1/repositories").respond(200, json=_REPO_LIST_WITH_CREDS_RESPONSE)
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id="argocd.repo.list",
+            target=_ReadTarget(),
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    item = result.result["items"][0]
+    # Non-secret fields survive; credential fields are blanked.
+    assert item["repo"] == "https://github.com/example/gitops"
+    assert item["username"] == "git-user"
+    assert item["password"] == REDACTED
+    assert item["sshPrivateKey"] == REDACTED
+    assert item["bearerToken"] == REDACTED
+    # No repo secret rides back in the envelope.
+    for secret in (_REPO_SECRET_PASSWORD, _REPO_SECRET_SSH_KEY, _REPO_SECRET_BEARER):
+        assert secret not in str(result)
 
 
 @pytest.mark.asyncio

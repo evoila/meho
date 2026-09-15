@@ -58,7 +58,19 @@ spec:
           # fallback: the values schema rejects empty `image.tag` so every
           # install pins the tag explicitly. Goal #11's deploy discipline
           # forbids any moving reference (including a chart-appVersion shadow).
+          #
+          # When `image.digest` is set (#284 / F15b), pin by the immutable
+          # manifest digest (`repository@sha256:...`) — the exact,
+          # content-addressed, scanned+signed digest the image pipeline
+          # promoted, and the reference a `cosign verify` / admission gate
+          # checks the signature against. `tag` stays the human-readable label
+          # of that release; the digest takes precedence in the rendered
+          # reference. With no digest set, fall back to the schema-required tag.
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -93,6 +105,18 @@ spec:
             # (locked driver) parses the `redis://` scheme unchanged.
             - name: BROADCAST_REDIS_URL
               value: "redis://{{ .Release.Name }}-broadcast:{{ .Values.broadcast.service.port }}/0"
+            {{- if .Values.broadcast.auth.enabled }}
+            # BROADCAST_REDIS_PASSWORD carries the Valkey `requirepass` the
+            # broadcast subchart enforces (charts/broadcast). Sourced from the
+            # same Secret + key the store reads, so the URL above stays
+            # password-free (no secret in a plaintext env `value:`) and the
+            # client authenticates via `Settings.broadcast_redis_password`.
+            - name: BROADCAST_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.broadcast.auth.existingSecret | default (printf "%s-broadcast-auth" .Release.Name) }}
+                  key: {{ .Values.broadcast.auth.existingSecretPasswordKey }}
+            {{- end }}
             {{- end }}
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6

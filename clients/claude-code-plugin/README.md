@@ -106,8 +106,13 @@ the scope is therefore safe: the session behaves exactly as the default.
 ### Prerequisites
 
 - A machine on the internal network / VPN that can reach the backplane.
-- Node.js with `npx` available (the shim runs the smoke-tested
-  `npx -y mcp-remote@0.1.38`).
+- Node.js with `npm` available (the shim vendors the smoke-tested
+  `mcp-remote@0.1.38` from the committed `package-lock.json` with
+  `npm ci --omit=dev` on first launch, then runs the lock-installed local
+  entry — no floating `npx -y` transitive install). The integrity-checked
+  tree is cached under `${XDG_CACHE_HOME:-~/.cache}/meho/mcp-remote`
+  (override with `MEHO_PLUGIN_CACHE`) and re-vendored only when the committed
+  lockfile changes.
 - `mcp-remote` performs the OAuth 2.1 + PKCE handshake against the realm. The
   shim passes `--static-oauth-client-info '{"client_id": "meho-mcp"}'` (overridable
   via `MEHO_MCP_CLIENT_ID`) so it presents the pre-registered public client

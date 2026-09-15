@@ -833,6 +833,19 @@ jobs:
           # fakes) so the guard resolves MCP_RESOURCE_URI to
           # https://meho-test.test/mcp and the install renders — the
           # guard behaviour itself is asserted by the render-time tests.
+          #
+          # #276: the broadcast subchart now ships (default-on) an ingress
+          # NetworkPolicy admitting tcp/6379 only from backplane-labelled
+          # Pods, plus Valkey `requirepass` auth. The G6.1-T9 chaos harness
+          # below drives the store from bare `valkey` Pods that carry
+          # neither the backplane pod-labels nor the password, so on a
+          # NetworkPolicy-enforcing CNI (kindnet enforces it) those probes
+          # hang on connect / are rejected by AUTH. Disable both guards for
+          # this minimal glue-and-recovery smoke — exactly as the umbrella
+          # `networkPolicy.enabled=false` above already does. The hardening
+          # itself is render-tested by
+          # backend/tests/test_chart_broadcast_hardening.py and the chart
+          # `validate` job (helm template + kubeconform), not here.
           helm install meho-test ./deploy/charts/meho \
             --namespace meho-test \
             --wait-for-jobs \
@@ -840,6 +853,8 @@ jobs:
             --set image.tag=test \
             --set ingress.enabled=false \
             --set networkPolicy.enabled=false \
+            --set broadcast.networkPolicy.enabled=false \
+            --set broadcast.auth.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set postgres.host=pgvector \
             --set vault.address=https://vault.test \

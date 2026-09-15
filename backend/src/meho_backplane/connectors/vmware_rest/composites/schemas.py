@@ -53,6 +53,8 @@ __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA",
+    "CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
@@ -88,6 +90,16 @@ __all__ = [
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "RESOURCE_POOL_CREATE_PARAMETER_SCHEMA",
+    "RESOURCE_POOL_CREATE_RESPONSE_SCHEMA",
+    "RESOURCE_POOL_DELETE_PARAMETER_SCHEMA",
+    "RESOURCE_POOL_DELETE_RESPONSE_SCHEMA",
+    "SUPERVISOR_DISABLE_PARAMETER_SCHEMA",
+    "SUPERVISOR_DISABLE_RESPONSE_SCHEMA",
+    "SUPERVISOR_ENABLE_PARAMETER_SCHEMA",
+    "SUPERVISOR_ENABLE_RESPONSE_SCHEMA",
+    "SUPERVISOR_STATUS_PARAMETER_SCHEMA",
+    "SUPERVISOR_STATUS_RESPONSE_SCHEMA",
     "VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA",
     "VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA",
     "VM_CLONE_PARAMETER_SCHEMA",
@@ -1472,6 +1484,207 @@ CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.cluster.drs_vm_host_rule.create`` parameter schema.
+#:
+#: A VM-Host affinity rule (``ClusterVmHostRuleInfo``) pins the VMs of a named
+#: VM group onto (``affine=true``) or away from (``affine=false``) the hosts of
+#: a named host group. A **sibling** of ``cluster.drs_rule.create`` (whose
+#: contract stays unchanged), because a VM-Host rule needs a host group + VM
+#: group, not the VM-VM explicit list. VM + host names resolve to MoRefs scoped
+#: to the cluster; rule + group names are the idempotence keys.
+CLUSTER_DRS_VM_HOST_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ClusterComputeResource moid the rule is added to (e.g. 'domain-c1').",
+        },
+        "rule_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new VM-Host rule. Rule names are an idempotence key — a name "
+                "already present returns ``status='rule_exists'`` before any write."
+            ),
+        },
+        "vm_group_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the ClusterVmGroup to create for the rule's VMs. Group names are "
+                "unique within a cluster — a clash returns ``status='group_exists'``."
+            ),
+        },
+        "host_group_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the ClusterHostGroup to create for the rule's hosts. Group names are "
+                "unique within a cluster — a clash returns ``status='group_exists'``."
+            ),
+        },
+        "vms": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Display names of the VMs in the VM group. Resolved to MoRefs scoped to the "
+                "cluster; none resolving → ``status='insufficient_vms'``."
+            ),
+        },
+        "hosts": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Display names of the hosts in the host group. Resolved to MoRefs scoped to the "
+                "cluster; none resolving → ``status='insufficient_hosts'``."
+            ),
+        },
+        "affine": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "``true`` (default) makes the host group the *affine* group (VMs run on those "
+                "hosts); ``false`` makes it the *anti-affine* group (VMs avoid those hosts)."
+            ),
+        },
+        "mandatory": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "``true`` = a 'must' rule (DRS never violates it, even for HA/maintenance); "
+                "``false`` (default) = a 'should' rule (a soft preference DRS may relax)."
+            ),
+        },
+        "enabled": {
+            "type": "boolean",
+            "default": True,
+            "description": "Whether the rule is enabled on creation. Defaults to true.",
+        },
+    },
+    "required": ["cluster", "rule_name", "vm_group_name", "host_group_name", "vms", "hosts"],
+    "additionalProperties": False,
+}
+
+
+#: Nested ``cpu_allocation`` / ``memory_allocation`` sub-schema for the
+#: resource-pool create (``Vcenter.ResourcePool.ResourceAllocationCreateSpec``).
+#: All optional — an omitted allocation uses vCenter's documented default.
+_RESOURCE_ALLOCATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reservation": {
+            "type": "integer",
+            "description": (
+                "Guaranteed resource (MHz for CPU, MB for memory). Default 0 when omitted."
+            ),
+        },
+        "expandable_reservation": {
+            "type": "boolean",
+            "description": (
+                "Whether the reservation can grow into the parent's unreserved resources. "
+                "Default true when omitted."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                "Utilisation ceiling (MHz for CPU, MB for memory); -1 = unbounded. Default -1."
+            ),
+        },
+        "shares": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["LOW", "NORMAL", "HIGH", "CUSTOM"],
+                    "description": "Shares level; CUSTOM uses the numeric ``shares`` count.",
+                },
+                "shares": {
+                    "type": "integer",
+                    "description": "Custom shares count; only used when ``level`` is CUSTOM.",
+                },
+            },
+            "required": ["level"],
+            "additionalProperties": False,
+            "description": "Relative-weight shares under contention. Default NORMAL when omitted.",
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.resource_pool.create`` parameter schema.
+#:
+#: Create a resource pool via the REST ``POST:/vcenter/resource-pool``
+#: (``Vcenter.ResourcePool.CreateSpec``). Exactly one parent selector:
+#: ``parent`` (a ResourcePool moid, used verbatim) or ``cluster`` (a
+#: ClusterComputeResource moid whose *root* resource pool is resolved as the
+#: parent — the estate-allocation convenience).
+RESOURCE_POOL_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new resource pool.",
+        },
+        "parent": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Parent ResourcePool moid the new pool nests under (e.g. 'resgroup-42'). "
+                "Mutually exclusive with ``cluster``."
+            ),
+        },
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid (e.g. 'domain-c1') whose root resource pool "
+                "becomes the parent — resolved via ClusterComputeResource.resourcePool. "
+                "Mutually exclusive with ``parent``."
+            ),
+        },
+        "cpu_allocation": _RESOURCE_ALLOCATION_SCHEMA,
+        "memory_allocation": _RESOURCE_ALLOCATION_SCHEMA,
+    },
+    "required": ["name"],
+    "oneOf": [{"required": ["parent"]}, {"required": ["cluster"]}],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.resource_pool.delete`` parameter schema.
+#:
+#: Delete a resource pool via the REST
+#: ``DELETE:/vcenter/resource-pool/{resourcePool}``, which reparents the pool's
+#: child pools + VMs up to its parent (it does not destroy them). A non-empty
+#: pool is refused unless ``force=true``.
+RESOURCE_POOL_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ResourcePool moid to delete (e.g. 'resgroup-42').",
+        },
+        "force": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Delete even when the pool has child pools / VMs (they are reparented up to the "
+                "parent). Without it, a non-empty pool returns ``status='not_empty'``."
+            ),
+        },
+    },
+    "required": ["resource_pool"],
+    "additionalProperties": False,
+}
+
+
 #: ``vmware.composite.folder.create`` parameter schema.
 #:
 #: Create a VM folder under a named parent via the **synchronous** vim
@@ -2364,6 +2577,184 @@ CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.cluster.drs_vm_host_rule.create`` response schema.
+CLUSTER_DRS_VM_HOST_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "rule_exists",
+                "group_exists",
+                "insufficient_vms",
+                "insufficient_hosts",
+                "timeout",
+            ],
+            "description": (
+                "``'created'`` — the ReconfigureComputeResource_Task add reached terminal "
+                "success; ``'rule_exists'`` / ``'group_exists'`` — the rule or a group name is "
+                "already present (idempotence keys; refused before any write); "
+                "``'insufficient_vms'`` / ``'insufficient_hosts'`` — none of the requested VM / "
+                "host names resolved in the cluster (refused before any write); ``'timeout'`` — "
+                "the reconfigure task did not reach a terminal state within the poll bound."
+            ),
+        },
+        "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
+        "rule_name": {"type": "string", "description": "Name of the rule."},
+        "vm_group_name": {"type": "string", "description": "Name of the created VM group."},
+        "host_group_name": {"type": "string", "description": "Name of the created host group."},
+        "affine": {
+            "type": "boolean",
+            "description": (
+                "Whether the host group is the affine (true) or anti-affine (false) group."
+            ),
+        },
+        "mandatory": {
+            "type": "boolean",
+            "description": "Whether the rule is a 'must' (true) or 'should' (false) rule.",
+        },
+        "enabled": {"type": "boolean", "description": "Whether the rule was created enabled."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigureComputeResource_Task moid — present once the write was issued "
+                "(``created`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "resolved_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": (
+                "The ``[{vm, name}]`` MoRefs placed in the VM group, resolved from names."
+            ),
+        },
+        "resolved_hosts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": (
+                "The ``[{host, name}]`` MoRefs placed in the host group, resolved from names."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "cluster", "rule_name", "vm_group_name", "host_group_name"],
+}
+
+
+#: ``vmware.composite.resource_pool.create`` response schema.
+RESOURCE_POOL_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "cluster_root_pool_unresolved", "no_parent"],
+            "description": (
+                "``'created'`` — the POST returned the new pool moid; "
+                "``'cluster_root_pool_unresolved'`` — the ``cluster`` convenience could not read "
+                "the cluster's root resource pool (pass an explicit ``parent``); ``'no_parent'`` "
+                "— neither ``parent`` nor ``cluster`` was supplied."
+            ),
+        },
+        "name": {"type": "string", "description": "The requested pool name."},
+        "parent": {
+            "type": ["string", "null"],
+            "description": "Resolved parent ResourcePool moid; ``null`` on a resolution refusal.",
+        },
+        "parent_source": {
+            "type": ["string", "null"],
+            "description": (
+                "Whether the parent came from ``parent`` (verbatim) or ``cluster`` "
+                "(root-pool resolution)."
+            ),
+        },
+        "cluster": {
+            "type": ["string", "null"],
+            "description": (
+                "The cluster moid, when the parent was resolved from a cluster; else ``null``."
+            ),
+        },
+        "resource_pool": {
+            "type": ["string", "null"],
+            "description": "The new pool's moid on success; ``null`` on a refusal.",
+        },
+        "verified_under_parent": {
+            "type": "boolean",
+            "description": (
+                "Read-back result: whether the new pool lists under the resolved parent "
+                "(``filter.parent_resource_pools``)."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "name"],
+}
+
+
+#: ``vmware.composite.resource_pool.delete`` response schema.
+RESOURCE_POOL_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "not_empty", "delete_unverified"],
+            "description": (
+                "``'deleted'`` — the DELETE returned and the read-back confirmed the pool is "
+                "absent; ``'not_empty'`` — the pool has child pools / VMs and ``force`` was not "
+                "set (no write); ``'delete_unverified'`` — the DELETE returned but the pool "
+                "still lists on read-back."
+            ),
+        },
+        "resource_pool": {"type": "string", "description": "The ResourcePool moid targeted."},
+        "forced": {
+            "type": "boolean",
+            "description": "Whether ``force`` was set (i.e. a non-empty pool was deleted).",
+        },
+        "child_pool_count": {
+            "type": "integer",
+            "description": "Number of child resource pools counted before the delete.",
+        },
+        "child_vm_count": {
+            "type": "integer",
+            "description": "Number of child VMs counted before the delete.",
+        },
+        "verified_absent": {
+            "type": "boolean",
+            "description": "Read-back result: whether the pool no longer lists.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``deleted`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "resource_pool"],
+}
+
+
 #: ``vmware.composite.folder.create`` response schema.
 FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2569,11 +2960,13 @@ VM_RESIZE_PARAMETER_SCHEMA: dict[str, Any] = {
 
 #: ``vmware.composite.vm.nic.repoint`` parameter schema.
 #:
-#: Repoints an existing vNIC to a different distributed portgroup,
-#: resolved by display name via
-#: ``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`` (there is
-#: no dedicated portgroup list resource -- the #1602 reconciliation
-#: lesson). Ambiguous / missing names refuse the repoint.
+#: Repoints an existing vNIC onto a distributed **or** host-scoped standard
+#: portgroup, resolved by display name via
+#: ``GET:/vcenter/network?filter.types=<backing_type>`` (there is no
+#: dedicated portgroup list resource -- the #1602 reconciliation lesson).
+#: ``backing_type`` defaults to ``DISTRIBUTED_PORTGROUP`` (back-compatible).
+#: An explicit ``network`` moid skips name resolution. Ambiguous / missing
+#: names refuse the repoint.
 VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -2591,12 +2984,42 @@ VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "minLength": 1,
             "description": (
-                "Display name of the target distributed portgroup. "
-                "Resolved to its network moid via "
-                "``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP``. "
+                "Display name of the target portgroup, resolved to its "
+                "network moid via "
+                "``GET:/vcenter/network?filter.types=<backing_type>``. "
                 "A name matching zero portgroups returns "
                 "``status='not_found'``; more than one returns "
-                "``status='ambiguous'`` with the candidates listed."
+                "``status='ambiguous'`` with the candidates listed (for "
+                "host-scoped standard portgroups a name routinely matches "
+                "one moid per host -- pass ``network`` to pick one). Still "
+                "the human label the approver sees even when ``network`` is "
+                "supplied."
+            ),
+        },
+        "backing_type": {
+            "type": "string",
+            "enum": ["DISTRIBUTED_PORTGROUP", "STANDARD_PORTGROUP"],
+            "default": "DISTRIBUTED_PORTGROUP",
+            "description": (
+                "Network kind the NIC is repointed onto. "
+                "``DISTRIBUTED_PORTGROUP`` (default) targets a vDS "
+                "portgroup; ``STANDARD_PORTGROUP`` targets a host-local "
+                "standard-switch portgroup (e.g. to repair a NIC that "
+                "landed on an L2 that cannot reach its gateway). Drives "
+                "both the ``filter.types`` resolution scope and the PATCHed "
+                "``backing.type``."
+            ),
+        },
+        "network": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Explicit target ``Network`` moid. Skips name resolution "
+                "and is validated for existence + type-consistency with "
+                "``backing_type`` (a mismatch returns "
+                "``status='invalid_request'``). Required to disambiguate a "
+                "host-scoped standard portgroup whose name resolves to "
+                "several moids (``status='ambiguous'``)."
             ),
         },
     },
@@ -2719,12 +3142,16 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "string",
-            "enum": ["repointed", "not_found", "ambiguous"],
+            "enum": ["repointed", "not_found", "ambiguous", "invalid_request"],
             "description": (
                 "``'repointed'`` -- the NIC backing was PATCHed to the "
-                "target portgroup; ``'not_found'`` -- no distributed "
-                "portgroup matched ``portgroup_name``; ``'ambiguous'`` -- "
-                "more than one did (candidates listed, no PATCH issued)."
+                "target portgroup; ``'not_found'`` -- no portgroup matched "
+                "``portgroup_name`` (or the explicit ``network`` moid did "
+                "not resolve); ``'ambiguous'`` -- more than one matched "
+                "(candidates listed -- pass ``network`` to pick one); "
+                "``'invalid_request'`` -- the explicit ``network`` moid is "
+                "the wrong network kind for ``backing_type``. No PATCH is "
+                "issued on any non-``repointed`` status."
             ),
         },
         "vm": {"type": "string", "description": "VM moid owning the NIC."},
@@ -2744,14 +3171,26 @@ VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
             "properties": {
                 "portgroup_id": {"type": ["string", "null"]},
                 "portgroup_name": {"type": "string"},
+                "backing_type": {
+                    "type": "string",
+                    "enum": ["DISTRIBUTED_PORTGROUP", "STANDARD_PORTGROUP"],
+                },
             },
-            "required": ["portgroup_id", "portgroup_name"],
-            "description": "The target distributed portgroup (moid resolved from the name).",
+            "required": ["portgroup_id", "portgroup_name", "backing_type"],
+            "description": (
+                "The target portgroup the reviewer approves: ``backing_type`` "
+                "(network kind), ``portgroup_id`` (resolved moid, ``null`` "
+                "when resolution failed), and ``portgroup_name`` (display "
+                "label)."
+            ),
         },
         "candidates": {
             "type": "array",
             "items": {"type": "object"},
-            "description": "Matching portgroup rows when ``status='ambiguous'`` (empty otherwise).",
+            "description": (
+                "Matching portgroup rows when ``status='ambiguous'`` / "
+                "``'invalid_request'`` (empty otherwise)."
+            ),
         },
         "guidance": {
             "type": ["string", "null"],
@@ -4461,4 +4900,947 @@ GUEST_PROGRAM_RUN_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "process_manager_moid", "program_path", "pid", "wait"],
+}
+
+
+# ---------------------------------------------------------------------------
+# namespace-management -- Supervisor (WCP) enable / disable / status (#3281)
+# ---------------------------------------------------------------------------
+
+
+#: ``vmware.composite.supervisor.enable`` parameter schema. The nested
+#: ``control_plane`` / ``workloads`` objects are the vendor
+#: ``EnableOnComputeClusterSpec`` sub-objects passed through to the enable POST
+#: body verbatim, so they keep ``additionalProperties: True`` (the full vendor
+#: spec -- LB config, DNS/NTP, image sync, CIDRs -- flows through unmodified).
+#: The schema pins the *structural* essentials (management network + control-
+#: plane storage policy, workload network_type + edge provider); the handler
+#: enforces the network-stack enums with a loud structured refusal
+#: (``unknown_network_provider``), so a bad provider fails closed in the
+#: composite rather than as an opaque vCenter 400.
+SUPERVISOR_ENABLE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid (``domain-cN``) of the vSphere cluster to "
+                "enable the Supervisor on. Rides the ``{cluster}`` path segment of "
+                "``POST /vcenter/namespace-management/supervisors/{cluster}"
+                "?action=enable_on_compute_cluster`` (the current 9.x path; the "
+                "``clusters/{cluster}?action=enable`` form is deprecated as of vSphere 9.0)."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "User-friendly Supervisor name (EnableOnComputeClusterSpec.name).",
+        },
+        "control_plane": {
+            "type": "object",
+            "required": ["network", "storage_policy"],
+            "properties": {
+                "network": {
+                    "type": "object",
+                    "description": (
+                        "Management network for the control plane (Networks.Management."
+                        "Network): backing portgroup + IP management (gateway in CIDR "
+                        "form, 5-address node range) + DNS/NTP services."
+                    ),
+                },
+                "storage_policy": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "SPBM policy id backing the Supervisor Kubernetes API server "
+                        "(SpsStorageProfile). Required -- on NFS there is no default "
+                        "policy; pass the tag-based NFS policy id."
+                    ),
+                },
+                "size": {
+                    "type": "string",
+                    "description": (
+                        "Control-plane sizing hint (TINY/SMALL/MEDIUM/LARGE). Optional; "
+                        "defaults to SMALL. TINY = 8 GB per CP VM."
+                    ),
+                },
+                "count": {
+                    "type": "integer",
+                    "enum": [1, 3],
+                    "description": "Number of control-plane VMs (1 or 3). Optional; defaults to 3.",
+                },
+            },
+            "additionalProperties": True,
+            "description": (
+                "EnableOnComputeClusterSpec.control_plane -- passed through to the "
+                "enable body. Requires a management ``network`` and a ``storage_policy``."
+            ),
+        },
+        "workloads": {
+            "type": "object",
+            "required": ["network", "edge"],
+            "properties": {
+                "network": {
+                    "type": "object",
+                    "required": ["network_type"],
+                    "properties": {
+                        "network_type": {
+                            "type": "string",
+                            "description": (
+                                "Workload network stack (Supervisors.Networks.Workload."
+                                "NetworkType). One of VSPHERE (VDS + Foundation LB), "
+                                "NSX_VPC (NSX VPC), NSXT (classic NSX-T). An unknown "
+                                "value is refused loudly by the composite "
+                                "(status='unknown_network_provider')."
+                            ),
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+                "edge": {
+                    "type": "object",
+                    "required": ["provider"],
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Edge (load-balancer) provider (Networks.Edges."
+                                "EdgeProvider). One of VSPHERE_FOUNDATION (pairs with the "
+                                "VSPHERE stack -- no separate NSX edge cluster required), "
+                                "NSX / NSX_VPC / NSX_ADVANCED, or the deprecated HAPROXY. "
+                                "An unknown value is refused loudly by the composite."
+                            ),
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "additionalProperties": True,
+            "description": (
+                "EnableOnComputeClusterSpec.workloads -- passed through to the enable "
+                "body. Requires a workload ``network`` (with ``network_type``) and an "
+                "``edge`` (with ``provider``); ``storage`` (ephemeral/image policies) is "
+                "optional and defaults from the control plane when omitted."
+            ),
+        },
+        "zone": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional pre-existing consumption fault-domain Zone id. Omitted -> a "
+                "zone is auto-created from the cluster's managed-object id."
+            ),
+        },
+    },
+    "required": ["cluster", "name", "control_plane", "workloads"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.enable`` response schema.
+SUPERVISOR_ENABLE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["enabling", "unknown_network_provider", "invalid_spec"],
+            "description": (
+                "``'enabling'`` -- the enable POST was accepted (asynchronous; poll "
+                "``vmware.composite.supervisor.status``). ``'unknown_network_provider'`` "
+                "-- workloads.network.network_type or workloads.edge.provider is not a "
+                "known 9.x value (refused before any write). ``'invalid_spec'`` -- a "
+                "required control_plane / workloads sub-field was missing (refused before "
+                "any write)."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "supervisor": {
+            "type": ["string", "null"],
+            "description": (
+                "New Supervisor id returned by the enable POST; ``null`` on any refusal."
+            ),
+        },
+        "network_type": {
+            "type": ["string", "null"],
+            "description": "Echoed workload network_type on success / provider refusal.",
+        },
+        "edge_provider": {
+            "type": ["string", "null"],
+            "description": "Echoed edge provider on success.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster", "supervisor"],
+}
+
+
+#: ``vmware.composite.supervisor.disable`` parameter schema.
+SUPERVISOR_DISABLE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid of the Supervisor-enabled cluster to tear "
+                "down. Rides ``POST /vcenter/namespace-management/clusters/{cluster}"
+                "?action=disable`` (``DELETE clusters/{cluster}`` 404s)."
+            ),
+        },
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.disable`` response schema.
+SUPERVISOR_DISABLE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["disabling"],
+            "description": (
+                "``'disabling'`` -- the disable POST was accepted (asynchronous; poll "
+                "``vmware.composite.supervisor.status``, config_status moves through "
+                "'REMOVING')."
+            ),
+        },
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "cluster"],
+}
+
+
+#: ``vmware.composite.supervisor.status`` parameter schema.
+SUPERVISOR_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "ClusterComputeResource moid to read Supervisor status for "
+                "(``GET /vcenter/namespace-management/clusters/{cluster}``)."
+            ),
+        },
+        "messages_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Optional cap on the inline ``messages`` / ``conditions`` arrays "
+                "(default 25). ``message_count`` / ``condition_count`` always carry the "
+                "uncapped sizes."
+            ),
+        },
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.supervisor.status`` response schema. Shaped for inline
+#: polling: the scalar ``config_status`` / ``kubernetes_status`` / ``ready``
+#: stay top-level so a runbook OperationCallVerify step or a Sensor assertion
+#: reads them without a JSONFlux handle.
+SUPERVISOR_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {"type": "string", "description": "Input cluster moid."},
+        "config_status": {
+            "type": ["string", "null"],
+            "description": (
+                "Clusters.ConfigStatus: CONFIGURING / REMOVING / RUNNING / ERROR. "
+                "``null`` when absent from the vCenter payload."
+            ),
+        },
+        "kubernetes_status": {
+            "type": ["string", "null"],
+            "description": "Clusters.KubernetesStatus: READY / WARNING / ERROR; else null.",
+        },
+        "ready": {
+            "type": "boolean",
+            "description": (
+                "True iff config_status == 'RUNNING' AND kubernetes_status == 'READY' -- "
+                "the single poll predicate a runbook / Sensor waits on."
+            ),
+        },
+        "messages": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Clusters.Message rows (severity + details).",
+        },
+        "conditions": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Capped Clusters.Condition rows (type / status / severity).",
+        },
+        "message_count": {"type": "integer", "description": "Uncapped message count."},
+        "condition_count": {"type": "integer", "description": "Uncapped condition count."},
+    },
+    "required": ["cluster", "config_status", "kubernetes_status", "ready"],
+}
+
+
+# ===========================================================================
+# storage_policy.* — governed NFS tag-based SPBM policy create/delete (#3494)
+# ===========================================================================
+
+#: ``vmware.composite.storage_policy.list`` parameter schema.
+#:
+#: Optional ``policy_ids`` narrows the list; absent, every visible policy is
+#: returned (JSONFlux-reduced by the dispatcher when set-shaped).
+STORAGE_POLICY_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": (
+                "Optional storage-policy identifiers to filter the list by. "
+                "Absent or empty lists every visible policy."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.list`` response schema.
+STORAGE_POLICY_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policies": {
+            "type": "array",
+            "description": "The visible storage policies (Vcenter.Storage.Policies.Summary rows).",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "policy": {"type": "string", "description": "Storage-policy identifier."},
+                    "name": {"type": "string", "description": "Storage-policy display name."},
+                    "description": {"type": "string", "description": "Storage-policy description."},
+                },
+                "required": ["policy", "name"],
+                "additionalProperties": True,
+            },
+        },
+    },
+    "required": ["policies"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.storage_policy.create`` parameter schema.
+#:
+#: Mints a tag-based requirement storage policy for NFS-principal datastores
+#: (which have no default policy). Creates the tag category + tag, attaches the
+#: tag to each named datastore, then creates the PBM policy whose one rule
+#: requires that tag. Category / tag / policy names must be new (this is a
+#: create op; use storage_policy.delete for teardown).
+STORAGE_POLICY_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": (
+                "Display name of the storage policy to create (PBM caps the name at 80 characters)."
+            ),
+        },
+        "category_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the tag category to create. The tag rule "
+                "references this category; the property id is "
+                "``com.vmware.storage.tag.<category_name>.property``."
+            ),
+        },
+        "tag_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the tag to create in the category and attach "
+                "to the datastores. The policy's tag rule requires this tag."
+            ),
+        },
+        "datastore_names": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "description": (
+                "Names of the datastore(s) the tag is attached to (typically "
+                "the NFS datastore(s) the Supervisor / VKS storage binds to). "
+                "Each name must resolve to exactly one datastore."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional description applied to the category, tag, and policy.",
+        },
+    },
+    "required": ["policy_name", "category_name", "tag_name", "datastore_names"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.create`` response schema.
+STORAGE_POLICY_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "datastore_not_found",
+                "policy_create_failed",
+            ],
+            "description": (
+                "``created`` — policy minted and visible; "
+                "``datastore_not_found`` — a datastore name resolved to zero / "
+                "many datastores (no tag substrate created); "
+                "``policy_create_failed`` — the tag substrate was created but "
+                "PbmCreate did not return a policy id (created artifacts "
+                "reported for cleanup)."
+            ),
+        },
+        "policy_id": {
+            "type": ["string", "null"],
+            "description": "The created PBM policy id (the vCenter StoragePolicy identifier).",
+        },
+        "policy_name": {"type": "string"},
+        "category_id": {"type": ["string", "null"], "description": "The created tag category id."},
+        "tag_id": {"type": ["string", "null"], "description": "The created tag id."},
+        "tag_name": {"type": "string"},
+        "datastores": {
+            "type": "array",
+            "description": "Resolved datastores the tag was attached to.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "moid": {"type": "string"},
+                },
+                "required": ["name", "moid"],
+                "additionalProperties": False,
+            },
+        },
+        "listed": {
+            "type": "boolean",
+            "description": "Whether the read-back GET saw the new policy in the policies list.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "policy_id", "policy_name"],
+    "additionalProperties": True,
+}
+
+#: ``vmware.composite.storage_policy.delete`` parameter schema.
+STORAGE_POLICY_DELETE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "policy_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "The storage-policy id to delete (the PBM profile uniqueId / "
+                "the identifier storage_policy.list returns as ``policy``)."
+            ),
+        },
+        "policy_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional display name, echoed in guidance for the approver.",
+        },
+    },
+    "required": ["policy_id"],
+    "additionalProperties": False,
+}
+
+#: ``vmware.composite.storage_policy.delete`` response schema.
+STORAGE_POLICY_DELETE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["deleted", "delete_failed", "still_present"],
+            "description": (
+                "``deleted`` — PbmDelete reported no per-id fault and the "
+                "read-back no longer lists the id; ``delete_failed`` — PbmDelete "
+                "returned a per-id fault (e.g. the policy is in use); "
+                "``still_present`` — PbmDelete reported success but the "
+                "read-back still lists the id."
+            ),
+        },
+        "policy_id": {"type": "string"},
+        "fault": {
+            "type": ["string", "null"],
+            "description": "The per-id PbmDelete fault type, when status='delete_failed'.",
+        },
+        "guidance": {"type": ["string", "null"]},
+    },
+    "required": ["status", "policy_id"],
+    "additionalProperties": True,
+}
+
+
+# ===========================================================================
+# Content-library SUBSCRIBED-library composites (#3495)
+# ===========================================================================
+
+
+#: ``vmware.composite.content_library.subscribed.create`` parameter schema.
+#:
+#: Create a SUBSCRIBED content library subscribed to a remote publisher (the
+#: TKr/VKr image source for a vSphere Supervisor). The subscription
+#: ``password`` may be secret; it rides the request body but never a preview /
+#: broadcast / audit-hash surface (the op is pinned into
+#: ``_CREDENTIAL_WRITE_OPS`` and carries a bespoke identity-only preview).
+CONTENT_LIBRARY_SUBSCRIBED_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name for the new subscribed library "
+                "(``Content.LibraryModel.name``). Names need not be unique."
+            ),
+        },
+        "subscription_url": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Publisher endpoint URL serving the library metadata "
+                "(``Content.Library.SubscriptionInfo.subscription_url``), e.g. "
+                "``https://wp-content.vmware.com/v2/latest/lib.json`` for the "
+                "upstream VMware Tanzu Kubernetes release (TKr/VKr) repo."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the datastore backing the library "
+                "(``Content.Library.StorageBacking`` of type ``DATASTORE``), "
+                "resolved to a moid via ``GET:/vcenter/datastore`` "
+                "(``filter.names``, exact match). A name matching no datastore "
+                "returns ``status='datastore_not_found'``, more than one "
+                "``status='ambiguous_datastore'`` — no library is created. A "
+                "storage backing is required even for an on-demand subscribed "
+                "library (only item metadata syncs, but the backing is still "
+                "mandatory)."
+            ),
+        },
+        "on_demand": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "When true (default), only item **metadata** synchronises; each "
+                "item's content (files) is pulled on first use. Recommended for "
+                "a TKr library — the ~3 GB-per-release image content then pulls "
+                "lazily at guest-cluster-create time rather than all up front. "
+                "When false, all content synchronises in advance."
+            ),
+        },
+        "automatic_sync_enabled": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Whether the library participates in automatic (periodic) "
+                "synchronisation. The subscription stays active either way; "
+                "with this false, sync happens only via an explicit "
+                "``content_library.subscribed.sync``. Automatic sync also "
+                "requires the global content-library automatic-sync option to "
+                "be enabled."
+            ),
+        },
+        "authentication_method": {
+            "type": "string",
+            "enum": ["NONE", "BASIC"],
+            "default": "NONE",
+            "description": (
+                "How the subscribed library authenticates to the publisher. "
+                "``NONE`` for a public endpoint (the VMware TKr repo); ``BASIC`` "
+                "for HTTP Basic, in which case ``username`` / ``password`` are "
+                "sent."
+            ),
+        },
+        "username": {
+            "type": "string",
+            "description": (
+                "Username for ``BASIC`` authentication "
+                "(``Content.Library.SubscriptionInfo.user_name``). Ignored when "
+                "``authentication_method`` is ``NONE``."
+            ),
+        },
+        "password": {
+            "type": "string",
+            "description": (
+                "Password for ``BASIC`` authentication "
+                "(``Content.Library.SubscriptionInfo.password``). Secret: kept "
+                "off every preview / broadcast / audit-hash surface. Ignored "
+                "when ``authentication_method`` is ``NONE``."
+            ),
+        },
+        "ssl_thumbprint": {
+            "type": "string",
+            "description": (
+                "Optional SHA-1 thumbprint of the publisher's SSL certificate "
+                "(``Content.Library.SubscriptionInfo.ssl_thumbprint``). When "
+                "set, the certificate is pinned to this thumbprint instead of "
+                "the normal chain validation."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "Optional human-readable library description.",
+        },
+    },
+    "required": ["name", "subscription_url", "datastore"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.create`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "created",
+                "datastore_not_found",
+                "ambiguous_datastore",
+                "create_error",
+            ],
+            "description": (
+                "``'created'`` — the subscribed library was created and its id "
+                "returned (the background sync to the publisher has begun); "
+                "``'datastore_not_found'`` / ``'ambiguous_datastore'`` — the "
+                "``datastore`` name matched zero / many datastores (no library "
+                "created); ``'create_error'`` — the create call itself faulted, "
+                "surfaced as a structured message under ``issues`` rather than a "
+                "raw vendor error."
+            ),
+        },
+        "library_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Identifier of the newly created subscribed library "
+                "(``com.vmware.content.Library``) — the id #3281's enable spec "
+                "consumes as ``default_kubernetes_service_content_library``. "
+                "``null`` unless ``status='created'``."
+            ),
+        },
+        "name": {"type": ["string", "null"], "description": "Echo of the library name."},
+        "subscription_url": {
+            "type": ["string", "null"],
+            "description": "Echo of the publisher subscription URL.",
+        },
+        "datastore_id": {
+            "type": ["string", "null"],
+            "description": "Resolved datastore moid used for the storage backing.",
+        },
+        "on_demand": {
+            "type": ["boolean", "null"],
+            "description": "Echo of the effective on-demand sync mode.",
+        },
+        "automatic_sync_enabled": {
+            "type": ["boolean", "null"],
+            "description": "Echo of the effective automatic-sync setting.",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Datastore moids that matched on ``ambiguous_datastore``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``created`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.sync`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_SYNC_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id to synchronise. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find``. A name matching no "
+                "library returns ``status='library_not_found'``, more than one "
+                "``status='ambiguous_library'``. Ignored when ``library_id`` is "
+                "given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.sync`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_SYNC_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "sync_triggered",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "sync_error",
+            ],
+            "description": (
+                "``'sync_triggered'`` — the forced synchronisation was accepted "
+                "(asynchronous: it does not wait for content to land, and is a "
+                "no-op if a sync is already in progress); ``'invalid_reference'`` "
+                "— neither ``library_id`` nor ``library_name`` was supplied; "
+                "``'library_not_found'`` / ``'ambiguous_library'`` — the "
+                "``library_name`` lookup matched zero / many libraries; "
+                "``'sync_error'`` — the sync call itself faulted."
+            ),
+        },
+        "library_id": {
+            "type": ["string", "null"],
+            "description": "The resolved library id the sync targeted.",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``sync_triggered`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.status`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_STATUS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id to read. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find`` (see the sync op's "
+                "``library_name`` for the not-found / ambiguous semantics). "
+                "Ignored when ``library_id`` is given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.status`` response schema.
+CONTENT_LIBRARY_SUBSCRIBED_STATUS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "ok",
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+                "read_error",
+            ],
+            "description": (
+                "``'ok'`` — the library model was read; ``'invalid_reference'`` / "
+                "``'library_not_found'`` / ``'ambiguous_library'`` — reference "
+                "resolution failures (see the sync op); ``'read_error'`` — the "
+                "GET returned a non-object payload."
+            ),
+        },
+        "library_id": {"type": ["string", "null"], "description": "The resolved library id."},
+        "name": {"type": ["string", "null"], "description": "Library display name."},
+        "type": {
+            "type": ["string", "null"],
+            "description": "Library type (``SUBSCRIBED`` for a subscribed library).",
+        },
+        "subscription_url": {
+            "type": ["string", "null"],
+            "description": "Publisher subscription URL (no secret in the GET response).",
+        },
+        "authentication_method": {
+            "type": ["string", "null"],
+            "description": "Subscription authentication method (``NONE`` / ``BASIC``).",
+        },
+        "automatic_sync_enabled": {
+            "type": ["boolean", "null"],
+            "description": "Whether automatic synchronisation is enabled.",
+        },
+        "on_demand": {
+            "type": ["boolean", "null"],
+            "description": "Whether the library synchronises item content on demand.",
+        },
+        "last_sync_time": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 timestamp of the last successful synchronisation — the "
+                "readiness signal: populated once the first metadata sync "
+                "completes. ``null`` before the first sync."
+            ),
+        },
+        "description": {
+            "type": ["string", "null"],
+            "description": "Library description, if any.",
+        },
+        "storage_backings": {
+            "type": ["array", "null"],
+            "items": {"type": "object"},
+            "description": "The library's storage backings (as returned by vCenter).",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a non-``ok`` status.",
+        },
+    },
+    "required": ["status", "library_id"],
+}
+
+
+#: ``vmware.composite.content_library.subscribed.items.list`` parameter schema.
+CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "library_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Subscribed-library id whose items to list. Supply this **or** "
+                "``library_name``; ``library_id`` wins when both are present."
+            ),
+        },
+        "library_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Library display name, resolved to an id via "
+                "``POST:/content/library?action=find`` (see the sync op for the "
+                "not-found / ambiguous semantics). Ignored when ``library_id`` "
+                "is given."
+            ),
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.content_library.subscribed.items.list`` response schema.
+#:
+#: The ``items`` collection is JSONFlux-reduced automatically once it crosses
+#: the dispatcher's 50-row / 4 KB threshold (drill in with ``result_query``).
+CONTENT_LIBRARY_SUBSCRIBED_ITEMS_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "invalid_reference",
+                "library_not_found",
+                "ambiguous_library",
+            ],
+            "description": (
+                "Present only on a reference-resolution failure; a successful "
+                "listing omits ``status`` and returns ``library_id`` + "
+                "``item_count`` + ``items``."
+            ),
+        },
+        "library_id": {"type": ["string", "null"], "description": "The resolved library id."},
+        "item_count": {
+            "type": "integer",
+            "description": "Number of items read from the library.",
+        },
+        "items": {
+            "type": "array",
+            "description": (
+                "One row per library item. For a TKr library each row's "
+                "``name`` is a Tanzu Kubernetes release version and ``cached`` "
+                "indicates whether the (multi-GB) image content is downloaded."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Library item id."},
+                    "name": {
+                        "type": ["string", "null"],
+                        "description": "Item name (the TKr version for a TKr item).",
+                    },
+                    "type": {
+                        "type": ["string", "null"],
+                        "description": "Item type (e.g. ``ovf``, ``vm-template``).",
+                    },
+                    "version": {
+                        "type": ["string", "null"],
+                        "description": "Item metadata version.",
+                    },
+                    "cached": {
+                        "type": ["boolean", "null"],
+                        "description": "Whether the item's content is synchronised locally.",
+                    },
+                    "size": {
+                        "type": ["integer", "null"],
+                        "description": "Aggregate size of the item's files in bytes, if reported.",
+                    },
+                    "last_sync_time": {
+                        "type": ["string", "null"],
+                        "description": "ISO-8601 timestamp of the item's last sync.",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Library ids that matched on ``ambiguous_library``.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Structured issue entries on a reference-resolution failure.",
+        },
+    },
+    "required": ["library_id"],
 }

@@ -4,11 +4,14 @@
 # Claude Code plugin — PR behavioral + conformance tests.
 #
 # Three suites pin the plugin's behavioural contracts, each stubbing the
-# binary it drives (`npx` / `meho`) on a controlled PATH:
-#   1. The stdio shim wrapper (bin/meho-mcp-remote) `exec`s
-#      `npx -y mcp-remote@… <url> --static-oauth-…` — its argv is the
-#      contract, in particular the OAuth scope metadata the MEHO_MCP_SCOPES
-#      elevation seam makes operator-configurable (stubbed-argv suite).
+# binary it drives (`npm` / `meho`) on a controlled PATH:
+#   1. The stdio shim wrapper (bin/meho-mcp-remote) vendors mcp-remote from
+#      its committed package-lock.json with `npm ci --omit=dev` (no floating
+#      `npx -y`), then runs the lock-installed local entry with
+#      `<url> --static-oauth-…` — the install path and that argv (in
+#      particular the OAuth scope metadata the MEHO_MCP_SCOPES elevation seam
+#      makes operator-configurable) are the contract. `npm`/`npx` are stubbed,
+#      so the suite exercises this with no registry access (behavioural suite).
 #   2. A static guard that every plugin-scoped hooks.json matcher names a
 #      tool actually registered under backend/src/meho_backplane/mcp/tools/
 #      (the meho_ prefix asymmetry silently disarmed the announce hook

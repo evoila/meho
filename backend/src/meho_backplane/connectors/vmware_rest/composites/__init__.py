@@ -80,6 +80,12 @@ from meho_backplane.connectors.vmware_rest.composites._host import (
     disk_mark_flash_composite,
     service_control_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._library import (
+    content_library_subscribed_create_composite,
+    content_library_subscribed_items_list_composite,
+    content_library_subscribed_status_composite,
+    content_library_subscribed_sync_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -89,6 +95,16 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 )
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
+)
+from meho_backplane.connectors.vmware_rest.composites._storage_policy import (
+    storage_policy_create_composite,
+    storage_policy_delete_composite,
+    storage_policy_list_composite,
+)
+from meho_backplane.connectors.vmware_rest.composites._supervisor import (
+    supervisor_disable_composite,
+    supervisor_enable_composite,
+    supervisor_status_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
@@ -134,6 +150,10 @@ __all__ = [
     "cluster_drs_recommendations_composite",
     "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
+    "content_library_subscribed_create_composite",
+    "content_library_subscribed_items_list_composite",
+    "content_library_subscribed_status_composite",
+    "content_library_subscribed_sync_composite",
     "datastore_mount_nfs_composite",
     "datastore_usage_composite",
     "disk_mark_flash_composite",
@@ -154,6 +174,12 @@ __all__ = [
     "performance_summary_composite",
     "register_vmware_composite_operations",
     "service_control_composite",
+    "storage_policy_create_composite",
+    "storage_policy_delete_composite",
+    "storage_policy_list_composite",
+    "supervisor_disable_composite",
+    "supervisor_enable_composite",
+    "supervisor_status_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",

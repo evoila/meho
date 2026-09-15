@@ -424,7 +424,7 @@ def test_callback_creates_session_and_redirects_to_dashboard() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = TestClient(_build_app(), base_url="https://testserver", follow_redirects=False)
         login_response = client.get("/ui/auth/login")  # default return_to=/ui/
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
         callback = client.get(
@@ -479,10 +479,12 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     assert "dashboardFeedTray({" in body
     assert '<script src="/ui/static/src/app/dashboard-feed.js" defer></script>' in body
     assert "Connecting to live feed" in body
-    # The compact feed row prefers the resolved ``principal_name``
-    # already carried on the ``BroadcastEvent`` frame, falling back to
-    # the raw ``principal_sub`` (#3338) — mirroring broadcast/_event_row.
+    # The compact feed row shows the resolved ``principal_name`` already carried
+    # on the ``BroadcastEvent`` frame alongside the raw ``principal_sub``;
+    # without a name, the sub remains the label (#3301).
     assert 'x-text="ev.principal_name || ev.principal_sub"' in body
+    assert 'x-show="ev.principal_name"' in body
+    assert "x-text=\"' (' + ev.principal_sub + ')'\"" in body
     # Version footer renders the deployed-build label the chassis env
     # binds from CHART_VERSION / GIT_SHA (#1698). No hardcoded ``v``
     # prefix anymore -- the label carries its own when it is a release
@@ -804,7 +806,7 @@ def test_full_flow_unauth_login_callback_then_dashboard() -> None:
                 },
             ),
         )
-        client = TestClient(_build_app(), follow_redirects=False)
+        client = TestClient(_build_app(), base_url="https://testserver", follow_redirects=False)
         _trust_test_cookies(client)
         # Step 1: hit /ui/ unauthenticated -> 302 to login.
         first = client.get("/ui/")

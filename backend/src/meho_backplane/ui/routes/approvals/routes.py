@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line approvals console
+# BFF; #274 adds one exception import + one handler branch, not a split.
 
 """Approvals UI routes: a notifications bell + approve/deny modal over a session BFF.
 
@@ -130,6 +132,7 @@ from meho_backplane.operations.approval_context import (
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
+    ApprovalRequestExpiredError,
     PreviewBindingMissingError,
     SelfApprovalForbiddenError,
     UnauthorizedApprovalError,
@@ -797,6 +800,13 @@ async def _commit_decision(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"This request was already {exc.status}.",
+        ) from exc
+    except ApprovalRequestExpiredError as exc:
+        # F12 / #274: the request's deadline lapsed — refuse the approval at
+        # decision time rather than waiting for the background expiry sweep.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This request's approval deadline has passed and it can no longer be decided.",
         ) from exc
     except PreviewBindingMissingError as exc:
         # #3197: a destructive row missing its preview-hash binding cannot be

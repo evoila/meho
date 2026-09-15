@@ -67,6 +67,9 @@ _EXPECTED_REST_WRITE_OP_IDS = {
     "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}",
     "POST:/vcenter/guest/customization-specs",
     "PUT:/vcenter/vm/{vm}/guest/customization",
+    # #3505 governed resource-pool create (a flat CreateSpec body — the DELETE
+    # counterpart is a path-only op excluded by the POST/PATCH/PUT collector).
+    "POST:/vcenter/resource-pool",
 }
 
 # The bodies #2973 flattened from the ``/rest`` ``{"spec": {...}}`` envelope to
@@ -231,6 +234,11 @@ _EMITTED_VIM_TYPE_NAMES: set[str] = {
     _write._CLUSTER_RULE_SPEC_TYPE,
     _write._CLUSTER_AFFINITY_RULE_TYPE,
     _write._CLUSTER_ANTI_AFFINITY_RULE_TYPE,
+    # #3505 VM-Host affinity rule DataObjects.
+    _write._CLUSTER_VM_HOST_RULE_INFO_TYPE,
+    _write._CLUSTER_VM_GROUP_TYPE,
+    _write._CLUSTER_HOST_GROUP_TYPE,
+    _write._CLUSTER_GROUP_SPEC_TYPE,
     # Typed HttpNfcLease OVF import (#3229) -- the CreateImportSpec cisp +
     # its network / property mapping DataObjects.
     ovf_import_control.OVF_CREATE_IMPORT_SPEC_PARAMS_TYPE,

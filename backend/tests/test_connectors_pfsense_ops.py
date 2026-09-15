@@ -1184,9 +1184,9 @@ def test_pfsense_ops_requires_approval_only_for_destructive_deletes() -> None:
 # state format, redmine #2121; matches the lab's own live classifier
 # `rdc-hetzner-dc/scripts/pfsense-meho-measure-report.sh` -- `$2=="tcp"`,
 # `<if> tcp <ep1> <-|-> <ep2>`). Inbound management connections render as
-# `<if> tcp <server:mgmtport> <- <client:highport>`; the classifier is
-# arrow/position-agnostic (server = whichever endpoint carries a mgmt port),
-# so line 7 carries the mgmt port on the OTHER endpoint to prove that. opt5
+# `<if> tcp <server:mgmtport> <- <client:highport>`; the classifier resolves
+# the server from the direction arrow (`->` server = dst, `<-` server = src),
+# so line 7 is an outbound `->` whose server is the dst endpoint. opt5
 # CIDR 10.11.16.0/20, opt2 CIDR 10.5.50.0/24. Sanctioned: 10.11.16.40 +
 # 10.5.50.153. Baseline (expected non-sanctioned): 10.11.255.0/24. Management
 # ports default 443/22/902/5480. All ten lines parse (unparsed_lines == 0).
@@ -1273,13 +1273,101 @@ def test_classify_mgmt_flows_per_leg_coverage() -> None:
 
 
 def test_classify_mgmt_flows_server_side_detected_on_either_endpoint() -> None:
-    """State 7 carries the mgmt port on the DST endpoint (the other endpoint
-    from lines 1-6); the client is the src. The classifier picks the server by
-    port, not by src/dst position, so it is still classified."""
+    """State 7 is an outbound `->` state whose server is the DST endpoint
+    (lines 1-6 are inbound `<-` with the server on the src). The classifier
+    resolves the server from the direction arrow, not the src/dst position,
+    so the dst-side management port is still classified with the client on
+    the src."""
     result = _classify_fixture()
     row = next(r for r in result["unexpected_sources"] if r["src"] == "203.0.113.5")
     assert row["leg"] == "opt5"
     assert row["ports"] == [443]
+
+
+# ---------------------------------------------------------------------------
+# #3471: honour the pfctl -ss direction arrow when splitting server/client.
+# An OUTBOUND connection whose local client ephemeral SOURCE port happens to
+# equal a management-class port must not be inverted into a false inbound hit
+# on a local management port. RFC 5737 documentation addresses only: local
+# management net 192.0.2.0/24, remote vendor endpoint 203.0.113.10.
+# ---------------------------------------------------------------------------
+_DOC_MGMT_NETS = [{"cidr": "192.0.2.0/24", "leg": "mgmt"}]
+
+
+def _classify_doc(line: str) -> dict[str, Any]:
+    return classify_mgmt_flows(
+        parse_pfctl_states(line), sanctioned_src=[], mgmt_nets=_DOC_MGMT_NETS
+    )
+
+
+def test_classify_mgmt_flows_ordinary_outbound_is_ignored() -> None:
+    """Local 192.0.2.5 dials out to a vendor 203.0.113.10:443 from an ordinary
+    ephemeral source port. The arrow-resolved server (the :443 endpoint) is
+    outside every mgmt_net, so nothing is classified (repro case 1)."""
+    result = _classify_doc("all tcp 203.0.113.10:443 <- 192.0.2.5:40000  ESTABLISHED:ESTABLISHED\n")
+    assert result["total_states_classified"] == 0
+    assert result["unexpected_source_count"] == 0
+
+
+def test_classify_mgmt_flows_outbound_coincidental_mgmt_source_port_not_flagged() -> None:
+    """Same outbound connection, but the local client's ephemeral source port
+    coincidentally equals a management port (5480). Before #3471 the dst-first
+    port tie-break inverted the roles and reported the remote server as an
+    unexpected inbound source hitting 192.0.2.5:5480. The direction arrow
+    (`<-`, so the server is the :443 src endpoint, outside every mgmt_net) now
+    resolves it correctly: not a management-plane hit (repro case 2)."""
+    result = _classify_doc("all tcp 203.0.113.10:443 <- 192.0.2.5:5480  ESTABLISHED:ESTABLISHED\n")
+    assert result["total_states_classified"] == 0
+    assert result["unexpected_source_count"] == 0
+    assert result["unexpected_sources"] == []
+
+
+def test_classify_mgmt_flows_genuine_inbound_to_mgmt_port_still_flagged() -> None:
+    """A real inbound hit on a local management port must still be flagged:
+    192.0.2.5:5480 (in the mgmt_net) is the server, reached inbound from
+    203.0.113.10. The byte-shape is identical to the false positive above
+    except for which endpoint is local -- the arrow is what distinguishes
+    them (repro case 3, must stay)."""
+    result = _classify_doc(
+        "all tcp 192.0.2.5:5480 <- 203.0.113.10:41022  ESTABLISHED:ESTABLISHED\n"
+    )
+    assert result["total_states_classified"] == 1
+    assert result["unexpected_source_count"] == 1
+    assert result["unexpected_sources"] == [
+        {"src": "203.0.113.10", "leg": "mgmt", "ports": [5480], "states": 1}
+    ]
+
+
+@pytest.mark.parametrize("mgmt_port", [22, 443, 902, 5480])
+def test_classify_mgmt_flows_double_mgmt_port_client_side_not_flagged(mgmt_port: int) -> None:
+    """For every default management port, an outbound connection to a vendor
+    management port (:443) whose local client source port ALSO equals a
+    management port must not be inverted into a false inbound hit (#3471); the
+    mgmt_port == 443 case exercises a both-endpoints-:443 state. The
+    mirror-image genuine inbound hit on that same port is still flagged."""
+    outbound = f"all tcp 203.0.113.10:443 <- 192.0.2.5:{mgmt_port}  ESTABLISHED:ESTABLISHED\n"
+    result = _classify_doc(outbound)
+    assert result["total_states_classified"] == 0
+    assert result["unexpected_source_count"] == 0
+
+    inbound = f"all tcp 192.0.2.5:{mgmt_port} <- 203.0.113.10:41022  ESTABLISHED:ESTABLISHED\n"
+    hit = _classify_doc(inbound)
+    assert hit["unexpected_source_count"] == 1
+    assert hit["unexpected_sources"][0]["src"] == "203.0.113.10"
+    assert hit["unexpected_sources"][0]["ports"] == [mgmt_port]
+
+
+def test_classify_mgmt_flows_bidirectional_arrow_falls_back_to_port_heuristic() -> None:
+    """`<->` carries no initiator information, so the classifier falls back to
+    the port heuristic (server = the endpoint carrying a mgmt port). The
+    in-mgmt_net endpoint 192.0.2.5:5480 is the server and 203.0.113.10 the
+    client, so the flow is still classified."""
+    result = _classify_doc(
+        "all tcp 192.0.2.5:5480 <-> 203.0.113.10:41022  ESTABLISHED:ESTABLISHED\n"
+    )
+    assert result["total_states_classified"] == 1
+    assert result["unexpected_source_count"] == 1
+    assert result["unexpected_sources"][0]["src"] == "203.0.113.10"
 
 
 def test_classify_mgmt_flows_default_ports_applied_when_omitted() -> None:

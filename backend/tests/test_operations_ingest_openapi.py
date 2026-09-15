@@ -207,6 +207,55 @@ def test_parse_petstore_30_safety_heuristic() -> None:
     assert ops["HEAD:/pets/{petId}/photos"].safety_level == "safe"
 
 
+def test_parse_vim_destructive_actions_raise_tier_and_require_approval() -> None:
+    """VIM's POST-shaped destructive methods cannot rely on HTTP verb alone."""
+    rows = parse_openapi(
+        "file:///vi-json-safety.yaml",
+        content="""
+openapi: 3.1.0
+info: {title: VIM safety fixture, version: '1.0'}
+paths:
+  /VirtualMachine/{moId}/Destroy_Task:
+    post:
+      operationId: VirtualMachine.Destroy_Task
+      responses: {'200': {description: accepted}}
+  /Datastore/{moId}/DeleteDatastoreFile_Task:
+    post:
+      operationId: DeleteDatastoreFile_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/RemoveSnapshot_Task:
+    post:
+      operationId: VirtualMachine.RemoveSnapshot_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Unregister:
+    post:
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Reset_Task:
+    post:
+      operationId: VirtualMachine.Reset_Task
+      responses: {'200': {description: accepted}}
+  /VirtualMachine/{moId}/Destroyer_Task:
+    post:
+      operationId: VirtualMachine.Destroyer_Task
+      responses: {'200': {description: accepted}}
+""",
+    )
+    ops = _by_op_id(rows)
+
+    for op_id in (
+        "POST:/VirtualMachine/{moId}/Destroy_Task",
+        "POST:/Datastore/{moId}/DeleteDatastoreFile_Task",
+        "POST:/VirtualMachine/{moId}/RemoveSnapshot_Task",
+        "POST:/VirtualMachine/{moId}/Unregister",
+    ):
+        assert ops[op_id].safety_level == "dangerous"
+        assert ops[op_id].requires_approval is True
+
+    assert ops["POST:/VirtualMachine/{moId}/Reset_Task"].safety_level == "caution"
+    assert ops["POST:/VirtualMachine/{moId}/Reset_Task"].requires_approval is False
+    assert ops["POST:/VirtualMachine/{moId}/Destroyer_Task"].safety_level == "caution"
+
+
 # -- parse_openapi: YAML 1.1 timestamp typing (#2272) ----------------------
 
 
@@ -2292,7 +2341,62 @@ def test_parse_schema_without_nested_refs_gains_no_components_key() -> None:
                 "x-meho-param-loc": "body",
             }
         },
+        # #293: the top-level ingested schema fails closed on undeclared params.
+        "additionalProperties": False,
     }
+
+
+def test_build_parameter_schema_fails_closed_on_undeclared_params() -> None:
+    """AC (#293 / S05): every built ingested schema carries ``additionalProperties: false``.
+
+    JSON Schema 2020-12 defaults ``additionalProperties`` to ``true``, so
+    without the clause a param the op never declared passes
+    ``validate_params`` and the dispatcher forwards it verbatim onto the
+    vendor query string. The ingester now emits the clause on every
+    built ``parameter_schema`` so the generic-connector dispatch surface
+    is confined to its declared params.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
+
+    # Every ingested op's built schema fails closed on additive keys.
+    for proto in rows:
+        assert proto.parameter_schema["additionalProperties"] is False, proto.op_id
+
+    # The clause is load-bearing: a strict validator over the built schema
+    # rejects an undeclared param with an ``additionalProperties`` error,
+    # while a declared param validates clean at the additive-key layer.
+    list_pets = _by_op_id(rows)["GET:/pets"]
+    validator = Draft202012Validator(list_pets.parameter_schema)
+    undeclared = [
+        err
+        for err in validator.iter_errors({"undeclared_switch": "on"})
+        if err.validator == "additionalProperties"
+    ]
+    assert undeclared, "undeclared param must raise an additionalProperties error"
+    declared_only = [
+        err
+        for err in validator.iter_errors({"limit": 5})
+        if err.validator == "additionalProperties"
+    ]
+    assert declared_only == []
+
+
+def test_response_schema_is_not_strict_additional_properties() -> None:
+    """Only the top-level *parameter* schema fails closed -- responses stay open.
+
+    ``additionalProperties: false`` on a response schema would make the
+    JSONFlux reducer choke on any vendor field the spec under-declares;
+    #293 hardens the request contract only, so ``response_schema`` never
+    gains the clause.
+    """
+    with respx.mock(assert_all_called=False) as router:
+        url = _mock_yaml_spec(router, "petstore_30.yaml", PETSTORE_30.read_bytes())
+        rows = parse_openapi(url)
+    page = _by_op_id(rows)["GET:/pets"].response_schema
+    assert page is not None
+    assert "additionalProperties" not in page
 
 
 def test_parse_response_schema_is_deliberately_not_bundled() -> None:

@@ -403,6 +403,36 @@ async def test_blast_radius_none_when_absent(session: AsyncSession) -> None:
     assert ctx.blast_radius is None
 
 
+@pytest.mark.asyncio
+async def test_composite_subop_park_resolves_non_empty_context(session: AsyncSession) -> None:
+    """A parked composite sub-op row resolves to a non-empty reviewer context (#294).
+
+    Before #294 the composite seam parked with the identifier-only envelope
+    (``{op_id, connector_id, target_id}``): ``_resolve_blast_radius`` returned
+    ``None`` and -- with no descriptor / subject / target -- the summary was
+    empty too, so the reviewer's row carried neither severity nor blast radius
+    (``is_empty`` was ``True``). The seam now stamps ``proposed_effect`` via the
+    dispatcher's ``_build_proposed_effect``, so a dangerous sub-op's row carries
+    its ``safety_level`` and, when the op produces one, its blast-radius block --
+    and the shared reviewer context both the console modal and ``meho approvals
+    show`` render is no longer blank.
+    """
+    blast = {"object": "vm-1042", "children": ["disk-1"], "irreversibility": "soft"}
+    request = await _seed_request(
+        session,
+        op_id="POST:/vcenter/vm/{vm}/power?action=start",
+        proposed_effect={
+            "op_id": "POST:/vcenter/vm/{vm}/power?action=start",
+            "connector_id": "vmware-rest-9.0",
+            "safety_level": "dangerous",
+            "blast_radius": blast,
+        },
+    )
+    ctx = await resolve_reviewer_context(session, request)
+    assert ctx.blast_radius == blast
+    assert ctx.is_empty is False
+
+
 # ---------------------------------------------------------------------------
 # Summary sentence
 # ---------------------------------------------------------------------------

@@ -7,6 +7,18 @@ execute when you call it. It **parks** in an approval queue and returns
 `awaiting_approval`, and a second person has to approve it before it
 runs. That is the four-eyes rule, and it is on by default.
 
+!!! note "Baseline: self-approval is off by default"
+
+    `config.approvalAllowSelfApproval` defaults to **`"false"`**
+    (`APPROVAL_ALLOW_SELF_APPROVAL=false`) — the secure baseline. With it
+    off, the identity that requested a gated write can never approve it,
+    and `GET /ready` reports `approval_queue.effective_posture:
+    "four_eyes_enforced"`. Leave it off. Setting it `"true"` is a
+    posture-wide, audited emergency break-glass (covered in Option 2 below)
+    that still never reaches a `dangerous` or `destructive` operation. The
+    endorsed single-operator answer is the agent-requester pattern, not the
+    flag.
+
 This guide is about the case the rule does not obviously cover: **you
 are the only operator.** A solo deploy still has to be able to make
 gated writes, so MEHO ships two ways for one person to clear the queue

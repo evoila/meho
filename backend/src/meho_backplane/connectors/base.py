@@ -22,11 +22,26 @@ from meho_backplane.connectors.schemas import (
     TopologyHints,
 )
 
-__all__ = ["Connector", "ShimKind", "shim_kind"]
+__all__ = ["Connector", "ConnectorResourceNotFoundError", "ShimKind", "shim_kind"]
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # in G0.2-T5 once G0.3 lands the Target model.
 type Target = Any
+
+
+class ConnectorResourceNotFoundError(Exception):
+    """A connector identified an addressed upstream resource as absent.
+
+    Connectors raise this only for an explicit upstream missing-resource
+    signal, never by inferring absence from a transport failure.  The
+    dispatcher turns it into the common structured ``not_found`` envelope,
+    keeping vendor fault parsing at the connector boundary.
+    """
+
+    def __init__(self, resource_ids: list[str], message: str) -> None:
+        super().__init__(message)
+        self.resource_ids = resource_ids
+
 
 #: G0.28-T1 (#1967) — tri-state dispatchability classification of a
 #: connector class, replacing the binary ``issubclass(GenericRestConnector)``
@@ -95,6 +110,29 @@ class Connector(ABC):
     # the module-level :func:`shim_kind` helper, never ``issubclass``. See
     # :data:`ShimKind`.
     _shim_kind: ShimKind = "none"
+
+    #: Opt-in for a connector-owned check that compares an ingested catalog
+    #: descriptor with a resolved target before dispatch policy runs. The
+    #: default keeps existing connectors and descriptor kinds unchanged.
+    enforces_catalog_target_compatibility: bool = False
+
+    @classmethod
+    def catalog_target_incompatibility(
+        cls,
+        *,
+        descriptor_source_kind: str,
+        target_product: str | None,
+        target_version: str | None,
+        selected_target_connector: type["Connector"] | None,
+    ) -> str | None:
+        """Return an operator-safe reason when a catalog cannot serve a target.
+
+        The dispatcher supplies only descriptor source metadata and pure
+        target-resolution facts. Connector packages own any vendor-specific
+        predicate; returning ``None`` permits normal policy and execution.
+        """
+        del cls, descriptor_source_kind, target_product, target_version, selected_target_connector
+        return None
 
     @abstractmethod
     async def fingerprint(

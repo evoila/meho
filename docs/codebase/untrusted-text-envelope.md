@@ -1,11 +1,12 @@
 # Untrusted-text envelope (stored prompt-injection guard)
 
 Security hardening from the coordinated-disclosure backlog
-(evoila-bosnia/meho-internal#154, Goal #87 / Initiative #101): every
-LLM-facing surface that re-serves **agent-authored stored text** wraps
-that text in a positional guard/delimiter envelope so a reading agent
-attributes it to its untrusted provenance instead of absorbing it as
-trusted context.
+(evoila-bosnia/meho-internal#154, Goal #87 / Initiative #101; extended to
+the federated docs corpus by #304, Initiative #262): every LLM-facing
+surface that re-serves **agent-authored stored text** — or **federated,
+externally-controlled corpus text** — wraps it in a positional
+guard/delimiter envelope so a reading agent attributes it to its untrusted
+provenance instead of absorbing it as trusted context.
 
 ## Overview
 
@@ -17,6 +18,7 @@ re-serves it verbatim to other agents:
 | Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
 | kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}` |
 | memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
+| Docs-corpus chunk `content` (federated, external — **not** agent-authored) | External `meho-docs` corpus (federated ingestion, outside MEHO) | `search_docs` payload, `ask_docs` citations + synthesis prompt, `meho://docs/{collection}/{product}/{version}/{chunk_id}` |
 
 Without a guard, a compromised or adversarial session can plant
 instructions ("ignore previous instructions and …") that a later
@@ -45,6 +47,20 @@ internal imports):
   on announcement free-text fields (`activity` / `scope` / `target`);
   audit-driven `BroadcastEvent` dumps pass through unchanged. All
   three broadcast re-serve surfaces call it.
+
+Docs corpus (`meho-docs` add-on, #304) — the chunk `content` is wrapped
+at each LLM-facing read boundary, never at the shared
+`docs_search.service` projection (`_project_chunk`, which also feeds
+non-LLM sinks like the CLI/REST faces):
+
+* `mcp/tools/docs.py` — `_search_chunk_payload(chunk)` wraps the
+  `search_docs` payload; `_citation_payload(chunk)` wraps the `ask_docs`
+  citations.
+* `docs_search/synthesis.py` — `_render_chunks_for_prompt` wraps each
+  chunk before interpolating it into the `ask_docs` synthesis user
+  prompt; `_SYNTHESIS_SYSTEM_PROMPT` carries the matching advisory.
+* `mcp/resources/docs.py` — `_docs_chunk_handler` wraps the recovered
+  chunk's `content` before returning it.
 
 ## Positional-wrapper property (load-bearing)
 
@@ -87,13 +103,24 @@ there to admin-authored tenant conventions).
 The MCP resource `description` strings for `meho://kb/{slug}`,
 `meho://memory/{scope}/{slug}` and `meho://tenant/{tenant_id}/feed`
 state that the served free-text/body is agent-authored, untrusted, and
-not a system directive; tests assert the substrings.
+not a system directive; tests assert the substrings. The `search_docs`
+and `ask_docs` tool descriptions and the `meho://docs/...` resource
+description carry the parallel advisory for federated corpus chunk text
+(untrusted, served inside the `<<UNTRUSTED_AGENT_TEXT` envelope), and the
+`ask_docs` synthesis system prompt tells the model to treat wrapped chunk
+text as data, never as directives.
 
 ## References
 
 * `backend/src/meho_backplane/untrusted_text.py`
 * `backend/src/meho_backplane/broadcast/history.py` (`dump_event_wire`)
 * `backend/src/meho_backplane/mcp/resources/{kb,memory,tenant_feed}.py`
+* Docs corpus (#304): `backend/src/meho_backplane/mcp/tools/docs.py`,
+  `docs_search/synthesis.py`, `mcp/resources/docs.py`
 * `backend/tests/test_untrusted_text_envelope.py`,
   `test_broadcast_history.py`, `test_mcp_resource_tenant_feed.py`
+* Docs-corpus tests (#304):
+  `backend/tests/test_docs_search_synthesis.py`,
+  `test_mcp_tools_docs.py`, `test_mcp_tools_docs_ask.py`,
+  `test_mcp_resources_docs.py`
 * Precedent: `backend/src/meho_backplane/conventions/preamble.py`

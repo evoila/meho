@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — one cohesive request/response model module
+# for the connectors-ingest surface; already over the line-count limit on
+# origin/main. This change only adds the DroppedOpModel projection + two
+# additive fields on IngestionResultModel (security review T3-F01).
+
 """Pydantic-v2 request / response models for the connectors-ingest surface.
 
 Shared by the REST router (G0.7-T6, ``api/v1/connectors_ingest.py``)
@@ -71,6 +76,7 @@ __all__ = [
     "ConnectorScope",
     "ConnectorState",
     "ConnectorStatusFilter",
+    "DroppedOpModel",
     "EditGroupBody",
     "EditOpBody",
     "GroupingResultModel",
@@ -629,6 +635,21 @@ class SafetyChangeModel(BaseModel):
     affected_sensors: list[AffectedSensorModel] = Field(default_factory=list)
 
 
+class DroppedOpModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.op_allowlist.DroppedOp`.
+
+    One operation the product's declared ingest op allowlist excluded
+    before persistence (security review T3-F01) — surfaced so the operator
+    sees exactly what an ingest of a wider spec dropped.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    method: str
+    path: str
+
+
 class IngestionResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
@@ -639,7 +660,9 @@ class IngestionResultModel(BaseModel):
     an extra ``connector_id`` echo for round-trip clarity.
     ``safety_changes`` (#2702) is additive with an empty-list default,
     so pre-existing clients see no shape change on ingests that
-    reclassify nothing.
+    reclassify nothing. ``dropped_count`` / ``dropped_ops`` (T3-F01) are
+    likewise additive with empty defaults — ``0`` / ``[]`` for every
+    product that declares no ingest op allowlist.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -651,6 +674,8 @@ class IngestionResultModel(BaseModel):
     connector_registered: bool
     operations_grouped: bool
     safety_changes: list[SafetyChangeModel] = Field(default_factory=list)
+    dropped_count: int = 0
+    dropped_ops: list[DroppedOpModel] = Field(default_factory=list)
 
 
 class GroupingResultModel(BaseModel):

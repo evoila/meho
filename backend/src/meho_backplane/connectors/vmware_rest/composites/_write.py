@@ -118,6 +118,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cluster_drs_rule_create_composite",
+    "cluster_drs_vm_host_rule_create_composite",
     "cluster_patch_composite",
     "folder_create_composite",
     "guest_customization_spec_create_composite",
@@ -125,6 +126,8 @@ __all__ = [
     "host_evacuate_composite",
     "network_portgroup_create_composite",
     "network_portgroup_security_set_composite",
+    "resource_pool_create_composite",
+    "resource_pool_delete_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
@@ -260,6 +263,11 @@ _OP_HOST_SOFTWARE_APPLY = "POST:/esx/settings/hosts/{host}/software?action=apply
 # row is ``{network (id), name, type}``. Mirrors ``_read._OP_LIST_NETWORK``.
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
+# ``Network.Summary.type`` value for a host-scoped standard portgroup — the
+# ``filter.types`` value the standard-portgroup resolution reads (mirrors
+# ``_NIC_BACKING_STANDARD_PORTGROUP``, which is the same enum on the NIC
+# backing-spec side).
+_NETWORK_TYPE_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
 # ``Vcenter.Vm.Hardware.Ethernet.BackingSpec.type`` value for a standard
 # portgroup -- the default backing the NIC create / repoint specs target.
 _NIC_BACKING_STANDARD_PORTGROUP = "STANDARD_PORTGROUP"
@@ -285,6 +293,15 @@ _OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
 _OP_LIST_DATACENTERS = "GET:/vcenter/datacenter"
 _OP_LIST_RESOURCE_POOLS = "GET:/vcenter/resource-pool"
 _OP_LIST_DATASTORES = "GET:/vcenter/datastore"
+# REST resource-pool write ops (#3505). The pinned 9.0 vcenter.yaml serves a
+# real ``POST:/vcenter/resource-pool`` (``Vcenter.ResourcePool.CreateSpec``:
+# name + parent ResourcePool moid + optional cpu/memory allocation, returns
+# the new pool moid) and ``DELETE:/vcenter/resource-pool/{resourcePool}``
+# (reparents children up to the parent). Both ride the direct-session REST
+# write seam (:func:`_write_sub_op`), so the composites work on a fresh boot
+# with zero catalog ingest like every other vmware-rest write.
+_OP_CREATE_RESOURCE_POOL = "POST:/vcenter/resource-pool"
+_OP_DELETE_RESOURCE_POOL = "DELETE:/vcenter/resource-pool/{resourcePool}"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
 _OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
@@ -671,7 +688,25 @@ _CLUSTER_CONFIG_SPEC_EX_TYPE = "ClusterConfigSpecEx"
 _CLUSTER_RULE_SPEC_TYPE = "ClusterRuleSpec"
 _CLUSTER_AFFINITY_RULE_TYPE = "ClusterAffinityRuleSpec"
 _CLUSTER_ANTI_AFFINITY_RULE_TYPE = "ClusterAntiAffinityRuleSpec"
+# VM-Host affinity rule types (#3505). A VM-Host rule pins a VM *group* onto
+# an (anti-)affine host *group* — a different shape from the VM-VM affinity /
+# anti-affinity rules above (which take an explicit VM list). The single
+# ``ReconfigureComputeResource_Task`` carries both a ``ClusterConfigSpecEx``
+# ``groupSpec`` delta (adds the ``ClusterVmGroup`` + ``ClusterHostGroup``) and
+# a ``rulesSpec`` delta (adds the ``ClusterVmHostRuleInfo`` referencing those
+# groups by name). All four are pinned vi-json.yaml DataObjects (spec-verified).
+_CLUSTER_VM_HOST_RULE_INFO_TYPE = "ClusterVmHostRuleInfo"
+_CLUSTER_VM_GROUP_TYPE = "ClusterVmGroup"
+_CLUSTER_HOST_GROUP_TYPE = "ClusterHostGroup"
+_CLUSTER_GROUP_SPEC_TYPE = "ClusterGroupSpec"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
+# ``ClusterComputeResource.configurationEx.group`` — the array of existing
+# ``ClusterGroupInfo`` (VM + host) groups; read for the VM-Host rule's
+# group-name collision check. The root resource pool of a cluster is read off
+# ``ClusterComputeResource.resourcePool`` (a single MoRef) for the #3505
+# resource-pool create's ``cluster`` convenience parent resolution.
+_PROP_CONFIGURATION_EX_GROUP = "configurationEx.group"
+_PROP_CLUSTER_RESOURCE_POOL = "resourcePool"
 # Property path the collision / idempotence read queries on the cluster:
 # ``ClusterComputeResource.configurationEx`` is a ``ClusterConfigInfoEx``
 # whose ``rule`` array holds the existing ``ClusterRuleInfo`` rules
@@ -706,6 +741,17 @@ _VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE: tuple[str, ...] = (
     _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
 )
 _VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
+# cluster.drs_vm_host_rule.create (#3505): same vim shape as drs_rule.create —
+# a ``RetrievePropertiesEx`` read (existing rule + group names, collision
+# check) then one ``ReconfigureComputeResource_Task`` carrying the groupSpec +
+# rulesSpec delta. The VM / host name→moref resolution reads ride the REST
+# session (``GET:/vcenter/vm`` / ``GET:/vcenter/host``), not manifested here —
+# mirroring drs_rule.create, whose VM-list resolution read is likewise not in
+# a ``_SUB_OPS_*`` tuple.
+_VIM_SUB_OPS_CLUSTER_DRS_VM_HOST_RULE_CREATE: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
+)
 
 # vim (VI-JSON) op_ids for the #2970 real-spec repoints. The pinned
 # ``vcenter.yaml`` serves NO REST path for VM snapshots, host maintenance
@@ -1058,6 +1104,30 @@ _SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
     _OP_HOST_SOFTWARE_APPLY,
     _OP_GET_TASK,
 )
+# resource_pool.create (#3505): the synchronous REST create write + the
+# read-back list (``filter.parent_resource_pools`` confirms the new pool is
+# under the resolved parent). Both vcenter.yaml-served REST paths, so they
+# reconcile through the generic ``_SUB_OPS_*`` sweep. The optional
+# cluster→root-RP resolution vim read is the separate
+# ``_VIM_SUB_OPS_RESOURCE_POOL_CREATE`` lane.
+_SUB_OPS_RESOURCE_POOL_CREATE: tuple[str, ...] = (
+    _OP_CREATE_RESOURCE_POOL,
+    _OP_LIST_RESOURCE_POOLS,
+)
+# resource_pool.delete (#3505): the emptiness reads (child pools via
+# ``filter.parent_resource_pools`` + child VMs via ``filter.resource_pools``),
+# the delete write, and the read-back list (absent = deleted). All
+# vcenter.yaml-served REST paths.
+_SUB_OPS_RESOURCE_POOL_DELETE: tuple[str, ...] = (
+    _OP_LIST_RESOURCE_POOLS,
+    _OP_LIST_VMS,
+    _OP_DELETE_RESOURCE_POOL,
+)
+# resource_pool.create's optional ``cluster`` convenience resolves the
+# cluster's root resource pool via a ``RetrievePropertiesEx`` read of
+# ``ClusterComputeResource.resourcePool`` — a vim read, so it lives in the
+# vi-json lane (mirroring the drs_rule reads).
+_VIM_SUB_OPS_RESOURCE_POOL_CREATE: tuple[str, ...] = (_OP_RETRIEVE_PROPERTIES,)
 _SUB_OPS_VM_RESIZE: tuple[str, ...] = (
     _OP_GET_VM,
     _OP_UPDATE_VM_CPU,
@@ -6071,6 +6141,598 @@ async def folder_create_composite(
 
 
 # ===========================================================================
+# resource_pool.create / .delete (REST Vcenter.ResourcePool_create / _delete
+# — #3505)
+# ===========================================================================
+#
+# The pinned 9.0 vcenter.yaml serves a real ``POST:/vcenter/resource-pool``
+# and ``DELETE:/vcenter/resource-pool/{resourcePool}`` (the issue body's
+# "GET-only" claim predates this spec revision — spec-verified against
+# ``vcenter.yaml`` L40601 + L40925). Both ride the direct-session REST write
+# seam, so — unlike the vim-shaped drs_rule / folder writes — no vmomi is
+# needed for the mutation itself. A thin composite (rather than curating the
+# raw ingested rows) is the right shape because the raw ``CreateSpec.parent``
+# is a bare ``ResourcePool`` moid: operators think in clusters, so the
+# composite resolves a cluster's *root* resource pool for them, refuse-then-
+# ``force`` guards a non-empty delete, and both read back through the listing.
+
+
+def _build_resource_allocation(alloc: Any) -> dict[str, Any] | None:
+    """Map an operator cpu/memory allocation onto ``ResourceAllocationCreateSpec``.
+
+    Passes through only the CreateSpec-recognised keys (``reservation`` /
+    ``expandable_reservation`` / ``limit`` and a nested ``shares`` with its
+    ``level`` + optional custom ``shares`` count); a ``None`` / non-dict input
+    yields ``None`` so the create body omits the allocation entirely and
+    vCenter applies its documented default. The keys sit flat on the ``/api``
+    body (no ``spec`` envelope — the #2973 flat-body rule).
+    """
+    if not isinstance(alloc, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in ("reservation", "expandable_reservation", "limit"):
+        if alloc.get(key) is not None:
+            out[key] = alloc[key]
+    shares = alloc.get("shares")
+    if isinstance(shares, dict) and shares.get("level") is not None:
+        shares_out: dict[str, Any] = {"level": shares["level"]}
+        if shares.get("shares") is not None:
+            shares_out["shares"] = shares["shares"]
+        out["shares"] = shares_out
+    return out or None
+
+
+async def _resolve_cluster_root_resource_pool(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    cluster_moid: str,
+) -> str | None:
+    """Resolve a cluster's *root* resource pool moid via a vim property read.
+
+    Reads ``ClusterComputeResource.resourcePool`` (a single MoRef) through the
+    shared ``RetrievePropertiesEx`` seam — the deterministic, non-localised
+    way to name the pool a new child nests under (the plain REST listing has
+    no "which one is root" marker). Returns the moid, or ``None`` when the
+    property is unreadable or not a MoRef (the caller surfaces a structured
+    ``cluster_root_pool_unresolved`` status).
+    """
+    retrieve = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_single_prop_retrieve_params(
+            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, cluster_moid, _PROP_CLUSTER_RESOURCE_POOL
+        ),
+    )
+    return _moref_value(_extract_single_prop(retrieve, _PROP_CLUSTER_RESOURCE_POOL))
+
+
+async def _list_child_resource_pool_ids(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    parent_moid: str,
+) -> list[str]:
+    """Child resource-pool moids of *parent_moid* via ``filter.parent_resource_pools``."""
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_RESOURCE_POOLS,
+        {"filter.parent_resource_pools": [parent_moid]},
+    )
+    rows = _unwrap_value(listing)
+    if not isinstance(rows, list):
+        return []
+    return [
+        r["resource_pool"]
+        for r in rows
+        if isinstance(r, dict) and isinstance(r.get("resource_pool"), str)
+    ]
+
+
+async def _resource_pool_present(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    resource_pool_moid: str,
+) -> bool:
+    """``True`` when a pool with *resource_pool_moid* still lists (read-back seam).
+
+    Uses ``GET:/vcenter/resource-pool?filter.resource_pools=<moid>`` rather
+    than a direct ``GET .../{id}`` so an absent pool is an *empty list* — no
+    404-exception path to disambiguate from a transport fault. Shared by the
+    create read-back (expect present under the parent) and the delete
+    read-back (expect absent).
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_RESOURCE_POOLS,
+        {"filter.resource_pools": [resource_pool_moid]},
+    )
+    rows = _unwrap_value(listing)
+    if not isinstance(rows, list):
+        return False
+    return any(isinstance(r, dict) and r.get("resource_pool") == resource_pool_moid for r in rows)
+
+
+async def resource_pool_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Create a resource pool under a parent pool or a cluster's root pool.
+
+    Op-id: ``vmware.composite.resource_pool.create``. Issues the synchronous
+    REST ``POST:/vcenter/resource-pool`` (``Vcenter.ResourcePool.CreateSpec``)
+    through the governed :func:`_write_sub_op` seam and returns the new pool
+    moid.
+
+    Parent selection (exactly one, enforced by the schema): ``parent`` is a
+    ``ResourcePool`` moid used verbatim (nesting under an existing pool);
+    ``cluster`` is a ``ClusterComputeResource`` moid whose *root* resource
+    pool is resolved (:func:`_resolve_cluster_root_resource_pool`) and used as
+    the parent — the estate-allocation convenience (the operator has a cluster,
+    not a root-pool moid). A ``cluster`` that yields no root pool returns
+    ``status='cluster_root_pool_unresolved'`` before any write.
+
+    Read-back: lists ``filter.parent_resource_pools=<parent>`` and confirms
+    the new moid is present under the resolved parent
+    (``verified_under_parent``). ``safety_level='caution'`` /
+    ``requires_approval=True``.
+    """
+    name = params["name"]
+    parent_param = params.get("parent")
+    cluster_param = params.get("cluster")
+
+    if isinstance(parent_param, str) and parent_param:
+        parent_moid = parent_param
+        parent_source = "resource_pool"
+    elif isinstance(cluster_param, str) and cluster_param:
+        parent_source = "cluster"
+        resolved_parent = await _resolve_cluster_root_resource_pool(
+            connector, target, operator, cluster_moid=cluster_param
+        )
+        if resolved_parent is None:
+            return {
+                "status": "cluster_root_pool_unresolved",
+                "name": name,
+                "parent": None,
+                "parent_source": parent_source,
+                "cluster": cluster_param,
+                "resource_pool": None,
+                "verified_under_parent": False,
+                "guidance": (
+                    f"could not resolve the root resource pool of cluster {cluster_param!r} "
+                    "(ClusterComputeResource.resourcePool was unreadable); pass an explicit "
+                    "'parent' resource-pool moid instead"
+                ),
+            }
+        parent_moid = resolved_parent
+    else:
+        return {
+            "status": "no_parent",
+            "name": name,
+            "parent": None,
+            "parent_source": None,
+            "cluster": None,
+            "resource_pool": None,
+            "verified_under_parent": False,
+            "guidance": "exactly one of 'parent' (a resource-pool moid) or 'cluster' is required",
+        }
+
+    body: dict[str, Any] = {"name": name, "parent": parent_moid}
+    cpu_alloc = _build_resource_allocation(params.get("cpu_allocation"))
+    if cpu_alloc is not None:
+        body["cpu_allocation"] = cpu_alloc
+    memory_alloc = _build_resource_allocation(params.get("memory_allocation"))
+    if memory_alloc is not None:
+        body["memory_allocation"] = memory_alloc
+
+    gate, create_payload = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_CREATE_RESOURCE_POOL,
+        params=body,
+    )
+    if gate is not None:
+        return gate
+
+    new_moid = _unwrap_value(create_payload)
+    new_moid = new_moid if isinstance(new_moid, str) else None
+    verified = False
+    if new_moid is not None:
+        verified = new_moid in await _list_child_resource_pool_ids(
+            connector, target, operator, parent_moid=parent_moid
+        )
+    return {
+        "status": "created",
+        "name": name,
+        "parent": parent_moid,
+        "parent_source": parent_source,
+        "cluster": cluster_param if parent_source == "cluster" else None,
+        "resource_pool": new_moid,
+        "verified_under_parent": verified,
+        "guidance": None,
+    }
+
+
+async def resource_pool_delete_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Delete a resource pool; refuse a non-empty pool unless ``force``.
+
+    Op-id: ``vmware.composite.resource_pool.delete``. The REST
+    ``DELETE:/vcenter/resource-pool/{resourcePool}`` **reparents** the pool's
+    child pools and VMs up to its parent rather than destroying them, so this
+    is ``safety_level='dangerous'`` (not ``destructive``) /
+    ``requires_approval=True``.
+
+    Refuse-then-``force``: the child pools (``filter.parent_resource_pools``)
+    and child VMs (``filter.resource_pools``) are counted first; a non-empty
+    pool returns ``status='not_empty'`` with the counts and no write unless
+    ``force=true`` is passed (the operator acknowledging the reparent). The
+    delete then read-backs through the listing — an absent pool
+    (``verified_absent``) confirms ``status='deleted'``.
+    """
+    pool_moid = params["resource_pool"]
+    force = bool(params.get("force", False))
+
+    child_pool_ids = await _list_child_resource_pool_ids(
+        connector, target, operator, parent_moid=pool_moid
+    )
+    child_vms = await _resolve_vm_list(
+        connector=connector,
+        target=target,
+        operator=operator,
+        filter_dict={"resource_pools": [pool_moid]},
+    )
+    child_pool_count = len(child_pool_ids)
+    child_vm_count = len(child_vms)
+
+    if (child_pool_count or child_vm_count) and not force:
+        return {
+            "status": "not_empty",
+            "resource_pool": pool_moid,
+            "forced": False,
+            "child_pool_count": child_pool_count,
+            "child_vm_count": child_vm_count,
+            "verified_absent": False,
+            "guidance": (
+                f"resource pool {pool_moid!r} is not empty ({child_pool_count} child pool(s), "
+                f"{child_vm_count} VM(s)); pass force=true to delete it — the delete reparents "
+                "the children up to the parent pool, it does not destroy them"
+            ),
+        }
+
+    gate, _payload = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_DELETE_RESOURCE_POOL,
+        params={"resourcePool": pool_moid},
+    )
+    if gate is not None:
+        return gate
+
+    still_present = await _resource_pool_present(
+        connector, target, operator, resource_pool_moid=pool_moid
+    )
+    return {
+        "status": "deleted" if not still_present else "delete_unverified",
+        "resource_pool": pool_moid,
+        "forced": force,
+        "child_pool_count": child_pool_count,
+        "child_vm_count": child_vm_count,
+        "verified_absent": not still_present,
+        "guidance": (
+            None
+            if not still_present
+            else (
+                f"the DELETE returned but resource pool {pool_moid!r} still lists; re-read the "
+                "pool or retry — the delete may still settle in the background"
+            )
+        ),
+    }
+
+
+# ===========================================================================
+# cluster.drs_vm_host_rule.create (vim ClusterVmHostRuleInfo — #3505)
+# ===========================================================================
+#
+# A VM-Host affinity rule pins a VM *group* onto an (anti-)affine host
+# *group* — a different shape from ``cluster.drs_rule.create`` (VM-VM, by
+# explicit VM list), so it ships as a **sibling** op that leaves the existing
+# op's contract byte-for-byte unchanged. One ``ReconfigureComputeResource_Task``
+# carries both the ``groupSpec`` delta (adds the ClusterVmGroup + ClusterHostGroup)
+# and the ``rulesSpec`` delta (adds the ClusterVmHostRuleInfo referencing those
+# groups). Rides the same governed vmomi seam + task poll as drs_rule.create.
+
+
+def _extract_cluster_group_names(retrieve_result: Any) -> set[str]:
+    """Pull the existing DRS group names off a ``RetrievePropertiesEx`` result.
+
+    The host / VM group names share one flat namespace with each other (a
+    ``ClusterGroupInfo.name`` is unique within the cluster), read off
+    ``configurationEx.group`` — the collision check for the VM-Host rule's two
+    new groups. Mirrors :func:`_extract_cluster_rule_names`.
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    names: set[str] = set()
+    if not isinstance(objects, list):
+        return names
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for prop in obj.get("propSet", []) or []:
+            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_GROUP:
+                continue
+            groups = unwrap_vim_value(prop.get("val"))
+            for group in groups if isinstance(groups, list) else []:
+                if isinstance(group, dict) and isinstance(group.get("name"), str):
+                    names.add(group["name"])
+    return names
+
+
+async def _resolve_named_hosts_in_cluster(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    cluster_moid: str,
+    host_names: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve host display names to ``[{host, name}]`` rows scoped to the cluster.
+
+    One read-only ``GET:/vcenter/host`` filtered by both ``names`` and
+    ``clusters`` — a VM-Host rule is cluster-local, so scoping the resolution
+    to the cluster disambiguates same-named hosts elsewhere and drops any name
+    that does not name a host in this cluster (the host analogue of
+    :func:`_resolve_drs_rule_vms`).
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_HOSTS,
+        {"filter.names": host_names, "filter.clusters": [cluster_moid]},
+    )
+    entries = _unwrap_value(listing)
+    rows = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    resolved: list[dict[str, Any]] = []
+    for row in rows:
+        moid = row.get("host")
+        if isinstance(moid, str):
+            name = row.get("name")
+            resolved.append({"host": moid, "name": name if isinstance(name, str) else None})
+    return resolved
+
+
+async def cluster_drs_vm_host_rule_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Add a DRS VM-Host affinity rule (VM group + host group + run-on rule).
+
+    Op-id: ``vmware.composite.cluster.drs_vm_host_rule.create``. Pins the VMs
+    of a named VM group onto (``affine=true``) or away from
+    (``affine=false``) the hosts of a named host group. No REST path exists,
+    so the add rides one vim
+    ``ClusterComputeResource.ReconfigureComputeResource_Task`` carrying a
+    ``ClusterConfigSpecEx`` with a ``groupSpec`` delta (adds the ClusterVmGroup
+    + ClusterHostGroup, ``operation='add'``) and a ``rulesSpec`` delta (adds
+    the ClusterVmHostRuleInfo, ``operation='add'``, ``modify=true``).
+
+    Flow:
+
+    1. Resolve the VM + host names to MoRefs, scoped to the cluster (*reads*,
+       un-gated). Zero VMs → ``status='insufficient_vms'``; zero hosts →
+       ``status='insufficient_hosts'`` (both before any write).
+    2. Read the cluster's existing rule + group names
+       (``configurationEx.rule`` / ``.group``) for the collision check: a
+       duplicate rule name → ``status='rule_exists'``; a duplicate VM- or
+       host-group name → ``status='group_exists'``.
+    3. Issue the single ``ReconfigureComputeResource_Task`` through the
+       governed :func:`_write_vmomi_sub_op` seam (a parked/denied gate returns
+       the :class:`OperationResult` verbatim) and poll it to terminal.
+       ``safety_level='caution'`` / ``requires_approval=True``.
+    """
+    cluster_moid = params["cluster"]
+    rule_name = params["rule_name"]
+    vm_group_name = params["vm_group_name"]
+    host_group_name = params["host_group_name"]
+    affine = bool(params.get("affine", True))
+    mandatory = bool(params.get("mandatory", False))
+    enabled = bool(params.get("enabled", True))
+    vm_names = [n for n in (params.get("vms") or []) if isinstance(n, str)]
+    host_names = [n for n in (params.get("hosts") or []) if isinstance(n, str)]
+
+    resolved_vms = await _resolve_drs_rule_vms(
+        connector=connector,
+        target=target,
+        operator=operator,
+        cluster_moid=cluster_moid,
+        vm_names=vm_names,
+    )
+    resolved_hosts = await _resolve_named_hosts_in_cluster(
+        connector=connector,
+        target=target,
+        operator=operator,
+        cluster_moid=cluster_moid,
+        host_names=host_names,
+    )
+
+    def _envelope(status: str, *, task: str | None, guidance: str | None) -> dict[str, Any]:
+        return {
+            "status": status,
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "vm_group_name": vm_group_name,
+            "host_group_name": host_group_name,
+            "affine": affine,
+            "mandatory": mandatory,
+            "enabled": enabled,
+            "task": task,
+            "resolved_vms": resolved_vms,
+            "resolved_hosts": resolved_hosts,
+            "guidance": guidance,
+        }
+
+    if not resolved_vms:
+        return _envelope(
+            "insufficient_vms",
+            task=None,
+            guidance=(
+                f"none of the {len(vm_names)} requested VM name(s) resolved to a VM in cluster "
+                f"{cluster_moid!r}; a VM-Host rule needs at least one VM in its group"
+            ),
+        )
+    if not resolved_hosts:
+        return _envelope(
+            "insufficient_hosts",
+            task=None,
+            guidance=(
+                f"none of the {len(host_names)} requested host name(s) resolved to a host in "
+                f"cluster {cluster_moid!r}; a VM-Host rule needs at least one host in its group"
+            ),
+        )
+
+    existing = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=retrieve_properties_body(
+            _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
+            [cluster_moid],
+            [_PROP_CONFIGURATION_EX_RULE, _PROP_CONFIGURATION_EX_GROUP],
+        ),
+    )
+    if rule_name in _extract_cluster_rule_names(existing):
+        return _envelope(
+            "rule_exists",
+            task=None,
+            guidance=(
+                f"a DRS rule named {rule_name!r} already exists on cluster {cluster_moid!r}; "
+                "rule names are the idempotence key — pick a new name or remove the existing rule"
+            ),
+        )
+    existing_groups = _extract_cluster_group_names(existing)
+    clash = {vm_group_name, host_group_name} & existing_groups
+    if clash:
+        return _envelope(
+            "group_exists",
+            task=None,
+            guidance=(
+                f"DRS group name(s) {sorted(clash)!r} already exist on cluster {cluster_moid!r}; "
+                "group names are unique within a cluster — pick new group names"
+            ),
+        )
+
+    host_group_key = "affineHostGroupName" if affine else "antiAffineHostGroupName"
+    reconfig_spec = {
+        "spec": {
+            _VMOMI_TYPE_NAME_KEY: _CLUSTER_CONFIG_SPEC_EX_TYPE,
+            "groupSpec": [
+                {
+                    _VMOMI_TYPE_NAME_KEY: _CLUSTER_GROUP_SPEC_TYPE,
+                    "operation": "add",
+                    "info": {
+                        _VMOMI_TYPE_NAME_KEY: _CLUSTER_VM_GROUP_TYPE,
+                        "name": vm_group_name,
+                        "vm": [
+                            vim_moref(_VIRTUAL_MACHINE_MO_TYPE, row["vm"]) for row in resolved_vms
+                        ],
+                    },
+                },
+                {
+                    _VMOMI_TYPE_NAME_KEY: _CLUSTER_GROUP_SPEC_TYPE,
+                    "operation": "add",
+                    "info": {
+                        _VMOMI_TYPE_NAME_KEY: _CLUSTER_HOST_GROUP_TYPE,
+                        "name": host_group_name,
+                        "host": [
+                            vim_moref(_HOST_SYSTEM_MO_TYPE, row["host"]) for row in resolved_hosts
+                        ],
+                    },
+                },
+            ],
+            "rulesSpec": [
+                {
+                    _VMOMI_TYPE_NAME_KEY: _CLUSTER_RULE_SPEC_TYPE,
+                    "operation": "add",
+                    "info": {
+                        _VMOMI_TYPE_NAME_KEY: _CLUSTER_VM_HOST_RULE_INFO_TYPE,
+                        "name": rule_name,
+                        "enabled": enabled,
+                        "mandatory": mandatory,
+                        "vmGroupName": vm_group_name,
+                        host_group_key: host_group_name,
+                    },
+                }
+            ],
+        },
+        "modify": True,
+    }
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
+        vmomi_path=f"/ClusterComputeResource/{cluster_moid}/ReconfigureComputeResource_Task",
+        body=reconfig_spec,
+        params={
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "vm_group_name": vm_group_name,
+            "host_group_name": host_group_name,
+        },
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_DRS_RULE_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == TASK_STATE_ERROR:
+        raise RuntimeError(
+            f"cluster.drs_vm_host_rule.create: ReconfigureComputeResource_Task on cluster "
+            f"{cluster_moid!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return _envelope(
+            "timeout",
+            task=outcome.task,
+            guidance=(
+                f"ReconfigureComputeResource_Task {outcome.task} did not reach a terminal state "
+                f"within {int(_DRS_RULE_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
+                "cluster's DRS rules — the rule add may still complete in the background"
+            ),
+        )
+    return _envelope("created", task=outcome.task, guidance=None)
+
+
+# ===========================================================================
 # Hardware write composites (#2891): vm.resize / vm.nic.repoint /
 # vm.device.cdrom -- pure vSphere Automation REST post-clone reconfigure.
 # ===========================================================================
@@ -6136,23 +6798,25 @@ async def _read_cdrom(
     return info if isinstance(info, dict) else None
 
 
-async def _resolve_distributed_portgroup(
+async def _resolve_portgroup_by_name(
     *,
     connector: VmwareRestConnector,
     target: Any,
     operator: Operator,
     portgroup_name: str,
+    network_type: str,
 ) -> tuple[str | None, str, list[dict[str, Any]]]:
-    """Resolve a distributed-portgroup display name to its network moid.
+    """Resolve a portgroup display name to its network moid, scoped to *network_type*.
 
-    Reads ``GET:/vcenter/network`` filtered to ``DISTRIBUTED_PORTGROUP`` +
-    the name (the #1602 fix -- there is no dedicated portgroup list
-    resource). Returns ``(network_moid, "ok", [])`` on a unique match,
-    ``(None, "not_found", [])`` on no match, or ``(None, "ambiguous",
-    candidates)`` when the name is not unique. Shared between the
-    ``vm.nic.repoint`` handler (dispatch time) and its preview builder
-    (#1608), so the reviewer sees the same portgroup the approved dispatch
-    will bind.
+    Reads ``GET:/vcenter/network`` filtered to *network_type*
+    (``DISTRIBUTED_PORTGROUP`` / ``STANDARD_PORTGROUP``) + the name (the
+    #1602 fix -- there is no dedicated portgroup list resource). Returns
+    ``(network_moid, "ok", [])`` on a unique match, ``(None, "not_found",
+    [])`` on no match, or ``(None, "ambiguous", candidates)`` when the name
+    is not unique. Standard portgroups are host-scoped, so one display name
+    routinely resolves to several ``Network`` moids (one per host) --
+    ``ambiguous`` is the expected, correct fail-closed outcome there, and
+    the caller resolves it with an explicit ``network`` moid.
     """
     listing = await _read_sub_op(
         connector,
@@ -6160,7 +6824,7 @@ async def _resolve_distributed_portgroup(
         operator,
         _OP_LIST_NETWORK,
         {
-            "filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP],
+            "filter.types": [network_type],
             "filter.names": [portgroup_name],
         },
     )
@@ -6178,6 +6842,69 @@ async def _resolve_distributed_portgroup(
     if not isinstance(network_moid, str):
         return None, "not_found", matches
     return network_moid, "ok", []
+
+
+async def _resolve_distributed_portgroup(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+) -> tuple[str | None, str, list[dict[str, Any]]]:
+    """Resolve a *distributed*-portgroup display name to its network moid.
+
+    Thin ``DISTRIBUTED_PORTGROUP``-scoped wrapper over
+    :func:`_resolve_portgroup_by_name`, kept as the stable seam the
+    ``vm.nic.repoint`` preview builder imports (#1608) so the reviewer sees
+    the same portgroup the approved dispatch binds.
+    """
+    return await _resolve_portgroup_by_name(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        network_type=_NETWORK_TYPE_DISTRIBUTED_PORTGROUP,
+    )
+
+
+async def _validate_network_moid(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    network_moid: str,
+    network_type: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Confirm an explicit ``Network`` moid exists and is of *network_type*.
+
+    Reads ``GET:/vcenter/network`` filtered to the moid (``filter.networks``)
+    -- the escape hatch for a host-scoped standard portgroup whose display
+    name is ambiguous across hosts. Returns ``(row, "ok")`` when the moid
+    resolves and its ``type`` matches, ``(None, "not_found")`` when no row
+    carries the moid, or ``(row, "type_mismatch")`` when it resolves but is
+    the wrong network kind for the requested backing.
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {"filter.networks": [network_moid]},
+    )
+    rows = _unwrap_value(listing)
+    match = (
+        next(
+            (row for row in rows if isinstance(row, dict) and row.get("network") == network_moid),
+            None,
+        )
+        if isinstance(rows, list)
+        else None
+    )
+    if match is None:
+        return None, "not_found"
+    if match.get("type") != network_type:
+        return match, "type_mismatch"
+    return match, "ok"
 
 
 def _resize_requires_power_off(
@@ -6344,6 +7071,50 @@ async def vm_resize_composite(
     }
 
 
+async def _resolve_repoint_target(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+    backing_type: str,
+    explicit_network: str | None,
+) -> tuple[str | None, str, list[dict[str, Any]], str]:
+    """Resolve the ``vm.nic.repoint`` target network moid + display name.
+
+    Returns ``(network_moid, resolution, candidates, resolved_name)`` where
+    resolution is ``ok`` / ``not_found`` / ``ambiguous`` / ``type_mismatch``.
+    When *explicit_network* is given, name resolution is skipped and the
+    moid is validated for existence + type-consistency with *backing_type*;
+    otherwise the name is resolved against ``GET:/vcenter/network`` scoped
+    to *backing_type*. Shared verbatim between the handler (dispatch time)
+    and its preview builder so the approval preview cannot drift from the
+    approved dispatch.
+    """
+    if explicit_network:
+        row, status = await _validate_network_moid(
+            connector=connector,
+            target=target,
+            operator=operator,
+            network_moid=explicit_network,
+            network_type=backing_type,
+        )
+        resolved_name = (row.get("name") if isinstance(row, dict) else None) or portgroup_name
+        if status == "ok":
+            return explicit_network, "ok", [], resolved_name
+        if status == "type_mismatch":
+            return None, "type_mismatch", ([row] if isinstance(row, dict) else []), resolved_name
+        return None, "not_found", [], resolved_name
+    network_moid, resolution, candidates = await _resolve_portgroup_by_name(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        network_type=backing_type,
+    )
+    return network_moid, resolution, candidates, portgroup_name
+
+
 async def vm_nic_repoint_composite(
     *,
     operator: Operator,
@@ -6351,19 +7122,32 @@ async def vm_nic_repoint_composite(
     params: dict[str, Any],
     connector: VmwareRestConnector,
 ) -> dict[str, Any] | OperationResult:
-    """Repoint an existing vNIC to a different distributed portgroup.
+    """Repoint an existing vNIC onto a distributed or standard portgroup.
 
     Op-id: ``vmware.composite.vm.nic.repoint``. Reads the NIC's current
     backing + MAC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``,
-    resolves the target portgroup by name via ``GET:/vcenter/network``
-    filtered to ``DISTRIBUTED_PORTGROUP`` (the #1602 fix -- no dedicated
-    portgroup list resource), then PATCHes the NIC backing. A name that
-    resolves to zero / many portgroups refuses the repoint
-    (``not_found`` / ``ambiguous``) with no PATCH issued.
+    resolves the target portgroup, then PATCHes the NIC backing to
+    ``{type: backing_type, network}`` (the same internal sub-op the
+    ``host.detach_from_vds`` fallback path uses).
+
+    ``backing_type`` (default ``DISTRIBUTED_PORTGROUP``, back-compatible)
+    picks the network kind. The name is resolved via ``GET:/vcenter/network``
+    filtered to that kind (the #1602 fix -- no dedicated portgroup list
+    resource). Standard portgroups are host-scoped, so one display name
+    routinely resolves to several ``Network`` moids (one per host); the
+    vCenter REST Automation API exposes no reliable VM->host mapping, so an
+    ambiguous name fails closed (``ambiguous``) and the operator supplies
+    the exact moid via ``network``. An explicit ``network`` moid skips name
+    resolution and is validated for type-consistency (``invalid_request``
+    on mismatch). A name matching zero portgroups returns ``not_found``.
+    No PATCH is issued on any non-``ok`` resolution.
     """
     vm_moid = params["vm"]
     nic_id = params["nic"]
     portgroup_name = params["portgroup_name"]
+    backing_type = params.get("backing_type", _NIC_BACKING_DISTRIBUTED_PORTGROUP)
+    network_param = params.get("network")
+    explicit_network = network_param if isinstance(network_param, str) and network_param else None
 
     nic_info = await _read_ethernet_nic(
         connector=connector, target=target, operator=operator, vm_moid=vm_moid, nic_id=nic_id
@@ -6371,29 +7155,59 @@ async def vm_nic_repoint_composite(
     mac_address = nic_info.get("mac_address") if nic_info else None
     current_backing = nic_info.get("backing") if nic_info else None
 
-    network_moid, resolution, candidates = await _resolve_distributed_portgroup(
-        connector=connector, target=target, operator=operator, portgroup_name=portgroup_name
+    network_moid, resolution, candidates, resolved_name = await _resolve_repoint_target(
+        connector=connector,
+        target=target,
+        operator=operator,
+        portgroup_name=portgroup_name,
+        backing_type=backing_type,
+        explicit_network=explicit_network,
     )
+    kind = "standard" if backing_type == _NIC_BACKING_STANDARD_PORTGROUP else "distributed"
     base = {
         "vm": vm_moid,
         "nic": nic_id,
         "mac_address": mac_address,
         "current_backing": current_backing,
-        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+        "requested_backing": {
+            "portgroup_id": network_moid,
+            "portgroup_name": resolved_name,
+            "backing_type": backing_type,
+        },
     }
     if resolution == "not_found":
-        return {
-            **base,
-            "status": "not_found",
-            "candidates": [],
-            "guidance": f"no distributed portgroup named {portgroup_name!r}",
-        }
+        guidance = (
+            f"network moid {explicit_network!r} not found"
+            if explicit_network
+            else f"no {kind} portgroup named {portgroup_name!r}"
+        )
+        return {**base, "status": "not_found", "candidates": [], "guidance": guidance}
     if resolution == "ambiguous":
+        moids = [c.get("network") for c in candidates if isinstance(c, dict)]
+        if backing_type == _NIC_BACKING_STANDARD_PORTGROUP:
+            guidance = (
+                f"multiple standard portgroups named {portgroup_name!r} (standard "
+                "portgroups are host-scoped -- one Network moid per host); pass the "
+                f"moid of the one on the VM's host via the 'network' param. candidates: {moids}"
+            )
+        else:
+            guidance = (
+                f"multiple distributed portgroups share the name {portgroup_name!r}; pass a "
+                f"unique name or the exact moid via the 'network' param. candidates: {moids}"
+            )
+        return {**base, "status": "ambiguous", "candidates": candidates, "guidance": guidance}
+    if resolution == "type_mismatch":
+        actual = (
+            candidates[0].get("type") if candidates and isinstance(candidates[0], dict) else None
+        )
         return {
             **base,
-            "status": "ambiguous",
+            "status": "invalid_request",
             "candidates": candidates,
-            "guidance": "multiple distributed portgroups share the name; pass a unique name",
+            "guidance": (
+                f"network moid {explicit_network!r} is a {actual!r} network, not the "
+                f"requested backing_type {backing_type!r}"
+            ),
         }
 
     gate, _ = await _write_sub_op(
@@ -6404,7 +7218,7 @@ async def vm_nic_repoint_composite(
         {
             "vm": vm_moid,
             "nic": nic_id,
-            "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid},
+            "backing": {"type": backing_type, "network": network_moid},
         },
     )
     if gate is not None:

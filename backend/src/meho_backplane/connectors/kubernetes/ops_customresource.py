@@ -61,6 +61,10 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.kubernetes.ops import KubernetesOp
+from meho_backplane.connectors.kubernetes.redaction import (
+    SECRET_KIND,
+    redact_kubernetes_payload,
+)
 
 if TYPE_CHECKING:
     from kubernetes_asyncio.client.models import (
@@ -170,10 +174,27 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
     :func:`_bounded_spec_excerpt`); the verbose ``managedFields`` /
     ``annotations`` metadata blocks are dropped to keep result sizes
     sane. ``namespace`` is ``None`` for a cluster-scoped CR.
+
+    Read-side Secret redaction (#3501): a dynamic CR read can be pointed
+    at core ``Secret`` objects (``group=""`` / ``version="v1"`` /
+    ``plural="secrets"``). The raw object is first passed through
+    :func:`~meho_backplane.connectors.kubernetes.redaction.redact_kubernetes_payload`,
+    which structurally scrubs every ``data`` / ``stringData`` value of a
+    ``kind: Secret`` object (regardless of whether it matches a named
+    credential pattern). For a ``Secret`` the projection then surfaces
+    the **redacted** ``data`` / ``string_data`` key inventory -- so the
+    read answers "which keys does this Secret carry?" with a per-value
+    digest, never the bytes. A non-Secret CR gets neither field and is
+    otherwise untouched by the walk.
     """
+    is_secret = obj.get("kind") == SECRET_KIND
+    if is_secret:
+        # Only a Secret object carries values to scrub; redacting a copy
+        # (never the caller's dict) keeps the walk off every other CR.
+        obj = redact_kubernetes_payload(obj)
     metadata = obj.get("metadata") or {}
     excerpt, truncated = _bounded_spec_excerpt(obj.get("spec"))
-    return {
+    row: dict[str, Any] = {
         "name": metadata.get("name"),
         "namespace": metadata.get("namespace"),
         "api_version": obj.get("apiVersion"),
@@ -183,6 +204,10 @@ def custom_resource_row(obj: dict[str, Any]) -> dict[str, Any]:
         "spec_excerpt": excerpt,
         "spec_truncated": truncated,
     }
+    if is_secret:
+        row["data"] = obj.get("data") or {}
+        row["string_data"] = obj.get("stringData") or {}
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +348,11 @@ _CR_ROW_ITEM_SCHEMA: dict[str, Any] = {
         "labels": {"type": "object"},
         "spec_excerpt": {"type": ["string", "null"]},
         "spec_truncated": {"type": "boolean"},
+        # Present only for a ``kind: Secret`` object (#3501): the redacted
+        # ``data`` / ``stringData`` key inventory -- key names kept, every
+        # value replaced with a placeholder + SHA-256 digest.
+        "data": {"type": "object"},
+        "string_data": {"type": "object"},
     },
     "required": [
         "name",

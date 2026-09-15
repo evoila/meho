@@ -146,6 +146,9 @@ def get_broadcast_client() -> redis.Redis:
         settings = get_settings()
         _CLIENT = redis.from_url(
             settings.broadcast_redis_url,
+            # requirepass for the chart's auth-enabled Valkey store; ``None``
+            # (the unset default) leaves the connection unauthenticated.
+            password=settings.broadcast_redis_password,
             decode_responses=True,
             socket_timeout=_BROADCAST_FAST_TIMEOUT_SECONDS,
             socket_connect_timeout=_BROADCAST_CONNECT_TIMEOUT_SECONDS,
@@ -184,6 +187,8 @@ def get_broadcast_blocking_client() -> redis.Redis:
         settings = get_settings()
         _BLOCKING_CLIENT = redis.from_url(
             settings.broadcast_redis_url,
+            # Same requirepass as the fast client; ``None`` → no auth.
+            password=settings.broadcast_redis_password,
             decode_responses=True,
             socket_timeout=BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
             socket_connect_timeout=_BROADCAST_CONNECT_TIMEOUT_SECONDS,

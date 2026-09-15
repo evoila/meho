@@ -324,20 +324,20 @@ func printQueryTable(w io.Writer, r *api.AuditQueryResult) {
 		fmt.Fprintln(w, "no audit rows matched the filter")
 		return
 	}
-	fmt.Fprintf(w, "%-22s %-12s %-18s %-26s %-16s %s\n",
+	fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
 		"TIME", "PRINCIPAL", "TARGET", "OP_ID", "CLASS", "STATUS")
 	for _, row := range r.Rows {
-		principal := strDeref(row.PrincipalName)
-		if principal == "" {
-			principal = row.PrincipalSub
+		principal := row.PrincipalSub
+		if name := strDeref(row.PrincipalName); name != "" {
+			principal = fmt.Sprintf("%s (%s)", name, row.PrincipalSub)
 		}
 		target := strDeref(row.TargetName)
 		if target == "" {
 			target = "-"
 		}
-		fmt.Fprintf(w, "%-22s %-12s %-18s %-26s %-16s %s\n",
+		fmt.Fprintf(w, "%-22s %-32s %-18s %-26s %-16s %s\n",
 			truncate(formatTS(row.Ts), 22),
-			truncate(principal, 12),
+			principal,
 			truncate(target, 18),
 			truncate(row.OpId, 26),
 			truncate(row.OpClass, 16),

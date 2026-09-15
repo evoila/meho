@@ -151,6 +151,17 @@ data:
   # `deploy/charts/meho/values.yaml` (`netdiag.probeAllowlist`) and
   # `docs/codebase/connectors-net-diagnostics.md`.
   MEHO_NETDIAG_PROBE_ALLOWLIST: {{ .Values.netdiag.probeAllowlist | quote }}
+  # Per-tenant probe-scope bound for the net.* connector (#3498), layered
+  # in front of MEHO_NETDIAG_PROBE_ALLOWLIST above. Read per probe from the
+  # environment by allowlist.py (TENANT_PROBE_ALLOWLIST_ENV) — NOT via
+  # settings.py. Rendered unconditionally: the default "" means no
+  # per-tenant bounds (every tenant inherits the instance allowlist).
+  # Semicolon-separated <tenant-uuid>=<comma-separated CIDRs/IPs/hostnames>;
+  # an empty value (<uuid>=) denies every targetless net.* probe for that
+  # tenant. See deploy/charts/meho/values.yaml
+  # (netdiag.probeAllowlistTenants) and
+  # docs/codebase/connectors-net-diagnostics.md.
+  MEHO_NETDIAG_PROBE_ALLOWLIST_TENANTS: {{ .Values.netdiag.probeAllowlistTenants | quote }}
   # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
   # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
   # so a wedged pipeline can't sit at `status=running` until a pod restart;
@@ -226,6 +237,12 @@ data:
   TOPOLOGY_HISTORY_RETENTION_DAYS: {{ .Values.topology.historyRetentionDays | quote }}
   TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: {{ .Values.topology.historyPruneIntervalSeconds | quote }}
   TOPOLOGY_HISTORY_PRUNE_ENABLED: {{ .Values.topology.historyPruneEnabled | quote }}
+  # Security review S19 (#307) — audit_log.raw_payload age-off knobs. NULLs
+  # only the pre-redaction body past `retentionDays`; the redacted record of
+  # account is retained. `retentionDays: 0` keeps un-redacted bodies forever.
+  RAW_PAYLOAD_RETENTION_DAYS: {{ .Values.auditRawPayload.retentionDays | quote }}
+  RAW_PAYLOAD_PRUNE_INTERVAL_SECONDS: {{ .Values.auditRawPayload.pruneIntervalSeconds | quote }}
+  RAW_PAYLOAD_PRUNE_ENABLED: {{ .Values.auditRawPayload.pruneEnabled | quote }}
   # Broadcast v2 T2 (#2547) — durable-announcement retention knobs. The
   # env-var names are the backplane's contract
   # (`backend/src/meho_backplane/settings.py`). `retentionDays: 0` is the

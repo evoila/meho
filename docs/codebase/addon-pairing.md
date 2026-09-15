@@ -107,8 +107,13 @@ Routes (both under the `addon-pairing` tag):
 
 - `PUT /api/v1/addons/pairings/{name}/capabilities` — the paired add-on
   (authenticating as its **service** principal; a human principal is 403)
-  declares its complete surface set. 404 when unpaired; 422 on an unknown kind
-  or a duplicate declaration. Audited (`op_id=addon.capabilities.declare`).
+  declares its complete surface set. The pairing is resolved by the caller's
+  service-account `sub` (the shared `resolve_owned_pairing` guard), and `{name}`
+  must be that pairing's own name, so a paired service cannot replace another
+  add-on's surfaces; a caller owning no pairing named `{name}` is 404. 422 on an
+  unknown kind or a duplicate declaration. Audited
+  (`op_id=addon.capabilities.declare`). See **Object-level write authorization**
+  below.
 - `GET /api/v1/addons/pairings/{name}/capabilities` — an operator reads the
   declared surfaces + live activation state. 404 when absent / cross-tenant.
 
@@ -207,11 +212,41 @@ can still mint tokens), then hard-delete the row. Audited
 
 **Heartbeat** (`POST /api/v1/addons/pairings/{name}/heartbeat`): the paired
 add-on, authenticating as its own **service** principal (a human principal is
-403), stamps `last_seen_at`.
+403), stamps `last_seen_at`. The pairing is resolved by the caller's
+service-account `sub` (the shared `resolve_owned_pairing` guard) and `{name}`
+must be that pairing's own name, so one paired service cannot heartbeat
+another's pairing; a caller owning no pairing named `{name}` is 404
+(indistinguishable from an absent one). See **Object-level write authorization**
+below.
 
 **Health**: `build_health_response` calls `_pairing_health(tenant_id)`, which
 lists active pairings and maps each to a `PairingHealth`
 (`contract_compatible` recomputed live). Empty list when nothing is paired.
+
+## Object-level write authorization
+
+An add-on's **self-service writes** — the liveness heartbeat (#3025) and the
+capability declaration (#3026) — are the paired add-on's own action, so both
+authorize by the caller's identity, not by the `{name}` in the request path. A
+single shared guard, `operations/addon_pairing.resolve_owned_pairing`, resolves
+the pairing by `(tenant_id, service_account_sub)` — the Keycloak service-account
+`sub` captured at pair time — and requires the requested name to be that
+pairing's own name. `AddonPairingService.heartbeat` and
+`AddonCapabilityService.declare` both call it as the first statement inside
+their write transaction, so authorization and the mutation commit as one unit
+and a concurrent unpair cannot slip between the check and the write.
+
+The failure mode is deliberately non-revealing: a caller whose `sub` binds to no
+pairing (a non-add-on service principal, or a pre-#3027 pairing whose
+`service_account_sub` is `NULL` — which fails closed until it re-pairs) and a
+caller whose `sub` binds to a *different* pairing both raise `AddonNotPairedError`
+→ 404 `addon_not_paired`, indistinguishable from an absent add-on, so a paired
+service can neither act on another's pairing nor probe which names exist. This
+is the write-side counterpart of the step-event subscription bind
+(`resolve_pairing_for_sub`; see `addon-step-events.md`). Cross-tenant isolation
+is unchanged — the guard filters by the JWT-derived `tenant_id` — and the
+operator/admin pairing-management routes (`pair` / `unpair` / `list` / `show`)
+keep their separate role gates.
 
 ## Dependencies
 
@@ -229,15 +264,14 @@ lists active pairings and maps each to a `PairingHealth`
   Pairing management is REST + console; pairing health already flows to
   `meho status` via `/api/v1/health` and the `meho_status` MCP tool. Adding
   the Go verbs is a separate change (OpenAPI snapshot + oapi-codegen regen).
-- **Heartbeat principal binding** is coarse: it requires a `service`
-  principal in the pairing's tenant, matched by add-on name. A finer binding
-  (verifying the caller's client id against the pairing's
-  `keycloak_client_id`) is a hardening follow-up for the initiative's
-  security-review DoD item. Task #3027 added
-  `AddonPairing.service_account_sub` (the add-on's token `sub`, captured at
-  pair time), which enables exactly this check — heartbeat could verify
-  `operator.sub == service_account_sub` — though it is not yet wired here.
-  See `addon-step-events.md` for the step-event push contract that uses it.
+- **Heartbeat / capability-declare object-level binding is wired.** Both
+  self-service writes resolve the pairing by the caller's
+  `service_account_sub` and match the requested name via the shared
+  `resolve_owned_pairing` guard (see **Object-level write authorization**), so
+  a same-tenant service token can no longer heartbeat or re-declare another
+  paired add-on. A pre-#3027 pairing whose `service_account_sub` is `NULL`
+  fails closed (cannot self-serve until it re-pairs), matching the step-event
+  subscription's stance.
 - **Console is read-only**: pair / unpair are REST-only. Console write
   actions (a pair/unpair button behind CSRF) are a follow-up.
 - **Paired-surface activation (#3029) is the first real consumer of the

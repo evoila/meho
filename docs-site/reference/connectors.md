@@ -44,6 +44,7 @@ MEHO has two kinds of connector, both first-class and indistinguishable to an ag
 | `vcd-rest-10.6` | `vcd` | >=10.0,<11.0 | — |
 | `vcfa-rest-9.0` | `vcfa` | >=9.0,<10.0 | — |
 | `vcfa-vra8-8.0` | `vcfa` | >=8.0,<9.0 | — |
+| `vmware-rest-8.0` | `vmware` | >=8.0,<8.1 | generic |
 | `vmware-rest-9.0` | `vmware` | >=8.5,<10.0 | generic |
 | `vrli-rest-9.0` | `vrli` | >=9.0,<10.0 | — |
 | `vrli-vrli8-8.0` | `vrli` | >=8.0,<9.0 | — |

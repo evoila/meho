@@ -50,7 +50,7 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   `holodeck_pod_list`, `holodeck_pod_info`, `holodeck_service_list`,
   `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`,
   `holodeck_disk_usage`, `holodeck_backups_list`. Pure parsers:
-  `parse_kubectl_command` (verb-safelist enforcement),
+  `parse_kubectl_command` (verb-safelist + flag-allowlist enforcement),
   `parse_logs_tail_output` (GNU `tail` `==> path <==` header split),
   `parse_networking_payload` (four-section composer),
   `parse_disk_usage_output` (root-fs `df -B1` + per-dir `du -sb` composer
@@ -234,9 +234,11 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   `requires_approval=True`). Forwards an operator-supplied ``kubectl``
   command to the in-appliance K8s cluster. Because the command line is
   operator-supplied, the op is approval-gated: a dispatch parks for
-  human approval rather than running unattended. Its verb safelist still
-  confines it to read-only ``kubectl`` verbs, and two complementary
-  allowlist layers reject both mutating verbs and shell-injection shapes
+  human approval rather than running unattended. Its verb safelist
+  confines it to read-only ``kubectl`` verbs, a positive **flag
+  allowlist** confines it to read-only scoping/formatting options, and
+  two complementary allowlist layers reject mutating verbs and
+  shell-injection shapes
   (`;`, `&&`, `||`, `|`, `$(...)`, backticks, `>`, `<`, newline):
 
   1. *Schema layer.* The `command` parameter has a `pattern` regex
@@ -259,10 +261,12 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
      (`[;&|<>` + backtick + `$()\\` + newline + carriage return]`) and
      refuses on hit, (b) tokenises via `shlex.split`, (c) walks past
      leading global flags (`--flag=value` and `--flag value` forms),
-     (d) checks the 2-token (parent, sub-verb) prefix against
-     `_K8S_MULTIWORD_READ_VERBS` first, and (e) falls through to the
-     single-word `_K8S_READ_VERBS`. Any rejected step raises
-     `KubectlSafetyError`; the handler returns
+     **validating each against `_K8S_ALLOWED_FLAGS`**, (d) checks the
+     2-token (parent, sub-verb) prefix against
+     `_K8S_MULTIWORD_READ_VERBS` first, (e) falls through to the
+     single-word `_K8S_READ_VERBS`, and (f) validates every remaining
+     argument-position flag against the same allowlist. Any rejected
+     step raises `KubectlSafetyError`; the handler returns
      `{stdout, stderr, exit_status, error}` with `error` set to the
      safety-check message. The metacharacter reject is **load-bearing**:
      `shlex.split` in POSIX mode does not treat shell separators as
@@ -285,6 +289,29 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   refuses any sub-verb not in the per-parent frozenset, so
   adjacent mutating sub-verbs (`config set-context`,
   `config unset`, `auth reconcile`, ...) fail closed.
+
+  The **flag allowlist** (`_K8S_ALLOWED_FLAGS`) closes the
+  argument-level class that the verb safelist and the metacharacter
+  reject leave open: a flag such as `--server`,
+  `--insecure-skip-tls-verify`, `--token`, `--kubeconfig`, `--context`,
+  `--raw` or `--output-directory` carries no shell metacharacter and
+  sits behind a read-only verb, so without a flag check the caller
+  could point the appliance's bearer credentials at an endpoint of
+  their choosing, disable TLS verification, dump the raw kubeconfig, or
+  write files on the appliance. `parse_kubectl_command` therefore
+  validates **every** flag — in both the global position before the
+  verb and the argument position after it, in both attached
+  (`--flag=value`) and separated (`--flag value`) forms — against a
+  positive allowlist of read-only scoping/formatting options
+  (`-n`/`--namespace`, `-o`/`--output`, `-l`/`--selector`,
+  `--field-selector`, `--sort-by`, logs-scoping options, ...). Endpoint,
+  context, credential and TLS trust are owned by the appliance's own
+  kubeconfig, never by the caller's command line. Off-allowlist flags
+  (including unknown flags and streaming `--watch`) fail closed. A
+  separated value that itself starts with `-` is not swallowed as the
+  preceding flag's value, so `--namespace --server=…` cannot smuggle a
+  rejected flag past the walk. The rejection message names the flag but
+  never echoes its (possibly secret) value.
 
   Stderr from the appliance is truncated at 4096 chars, matching the
   `PwshRunError` convention.

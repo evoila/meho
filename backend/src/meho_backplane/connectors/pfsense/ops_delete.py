@@ -1160,24 +1160,45 @@ async def pfsense_gateway_delete(
         }
 
     gateway = matches[0]
-    await _apply_playback(
-        self,
-        target,
-        script_name=f"meho_gateway_delete_{_script_token(name)}",
-        script_body=_build_gateway_delete_playback(name),
-        operator=operator,
-    )
+    script_name = f"meho_gateway_delete_{_script_token(name)}"
+    script_body = _build_gateway_delete_playback(name)
 
-    after = await _read_config_xml(self, target, operator)
-    gateways_after = parse_gateways_xml(after)
-    still_present = any(g.get("name") == name for g in gateways_after)
-    removed_exactly_one = len(gateways_after) == len(gateways_before) - 1
-    if still_present or not removed_exactly_one:
-        raise RuntimeError(
-            f"gateway.delete verification failed for {name!r}: present_after={still_present}, "
-            f"gateways {len(gateways_before)}->{len(gateways_after)} (expected exactly one "
-            "fewer); the pfSsh.php playback did not persist a clean single-gateway delete"
+    # A ``pfSsh.php playback`` exits 0 even when ``write_config()`` never
+    # committed: a transient pfSense-runtime persistence race (a concurrent
+    # config-write / gateway event re-serialising an in-memory ``$config``
+    # snapshot that still carried the gateway) can leave config.xml untouched
+    # (#3529 -- observed on an unreferenced gateway whose delete would
+    # otherwise apply cleanly). The single-shot ``_apply_playback`` cannot see
+    # this; only the read-back below can. The delete fragment is idempotent (it
+    # re-matches the gateway by name and persists only on a single removal), so
+    # a non-persisting read-back is retried once and re-verified before we fail
+    # closed. (The referenced-guard completeness gap in
+    # ``find_gateway_references`` is a distinct latent defect tracked in #3315,
+    # not addressed here.)
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        await _apply_playback(
+            self,
+            target,
+            script_name=script_name,
+            script_body=script_body,
+            operator=operator,
         )
+        after = await _read_config_xml(self, target, operator)
+        gateways_after = parse_gateways_xml(after)
+        still_present = any(g.get("name") == name for g in gateways_after)
+        removed_exactly_one = len(gateways_after) == len(gateways_before) - 1
+        if not still_present and removed_exactly_one:
+            break
+        if attempt >= max_attempts:
+            raise RuntimeError(
+                f"gateway.delete verification failed for {name!r} after {attempt} "
+                f"apply attempt(s): present_after={still_present}, gateways "
+                f"{len(gateways_before)}->{len(gateways_after)} (expected exactly one "
+                "fewer); the pfSsh.php playback did not persist a clean single-gateway "
+                "delete"
+            )
+
     return {
         **result,
         "status": "deleted",

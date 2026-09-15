@@ -23,7 +23,19 @@ byte, so the ``mail_smtp_starttls`` flag is moot there). Any other
 port opens plaintext via :class:`smtplib.SMTP` and, when
 ``mail_smtp_starttls`` is set (default), upgrades with ``starttls()``
 followed by a fresh ``ehlo()`` — the RFC 3207 requirement to rediscover
-extensions on the encrypted channel. ``login()`` runs only when a
+extensions on the encrypted channel.
+
+TLS trust (F08 #270): **both** paths are handed an explicit validating
+context (:func:`_build_tls_context` → :func:`ssl.create_default_context`,
+``check_hostname=True`` + ``CERT_REQUIRED``) rather than the
+``ssl._create_stdlib_context()`` smtplib falls back to when ``context``
+is ``None`` — that fallback leaves ``CERT_NONE`` and hostname checking
+off, so mail contents and credentials would flow to an unverified peer.
+``mail_smtp_ca_bundle`` optionally pins an internal relay's CA (the
+bundle replaces the public roots); there is no verification-disable
+knob. A wrong-name / untrusted-chain / expired certificate raises
+:class:`ssl.SSLError`, refused as ``reason="smtp_tls_error"`` before any
+AUTH or message data reaches the peer. ``login()`` runs only when a
 username is configured (an internal relay commonly needs none) **and
 only on an encrypted channel**: ``smtplib.login()`` imposes no TLS
 precondition of its own, so AUTH LOGIN/PLAIN would put base64-wrapped —
@@ -52,12 +64,17 @@ Reason codes are stable:
 * ``smtp_auth_error`` — :class:`smtplib.SMTPAuthenticationError`.
 * ``smtp_recipients_refused`` — the server rejected every recipient
   (:class:`smtplib.SMTPRecipientsRefused`).
+* ``smtp_tls_error`` — TLS certificate verification / handshake failure
+  on either the implicit-TLS or STARTTLS path
+  (:class:`ssl.SSLError`): wrong name, untrusted chain, expired cert.
 * ``smtp_error`` — any other :class:`smtplib.SMTPException`.
 
-The ``except`` ordering below is load-bearing: ``SMTPException``
-subclasses :class:`OSError` (since Python 3.4), so the specific SMTP
-arms and the generic ``SMTPException`` arm must precede the ``OSError``
-arm or a refused login would misreport as a connect error.
+The ``except`` ordering below is load-bearing: both
+:class:`smtplib.SMTPException` and :class:`ssl.SSLError` subclass
+:class:`OSError` (since Python 3.4), so every specific SMTP arm, the
+generic ``SMTPException`` arm, and the ``SSLError`` arm must precede the
+``OSError`` arm or a refused login / a certificate rejection would
+misreport as a connect error.
 
 Logging discipline: structlog events carry host/port/reason only —
 never the password, never the message body. The recipient list and
@@ -69,6 +86,7 @@ from __future__ import annotations
 
 import asyncio
 import smtplib
+import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Final
@@ -111,12 +129,33 @@ class MailSendResult:
     reason: str | None = None
 
 
+def _build_tls_context(ca_bundle: str) -> ssl.SSLContext:
+    """Build the validating TLS context both SMTP paths hand to the socket.
+
+    :func:`ssl.create_default_context` returns a context with
+    ``check_hostname=True`` and ``verify_mode=CERT_REQUIRED`` — the
+    opposite of the ``ssl._create_stdlib_context()`` smtplib falls back
+    to when ``context`` is left ``None`` (that one disables both, the F08
+    finding). A non-empty *ca_bundle* pins an internal relay's CA: passing
+    ``cafile`` makes ``create_default_context`` load *only* that bundle
+    (it skips ``load_default_certs``), so the trust anchor is the internal
+    CA rather than the public roots — the SMTP analogue of the
+    target-level ``tls_ca_pin``. Hostname verification stays on in both
+    cases, so ``server_hostname`` (the configured ``mail_smtp_host``,
+    which smtplib passes to ``wrap_socket``) must match the certificate.
+    """
+    if ca_bundle:
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
 def _send_sync(
     msg: EmailMessage,
     *,
     host: str,
     port: int,
     starttls: bool,
+    ca_bundle: str,
     username: str,
     password: str,
     from_addr: str,
@@ -129,6 +168,13 @@ def _send_sync(
     ``QUIT`` and closes the connection on every exit path
     (:class:`smtplib.SMTP` is a context manager).
 
+    Both TLS paths are handed the same validating context from
+    :func:`_build_tls_context` — the implicit-TLS ``SMTP_SSL``
+    constructor (port 465) and the ``STARTTLS`` upgrade — so a
+    wrong-name, untrusted-chain or expired MTA certificate raises
+    :class:`ssl.SSLError` and the send is refused *before* any AUTH or
+    message data reaches the peer.
+
     ``encrypted`` tracks whether the channel is confidential — true from
     construction under implicit TLS, true again once ``starttls()``
     returns. It gates ``login()`` at the call site rather than being
@@ -136,8 +182,11 @@ def _send_sync(
     how TLS is established cannot leave the credential guard behind.
     """
     try:
+        context = _build_tls_context(ca_bundle)
         if port == _IMPLICIT_TLS_PORT:
-            client: smtplib.SMTP = smtplib.SMTP_SSL(host, port, timeout=_SMTP_TIMEOUT_SECONDS)
+            client: smtplib.SMTP = smtplib.SMTP_SSL(
+                host, port, timeout=_SMTP_TIMEOUT_SECONDS, context=context
+            )
             encrypted = True
         else:
             client = smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SECONDS)
@@ -145,7 +194,7 @@ def _send_sync(
         with client:
             client.ehlo()
             if starttls and port != _IMPLICIT_TLS_PORT:
-                client.starttls()
+                client.starttls(context=context)
                 # RFC 3207: the pre-TLS EHLO response is void; rediscover
                 # the server's extensions on the encrypted channel.
                 client.ehlo()
@@ -165,6 +214,12 @@ def _send_sync(
         return "smtp_connect_error"
     except smtplib.SMTPException:
         return "smtp_error"
+    except ssl.SSLError:
+        # Certificate verification / handshake failure on either TLS path
+        # (wrong name, untrusted chain, expired cert). ``ssl.SSLError``
+        # subclasses ``OSError``, so this arm MUST precede the ``OSError``
+        # arm below or a trust failure would misreport as a connect error.
+        return "smtp_tls_error"
     except OSError:
         # Raw socket-level connect failure (refused, DNS, timeout) —
         # smtplib raises these un-wrapped from the constructor's connect.
@@ -229,6 +284,7 @@ async def send_email(*, to: list[str], subject: str, body: str) -> MailSendResul
         host=settings.mail_smtp_host,
         port=settings.mail_smtp_port,
         starttls=settings.mail_smtp_starttls,
+        ca_bundle=settings.mail_smtp_ca_bundle,
         username=settings.mail_smtp_username,
         password=settings.mail_smtp_password,
         from_addr=settings.mail_from,

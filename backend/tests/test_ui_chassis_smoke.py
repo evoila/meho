@@ -43,6 +43,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -61,6 +62,7 @@ from meho_backplane.ui.auth import (
     UISessionMiddleware,
 )
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.auth import flow as oauth_flow
 from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
@@ -121,6 +123,28 @@ _SURFACE_ROUTES = ("/ui/broadcast", "/ui/kb", "/ui/topology", "/ui/connectors", 
 #: via :data:`_SURFACE_ROUTES` so a sidebar-vs-route divergence surfaces
 #: explicitly.
 _STUB_SURFACE_ROUTES: tuple[str, ...] = ()
+
+
+def _patch_oauth_token_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx2.Response,
+) -> list[httpx2.Request]:
+    """Stub the Authlib 1.8 ``httpx2`` token client, not respx's httpx client."""
+    calls: list[httpx2.Request] = []
+
+    async def _handle(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == _TOKEN_ENDPOINT
+        return response
+
+    class _TestOAuth2Client(oauth_flow.AsyncOAuth2Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx2.MockTransport(_handle)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "AsyncOAuth2Client", _TestOAuth2Client)
+    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -406,15 +430,18 @@ def test_login_redirects_to_keycloak() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_callback_creates_session_and_redirects_to_dashboard() -> None:
+def test_callback_creates_session_and_redirects_to_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A valid callback creates a session row and 302s to ``/ui/``."""
     key = make_rsa_keypair("test-kid")
     access_token = mint_token(key)
     jwks = public_jwks(key)
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": access_token,
@@ -788,15 +815,16 @@ def test_middleware_lets_authenticated_ui_request_through() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_full_flow_unauth_login_callback_then_dashboard() -> None:
+def test_full_flow_unauth_login_callback_then_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end smoke: unauth -> login -> callback -> dashboard render."""
     key = make_rsa_keypair("test-kid")
     access_token = mint_token(key)
     jwks = public_jwks(key)
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": access_token,

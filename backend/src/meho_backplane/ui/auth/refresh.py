@@ -97,6 +97,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Final, NoReturn
 
 import httpx
+import httpx2
 import structlog
 from authlib.integrations.base_client.errors import OAuthError
 from fastapi import HTTPException, status
@@ -189,9 +190,9 @@ def _classify_refresh_failure(exc: Exception) -> tuple[str, dict[str, str]]:
     that is not a token": ``malformed_response``.
     """
     fields = {"error_class": type(exc).__name__}
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (httpx.TimeoutException, httpx2.TimeoutException)):
         return "timeout", fields
-    if isinstance(exc, httpx.HTTPError):
+    if isinstance(exc, (httpx.HTTPError, httpx2.HTTPError)):
         return "network_error", fields
     if isinstance(exc, OAuthError):
         # authlib surfaces the IdP's error code (``invalid_grant`` on
@@ -323,7 +324,7 @@ async def _refresh_via_idp(
     """
     try:
         return await refresh_access_token(refresh_token=locked.refresh_token)
-    except (httpx.HTTPError, OAuthError, OAuthFlowError, ValueError) as exc:
+    except (httpx.HTTPError, httpx2.HTTPError, OAuthError, OAuthFlowError, ValueError) as exc:
         reason, extra = _classify_refresh_failure(exc)
         log.warning(
             "ui_auth_token_refresh_failed",

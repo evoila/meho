@@ -39,6 +39,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -55,6 +56,7 @@ from meho_backplane.ui.auth import (
     UISessionMiddleware,
     build_router,
 )
+from meho_backplane.ui.auth import flow as oauth_flow
 from meho_backplane.ui.auth.errors import ui_session_expired_exception_handler
 from meho_backplane.ui.auth.flow import (
     AUTHORIZATION_FLOW_TTL_SECONDS,
@@ -98,6 +100,37 @@ _REDIRECT_URI = f"{_BACKPLANE_URL}/ui/auth/callback"
 _AUTHORIZATION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/auth"
 _TOKEN_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/token"
 _END_SESSION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/logout"
+
+
+def _patch_oauth_token_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx2.Response | Exception,
+) -> list[httpx2.Request]:
+    """Inject an ``httpx2`` token-endpoint double into Authlib 1.8 clients.
+
+    Authlib 1.8 moved its async OAuth client from ``httpx`` to ``httpx2``.
+    ``respx`` deliberately intercepts only ``httpx``, so the prior token-route
+    mocks no longer see the callback or refresh request and CI tries DNS for
+    ``keycloak.test``. Discovery/JWKS retain their existing ``httpx`` + respx
+    coverage; this helper covers only Authlib's separate token transport.
+    """
+    calls: list[httpx2.Request] = []
+
+    async def _handle(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == _TOKEN_ENDPOINT
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    class _TestOAuth2Client(oauth_flow.AsyncOAuth2Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx2.MockTransport(_handle)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "AsyncOAuth2Client", _TestOAuth2Client)
+    return calls
 
 
 @pytest.fixture(autouse=True)
@@ -370,7 +403,7 @@ def _mint_access_token(
     return token, public_jwks(key)
 
 
-def test_callback_creates_session_and_sets_cookie() -> None:
+def test_callback_creates_session_and_sets_cookie(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC 2: callback exchanges code+verifier, creates session row, sets cookie."""
     access_token, jwks = _mint_access_token()
     refresh_token = "refresh-token-value"
@@ -379,8 +412,9 @@ def test_callback_creates_session_and_sets_cookie() -> None:
         _mock_oidc_metadata(mock_router, jwks=jwks)
         # The token endpoint returns access + refresh + expires_in
         # exactly as Keycloak does.
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(
+        token_calls = _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": access_token,
@@ -400,7 +434,7 @@ def test_callback_creates_session_and_sets_cookie() -> None:
             f"/ui/auth/callback?code=test-code&state={state}",
         )
 
-    assert token_route.called
+    assert token_calls
     # Verify the token request body shape -- code, code_verifier,
     # redirect_uri, resource indicator. authlib's default
     # ``client_secret_basic`` puts the client credentials in the
@@ -409,8 +443,8 @@ def test_callback_creates_session_and_sets_cookie() -> None:
     # carry ``client_id`` / ``client_secret``. The header check below
     # confirms the secret is on the wire to the IdP without ever
     # surfacing the value in the test output.
-    call = token_route.calls[0]
-    posted_body = call.request.content.decode("utf-8")
+    call = token_calls[0]
+    posted_body = call.content.decode("utf-8")
     assert "code=test-code" in posted_body
     assert "code_verifier=" in posted_body
     assert "grant_type=authorization_code" in posted_body
@@ -427,7 +461,7 @@ def test_callback_creates_session_and_sets_cookie() -> None:
     # do not unpack the value because the secret-leak sweep in
     # ``conftest`` would otherwise flag the test on any future
     # accidental print.
-    auth_header = call.request.headers.get("authorization")
+    auth_header = call.headers.get("authorization")
     assert auth_header is not None
     assert auth_header.startswith("Basic ")
     assert len(auth_header) > len("Basic ")
@@ -571,7 +605,7 @@ def test_callback_idp_error_html_is_not_collapsed_to_login_restart() -> None:
     assert response.json()["detail"] == "authorization_failed"
 
 
-def test_callback_502s_when_token_endpoint_unreachable() -> None:
+def test_callback_502s_when_token_endpoint_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Network failure on the token endpoint surfaces as 502 (not a login restart).
 
     AC 4: the unreachable-token-endpoint path stays a distinguishable
@@ -581,7 +615,7 @@ def test_callback_502s_when_token_endpoint_unreachable() -> None:
     """
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router)
-        mock_router.post(_TOKEN_ENDPOINT).mock(side_effect=httpx.ConnectError("boom"))
+        _patch_oauth_token_transport(monkeypatch, httpx2.ConnectError("boom"))
         client = _https_client()
         login_response = client.get("/ui/auth/login")
         state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
@@ -593,13 +627,16 @@ def test_callback_502s_when_token_endpoint_unreachable() -> None:
     assert response.json()["detail"] == "upstream_auth_provider_unreachable"
 
 
-def test_callback_rejects_replayed_state_after_first_consumption() -> None:
+def test_callback_rejects_replayed_state_after_first_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The verifier is single-use; a second callback with the same state fails."""
     access_token, jwks = _mint_access_token()
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": access_token,
@@ -663,7 +700,9 @@ def test_login_sets_browser_binding_cookie_with_lax_httponly_secure() -> None:
     assert pending.browser_binding != state
 
 
-def test_callback_from_second_browser_without_binding_cookie_is_rejected() -> None:
+def test_callback_from_second_browser_without_binding_cookie_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F10 (#272): the headline attack -- A's unconsumed callback in B fails.
 
     Browser A starts login; browser B (a fresh client that never started
@@ -674,8 +713,8 @@ def test_callback_from_second_browser_without_binding_cookie_is_rejected() -> No
     access_token, jwks = _mint_access_token()
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(200, json=_token_json(access_token)),
+        token_calls = _patch_oauth_token_transport(
+            monkeypatch, httpx2.Response(200, json=_token_json(access_token))
         )
         browser_a = TestClient(_build_app(), follow_redirects=False)
         login = browser_a.get("/ui/auth/login")
@@ -689,11 +728,13 @@ def test_callback_from_second_browser_without_binding_cookie_is_rejected() -> No
     assert response.status_code == 400
     assert response.json()["detail"] == AUTHORIZATION_STATE_EXPIRED_DETAIL
     # Rejected before the token exchange -- no session, no token POST.
-    assert not token_route.called
+    assert not token_calls
     assert SESSION_COOKIE_NAME not in response.cookies
 
 
-def test_callback_same_browser_succeeds_and_clears_binding_cookie() -> None:
+def test_callback_same_browser_succeeds_and_clears_binding_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F10 (#272): the initiating browser completes login; the cookie is cleared.
 
     Same-browser success is the legitimate path -- it must still work --
@@ -702,8 +743,8 @@ def test_callback_same_browser_succeeds_and_clears_binding_cookie() -> None:
     access_token, jwks = _mint_access_token()
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(200, json=_token_json(access_token)),
+        _patch_oauth_token_transport(
+            monkeypatch, httpx2.Response(200, json=_token_json(access_token))
         )
         client = _https_client()
         login = client.get("/ui/auth/login?return_to=/ui/dashboard")
@@ -720,7 +761,9 @@ def test_callback_same_browser_succeeds_and_clears_binding_cookie() -> None:
     assert "max-age=0" in binding_header.lower()
 
 
-def test_concurrent_logins_bind_independently_and_both_complete() -> None:
+def test_concurrent_logins_bind_independently_and_both_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F10 (#272): concurrent logins in one browser must not break binding.
 
     Two logins from one browser get distinct per-``state`` cookie names,
@@ -730,8 +773,8 @@ def test_concurrent_logins_bind_independently_and_both_complete() -> None:
     access_token, jwks = _mint_access_token()
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(200, json=_token_json(access_token)),
+        _patch_oauth_token_transport(
+            monkeypatch, httpx2.Response(200, json=_token_json(access_token))
         )
         client = _https_client()
         login1 = client.get("/ui/auth/login?return_to=/ui/one")
@@ -1144,8 +1187,8 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        token_calls = _patch_oauth_token_transport(
+            monkeypatch, httpx2.Response(400, json={"error": "invalid_grant"})
         )
         with capture_logs() as captured:
             client = TestClient(_build_read_probe_app(), follow_redirects=False)
@@ -1154,7 +1197,7 @@ def test_read_path_revoked_grant_bounces_to_login_after_token_expiry(
 
     assert response.status_code == 302
     assert response.headers["location"].startswith("/ui/auth/login?return_to=")
-    assert token_route.call_count == 1
+    assert len(token_calls) == 1
     failed = [e for e in captured if e["event"] == "ui_read_session_revalidation_failed"]
     assert len(failed) == 1
     assert failed[0]["session_id"] == str(session_id)
@@ -1179,8 +1222,9 @@ def test_read_path_expired_token_refreshes_silently_and_serves(
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
-            return_value=httpx.Response(
+        token_calls = _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": fresh,
@@ -1196,7 +1240,7 @@ def test_read_path_expired_token_refreshes_silently_and_serves(
 
     assert response.status_code == 200
     assert response.json() == {"operator": "op-77"}
-    assert token_route.call_count == 1
+    assert len(token_calls) == 1
 
     async def _check_rotated() -> None:
         sessionmaker = get_sessionmaker()
@@ -1229,8 +1273,8 @@ def test_read_path_revalidation_hits_cached_jwks_no_outbound_calls(
         jwks_route = mock_router.get(_JWKS_URL).mock(
             return_value=httpx.Response(200, json=public_jwks(key)),
         )
-        token_route = mock_router.post(_TOKEN_ENDPOINT_URL).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
+        token_calls = _patch_oauth_token_transport(
+            monkeypatch, httpx2.Response(400, json={"error": "invalid_grant"})
         )
         client = TestClient(_build_read_probe_app(), follow_redirects=False)
         client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
@@ -1241,7 +1285,7 @@ def test_read_path_revalidation_hits_cached_jwks_no_outbound_calls(
     assert second.status_code == 200
     # One JWKS warm-up fetch, then cache hits; no refresh round-trips.
     assert jwks_route.call_count == 1
-    assert token_route.call_count == 0
+    assert not token_calls
 
 
 def test_read_path_within_drift_window_skips_revalidation() -> None:
@@ -1362,14 +1406,17 @@ def test_exchange_code_rejects_unknown_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_full_login_round_trip_lets_authenticated_page_through() -> None:
+def test_full_login_round_trip_lets_authenticated_page_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """End-to-end: log in, then the session cookie reaches the sentinel route."""
     access_token, jwks = _mint_access_token(sub="op-roundtrip")
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc_metadata(mock_router, jwks=jwks)
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(
+        _patch_oauth_token_transport(
+            monkeypatch,
+            httpx2.Response(
                 200,
                 json={
                     "access_token": access_token,

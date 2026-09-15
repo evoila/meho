@@ -74,6 +74,7 @@ from meho_backplane.operations.approval_queue import (
     expire_stale_requests,
     list_pending,
     reject_request,
+    resume_dispatch_after_approval,
 )
 from meho_backplane.settings import get_settings
 
@@ -350,6 +351,55 @@ async def test_credential_handoff_rejects_ciphertext_bound_to_another_request(
     async with get_sessionmaker()() as fresh:
         with pytest.raises(ApprovalHandoffError, match="invalid shape"):
             await consume_handoff(fresh, second.execution_handle, second.id, second.tenant_id)
+
+
+@pytest.mark.asyncio
+async def test_credential_composite_resume_never_flushes_decrypted_parent(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claimed composite handoff stays local even when its row is attached."""
+    import meho_backplane.operations.dispatcher as dispatcher_module
+
+    secret = "test-only-credential-value"
+    params = {"value": secret}
+    parent = {"op_id": "composite.rotate", "params": {"password": secret}}
+    request = await create_pending_request(
+        session,
+        operator=_make_operator(sub="requester"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        resume_parent=parent,
+    )
+    request.status = ApprovalRequestStatus.APPROVED.value
+    request.decided_at = datetime.now(UTC)
+    await session.commit()
+
+    calls: list[dict[str, Any]] = []
+
+    async def _dispatch(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _dispatch)
+    await resume_dispatch_after_approval(operator=_make_operator(sub="reviewer"), request=request)
+    assert calls[0]["op_id"] == "composite.rotate"
+    assert calls[0]["params"] == parent["params"]
+
+    # The original ORM identity remains attached. Flush/commit must not turn
+    # the temporary execution input into a durable approval-row JSON value.
+    await session.flush()
+    await session.commit()
+    assert request.params is None
+    assert request.resume_parent == {"op_id": "composite.rotate"}
+    async with get_sessionmaker()() as fresh:
+        parked = await fresh.get(ApprovalRequest, request.id)
+        assert parked is not None
+        assert parked.params is None
+        assert parked.resume_parent == {"op_id": "composite.rotate"}
+        assert secret not in repr(parked)
 
 
 @pytest.mark.asyncio

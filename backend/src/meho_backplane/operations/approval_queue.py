@@ -1127,6 +1127,7 @@ async def resume_dispatch_after_approval(
 
     # Only the durable claim winner may touch the one-time ciphertext.  A
     # losing concurrent resume returns above without consuming its payload.
+    resume_parent_override: dict[str, Any] | None = None
     if request.execution_handle is not None:
         from meho_backplane.db.engine import get_sessionmaker
 
@@ -1141,13 +1142,16 @@ async def resume_dispatch_after_approval(
                 "approval execution payload does not match the approved request"
             )
         if handoff.get("resume_parent") is not None:
-            request.resume_parent = cast(dict[str, Any], handoff["resume_parent"])
+            # Never assign decrypted composite inputs to the ORM row: an
+            # attached request could autoflush them back into approval_request.
+            resume_parent_override = cast(dict[str, Any], handoff["resume_parent"])
 
     return await _dispatch_resume_with_bound_context(
         operator=operator,
         request=request,
         resolved_target=resolved_target,
         effective_params=cast(dict[str, Any], effective_params),
+        resume_parent_override=resume_parent_override,
     )
 
 
@@ -1245,6 +1249,7 @@ async def _dispatch_resume_with_bound_context(
     request: ApprovalRequest,
     resolved_target: Any,
     effective_params: dict[str, Any],
+    resume_parent_override: dict[str, Any] | None = None,
 ) -> Any:
     """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
 
@@ -1283,7 +1288,9 @@ async def _dispatch_resume_with_bound_context(
     )
     from meho_backplane.operations.dispatcher import dispatch
 
-    resume_parent = request.resume_parent
+    resume_parent = (
+        resume_parent_override if resume_parent_override is not None else request.resume_parent
+    )
     if resume_parent is not None:
         dispatch_op_id = str(resume_parent["op_id"])
         dispatch_params = cast(dict[str, Any], resume_parent["params"])

@@ -530,6 +530,7 @@ async def _resume_approved_or_already_resumed(
     would set up an import-time cycle; keeping both inline resolves them
     once at first-call time.
     """
+    from meho_backplane.operations.approval_handoff import discard as discard_handoff
     from meho_backplane.operations.approval_queue import claim_resume
 
     if not await claim_resume(approval_request_id):
@@ -544,9 +545,18 @@ async def _resume_approved_or_already_resumed(
             approval_request_id=approval_request_id,
         )
 
+    # The agent already owns the original inputs in memory.  Once it wins the
+    # durable claim, discard any credential-write custody row before dispatch:
+    # a losing waiter returned above and cannot remove another winner's input.
+    # This mirrors the other claim winners without ever decrypting the payload.
+    from meho_backplane.db.engine import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        await discard_handoff(session, approval_request_id, operator.tenant_id)
+        await session.commit()
+
     # The re-dispatch threads ``_approved=True`` through the policy gate, so
     # the durable approval-decision row is the authorization.
-    from meho_backplane.db.engine import get_sessionmaker
     from meho_backplane.operations._audit import parent_audit_id_var
     from meho_backplane.operations.approval_queue import get_request
     from meho_backplane.operations.meta_tools import call_operation_with_approval

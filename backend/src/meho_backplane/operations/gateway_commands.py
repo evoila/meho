@@ -85,6 +85,7 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.approval_handoff import discard as discard_handoff
 from meho_backplane.operations.approval_queue import (
     consume_remote_write_approval,
     find_remote_write_approval,
@@ -706,6 +707,10 @@ async def _mint_remote_write(
             operator=operator,
             runner_id=runner_id,
         )
+
+    # Keep custody cleanup in the caller-owned mint transaction: a rollback
+    # restores both the approval claim and its encrypted execution input.
+    await discard_handoff(session, approval.id, approval.tenant_id)
 
     return await _finalize_mint(
         session,

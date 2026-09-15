@@ -49,6 +49,7 @@ from unittest.mock import patch as _patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -76,6 +77,7 @@ from meho_backplane.ui.auth import (
     ui_session_expired_exception_handler,
 )
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.auth import flow as oauth_flow
 from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
@@ -125,6 +127,21 @@ _OP_A = "op-alice"
 _OP_B = "op-bob"
 
 
+class _TokenEndpointStub:
+    """Mutable transport double for Authlib 1.8's httpx2 token client."""
+
+    def __init__(self) -> None:
+        self.response: httpx2.Response | Exception | None = None
+        self.calls: list[httpx2.Request] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+
+_token_endpoint_stub = _TokenEndpointStub()
+
+
 @pytest.fixture(autouse=True)
 def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin chassis + BFF env vars for every test.
@@ -145,6 +162,25 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
+    _token_endpoint_stub.response = None
+    _token_endpoint_stub.calls.clear()
+
+    async def _handle(request: httpx2.Request) -> httpx2.Response:
+        _token_endpoint_stub.calls.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == _TOKEN_ENDPOINT
+        response = _token_endpoint_stub.response
+        assert response is not None, "configure the Authlib token transport in this test"
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    class _TestOAuth2Client(oauth_flow.AsyncOAuth2Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx2.MockTransport(_handle)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "AsyncOAuth2Client", _TestOAuth2Client)
     yield
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
@@ -342,9 +378,9 @@ def _mint_expired_access_token(keypair: Any, *, sub: str, tenant_id: uuid.UUID) 
     )
 
 
-def _refresh_grant_response(access_token: str) -> httpx.Response:
+def _refresh_grant_response(access_token: str) -> httpx2.Response:
     """Build a well-formed RFC 6749 § 6 refresh-grant token response."""
-    return httpx.Response(
+    return httpx2.Response(
         200,
         json={
             "access_token": access_token,
@@ -358,16 +394,13 @@ def _refresh_grant_response(access_token: str) -> httpx.Response:
 def _mock_token_endpoint(
     mock: respx.MockRouter,
     *,
-    response: httpx.Response,
-) -> Any:
-    """Stub OIDC discovery to advertise the token endpoint + stub the grant.
+    response: httpx2.Response | Exception,
+) -> _TokenEndpointStub:
+    """Stub discovery and configure the Authlib 1.8 token transport.
 
-    ``_mock_discovery_and_jwks`` publishes a discovery document without a
-    ``token_endpoint``, so the refresh path (which reads it off discovery)
-    cannot resolve the grant URL. Overriding the discovery route with one
-    that carries ``token_endpoint`` -- and mocking that endpoint -- lets
-    the refresh leg run. Returns the token route so the caller can assert
-    its ``call_count`` (the "exactly one refresh, no retry" contract).
+    ``respx`` continues to serve discovery/JWKS via ``httpx``. Authlib 1.8
+    sends the refresh grant via a separate ``httpx2`` client, configured by
+    the autouse fixture. The returned stub retains the one-call assertion.
     """
     # `_fetch_discovery_doc` requires BOTH `authorization_endpoint` and
     # `token_endpoint`; the base `_mock_discovery_and_jwks` stub carries
@@ -384,7 +417,8 @@ def _mock_token_endpoint(
             },
         ),
     )
-    return mock.post(_TOKEN_ENDPOINT).mock(return_value=response)
+    _token_endpoint_stub.response = response
+    return _token_endpoint_stub
 
 
 def _load_session_tokens(session_id: uuid.UUID) -> tuple[str, str]:
@@ -1078,7 +1112,7 @@ def test_create_submit_refresh_unavailable_redirects_html_to_login() -> None:
     client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
     token_route = _mock_token_endpoint(
         mock,
-        response=httpx.Response(400, json={"error": "invalid_grant"}),
+        response=httpx2.Response(400, json={"error": "invalid_grant"}),
     )
     try:
         with _stub_embedding_service():
@@ -1118,7 +1152,7 @@ def test_create_submit_refresh_unavailable_keeps_json_shape_for_fetch() -> None:
         tenant_id=_TENANT_A, access_token=expired_access, operator_sub=_OP_A
     )
     client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
-    _mock_token_endpoint(mock, response=httpx.Response(400, json={"error": "invalid_grant"}))
+    _mock_token_endpoint(mock, response=httpx2.Response(400, json={"error": "invalid_grant"}))
     try:
         with _stub_embedding_service():
             response = client.post(
@@ -1214,7 +1248,7 @@ def test_create_submit_wrong_audience_401_is_not_swallowed_by_login_bounce() -> 
     # Stub the token endpoint to a hard failure so a spurious refresh
     # attempt (the regression this guards) would surface as a call here;
     # the assertion below proves it stays at zero.
-    token_route = _mock_token_endpoint(mock, response=httpx.Response(400, json={"error": "nope"}))
+    token_route = _mock_token_endpoint(mock, response=httpx2.Response(400, json={"error": "nope"}))
     try:
         with _stub_embedding_service():
             response = client.post(

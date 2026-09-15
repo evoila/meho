@@ -340,7 +340,11 @@ def client() -> Iterator[TestClient]:
 
 
 def _admin_token(
-    *, tenant_id: UUID | None = None, sub: str = "op-admin", kid: str = "kid-admin"
+    *,
+    tenant_id: UUID | None = None,
+    sub: str = "op-admin",
+    kid: str = "kid-admin",
+    platform_admin: bool = False,
 ) -> tuple[Any, str]:
     """Mint a JWT for a ``tenant_admin`` operator.
 
@@ -357,6 +361,7 @@ def _admin_token(
         sub=sub,
         tenant_role=TenantRole.TENANT_ADMIN.value,
         tenant_id=str(tid),
+        platform_admin=platform_admin,
     )
     return key, token
 
@@ -2288,6 +2293,113 @@ async def test_enable_cross_tenant_returns_404(client: TestClient) -> None:
     # tenant_b's connector untouched
     statuses = await _group_statuses(tenant_id=tenant_b)
     assert set(statuses.values()) == {"staged"}
+
+
+# ---------------------------------------------------------------------------
+# Built-in (global) connector writes: platform_admin gate (#3616 parity)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enable_builtin_only_forbidden_for_tenant_admin(client: TestClient) -> None:
+    """The reported defect's RBAC floor: a plain ``tenant_admin`` enabling a
+    built-in-only connector gets a clear 403 (not the historical 404).
+
+    A freshly ingested built-in (global, ``tenant_id IS NULL``) connector
+    is resolvable via the tenant-preferring fall-back, but enabling it
+    affects every tenant, so the route refuses a ``tenant_admin`` without
+    ``platform_admin`` with a structured ``builtin_connector_write_forbidden``
+    403 rather than the 404 v0.35.0 returned. Nothing transitions.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None)  # built-in / global rows only
+    key, token = _admin_token(tenant_id=operator_tenant)  # no platform_admin
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/vmware-rest-9.0/enable",
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "builtin_connector_write_forbidden"
+    assert detail["connector_id"] == "vmware-rest-9.0"
+    # The built-in connector is untouched.
+    statuses = await _group_statuses(tenant_id=None)
+    assert set(statuses.values()) == {"staged"}
+
+
+@pytest.mark.asyncio
+async def test_enable_builtin_only_succeeds_for_platform_admin(client: TestClient) -> None:
+    """The fix: a ``platform_admin`` enables a built-in-only connector (204, not 404).
+
+    The route calls ``enable_connector(..., tenant_id=operator.tenant_id)``,
+    so the built-in-only label must resolve through the tenant-preferring
+    fall-back to the built-in row and enable it for a platform_admin.
+    """
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None)  # built-in / global rows only
+    key, token = _admin_token(tenant_id=operator_tenant, platform_admin=True)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/vmware-rest-9.0/enable",
+            headers=_authed(token),
+        )
+    assert response.status_code == 204, response.text
+    statuses = await _group_statuses(tenant_id=None)
+    assert set(statuses.values()) == {"enabled"}
+    assert await _audit_row_count(op_id="meho_connector_enable") == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_builtin_only_forbidden_for_tenant_admin(client: TestClient) -> None:
+    """``PATCH /operations/{op_id}`` on a built-in-only row → 403 for tenant_admin."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None)
+    key, token = _admin_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            "/api/v1/connectors/vmware-rest-9.0/operations/GET:/api/v1/group-0/0",
+            json={"is_enabled": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["error"] == "builtin_connector_write_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_edit_group_builtin_only_forbidden_for_tenant_admin(client: TestClient) -> None:
+    """``PATCH /groups/{group_key}`` on a built-in-only row → 403 for tenant_admin."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None)
+    key, token = _admin_token(tenant_id=operator_tenant)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            "/api/v1/connectors/vmware-rest-9.0/groups/group-0",
+            json={"when_to_use": "tenant admin must not curate the built-in row"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["error"] == "builtin_connector_write_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_edit_op_builtin_only_succeeds_for_platform_admin(client: TestClient) -> None:
+    """``PATCH /operations/{op_id}`` on a built-in-only row lands for platform_admin."""
+    operator_tenant = uuid.uuid4()
+    await _seed_connector(tenant_id=None)
+    key, token = _admin_token(tenant_id=operator_tenant, platform_admin=True)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.patch(
+            "/api/v1/connectors/vmware-rest-9.0/operations/GET:/api/v1/group-0/0",
+            json={"is_enabled": True},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
 
 
 # ---------------------------------------------------------------------------

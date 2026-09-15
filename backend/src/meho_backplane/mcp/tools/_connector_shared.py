@@ -30,6 +30,7 @@ from uuid import UUID
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
@@ -322,3 +323,34 @@ def raise_invalid_params_for_connector_not_found(
     #2488 builds on — map through one grep-friendly home.
     """
     raise McpInvalidParamsError("connector_not_found") from exc
+
+
+def raise_invalid_params_for_builtin_write_forbidden(
+    exc: BuiltinConnectorWriteForbiddenError,
+) -> NoReturn:
+    """Map :class:`BuiltinConnectorWriteForbiddenError` onto -32602.
+
+    The mutating curation tools (``meho_connector_enable`` /
+    ``enable_reads`` / ``disable`` / ``edit_group`` / ``edit_op``) resolve
+    ``connector_id`` to a row-scope before acting; when that scope is a
+    built-in (``tenant_id IS NULL``) row and the caller is a
+    ``tenant_admin`` without ``platform_admin``, the service refuses with
+    this exception. The REST siblings render it as a structured ``403``
+    (:attr:`BuiltinConnectorWriteForbiddenError.detail`); without a
+    handler-level ``except`` arm the MCP path falls through the
+    dispatcher's generic ``except Exception`` and surfaces as a bare
+    ``-32603 "internal error: BuiltinConnectorWriteForbiddenError"`` — the
+    wrong JSON-RPC class and a Python-class-name leak into the stable
+    wire contract, the same genus #2481 / #2488 closed for the not-found
+    and edit-value arms.
+
+    A permission refusal is a caller-context problem, so it maps onto
+    MCP's only structured handler-error channel — ``-32602`` /
+    :class:`McpInvalidParamsError` — carrying the same structured
+    ``builtin_connector_write_forbidden`` ``data`` envelope the REST 403
+    ships (one builder, shared with the route), the identical mechanism
+    :func:`~meho_backplane.mcp.tools.doc_collections_update` uses for the
+    global doc-collection seat (#3616). The message names the platform
+    requirement so an agent can escalate rather than retry blindly.
+    """
+    raise McpInvalidParamsError(str(exc), data=exc.detail) from exc

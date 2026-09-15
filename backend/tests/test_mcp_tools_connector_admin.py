@@ -49,6 +49,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    BuiltinConnectorWriteForbiddenError,
     ConnectorListItem,
     ConnectorNotFoundError,
     ConnectorReviewGroup,
@@ -127,6 +128,14 @@ class _FakeReviewService:
     #: ``None`` keeps the clean path.
     raise_value_error: ClassVar[ValueError | None] = None
 
+    #: When set, every mutating method (enable / disable / enable_reads /
+    #: edit_op / edit_group) raises this instead of returning — class
+    #: attribute for the same lazy-construction reason as
+    #: ``raise_not_found``, so the built-in-write platform_admin gate
+    #: mapping (403 REST / -32602 MCP) can be exercised through the real
+    #: handlers. Default ``None`` keeps the clean path.
+    raise_forbidden: ClassVar[BuiltinConnectorWriteForbiddenError | None] = None
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -178,6 +187,8 @@ class _FakeReviewService:
         self.edit_group_calls.append(
             {"connector_id": connector_id, "group_key": group_key, **kwargs},
         )
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_value_error is not None:
@@ -192,6 +203,8 @@ class _FakeReviewService:
         self.edit_op_calls.append(
             {"connector_id": connector_id, "op_id": op_id, **kwargs},
         )
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_value_error is not None:
@@ -200,11 +213,15 @@ class _FakeReviewService:
 
     async def enable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.enable_calls.append(connector_id)
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
 
     async def enable_reads(self, connector_id: str, **kwargs: Any) -> int:
         self.enable_reads_calls.append({"connector_id": connector_id, **kwargs})
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
         if self.raise_on_resolve is not None:
@@ -213,6 +230,8 @@ class _FakeReviewService:
 
     async def disable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.disable_calls.append(connector_id)
+        if self.raise_forbidden is not None:
+            raise self.raise_forbidden
         if self.raise_not_found is not None:
             raise self.raise_not_found
 
@@ -1460,6 +1479,72 @@ async def test_connector_handler_maps_not_found_to_invalid_params(
     assert "ConnectorNotFoundError" not in str(caught.value)
     # Existence is not leaked, so no structured envelope is attached.
     assert caught.value.data is None
+
+
+# ---------------------------------------------------------------------------
+# BuiltinConnectorWriteForbiddenError → structured -32602 (#3616 parity)
+#
+# A tenant_admin without platform_admin mutating a built-in (global) row
+# is refused by the service. The five mutating tools (enable / disable /
+# enable_reads / edit_op / edit_group) must surface it as a JSON-RPC
+# -32602 carrying the structured builtin_connector_write_forbidden data
+# envelope the REST 403 ships, NOT the dispatcher's bare -32603 class-name
+# leak. The read tool (review) and delete are not gated on the built-in
+# platform seat, so they are excluded.
+# ---------------------------------------------------------------------------
+
+
+def _builtin_write_forbidden_error() -> BuiltinConnectorWriteForbiddenError:
+    """Build the forbidden error the service raises for a built-in write."""
+    return BuiltinConnectorWriteForbiddenError(connector_id="vmware-rest-9.0")
+
+
+_FORBIDDEN_HANDLER_CASES: list[tuple[str, dict[str, Any]]] = [
+    ("_enable_handler", {"connector_id": "vmware-rest-9.0"}),
+    ("_disable_handler", {"connector_id": "vmware-rest-9.0"}),
+    ("_enable_reads_handler", {"connector_id": "vmware-rest-9.0"}),
+    (
+        "_edit_group_handler",
+        {"connector_id": "vmware-rest-9.0", "group_key": "g", "when_to_use": "x"},
+    ),
+    (
+        "_edit_op_handler",
+        {"connector_id": "vmware-rest-9.0", "op_id": "GET:/x", "is_enabled": True},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "arguments"),
+    _FORBIDDEN_HANDLER_CASES,
+    ids=[case[0] for case in _FORBIDDEN_HANDLER_CASES],
+)
+async def test_mutating_handler_maps_builtin_forbidden_to_invalid_params(
+    handler_name: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every mutating handler maps the built-in platform gate to -32602 + envelope."""
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_forbidden",
+        _builtin_write_forbidden_error(),
+    )
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    handler = getattr(ca_mod, handler_name)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await handler(op, arguments)
+
+    # Structured data envelope (the same the REST 403 ships), not a bare
+    # -32603 class-name leak.
+    assert caught.value.data is not None
+    assert caught.value.data["error"] == "builtin_connector_write_forbidden"
+    assert caught.value.data["connector_id"] == "vmware-rest-9.0"
+    assert "BuiltinConnectorWriteForbiddenError" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

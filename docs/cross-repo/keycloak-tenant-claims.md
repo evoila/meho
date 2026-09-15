@@ -614,6 +614,22 @@ Attribute mapper is the script-free alternative (mirrors `tenant_role`
 Shape B). The backplane also accepts the string forms `"true"` /
 `"false"` for realms whose mapper emits the claim as a string.
 
+**Alternative source — a realm role, no mapper (`JWT_PLATFORM_ADMIN_ROLE_NAME`).**
+Realms that already express platform authority as a **realm role** (the
+role list Keycloak emits under `realm_access.roles` via the default
+roles scope) need not add the Hardcoded-claim mapper above. Set
+`JWT_PLATFORM_ADMIN_ROLE_NAME` (settings field
+`Settings.jwt_platform_admin_role_name`) to the role's name and the
+backplane grants `platform_admin` when **either** the boolean claim
+says true **or** that exact role name appears in `realm_access.roles`.
+The setting is **unset by default** — behaviour is then exactly the
+boolean-claim path above, so no existing deployment changes. The match
+is **exact string equality** (no prefix / substring: `meho-admin` never
+matches `meho-admins`), and the source stays **fail-closed** — a
+malformed `realm_access` shape (`realm_access` not an object, `roles`
+not a list of strings) or an absent role resolves to `False`, and a
+malformed shape is logged under `malformed_platform_admin_realm_access`.
+
 > Status: the backplane primitive (the `platform_admin` field + claim
 > extraction) landed under [#1638]; no surface consumes it yet — it is
 > the substrate a later cross-tenant authorization gate checks. The

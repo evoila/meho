@@ -1093,46 +1093,102 @@ def _extract_scopes(claims: Any, settings: Settings) -> frozenset[str]:
     return frozenset()
 
 
+def _realm_access_has_platform_admin_role(claims: Any, role_name: str) -> bool:
+    """Return whether *role_name* is present in the token's realm roles.
+
+    The realm roles live under ``claims["realm_access"]["roles"]`` — the
+    list a Keycloak realm emits under its default roles scope. The match
+    is **exact string equality**: ``role_name`` must appear verbatim in
+    the list; a prefix or substring never grants (``meho-admin`` does not
+    match ``meho-admins``).
+
+    Fail-closed on every malformed shape: a missing ``realm_access``, a
+    ``realm_access`` that is not an object, a missing ``roles``, or a
+    ``roles`` that is not a list of strings all resolve to ``False`` — a
+    malformed structure must never *grant* the cross-tenant capability. A
+    present-but-malformed structure is logged under
+    ``malformed_platform_admin_realm_access`` (mirroring
+    ``malformed_platform_admin_claim``).
+    """
+    realm_access = claims.get("realm_access")
+    if realm_access is None:
+        return False
+    if not isinstance(realm_access, dict):
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "malformed_platform_admin_realm_access",
+            role_name=role_name,
+            reason="realm_access_not_an_object",
+        )
+        return False
+    roles = realm_access.get("roles")
+    if roles is None:
+        return False
+    if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "malformed_platform_admin_realm_access",
+            role_name=role_name,
+            reason="roles_not_a_list_of_strings",
+        )
+        return False
+    return role_name in roles
+
+
 def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     """Extract the cross-tenant ``platform_admin`` flag from *claims*.
 
-    The ``platform_admin`` claim is **optional** and **fail-closed**: a
-    token that carries no claim — every pre-existing token, and every
-    agent / service principal whose Keycloak client does not emit it —
-    resolves to ``False``. The flag is orthogonal to
-    :class:`~meho_backplane.auth.operator.TenantRole`; it marks a genuine
-    platform / cross-tenant operator, the substrate a later cross-tenant
-    authorization gate checks so that ``tenant_admin`` *rank* alone never
-    confers cross-tenant reach.
+    The ``platform_admin`` capability is **optional** and
+    **fail-closed**: a token that carries neither source — every
+    pre-existing token, and every agent / service principal whose
+    Keycloak client does not emit it — resolves to ``False``. The flag is
+    orthogonal to :class:`~meho_backplane.auth.operator.TenantRole`; it
+    marks a genuine platform / cross-tenant operator, the substrate a
+    later cross-tenant authorization gate checks so that ``tenant_admin``
+    *rank* alone never confers cross-tenant reach.
 
-    Accepted shapes: a JSON boolean ``true`` / ``false`` (the canonical
-    Keycloak boolean protocol-mapper output) or the strings ``"true"`` /
-    ``"false"`` (case-insensitive) for realms whose mapper emits the claim
-    as a string. Only an explicit truthy value grants the flag; every
-    other shape (absent, ``null``, a number, an object, an unrecognised
-    string) fails closed to ``False`` — a malformed claim must never
-    *grant* the cross-tenant capability. A present-but-malformed value is
-    logged under ``malformed_platform_admin_claim``.
+    Two sources are OR-combined:
 
-    The claim name is configurable via ``JWT_PLATFORM_ADMIN_CLAIM_NAME``
-    (default ``platform_admin``) so realms that surface the flag under a
-    different attribute are accommodated without a code change.
+    1. **Boolean claim** (always active). The claim named by
+       ``JWT_PLATFORM_ADMIN_CLAIM_NAME`` (default ``platform_admin``)
+       carrying a JSON boolean ``true`` / ``false`` or the case-
+       insensitive strings ``"true"`` / ``"false"`` (for realms whose
+       mapper emits the claim as a string). Only an explicit truthy value
+       grants; every other shape (absent, ``null``, a number, an object,
+       an unrecognised string) fails closed to ``False`` and a present-
+       but-malformed value is logged under ``malformed_platform_admin_claim``.
+
+    2. **Realm role** (active only when ``JWT_PLATFORM_ADMIN_ROLE_NAME``
+       is set). Many Keycloak realms express admin authority as a realm
+       role emitted under ``realm_access.roles`` rather than a dedicated
+       boolean mapper. When the setting is set, the flag also grants if
+       that exact role name is present in the token's realm roles. When
+       the setting is **unset** (the default), this source is inert and
+       behaviour is exactly source 1 — no ``realm_access`` inspection and
+       no new log events. See
+       :func:`_realm_access_has_platform_admin_role` for the fail-closed
+       shape handling.
     """
     claim_name = settings.jwt_platform_admin_claim_name
     raw = claims.get(claim_name)
-    if raw is None:
-        return False
     if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
-        return raw.strip().lower() == "true"
-    log = structlog.get_logger(__name__)
-    log.warning(
-        "malformed_platform_admin_claim",
-        claim_name=claim_name,
-        reason="not_a_boolean",
-    )
-    return False
+        if raw:
+            return True
+    elif isinstance(raw, str) and raw.strip().lower() in {"true", "false"}:
+        if raw.strip().lower() == "true":
+            return True
+    elif raw is not None:
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "malformed_platform_admin_claim",
+            claim_name=claim_name,
+            reason="not_a_boolean",
+        )
+
+    role_name = settings.jwt_platform_admin_role_name
+    if role_name is None:
+        return False
+    return _realm_access_has_platform_admin_role(claims, role_name)
 
 
 def _extract_approver(claims: Any, settings: Settings) -> bool:

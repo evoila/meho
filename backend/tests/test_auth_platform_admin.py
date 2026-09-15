@@ -19,6 +19,10 @@ Coverage matrix (per acceptance criteria):
 * A malformed ``platform_admin`` value (a number, an unrecognised string)
   → ``False`` with a structured-log warning (no exception).
 * A custom ``JWT_PLATFORM_ADMIN_CLAIM_NAME`` env-var shifts the lookup.
+* The optional realm-role source ``JWT_PLATFORM_ADMIN_ROLE_NAME``: inert
+  when unset (boolean claim only), OR-combined with the boolean claim
+  when set, exact-match on ``realm_access.roles``, fail-closed +
+  ``malformed_platform_admin_realm_access`` log on malformed shapes.
 """
 
 from __future__ import annotations
@@ -42,6 +46,8 @@ with warnings.catch_warnings():
 from meho_backplane.auth.jwt import clear_jwks_cache, verify_jwt
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.settings import get_settings
+
+_UNSET: Any = object()
 
 _ISSUER: str = "https://keycloak.test/realms/meho"
 _AUDIENCE: str = "meho-backplane"
@@ -81,6 +87,7 @@ def _mint(
     platform_admin: Any = None,
     principal_kind: str | None = None,
     claim_name: str = "platform_admin",
+    realm_access: Any = _UNSET,
 ) -> str:
     """Mint a signed JWT, optionally carrying ``platform_admin`` / ``principal_kind``.
 
@@ -106,6 +113,8 @@ def _mint(
             payload[claim_name] = platform_admin
         if principal_kind is not None:
             payload["principal_kind"] = principal_kind
+        if realm_access is not _UNSET:
+            payload["realm_access"] = realm_access
         header = {"alg": "RS256", "kid": key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, key)
         return token.decode("ascii") if isinstance(token, bytes) else token
@@ -232,4 +241,122 @@ def test_custom_claim_name(monkeypatch: pytest.MonkeyPatch) -> None:
             claim_name="is_platform_admin",
         )
         is True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Realm-role source (JWT_PLATFORM_ADMIN_ROLE_NAME) — #3646-composing (see PR)
+# ---------------------------------------------------------------------------
+
+
+def _set_role_name(monkeypatch: pytest.MonkeyPatch, role_name: str) -> None:
+    """Set ``JWT_PLATFORM_ADMIN_ROLE_NAME`` and refresh the settings cache."""
+    monkeypatch.setenv("JWT_PLATFORM_ADMIN_ROLE_NAME", role_name)
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+
+def test_role_source_unset_ignores_realm_role() -> None:
+    """Setting UNSET: a matching realm role alone does NOT grant (today's behaviour)."""
+    assert (
+        _resolve(
+            _make_key("kid-role-unset"),
+            realm_access={"roles": ["meho-platform-admin", "offline_access"]},
+        )
+        is False
+    )
+
+
+def test_role_source_set_and_role_present_grants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting SET + the exact role present in realm_access.roles → ``True``."""
+    _set_role_name(monkeypatch, "meho-platform-admin")
+    assert (
+        _resolve(
+            _make_key("kid-role-present"),
+            realm_access={"roles": ["default-roles-meho", "meho-platform-admin"]},
+        )
+        is True
+    )
+
+
+def test_role_source_set_and_role_absent_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting SET + the role NOT in realm_access.roles → ``False`` (fail-closed)."""
+    _set_role_name(monkeypatch, "meho-platform-admin")
+    assert (
+        _resolve(
+            _make_key("kid-role-absent"),
+            realm_access={"roles": ["offline_access", "uma_authorization"]},
+        )
+        is False
+    )
+
+
+def test_role_source_set_boolean_claim_wins_without_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting SET + boolean claim ``true`` + role absent → ``True`` (OR-combined)."""
+    _set_role_name(monkeypatch, "meho-platform-admin")
+    assert (
+        _resolve(
+            _make_key("kid-role-claim-wins"),
+            platform_admin=True,
+            realm_access={"roles": ["offline_access"]},
+        )
+        is True
+    )
+
+
+def test_role_source_exact_match_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The role check is exact-match: ``meho-admin`` does not match ``meho-admins``."""
+    _set_role_name(monkeypatch, "meho-admin")
+    assert (
+        _resolve(
+            _make_key("kid-role-prefix"),
+            realm_access={"roles": ["meho-admins", "meho-administrator"]},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "realm_access",
+    [
+        pytest.param("not-an-object", id="realm_access_str"),
+        pytest.param(["roles-should-be-under-a-key"], id="realm_access_list"),
+        pytest.param({"roles": "not-a-list"}, id="roles_str"),
+        pytest.param({"roles": {"meho-admin": True}}, id="roles_dict"),
+        pytest.param({"roles": ["meho-admin", 7]}, id="roles_has_non_string"),
+    ],
+)
+def test_role_source_malformed_realm_access_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    realm_access: Any,
+) -> None:
+    """Malformed ``realm_access`` shapes → ``False`` + a structured warning.
+
+    A missing ``roles`` key (``realm_access`` an object without ``roles``)
+    is *absent*, not malformed, so it fails closed silently; the shapes
+    parametrised here are the genuinely malformed ones that must log.
+    """
+    _set_role_name(monkeypatch, "meho-admin")
+    value = _resolve(_make_key("kid-role-malformed"), realm_access=realm_access)
+    assert value is False
+    out, _ = capfd.readouterr()
+    assert "malformed_platform_admin_realm_access" in out, (
+        f"Expected 'malformed_platform_admin_realm_access' in structlog stdout; got: {out!r}"
+    )
+
+
+def test_role_source_missing_roles_key_is_silent_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """``realm_access`` object without a ``roles`` key → ``False`` and NO warning."""
+    _set_role_name(monkeypatch, "meho-admin")
+    value = _resolve(_make_key("kid-role-noroles"), realm_access={"other": "x"})
+    assert value is False
+    out, _ = capfd.readouterr()
+    assert "malformed_platform_admin_realm_access" not in out, (
+        f"Did not expect a malformed-shape warning for an absent roles key; got: {out!r}"
     )

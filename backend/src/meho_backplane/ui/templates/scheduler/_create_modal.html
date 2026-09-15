@@ -22,11 +22,11 @@
   kind's discriminator field is meaningful; the server populates only that
   field on the wire schema regardless of any stale hidden values.
 
-  Live cron validation: the cron <input> ``hx-post``s to
-  ``/ui/scheduler/validate-cron`` (debounced) and swaps the
-  ``#scheduler-cron-preview`` fragment, so the operator sees validity + a
-  ``next_fire_at`` preview before submit -- no free-text cron with no
-  feedback.
+  Live cron validation: the cron <input> (debounced) and the timezone
+  <input> (on change) each ``hx-post`` to ``/ui/scheduler/validate-cron``
+  and swap the ``#scheduler-cron-preview`` fragment, so the operator sees
+  validity + a ``next_fire_at`` preview before submit -- no free-text cron
+  with no feedback, and no stale preview after a timezone edit (#335).
 
   CSRF: the form carries its own ``hx-headers`` echo of the token (HTMX
   does not inherit ``hx-headers`` to children injected into a swapped
@@ -65,11 +65,11 @@
       x-data="{ kind: 'cron' }"
     >
       {# ---------- Agent definition ---------- #}
-      <label class="form-control">
-        <span class="label-text">Agent definition</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Agent definition</span>
         <select
           name="agent_definition_id"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           required
           aria-label="Agent definition"
         >
@@ -83,11 +83,11 @@
       </label>
 
       {# ---------- Kind switch ---------- #}
-      <label class="form-control">
-        <span class="label-text">Kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Kind</span>
         <select
           name="kind"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           x-model="kind"
           aria-label="Trigger kind"
         >
@@ -99,31 +99,41 @@
 
       {# ---------- cron fields ---------- #}
       <div x-show="kind === 'cron'" class="space-y-2 rounded-box border border-base-300 p-3">
-        <label class="form-control">
-          <span class="label-text">Cron expression (5-field)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Cron expression (5-field)</span>
           <input
             type="text"
             name="cron_expr"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             placeholder="*/15 * * * *"
             maxlength="128"
             hx-post="/ui/scheduler/validate-cron"
-            hx-trigger="input changed delay:400ms, change from:find input[name=timezone]"
+            hx-trigger="input changed delay:400ms"
             hx-target="#scheduler-cron-preview"
             hx-swap="innerHTML"
             hx-include="closest div"
             aria-label="Cron expression"
           />
         </label>
-        <label class="form-control">
-          <span class="label-text">Timezone (IANA)</span>
+        {# The timezone input carries its own validate-cron wiring: htmx's
+           ``from:find`` searches descendants of the element the trigger is
+           declared on, so a ``change from:find input[name=timezone]`` clause
+           on the (childless) cron <input> never bound and a timezone edit
+           silently kept a stale next-fire preview (#335). #}
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Timezone (IANA)</span>
           <input
             type="text"
             name="timezone"
-            class="input input-bordered input-sm"
+            class="input input-bordered input-sm w-full"
             value="UTC"
             maxlength="64"
             placeholder="UTC"
+            hx-post="/ui/scheduler/validate-cron"
+            hx-trigger="change"
+            hx-target="#scheduler-cron-preview"
+            hx-swap="innerHTML"
+            hx-include="closest div"
             aria-label="Timezone"
           />
         </label>
@@ -141,19 +151,19 @@
          browser's own DST-aware ``Date``; the live hint shows the resolved
          UTC so the conversion is visible, not silent (#2339). #}
       <div x-show="kind === 'one_off'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
-        <label class="form-control">
-          <span class="label-text">Fire at (your local time)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Fire at <span class="opacity-60 font-normal">(your local time)</span></span>
           <input
             type="datetime-local"
             name="fire_at"
-            class="input input-bordered input-sm"
+            class="input input-bordered input-sm w-full"
             data-fire-at
             aria-label="Fire at"
             aria-describedby="scheduler-fire-at-hint"
           />
           <span
             id="scheduler-fire-at-hint"
-            class="label-text-alt opacity-60"
+            class="text-xs opacity-60"
             data-fire-at-hint
             aria-live="polite"
           >Enter your local wall-clock time — it is converted to UTC on submit.</span>
@@ -162,11 +172,11 @@
 
       {# ---------- event fields ---------- #}
       <div x-show="kind === 'event'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
-        <label class="form-control">
-          <span class="label-text">Event filter (JSON object)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Event filter <span class="opacity-60 font-normal">(JSON object)</span></span>
           <textarea
             name="event_filter"
-            class="textarea textarea-bordered textarea-sm font-mono"
+            class="textarea textarea-bordered textarea-sm font-mono w-full"
             rows="3"
             placeholder='{"type": "connector.fingerprint.changed"}'
             aria-label="Event filter"
@@ -179,28 +189,28 @@
          source, so an input-less trigger fails every fire) and optional for
          event (its future dispatch junction may derive the prompt from the
          matched event). The label tracks the Alpine kind-switch. #}
-      <label class="form-control">
-        <span class="label-text">
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">
           Run inputs (JSON object)<span
-            class="opacity-60"
+            class="opacity-60 font-normal"
             x-show="kind !== 'event'"
           > — required, must render a prompt</span><span
-            class="opacity-60"
+            class="opacity-60 font-normal"
             x-cloak
             x-show="kind === 'event'"
           > — optional</span>
         </span>
         <textarea
           name="inputs"
-          class="textarea textarea-bordered textarea-sm font-mono"
+          class="textarea textarea-bordered textarea-sm font-mono w-full"
           rows="2"
           placeholder='{"prompt": "summarise overnight alerts"}'
           aria-label="Run inputs"
         ></textarea>
       </label>
 
-      <fieldset class="form-control">
-        <legend class="label-text mb-1">In-flight policy</legend>
+      <fieldset>
+        <legend class="text-sm font-medium mb-1">In-flight policy</legend>
         <div class="flex flex-col gap-1">
           {% for policy in in_flight_policy_values %}
             <label class="flex items-center gap-2 text-sm">
@@ -217,12 +227,12 @@
         </div>
       </fieldset>
 
-      <label class="form-control">
-        <span class="label-text">Change ticket (work_ref, optional)</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Change ticket <span class="opacity-60 font-normal">(work_ref, optional)</span></span>
         <input
           type="text"
           name="work_ref"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           placeholder="gh:evoila/meho#1826"
           maxlength="256"
           aria-label="Change ticket reference"

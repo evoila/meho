@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-09-15
+
+### Fixed
+
+- Built-in (global) connectors can no longer be un-mutable for tenant-scoped principals through a misleading `404`: mutating a built-in connector row — enable / disable / enable-reads / edit-op / edit-group, across REST, MCP and the console — now resolves the built-in row and requires `platform_admin`, answering a plain `tenant_admin` with a structured `403` `builtin_connector_write_forbidden` instead of the `404` that `POST /enable` returned while `/review` resolved the same row. Tenant-scoped and ambiguous-scope behaviour is unchanged. (#3644 / #3646)
+
+  **Operator upgrade note (release that ships #3646).** `enable-reads` on a built-in connector now also requires `platform_admin` (previously `tenant_admin` sufficed). Operators who relied on `tenant_admin` to bulk-enable reads on built-in connectors must grant `platform_admin` — via the boolean `platform_admin` claim or the new realm-role setting shipped in this release (`jwt_platform_admin_role_name` / `JWT_PLATFORM_ADMIN_ROLE_NAME`, #3651). Tenant-scoped connector rows are unaffected.
+
+- The operator console no longer renders unstyled: on v0.35.0 the compiled Tailwind bundle contained no utility classes because automatic content detection found no templates once the image build stopped copying the source tree into the build directory (#3627). `styles.css` now declares explicit `@source` directives for the template roots, and the image build fails loud if the compiled bundle contains no utility classes. (#3647 / #3648)
+- The Scheduler create-trigger modal is restructured onto the current console form layout (the daisyUI v4 `form-control` / `label-text` classes compiled to nothing under v5), and editing the trigger timezone now re-validates the cron preview — a dead `from:find` htmx binding meant a timezone change silently kept a stale `next_fire_at`. (#335 / #3527)
+- The Scheduler detail view humanizes all six of its timestamps: the raw `isoformat()` output is replaced by a scannable `YYYY-MM-DD HH:MM UTC` rendered in a `<time>` element (the ISO instant stays machine-readable in the `datetime` attribute), matching the rest of the console; `font-mono` is kept only on genuinely machine-shaped values. (#336 / #3528)
+
+### Added
+
+- `secret-broker` gains a Keycloak client-secret **source** kind: it moves a confidential Keycloak client's secret server-side into Vault, keyed `keycloak:<target>/<realm>/clients/<clientId>#secret`, so the secret is brokered through the governed backplane instead of being handled out of band. (#3619 / #3621)
+- An optional realm-role source for the cross-tenant `platform_admin` flag: setting `jwt_platform_admin_role_name` (env `JWT_PLATFORM_ADMIN_ROLE_NAME`) makes a token whose `realm_access.roles` contains exactly that role resolve to `platform_admin` (fail-closed, exact match, inert when unset), alongside the existing boolean claim. The setting reaches the pod via the chart's `extraEnv`. (#3650 / #3651)
+
 ## [0.35.0] - 2026-09-14
 
 ### Fixed

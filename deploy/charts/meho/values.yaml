@@ -984,6 +984,14 @@ uiConsole:
   # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
   sessionEncryptionKey: session_encryption_key
 
+# Credential-write approvals keep their input in a short-lived encrypted
+# custody row. This independent key is wired only by secretKeyRef; it is not
+# shared with the optional browser-console session key.
+approvalHandoff:
+  enabled: false
+  secretName: ""
+  secretKey: approval_handoff_encryption_key
+
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
   # mirror is explicitly v0.2 per Goal #11 spec.

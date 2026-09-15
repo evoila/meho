@@ -42,6 +42,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +52,14 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, AuditLog
 from meho_backplane.operations._audit import work_ref_var
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_handoff import (
+    ApprovalExecutionPayload,
+    ApprovalHandoffError,
+    ApprovalHandoffKeyError,
+)
+from meho_backplane.operations.approval_handoff import (
+    consume as consume_handoff,
+)
 from meho_backplane.operations.approval_queue import (
     ApprovalNotFoundError,
     ApprovalRequestAlreadyDecidedError,
@@ -140,6 +149,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", Fernet.generate_key().decode())
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -218,6 +228,128 @@ async def test_create_pending_request_inserts_row(session: AsyncSession) -> None
     assert request.reviewed_by is None
     assert request.reviewed_by_name is None
     assert request.decided_at is None
+
+
+@pytest.mark.asyncio
+async def test_credential_write_parks_only_an_opaque_handle(session: AsyncSession) -> None:
+    """Credential-write inputs never persist on the approval row or read views."""
+    from meho_backplane.api.v1.approvals import _view
+    from meho_backplane.mcp.tools.approvals import _row_to_dict
+
+    secret = "test-only-credential-value"
+    params = {"path": "kv/app", "value": secret}
+    request = await create_pending_request(
+        session,
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        resume_parent={"op_id": "composite.rotate", "params": {"password": secret}},
+    )
+    await session.commit()
+
+    assert request.params is None
+    assert request.resume_parent == {"op_id": "composite.rotate"}
+    assert request.execution_handle is not None
+    assert secret not in repr(request)
+    assert secret not in _view(request).model_dump_json()
+    assert secret not in repr(_row_to_dict(request))
+
+    async with get_sessionmaker()() as fresh:
+        payload = await fresh.get(ApprovalExecutionPayload, request.execution_handle)
+    assert payload is not None
+    assert payload.tenant_id == _TENANT_ID
+    assert secret.encode() not in payload.ciphertext
+
+
+@pytest.mark.asyncio
+async def test_credential_write_fails_closed_without_handoff_key(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("APPROVAL_HANDOFF_ENCRYPTION_KEY", raising=False)
+    get_settings.cache_clear()
+    with pytest.raises(ApprovalHandoffKeyError, match="APPROVAL_HANDOFF_ENCRYPTION_KEY"):
+        await create_pending_request(
+            session,
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.put",
+            target=None,
+            params={"value": "test-only-credential-value"},
+            params_hash=compute_params_hash({"value": "test-only-credential-value"}),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["rejected", "expired"])
+async def test_credential_write_terminal_state_discards_handoff(
+    session: AsyncSession, terminal: str
+) -> None:
+    params = {"value": "test-only-credential-value"}
+    request = await create_pending_request(
+        session,
+        operator=_make_operator(sub="requester"),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1) if terminal == "expired" else None,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as terminal_session:
+        if terminal == "rejected":
+            await reject_request(
+                terminal_session, request.id, operator=_make_operator(sub="reviewer")
+            )
+        else:
+            expired = await expire_stale_requests(terminal_session, operator=_make_operator())
+            assert [row.id for row in expired] == [request.id]
+        await terminal_session.commit()
+
+    async with get_sessionmaker()() as fresh:
+        assert await fresh.get(ApprovalExecutionPayload, request.execution_handle) is None
+
+
+@pytest.mark.asyncio
+async def test_credential_handoff_rejects_ciphertext_bound_to_another_request(
+    session: AsyncSession,
+) -> None:
+    """Authenticated ciphertext must still be bound to its request and tenant."""
+    params = {"value": "test-only-credential-value"}
+    first = await create_pending_request(
+        session,
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    second = await create_pending_request(
+        session,
+        operator=_make_operator(),
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=None,
+        params=params,
+        params_hash=compute_params_hash(params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as fresh:
+        first_payload = await fresh.get(ApprovalExecutionPayload, first.execution_handle)
+        second_payload = await fresh.get(ApprovalExecutionPayload, second.execution_handle)
+        assert first_payload is not None and second_payload is not None
+        second_payload.ciphertext = first_payload.ciphertext
+        await fresh.commit()
+
+    async with get_sessionmaker()() as fresh:
+        with pytest.raises(ApprovalHandoffError, match="invalid shape"):
+            await consume_handoff(fresh, second.execution_handle, second.id, second.tenant_id)
 
 
 @pytest.mark.asyncio

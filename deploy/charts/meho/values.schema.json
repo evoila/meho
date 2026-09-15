@@ -662,6 +662,21 @@
         }
       ]
     },
+    "approvalHandoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Encrypted custody for credential-write approval inputs. When enabled, APPROVAL_HANDOFF_ENCRYPTION_KEY is injected only via secretKeyRef. It is independent of the optional UI session key.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string" },
+        "secretKey": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [{
+        "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+        "then": { "required": ["secretName"], "properties": { "secretName": { "type": "string", "minLength": 1 } } }
+      }]
+    },
     "audit": {
       "type": "object",
       "additionalProperties": false,

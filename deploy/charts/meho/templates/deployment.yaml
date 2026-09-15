@@ -180,6 +180,13 @@ spec:
                   name: {{ .Values.uiConsole.secretName | quote }}
                   key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
             {{- end }}
+            {{- if .Values.approvalHandoff.enabled }}
+            - name: APPROVAL_HANDOFF_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.approvalHandoff.secretName | quote }}
+                  key: {{ .Values.approvalHandoff.secretKey | quote }}
+            {{- end }}
             {{- if .Values.checkRunner.enabled }}
             # #2642 — the in-process check-runner's service-principal
             # identity for background dispatch. Wired only when

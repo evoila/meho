@@ -84,6 +84,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.db.models import (
     ApprovalRequest,
     ApprovalRequestStatus,
@@ -99,6 +100,18 @@ from meho_backplane.operations._audit import (
 )
 from meho_backplane.operations._errors import result_already_resumed, result_denied
 from meho_backplane.operations._validate import compute_params_hash
+from meho_backplane.operations.approval_handoff import (
+    ApprovalHandoffError,
+)
+from meho_backplane.operations.approval_handoff import (
+    consume as consume_handoff,
+)
+from meho_backplane.operations.approval_handoff import (
+    discard as discard_handoff,
+)
+from meho_backplane.operations.approval_handoff import (
+    store as store_handoff,
+)
 
 __all__ = [
     "ApprovalError",
@@ -592,6 +605,14 @@ async def create_pending_request(
     request_audit_id = uuid.uuid4()
     created_at = _now()
     bounded_expires_at = _bounded_expires_at(created_at, expires_at, _resolve_default_ttl())
+    handoff_payload: dict[str, Any] | None = None
+    stored_params: dict[str, Any] | None = params
+    stored_resume_parent = resume_parent
+    if classify_op(op_id) == "credential_write":
+        handoff_payload = {"params": params, "resume_parent": resume_parent}
+        stored_params = None
+        if resume_parent is not None:
+            stored_resume_parent = {"op_id": resume_parent["op_id"]}
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -608,7 +629,7 @@ async def create_pending_request(
         target_id=target_id,
         params_hash=params_hash,
         preview_hash=preview_hash,
-        params=params,
+        params=stored_params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
         created_at=created_at,
@@ -616,10 +637,15 @@ async def create_pending_request(
         work_ref=work_ref_var.get(),
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
-        resume_parent=resume_parent,
+        resume_parent=stored_resume_parent,
     )
     session.add(request)
     await session.flush()
+    if handoff_payload is not None:
+        request.execution_handle = store_handoff(
+            session, request.id, request.tenant_id, handoff_payload
+        )
+        await session.flush()
 
     # Synchronous "request" audit row -- same transaction.
     await _write_audit_row(
@@ -815,6 +841,7 @@ async def reject_request(
     # claim (#3300); ``None`` fail-opens to the raw sub. See approve_request.
     request.reviewed_by_name = operator.name
     request.decided_at = now
+    await discard_handoff(session, request.id, request.tenant_id)
     await session.flush()
 
     extra: dict[str, Any] = {"decision": "rejected", "reviewed_by": operator.sub}
@@ -1073,7 +1100,7 @@ async def resume_dispatch_after_approval(
     when the waiter is alive.
     """
     effective_params = params if params is not None else request.params
-    if effective_params is None:
+    if effective_params is None and request.execution_handle is None:
         return _resume_pre0036_denied(operator, request)
 
     resolved_target, denied = await _rehydrate_resume_target(operator, request)
@@ -1098,11 +1125,29 @@ async def resume_dispatch_after_approval(
         )
         return result_already_resumed(request.op_id, request.id, 0.0)
 
+    # Only the durable claim winner may touch the one-time ciphertext.  A
+    # losing concurrent resume returns above without consuming its payload.
+    if request.execution_handle is not None:
+        from meho_backplane.db.engine import get_sessionmaker
+
+        async with get_sessionmaker()() as handoff_session:
+            handoff = await consume_handoff(
+                handoff_session, request.execution_handle, request.id, request.tenant_id
+            )
+            await handoff_session.commit()
+        effective_params = cast(dict[str, Any], handoff["params"])
+        if compute_params_hash(effective_params) != request.params_hash:
+            raise ApprovalHandoffError(
+                "approval execution payload does not match the approved request"
+            )
+        if handoff.get("resume_parent") is not None:
+            request.resume_parent = cast(dict[str, Any], handoff["resume_parent"])
+
     return await _dispatch_resume_with_bound_context(
         operator=operator,
         request=request,
         resolved_target=resolved_target,
-        effective_params=effective_params,
+        effective_params=cast(dict[str, Any], effective_params),
     )
 
 
@@ -1472,6 +1517,7 @@ async def expire_stale_requests(
             request.expires_at = request.created_at + default_ttl
         request.status = ApprovalRequestStatus.EXPIRED.value
         request.decided_at = cutoff
+        await discard_handoff(session, request.id, request.tenant_id)
         await session.flush()
 
         expire_audit_id = uuid.uuid4()

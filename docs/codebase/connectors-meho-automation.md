@@ -58,10 +58,10 @@ eager-imported at boot like every other connector subpackage.
 | `POST:/api/v1/blueprints/{blueprint_id}/validate` | Validate a blueprint (read-side dry-run) | `caution` (no approval park) |
 | `POST:/api/v1/runs/{run_id}/gates/{node_id}/decision` | Decide an in-run gate | `caution` (no approval park) |
 
-The launch body is compiled server-side from typed `inputs`; passing
-`inputs` (plus `name`, and optionally `work_ref`, `simulate`, `tenant`) is
-enough for a governed launch. `params` / `target_ref` are advanced per-node
-overrides.
+The request body follows the add-on's run-launch schema; the backplane
+forwards it verbatim as the `call_operation` params, and the add-on validates
+it and rejects a body missing any field its schema requires. `params` /
+`target_ref` are advanced per-node overrides.
 
 ### Safety tiers and the pin
 
@@ -134,38 +134,87 @@ The Vault credential the target's `secret_ref` points at therefore holds:
 }
 ```
 
+All three fields are **mandatory in Vault**: the shipped `mehoauto/0.1.0`
+profile lists `client_id`, `client_secret`, and `token_url` in its
+`auth.secret_fields`, so a bundle missing any one fails closed at dispatch.
+Land the confidential `client_secret` **server-side** rather than pasting it
+through an operator's shell — the secret broker's Keycloak client-secret
+source (#3621) moves a realm client's secret straight into the target's Vault
+`secret_ref` (ref shape
+`keycloak:<target>/<realm>/clients/<client-id>#secret`; see
+[docs/codebase/connectors-secret-broker.md](connectors-secret-broker.md)),
+so the value never transits an operator terminal or shell history.
+
 ## Registration recipe (operator, on a deployed backplane)
 
-1. **Create the target** at the cluster-internal base URL (no ingress, no
-   TLS — plain `http` is accepted for a dotless / in-cluster host):
+1. **Register the target.** The resolver matches a target to the versioned,
+   profile-backed connector by `(product, version)`, and a profiled connector
+   registers no wildcard fallback — so the target must carry a `version`
+   before it can resolve (or dispatch, or even probe). `meho targets add`
+   sets `--version` but has no `--extras` flag; the plain-`http` scheme lives
+   in the `extras` column, and only `meho targets import` can write it.
+   Register in two moves:
 
    ```
-   meho target create \
-     --name automation-addon \
+   # a) Create the target with its product + operator-asserted version.
+   #    (No ingress, no TLS — the add-on Service is plain http in-cluster.)
+   meho targets add automation-addon \
      --product mehoauto --version 0.1.0 \
-     --base-url http://meho-automation:8000 \
+     --host meho-automation --port 8000 \
      --secret-ref <vault-kv-path-holding-client_id/client_secret/token_url>
    ```
 
-   (The add-on OpenAPI declares no `servers` block, so the base URL is set on
-   the target here.)
-
-2. **Ingest from the add-on's live spec** via the `--spec` on-ramp — there is
-   no vendored spec and no catalog upstream, so `--catalog` is not the path
-   (the listing's `next_step` hint says so):
+   ```yaml
+   # b) automation-addon-scheme.yaml — carry the plain-http scheme in extras.
+   #    The HTTP adapter builds the base URL as {scheme}://{host}[:port] from
+   #    extras.scheme (default https), so an in-cluster Service with no TLS
+   #    needs scheme=http. The add-on OpenAPI declares no `servers` block, so
+   #    the connector derives the base URL from host / port / extras.scheme.
+   #    `name`, `product`, and `host` are required on every import entry (even
+   #    with --update); `product`/`host` must repeat the values set in (a).
+   targets:
+     - name: automation-addon
+       product: mehoauto
+       host: meho-automation
+       extras:
+         scheme: http
+   ```
 
    ```
-   # fetch the add-on's published OpenAPI (unauthenticated), then ingest its bytes
-   curl -s http://meho-automation:8000/openapi.json > /tmp/mehoauto.openapi.json
+   # `targets import --update` is a sparse update that leaves the version set
+   # in (a) intact (name/product are stripped as immutable; host is
+   # re-asserted to the same value).
+   meho targets import --update automation-addon-scheme.yaml
+   ```
+
+   Prerequisites, both about the backplane reaching the add-on Service: admit
+   the add-on's host on the backplane's SSRF / outbound allowlist, and allow
+   a NetworkPolicy path from the backplane pod to the add-on Service on the
+   chosen port.
+
+2. **Ingest from the add-on's OpenAPI document** via the `--spec` on-ramp —
+   there is no vendored spec and no catalog upstream, so `--catalog` is not
+   the path (the listing's `next_step` hint says so). A server-side `--spec`
+   URL fetch is **https-only** (the SSRF guard rejects `http`, `file://`, and
+   bare paths), and the add-on's in-cluster Service is plain-http and
+   unreachable from an operator workstation — so do **not** point `--spec` at
+   the add-on's live URL. Instead take the add-on's committed OpenAPI document
+   (or run its export script) at the **deployed ref**, save it locally, and
+   pass it as a `file://` source: the CLI reads a `file://` (or `docs:`)
+   source client-side and uploads the bytes inline, so no local path or
+   non-https scheme ever reaches the backplane.
+
+   ```
    meho connector ingest \
-     --product mehoauto --version 0.1.0 --impl-id mehoauto-rest \
-     --spec file:///tmp/mehoauto.openapi.json
+     --product mehoauto --version 0.1.0 --impl mehoauto-rest \
+     --spec file:///abs/path/to/mehoauto.openapi.json
    ```
 
-   The fetched `/openapi.json` is the add-on's **full** API (~30 mutating
-   routes), but the catalog op-allowlist (see below) drops every route except
-   the three curated ops **before persistence**, so exactly three
-   `EndpointDescriptor` rows land — `POST /api/v1/runs` (launch),
+   That OpenAPI document is the add-on's **full** API (~30 mutating routes),
+   but the catalog op-allowlist (see below) drops every route except the
+   three curated ops **before persistence** regardless of how wide the
+   document is, so exactly three `EndpointDescriptor` rows land —
+   `POST /api/v1/runs` (launch),
    `POST /api/v1/blueprints/{blueprint_id}/validate` (validate), and
    `POST /api/v1/runs/{run_id}/gates/{node_id}/decision` (gate) — **staged /
    disabled** (`is_enabled=false`, `source_kind=ingested`) with the pinned
@@ -182,11 +231,13 @@ The Vault credential the target's `secret_ref` points at therefore holds:
    meho connector enable mehoauto-rest-0.1.0
    ```
 
-4. **Dispatch** with the EXACT `connector_id` and the op's `op_id`:
+4. **Dispatch** with the EXACT `connector_id` and `op_id` as **positional
+   arguments** — `meho operation call <connector_id> <op_id>`; they are not
+   flags:
 
    ```
-   meho operation call --connector-id mehoauto-rest-0.1.0 \
-     --op-id 'POST:/api/v1/blueprints/{blueprint_id}/validate' \
+   meho operation call mehoauto-rest-0.1.0 \
+     'POST:/api/v1/blueprints/{blueprint_id}/validate' \
      --target automation-addon --params '{"blueprint_id": "...", "inputs": {...}}'
    ```
 

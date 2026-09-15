@@ -5,9 +5,16 @@
  * Tailwind 4 input stylesheet for the MEHO Operator Console.
  *
  * The standalone ``tailwindcss`` CLI compiles this file into
- * ``static/dist/tailwind.css`` (one minified output) using the
- * Tailwind 4 content-detection scanner against ``templates/**`` --
- * no explicit ``content: [...]`` array required. Build invocation:
+ * ``static/dist/tailwind.css`` (one minified output). The class
+ * inventory is scanned from the ``@source`` directives declared below
+ * (the console templates + the ``app/`` controllers) rather than from
+ * Tailwind 4's automatic content detection: the CLI runs against the
+ * *installed* package tree inside the runtime venv (see
+ * ``backend/Dockerfile``), whose ``.venv`` path is a dot-directory that
+ * automatic detection skips, and its scan is rooted at the CLI's cwd
+ * (the build ``WORKDIR``), not at this stylesheet. Explicit ``@source``
+ * paths are resolved relative to *this* file, so they hold in both the
+ * image build and the local ``--watch`` loop. Build invocation:
  *
  *   tailwindcss -i static/src/styles.css \
  *               -o static/dist/tailwind.css --minify
@@ -38,6 +45,23 @@
  * utilities;` triplet (https://tailwindcss.com/docs/installation).
  */
 @import "tailwindcss";
+
+/*
+ * Explicit content sources -- resolved relative to THIS stylesheet, so
+ * the class scan is deterministic regardless of the CLI's cwd or of
+ * whether the tree lives at ``backend/src/...`` (dev ``--watch``) or in
+ * the installed venv at ``.venv/.../meho_backplane/ui/...`` (image
+ * build). Relying on Tailwind 4 automatic detection silently emitted a
+ * utilities-less bundle once the image stopped shipping the source tree
+ * at the build cwd (evoila/meho#3627): the venv is a dot-directory that
+ * auto-detection skips, so nothing was scanned and the console rendered
+ * as unstyled HTML. Both trees below author console classes:
+ *   - ``templates/`` -- Jinja markup (the bulk of the class inventory)
+ *   - ``app/``       -- controllers that inject classes at runtime
+ *                       (e.g. ``badge-error``, ``btn-sm``, ``modal-open``)
+ */
+@source "../../templates";
+@source "./app";
 
 /*
  * DaisyUI 5 plugin loader. The vendored plugin sits beside this CSS

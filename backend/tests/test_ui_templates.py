@@ -266,6 +266,37 @@ def test_base_template_uses_compiled_tailwind_css(ui_env: Environment) -> None:
     assert re.search(r'href="/ui/static/dist/tailwind\.css"', html) is not None
 
 
+def test_styles_declares_explicit_tailwind_sources() -> None:
+    """styles.css pins its class-scan inputs with ``@source`` directives.
+
+    The Tailwind 4 CLI compiles the console bundle against the
+    *installed* package tree in the runtime venv, whose ``.venv`` path is
+    a dot-directory that Tailwind's automatic content detection skips;
+    that detection is also rooted at the CLI's cwd (the image WORKDIR),
+    not at this stylesheet. Relying on it shipped a utilities-less bundle
+    the moment the image stopped copying the source tree to the build cwd
+    (evoila/meho#3627) -- a non-empty preflight+theme file that passed
+    the Dockerfile ``test -s`` yet rendered the console as unstyled HTML.
+    Explicit ``@source`` paths, resolved relative to styles.css, make the
+    scan deterministic in both the image build and the local ``--watch``
+    loop. This guards that they are not dropped again.
+    """
+    styles = (static_src_dir() / "styles.css").read_text(encoding="utf-8")
+    assert '@source "../../templates"' in styles, (
+        "styles.css must declare the templates dir as an explicit Tailwind "
+        "@source; automatic content detection does not reach it in the image build"
+    )
+    assert '@source "./app"' in styles, (
+        "styles.css must declare the app/ controllers as an explicit Tailwind "
+        "@source (they inject classes like badge-error/btn-sm at runtime)"
+    )
+    # The declared paths, resolved relative to styles.css, must point at
+    # directories that actually carry console classes -- a guard against a
+    # rename silently un-scoping the scan.
+    assert templates_dir().is_dir()
+    assert (static_src_dir() / "app").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # Operator-console modal dismissal (G0.26-T3 #1803)
 #

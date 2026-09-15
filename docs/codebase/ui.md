@@ -120,9 +120,18 @@ Two artifacts ship in the backend image:
      --minify
    ```
 
-   Tailwind 4's automatic content detection scans `templates/**` for
-   utility usage; no `tailwind.config.js` exists. DaisyUI is loaded
-   via `@plugin "./vendor/daisyui.js"` in `styles.css` itself.
+   The class scan is driven by explicit `@source` directives in
+   `styles.css` (`../../templates` + `./app`), not Tailwind 4's
+   automatic content detection; no `tailwind.config.js` exists. The
+   explicit sources are load-bearing: the CLI runs against the
+   *installed* package tree in the runtime venv, whose `.venv` path is a
+   dot-directory automatic detection skips, and that detection is rooted
+   at the CLI's cwd (the image `WORKDIR`), not at `styles.css`. Relying
+   on it shipped a utilities-less bundle once the image stopped copying
+   the source tree to the build cwd (#3627). The Dockerfile step asserts
+   `grep -q '\.btn'` on the output so a scan that reaches no templates
+   fails the build loud. DaisyUI is loaded via
+   `@plugin "./vendor/daisyui.js"` in `styles.css` itself.
 
    `static/dist/` is `.gitignore`'d — only built artifacts live
    there.

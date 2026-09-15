@@ -193,7 +193,7 @@ openssl genrsa 2048 2>/dev/null | \
 echo "exit=$?"                                            # expect non-zero, empty stdout
 
 # 3. Degraded posting: run /auto-review-pr with no
-#    MEHO_REVIEW_APP_TOKEN and no 1Password item reachable; verify the
+#    MEHO_REVIEW_APP_TOKEN and no selected credential source reachable; verify the
 #    posted comment opens with the degraded banner and
 #    gh pr view <n> --json reviewDecision is unchanged.
 ```

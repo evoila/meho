@@ -184,6 +184,10 @@ def _seed_trigger(
     status_value: str = ScheduledTriggerStatus.ACTIVE.value,
     next_fire_at: datetime | None = None,
     work_ref: str | None = None,
+    last_fired_at: datetime | None = None,
+    skip_count: int = 0,
+    last_skip_reason: str | None = None,
+    last_skipped_at: datetime | None = None,
 ) -> uuid.UUID:
     tid = trigger_id or uuid.uuid4()
     now = datetime.now(UTC)
@@ -204,7 +208,10 @@ def _seed_trigger(
                     status=status_value,
                     in_flight_policy=ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
                     next_fire_at=next_fire_at or (now + timedelta(hours=1)),
-                    last_fired_at=None,
+                    last_fired_at=last_fired_at,
+                    skip_count=skip_count,
+                    last_skip_reason=last_skip_reason,
+                    last_skipped_at=last_skipped_at,
                     inputs={"prompt": "summarise"},
                     identity_sub="__scheduler__",
                     created_by_sub=_OP_ADMIN,
@@ -526,6 +533,59 @@ def test_detail_renders_full_row_for_operator() -> None:
     assert "__scheduler__" in body  # identity_sub
     assert "fail_into_audit" in body  # in_flight_policy
     assert "gh:evoila/meho#1826" in body  # work_ref chip + recent-fires link
+    # #336: timestamps follow the console `<time>` convention -- a
+    # machine-readable ISO instant in the attribute, a human-readable
+    # `YYYY-MM-DD HH:MM UTC` string as the visible text. The raw
+    # microsecond isoformat must no longer be the element's text, which a
+    # bare `+00:00</` (isoformat immediately followed by a closing tag)
+    # would betray.
+    assert "<time datetime=" in body
+    assert "UTC</time>" in body
+    assert "+00:00</" not in body
+    # The never-fired fallback survives the humanisation.
+    assert "(never)" in body
+
+
+def test_detail_humanises_one_off_and_skip_timestamps() -> None:
+    """The one_off / last-fired / last-skipped instants humanise too (#336).
+
+    The default cron fixture never populates ``fire_at``, ``last_fired_at``
+    or ``last_skipped_at``, so those three of the page's six timestamps
+    would go unexercised. Seeding a skipping one_off trigger renders every
+    remaining branch and pins the exact ``YYYY-MM-DD HH:MM UTC`` shape.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    fire_at = datetime(2026, 6, 18, 9, 30, 12, 483920, tzinfo=UTC)
+    last_fired = datetime(2026, 6, 17, 22, 5, 1, 12345, tzinfo=UTC)
+    last_skipped = datetime(2026, 6, 18, 8, 0, 44, 900001, tzinfo=UTC)
+    tid = _seed_trigger(
+        tenant_id=_TENANT_A,
+        kind=ScheduledTriggerKind.ONE_OFF.value,
+        cron_expr=None,
+        fire_at=fire_at,
+        last_fired_at=last_fired,
+        skip_count=2,
+        last_skip_reason="previous run still in flight",
+        last_skipped_at=last_skipped,
+    )
+    client, mock, _ = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_OPERATOR, role=TenantRole.OPERATOR
+    )
+    try:
+        response = client.get(f"/ui/scheduler/{tid}")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "2026-06-18 09:30 UTC</time>" in body  # fire_at
+    assert "2026-06-17 22:05 UTC</time>" in body  # last_fired_at
+    assert "2026-06-18 08:00 UTC</time>" in body  # last_skipped_at
+    # The ISO instant stays machine-readable in the attribute.
+    assert f'datetime="{fire_at.isoformat()}"' in body
+    # Microsecond precision never reaches the visible text.
+    assert "483920" not in body.replace(fire_at.isoformat(), "")
+    assert "+00:00</" not in body
 
 
 def test_detail_cross_tenant_is_404() -> None:

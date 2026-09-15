@@ -156,6 +156,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # so the runtime stage's `COPY --from=builder /app/.venv` picks up the
 # artifact automatically (no extra COPY layer required).
 #
+# The class scan is driven by the explicit `@source` directives in
+# styles.css (templates/ + static/src/app/), NOT Tailwind's automatic
+# content detection: that detection is rooted at the CLI's cwd (this
+# WORKDIR, /app) and skips dot-directories, so once this stage stopped
+# copying `src/` to /app/src and the source moved into `/app/.venv/...`
+# (the wheel-install refactor, #3627), automatic detection scanned
+# nothing and shipped a utilities-less bundle -- a non-empty ~35 KB file
+# of preflight + theme only, which passed `test -s` yet rendered the
+# console as unstyled HTML. The `grep -q '\.btn'` gate below fails the
+# build loud if the scan ever again reaches no templates; `test -s` alone
+# could not catch it.
+#
 # `static/dist/` is .gitignore'd; only built artifacts live there. Local dev
 # runs the same CLI in --watch mode against the source tree (see
 # docs/codebase/ui.md).
@@ -188,7 +200,9 @@ RUN set -eux; \
       -i "${UI_SP}/static/src/styles.css" \
       -o "${UI_SP}/static/dist/tailwind.css" \
       --minify; \
-    test -s "${UI_SP}/static/dist/tailwind.css"
+    test -s "${UI_SP}/static/dist/tailwind.css"; \
+    grep -q '\.btn' "${UI_SP}/static/dist/tailwind.css" \
+      || { echo "ERROR: compiled tailwind bundle carries no utility/component classes -- the @source content scan reached no templates. See evoila/meho#3627." >&2; exit 1; }
 
 # ---------- Runtime ----------------------------------------------------------
 FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime

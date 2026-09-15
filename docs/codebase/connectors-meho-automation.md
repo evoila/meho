@@ -170,15 +170,20 @@ so the value never transits an operator terminal or shell history.
    #    extras.scheme (default https), so an in-cluster Service with no TLS
    #    needs scheme=http. The add-on OpenAPI declares no `servers` block, so
    #    the connector derives the base URL from host / port / extras.scheme.
+   #    `name`, `product`, and `host` are required on every import entry (even
+   #    with --update); `product`/`host` must repeat the values set in (a).
    targets:
      - name: automation-addon
+       product: mehoauto
+       host: meho-automation
        extras:
          scheme: http
    ```
 
    ```
-   # `targets import --update` is a sparse PATCH — it touches only the extras
-   # column and leaves the version set in (a) intact.
+   # `targets import --update` is a sparse update that leaves the version set
+   # in (a) intact (name/product are stripped as immutable; host is
+   # re-asserted to the same value).
    meho targets import --update automation-addon-scheme.yaml
    ```
 

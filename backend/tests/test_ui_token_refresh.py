@@ -46,6 +46,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import httpx2
 import pytest
 import respx
 from cryptography.fernet import Fernet
@@ -67,6 +68,7 @@ from meho_backplane.ui.auth import (
     require_ui_admin,
     ui_session_expired_exception_handler,
 )
+from meho_backplane.ui.auth import flow as oauth_flow
 from meho_backplane.ui.auth.flow import clear_discovery_cache
 from meho_backplane.ui.auth.middleware import require_ui_session
 from meho_backplane.ui.auth.refresh import refresh_session_tokens
@@ -102,6 +104,27 @@ _PROBE_PATH = "/ui/admin-probe"
 _AGENTS_PROBE_PATH = "/ui/agents-lift-probe"
 
 
+class _TokenEndpointStub:
+    """Mutable Authlib 1.8 token transport double for one test case."""
+
+    def __init__(self) -> None:
+        self.response: httpx2.Response | Exception | None = None
+        self.calls: list[httpx2.Request] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+
+_token_endpoint_stub = _TokenEndpointStub()
+
+
+def _mock_token_endpoint(response: httpx2.Response | Exception) -> _TokenEndpointStub:
+    """Configure the token transport Authlib 1.8 actually uses."""
+    _token_endpoint_stub.response = response
+    return _token_endpoint_stub
+
+
 @pytest.fixture(autouse=True)
 def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin chassis + BFF env vars and reset every process-level cache.
@@ -122,6 +145,25 @@ def _bff_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_discovery_cache()
     clear_jwks_cache()
     reset_engine_for_testing()
+    _token_endpoint_stub.response = None
+    _token_endpoint_stub.calls.clear()
+
+    async def _handle(request: httpx2.Request) -> httpx2.Response:
+        _token_endpoint_stub.calls.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == _TOKEN_ENDPOINT
+        response = _token_endpoint_stub.response
+        assert response is not None, "configure the Authlib token transport in this test"
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    class _TestOAuth2Client(oauth_flow.AsyncOAuth2Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx2.MockTransport(_handle)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(oauth_flow, "AsyncOAuth2Client", _TestOAuth2Client)
     yield
     get_settings.cache_clear()
     reset_fernet_cache_for_testing()
@@ -233,8 +275,8 @@ def _admin_jwt(private_key: Any, *, expires_in: int = 3600, sub: str = "op-77") 
     )
 
 
-def _refresh_response(access_token: str, *, expires_in: int = 300) -> httpx.Response:
-    return httpx.Response(
+def _refresh_response(access_token: str, *, expires_in: int = 300) -> httpx2.Response:
+    return httpx2.Response(
         200,
         json={
             "access_token": access_token,
@@ -271,16 +313,14 @@ def test_expired_access_token_refreshes_silently_and_serves() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=_refresh_response(fresh),
-        )
+        token_route = _mock_token_endpoint(_refresh_response(fresh))
         response = _client(_build_app(), session_id).get(_PROBE_PATH)
 
     assert response.status_code == 200
     assert response.json() == {"operator": "op-77"}
     assert token_route.call_count == 1
     # RFC 6749 § 6 grant shape: grant_type + the stored refresh token.
-    form = parse_qs(token_route.calls[0].request.content.decode("ascii"))
+    form = parse_qs(token_route.calls[0].content.decode("ascii"))
     assert form["grant_type"] == ["refresh_token"]
     assert form["refresh_token"] == ["refresh-token-1"]
     # RFC 9700 § 4.14 rotation: the row now holds the fresh pair.
@@ -299,7 +339,7 @@ def test_refresh_success_event_fields_and_no_token_leakage() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        mock_router.post(_TOKEN_ENDPOINT).mock(return_value=_refresh_response(fresh))
+        _mock_token_endpoint(_refresh_response(fresh))
         with capture_logs() as captured:
             response = _client(_build_app(), session_id).get(_PROBE_PATH)
 
@@ -347,9 +387,7 @@ def test_proactive_refresh_when_row_near_expiry(
     before = datetime.now(UTC)
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=_refresh_response(fresh, expires_in=300),
-        )
+        token_route = _mock_token_endpoint(_refresh_response(fresh, expires_in=300))
         response = _client(_build_app(), session_id).get(_PROBE_PATH)
 
     assert response.status_code == 200
@@ -372,7 +410,7 @@ def _run_failed_refresh(
     *,
     token_mock: Any,
     accept: str,
-) -> tuple[httpx.Response, list[dict[str, Any]], Any]:
+) -> tuple[httpx.Response, list[dict[str, Any]], _TokenEndpointStub]:
     """Drive one refresh failure; return (response, logs, token route)."""
     key = make_rsa_keypair("kid-refresh-fail")
     stale = _admin_jwt(key, expires_in=-120)
@@ -380,10 +418,7 @@ def _run_failed_refresh(
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        if isinstance(token_mock, Exception):
-            token_route = mock_router.post(_TOKEN_ENDPOINT).mock(side_effect=token_mock)
-        else:
-            token_route = mock_router.post(_TOKEN_ENDPOINT).mock(return_value=token_mock)
+        token_route = _mock_token_endpoint(token_mock)
         client = _client(_build_app(), session_id)
         with capture_logs() as captured:
             response = client.get(_PROBE_PATH, headers={"accept": accept})
@@ -400,7 +435,7 @@ def test_invalid_grant_redirects_html_to_login_and_clears_cookie() -> None:
     Single attempt only (no retry), reason logged as ``invalid_grant``.
     """
     response, captured, token_route = _run_failed_refresh(
-        token_mock=httpx.Response(
+        token_mock=httpx2.Response(
             400,
             json={"error": "invalid_grant", "error_description": "Token is not active"},
         ),
@@ -423,7 +458,7 @@ def test_invalid_grant_redirects_html_to_login_and_clears_cookie() -> None:
 def test_refresh_failure_keeps_json_shape_for_non_html_callers() -> None:
     """AC: JSON callers get ``{"detail": "session_expired"}``, not a 302."""
     response, captured, _ = _run_failed_refresh(
-        token_mock=httpx.Response(400, json={"error": "invalid_grant"}),
+        token_mock=httpx2.Response(400, json={"error": "invalid_grant"}),
         accept="application/json",
     )
     assert response.status_code == 401
@@ -437,22 +472,22 @@ def test_refresh_failure_keeps_json_shape_for_non_html_callers() -> None:
     ("token_mock", "expected_reason"),
     [
         pytest.param(
-            httpx.ConnectTimeout("connection timed out"),
+            httpx2.ConnectTimeout("connection timed out"),
             "timeout",
             id="timeout",
         ),
         pytest.param(
-            httpx.Response(502, text="<html>Bad Gateway</html>"),
+            httpx2.Response(502, text="<html>Bad Gateway</html>"),
             "network_error",
             id="network-error",
         ),
         pytest.param(
-            httpx.Response(200, json={"token_type": "Bearer"}),
+            httpx2.Response(200, json={"token_type": "Bearer"}),
             "malformed_response",
             id="malformed-response",
         ),
         pytest.param(
-            httpx.Response(
+            httpx2.Response(
                 200,
                 text="<html>captive portal</html>",
                 headers={"content-type": "text/html"},
@@ -461,7 +496,7 @@ def test_refresh_failure_keeps_json_shape_for_non_html_callers() -> None:
             id="non-json-200",
         ),
         pytest.param(
-            httpx.Response(
+            httpx2.Response(
                 400,
                 text="<html>err</html>",
                 headers={"content-type": "text/html"},
@@ -534,10 +569,8 @@ def test_concurrent_loser_skips_token_endpoint_and_returns_stored_pair() -> None
             stale_access_token="loser-stale-access-token",
         )
 
-    with respx.mock(assert_all_called=False) as mock_router:
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(500),
-        )
+    with respx.mock(assert_all_called=False):
+        token_route = _mock_token_endpoint(httpx2.Response(500))
         with capture_logs() as captured:
             result = asyncio.run(_losing_refresh())
 
@@ -567,9 +600,7 @@ def test_refresh_extension_clamps_at_absolute_lifetime_ceiling(
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, {"keys": []})
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=_refresh_response("new-access", expires_in=3600),
-        )
+        _mock_token_endpoint(_refresh_response("new-access", expires_in=3600))
         rotated = asyncio.run(_refresh())
 
     # The candidate now + (3600 - 60) clamps to the ceiling
@@ -597,10 +628,8 @@ def test_refresh_never_shrinks_a_slid_expires_at() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, {"keys": []})
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            # now + (300 - 60) is far earlier than the 2 h expiry.
-            return_value=_refresh_response("new-access", expires_in=300),
-        )
+        # now + (300 - 60) is far earlier than the 2 h expiry.
+        _mock_token_endpoint(_refresh_response("new-access", expires_in=300))
         rotated = asyncio.run(_refresh())
 
     assert rotated.expires_at >= original.expires_at
@@ -624,10 +653,8 @@ def test_revoked_session_redirects_via_middleware_without_refresh() -> None:
 
     asyncio.run(_revoke())
 
-    with respx.mock(assert_all_called=False) as mock_router:
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(500),
-        )
+    with respx.mock(assert_all_called=False):
+        token_route = _mock_token_endpoint(httpx2.Response(500))
         response = _client(_build_app(), session_id).get(_PROBE_PATH)
 
     assert response.status_code == 302
@@ -706,9 +733,7 @@ def test_agents_lift_refreshes_expired_token_and_serves() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=_refresh_response(fresh),
-        )
+        token_route = _mock_token_endpoint(_refresh_response(fresh))
         response = _client(_build_app(), session_id).get(_AGENTS_PROBE_PATH)
 
     assert response.status_code == 200, response.text
@@ -734,9 +759,7 @@ def test_agents_lift_refresh_unavailable_redirects_html_to_login() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        token_route = mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
-        )
+        token_route = _mock_token_endpoint(httpx2.Response(400, json={"error": "invalid_grant"}))
         client = _client(_build_app(), session_id)
         response = client.get(
             _AGENTS_PROBE_PATH,
@@ -757,9 +780,7 @@ def test_agents_lift_refresh_unavailable_keeps_json_shape() -> None:
 
     with respx.mock(assert_all_called=False) as mock_router:
         _mock_oidc(mock_router, public_jwks(key))
-        mock_router.post(_TOKEN_ENDPOINT).mock(
-            return_value=httpx.Response(400, json={"error": "invalid_grant"}),
-        )
+        _mock_token_endpoint(httpx2.Response(400, json={"error": "invalid_grant"}))
         response = _client(_build_app(), session_id).get(
             _AGENTS_PROBE_PATH,
             headers={"accept": "application/json"},

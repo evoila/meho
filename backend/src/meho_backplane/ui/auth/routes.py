@@ -94,6 +94,7 @@ from typing import Annotated, Final
 from urllib.parse import urlencode
 
 import httpx
+import httpx2
 import structlog
 from authlib.integrations.base_client.errors import (
     MismatchingStateError,
@@ -492,7 +493,7 @@ async def _exchange_or_translate(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AUTHORIZATION_STATE_EXPIRED_DETAIL,
         ) from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx2.HTTPError) as exc:
         log.warning(
             "ui_auth_token_endpoint_unreachable",
             error_class=type(exc).__name__,

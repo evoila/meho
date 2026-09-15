@@ -584,7 +584,9 @@ async def exchange_code_for_tokens(
         ``state`` is unknown / expired, the browser binding is missing
         or mismatched, or the response is malformed.
     httpx.HTTPError
-        Network failure on the token-endpoint POST.
+        Discovery resolution failed before the token exchange.
+    httpx2.HTTPError
+        Network failure on Authlib's token-endpoint POST.
     """
     settings = get_settings()
     _ensure_client_configured(settings)
@@ -632,7 +634,8 @@ async def refresh_access_token(*, refresh_token: str) -> TokenExchangeResult:
     caller (:mod:`meho_backplane.ui.auth.refresh`) maps each failure
     class (:class:`OAuthFlowConfigurationError` /
     :class:`OAuthFlowError` / authlib ``OAuthError`` /
-    :class:`httpx.HTTPError`, all propagated raw from here) to a
+    :class:`httpx.HTTPError` for discovery or :class:`httpx2.HTTPError`
+    for Authlib's token grant, all propagated raw from here) to a
     structured reason and fails the request closed.
 
     The returned :class:`TokenExchangeResult` reuses the callback-leg

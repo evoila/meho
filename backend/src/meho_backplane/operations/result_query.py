@@ -221,14 +221,14 @@ class ResultQueryOutputTooLargeError(Exception):
         )
 
 
-def _known_columns(engine: QueryEngine) -> list[str]:
-    """Return the registered handle table's column names (its known schema).
+def _known_columns(engine: QueryEngine) -> dict[str, str]:
+    """Return exact registered handle column names mapped to DuckDB types.
 
     The contract compiler validates every referenced field against this set,
     so an unknown field is rejected before any SQL runs.
     """
     described = engine.conn.execute(f"DESCRIBE {RESULT_TABLE}").fetchall()
-    return [str(row[0]) for row in described]
+    return {str(row[0]): str(row[1]) for row in described}
 
 
 def _execute_sync(engine: QueryEngine, compiled: CompiledQuery) -> tuple[list[str], list[Any]]:
@@ -263,7 +263,12 @@ async def _run_compiled_query(
     try:
         engine.register(RESULT_TABLE, rows, unwrap="auto")
         columns = _known_columns(engine)
-        compiled = compile_query(spec, columns, max_limit=max_output_rows)
+        compiled = compile_query(
+            spec,
+            list(columns),
+            max_limit=max_output_rows,
+            column_types=columns,
+        )
 
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(None, _execute_sync, engine, compiled)

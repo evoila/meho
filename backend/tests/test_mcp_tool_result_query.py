@@ -291,6 +291,7 @@ def test_input_schema_advertises_the_query_argument(
     # Paging args stay; the top-level stays closed to unknown args.
     assert {"handle_id", "offset", "limit", "query"} <= set(schema["properties"])
     assert schema["additionalProperties"] is False
+    assert schema["properties"]["query"]["properties"]["aggregate"]["maxItems"] == 8
 
 
 def _seed(fake_store: _FakeStore, op: Operator, handle: UUID) -> None:

@@ -115,6 +115,7 @@ from meho_backplane.operations.ingest.connector_registration import (
     synthesise_profiled_class,
 )
 from meho_backplane.operations.ingest.exceptions import (
+    LlmOutputInvalid,
     ProductImplIdMismatch,
     VersionMismatchError,
 )
@@ -344,6 +345,61 @@ def _safety_change_to_model(change: SafetyChange) -> SafetyChangeModel:
             for sensor in change.affected_sensors
         ],
     )
+
+
+class GroupingPhaseFailedError(Exception):
+    """The T3 grouping phase raised after the T2 register phase committed.
+
+    The pipeline runs register (T2) and LLM grouping (T3) in two
+    independent transactions: :meth:`_run_register_phase` commits per-spec
+    before :meth:`_run_grouping_phase` opens its own session (see
+    :meth:`_dispatch_real_run`). So when grouping raises, only the grouping
+    session rolled back — the connector is already registered and
+    dispatchable. Collapsing that outcome into a bare ``failed`` async-job
+    row misleads operators into thinking the whole ingest failed (#3685).
+
+    :meth:`_dispatch_real_run` wraps the grouping call and re-raises any
+    grouping-phase exception as this type, carrying the **committed**
+    register :class:`IngestionResult` and the ``connector_id``. The
+    async-job layer (:func:`~meho_backplane.operations.ingest.jobs.run_ingest_job`)
+    catches it and reconciles the run as ``degraded`` — "registered,
+    grouping failed" — preserving the durable register counts and a
+    structured reason instead of a flat ``failed``.
+
+    Attributes
+    ----------
+    connector_id:
+        Operator-facing identifier of the connector whose grouping failed.
+    ingestion:
+        The register phase's committed :class:`IngestionResult` — the
+        counts that are durable despite the grouping rollback.
+    cause:
+        The underlying grouping-phase exception, also chained via
+        ``raise ... from cause`` so the traceback is preserved.
+
+    Inherits from :class:`Exception` directly (not :class:`ValueError`) so
+    callers can ``except GroupingPhaseFailedError`` precisely; it is an
+    internal control-flow signal between the pipeline and the async-job
+    reconciler, never an operator-input error.
+    """
+
+    def __init__(
+        self,
+        *,
+        connector_id: str,
+        ingestion: IngestionResult,
+        cause: BaseException,
+    ) -> None:
+        self.connector_id = connector_id
+        self.ingestion = ingestion
+        self.cause = cause
+        super().__init__(
+            f"grouping phase failed for connector_id={connector_id!r} after the "
+            f"register phase committed (inserted={ingestion.inserted_count}, "
+            f"updated={ingestion.updated_count}, skipped={ingestion.skipped_count}); "
+            f"the connector is registered and dispatchable but its ingested "
+            f"operations were not grouped: {type(cause).__name__}: {cause}"
+        )
 
 
 class IngestionPipelineResult:
@@ -865,13 +921,45 @@ class IngestionPipelineService:
         # which the ingest route boundary guarantees round-trips its
         # connector_id (G0.27 / T3 #1817), so descriptors and groups agree
         # on the dispatch-canonical spelling every dispatch probe queries.
-        grouping_result = await self._run_grouping_phase(
-            product=product,
-            version=version,
-            impl_id=impl_id,
-            tenant_id=tenant_id,
-            sessionmaker=sessionmaker,
-        )
+        # The register phase above already committed (per-spec, in its own
+        # session), so an *unexpected* grouping failure here leaves the
+        # connector registered and dispatchable — only the grouping session
+        # rolls back. Re-raise those as GroupingPhaseFailedError carrying the
+        # durable register counts so the async-job layer reconciles the run
+        # as ``degraded`` ("registered, grouping failed") rather than a flat
+        # ``failed`` (#3685).
+        #
+        # LlmClientUnavailable (no key wired) and LlmOutputInvalid (bad LLM
+        # output) are pass-through: they are the operator-facing grouping-
+        # error contract the REST route maps to 503 / 400 and the async job
+        # surfaces under their own error_class — wrapping them would break
+        # those mappings. ``except Exception`` also deliberately does NOT
+        # catch ``asyncio.CancelledError`` (a BaseException): the job
+        # watchdog's timeout must still propagate to ``failed`` to keep the
+        # job-terminality guarantee.
+        try:
+            grouping_result = await self._run_grouping_phase(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                tenant_id=tenant_id,
+                sessionmaker=sessionmaker,
+            )
+        except (LlmClientUnavailable, LlmOutputInvalid):
+            raise
+        except Exception as exc:
+            log.warning(
+                "ingestion_pipeline_grouping_failed_after_register",
+                error_class=type(exc).__name__,
+                inserted_count=aggregated.inserted_count,
+                updated_count=aggregated.updated_count,
+                skipped_count=aggregated.skipped_count,
+            )
+            raise GroupingPhaseFailedError(
+                connector_id=connector_id,
+                ingestion=aggregated,
+                cause=exc,
+            ) from exc
         log.info(
             "ingestion_pipeline_grouping_complete",
             groups_created=grouping_result.groups_created,

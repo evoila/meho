@@ -45,7 +45,11 @@ from meho_backplane.operations.ingest import (
     jobs,
     run_ingest_job,
 )
-from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
+from meho_backplane.operations.ingest.jobs import (
+    GROUPING_FAILED_AFTER_REGISTER,
+    INGESTED_NOT_DISPATCHABLE,
+)
+from meho_backplane.operations.ingest.pipeline import GroupingPhaseFailedError
 from meho_backplane.operations.ingest.register_ingested import IngestionResult
 
 
@@ -277,6 +281,64 @@ async def test_raising_pipeline_still_fails() -> None:
     assert stored.error is not None and "spec parse blew up" in stored.error
     assert stored.result is None
     assert probe_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_grouping_failure_after_register_degrades_not_fails() -> None:
+    """A T3 grouping crash after a durable T2 register ends ``degraded``, not ``failed``.
+
+    The pipeline commits register (T2) before grouping (T3) opens its own
+    session, so a grouping crash leaves the connector registered and
+    dispatchable -- only grouping rolled back. The pipeline re-raises the
+    grouping fault as :class:`GroupingPhaseFailedError` carrying the durable
+    register :class:`IngestionResult`. ``run_ingest_job`` must reconcile it
+    as ``degraded`` (carrying the register counts + the structured
+    ``grouping_failed_after_register`` ``error_class``) rather than the flat
+    ``failed`` a bare exception lands -- otherwise a healthy, dispatchable
+    connector reads as a failed ingest (#3685). The dispatchability probe is
+    never consulted (there is no returned result to probe).
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    probe_calls = 0
+
+    async def _check(_result: IngestionPipelineResult) -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        return True
+
+    async def _raise_grouping_failure() -> IngestionPipelineResult:
+        raise GroupingPhaseFailedError(
+            connector_id="vmware-rest-9.0",
+            ingestion=IngestionResult(
+                inserted_count=7,
+                updated_count=0,
+                skipped_count=0,
+                connector_registered=True,
+                operations_grouped=False,
+            ),
+            cause=ValueError("group_key 'vmware-host-usage' must match snake_case"),
+        )
+
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=_raise_grouping_failure,
+        registry=registry,
+        dispatchability_check=_check,
+    )
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "degraded"
+    assert stored.error_class == GROUPING_FAILED_AFTER_REGISTER
+    assert stored.error is not None and "grouping phase failed" in stored.error
+    # The durable register counts survive on the degraded row.
+    assert stored.result is not None
+    assert stored.result.ingestion.inserted_count == 7
+    assert stored.result.grouping is None
+    # A grouping crash is not a dispatchability question -- the probe stays untouched.
+    assert probe_calls == 0
+    assert stored.ended_at is not None
 
 
 @pytest.mark.asyncio
